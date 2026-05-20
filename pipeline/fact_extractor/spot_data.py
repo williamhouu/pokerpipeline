@@ -222,6 +222,13 @@ class DecisionData:
     # Commitment -- commitment_threshold_decision (Section B).
     post_decision_spr: float = 0.0
     stack_committed_fraction: float = 0.0
+    # Decision-class signals -- the remaining Section B tags.
+    hero_has_later_street_value: bool = True             # bluffcatch_spot
+    estimated_fold_equity: float = 0.0                   # bluff_spot
+    estimated_showdown_value: float = 0.0                # bluff_spot
+    check_ev_vs_villain_range: float = 0.0               # equity_denial_spot
+    bet_ev_vs_calling_range: float = 0.0                 # equity_denial_spot
+    float_line_is_positive: bool = False                 # float_call_spot
 
     def __post_init__(self) -> None:
         _unit_map("hero_combo_strategy", self.hero_combo_strategy)
