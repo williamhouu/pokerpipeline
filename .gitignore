@@ -1,0 +1,42 @@
+# Virtual environment
+venv/
+.venv/
+
+# Solver outputs — large binary files (GBs each), kept local, never committed
+test_solves/
+solves/
+*.cfr
+*.solve
+*.monker
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+
+# Environment / secrets
+.env
+.env.*
+
+# Editors
+.idea/
+.vscode/
+
+# Claude Code personal/local settings (shared settings.json stays tracked)
+.claude/settings.local.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Working extraction scratch files
+docs/_*.txt
