@@ -52,3 +52,22 @@ def parse_board(board) -> list[str]:
     if len(set(cards)) != len(cards):
         raise ValueError(f"board has duplicate cards: {board}")
     return cards
+
+
+def parse_hole(hole) -> list[str]:
+    """Validate and normalise hero's two hole cards.
+
+    Accepts a list of card tokens, a space-separated string ('Ah Ks'), or a
+    bare 4-character string ('AhKs'). Enforces exactly 2 distinct cards.
+    Returns the normalised card list.
+    """
+    if isinstance(hole, str):
+        text = hole.strip().replace("10", "T")
+        hole = text.split() if " " in text else (
+            [text[:2], text[2:]] if len(text) == 4 else [text])
+    cards = [parse_card(c) for c in hole]
+    if len(cards) != 2:
+        raise ValueError(f"hole must be exactly 2 cards, got {len(cards)}: {hole}")
+    if cards[0] == cards[1]:
+        raise ValueError(f"hole has duplicate cards: {hole}")
+    return cards
