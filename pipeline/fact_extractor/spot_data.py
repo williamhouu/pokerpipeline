@@ -171,6 +171,7 @@ class SpotMetadata:
     spr: float = 0.0
     position_dynamic: str = ""                           # e.g. "BB_vs_BTN"
     hero_position: str = ""                              # e.g. "BB" (blind tags)
+    villain_position: str = ""                           # blind_vs_blind_pot
     hero_in_position: bool = False                       # donk / pot_control
     hero_is_preflop_raiser: bool = False                 # donk / facing_donk
     game_format: str = "cash"                            # one of GAME_FORMATS
