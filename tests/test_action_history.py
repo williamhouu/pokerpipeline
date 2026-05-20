@@ -8,11 +8,10 @@ match for both the context block and the action history block.
 Suit emoji are built from explicit codepoints (suit + U+FE0F; hearts U+2764)
 so the test pins the exact notation the brief specifies.
 
-NOTE on pot figures: the brief's printed pots agree with this module on 7 of
-the 10 examples. On examples 6, 7, and 8 the brief's hand-written pot is off
-(153 vs 152, 475 vs 485, 133 vs 125) -- arithmetic slips in the doc, with no
-consistent rule. This module sums blinds + antes + every committed chip, which
-the other 7 examples confirm; the expected values below use that correct math.
+Every figure here -- including all pot sizes -- matches the brief. (The brief's
+worked examples 6, 7, and 8 originally carried arithmetic slips in their pots,
+153/475/133; those were corrected in the doc to 152/485/125, which is what this
+module computes by summing blinds + antes + every committed chip.)
 """
 import sys
 from pathlib import Path
@@ -128,7 +127,7 @@ EXAMPLES = [
             "turn_actions": [], "river_actions": [],
         },
         "$2/$5 Online cash. 6-handed. $500 effective stacks.",
-        # Brief prints "Flop ($153)"; correct sum is $152 (SB 2 + 50*3).
+        # Flop pot $152 = SB 2 + 50*3.
         f"You're on the Button with A{S}K{S}.\n"
         f"UTG opens to $15. You 3-bet to $50. The Big Blind calls. UTG calls.\n\n"
         f"Flop ($152): K{H}7{C}4{H}\n"
@@ -149,7 +148,7 @@ EXAMPLES = [
             "turn_actions": [], "river_actions": [],
         },
         "$5/$10 Online cash. 9-handed. $1,000 effective stacks.",
-        # Brief prints "Flop ($475)"; correct sum is $485 (SB 5 + 150*3 + CO 30).
+        # Flop pot $485 = SB 5 + 150*3 + CO 30 (CO called the open, then folded).
         f"You're in the Big Blind with A{S}A{C}.\n"
         f"UTG+1 opens to $30. The Lojack calls. The Cutoff calls. "
         f"You 3-bet to $150. UTG+1 calls. The Lojack calls.\n\n"
@@ -170,7 +169,7 @@ EXAMPLES = [
             "turn_actions": [], "river_actions": [],
         },
         "$1/$2 Online cash. 6-handed. $200 effective stacks.",
-        # Brief prints "Turn ($133)"; correct sum is $125 ($25 + flop 50*2).
+        # Turn pot $125 = flop $25 + flop betting 50*2.
         f"You're in the Big Blind with 5{S}5{C}.\n"
         f"UTG opens to $6. The Cutoff calls. The Button calls. You call.\n\n"
         f"Flop ($25): 9{H}5{H}2{C}\n"
