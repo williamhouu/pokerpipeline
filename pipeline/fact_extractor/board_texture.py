@@ -21,16 +21,31 @@ from pipeline.cards import BROADWAY, card_suit, parse_board, rank_value
 
 
 def _suit_distribution(cards: list[str]) -> str:
+    """Top suit count -> label. Strict definitions, no overloading 'monotone'.
+
+    'monotone' is reserved for the flop case where all 3 cards share a suit
+    (the standard poker usage). On the turn / river:
+      * 4-5 cards of one suit  -> 'flush_on_board' (a board flush is possible
+        with one hole card -- or already complete on the river);
+      * exactly 3 of one suit  -> 'three_of_suit' (live flush draws; *not*
+        monotone -- two of the cards are off-suit);
+      * 2 of one suit          -> 'two_tone';
+      * none repeated          -> 'rainbow'.
+
+    The earlier code labelled the 3-of-suit case 'monotone' on turn/river
+    boards, which mis-fired on runouts like 2c Js 7s 8h As (3 spades + 2 off
+    suit) -- those are flush-threat boards, not monotone boards.
+    """
     counts: dict[str, int] = {}
     for card in cards:
         counts[card_suit(card)] = counts.get(card_suit(card), 0) + 1
     top = max(counts.values())
     if len(cards) == 3:                       # flop
         return {3: "monotone", 2: "two_tone", 1: "rainbow"}[top]
-    if top >= 4:                              # turn / river
-        return "flush_completed"
+    if top >= 4:                              # turn / river: board flush
+        return "flush_on_board"
     if top == 3:
-        return "monotone"
+        return "three_of_suit"
     if top == 2:
         return "two_tone"
     return "rainbow"
@@ -95,12 +110,12 @@ def _composite(suit: str, pair: str, connectedness: str, n_broadway: int) -> str
     if pair == "trips_on_board":
         return "static"
     if pair == "paired":
-        if suit in ("monotone", "flush_completed"):
+        if suit in ("monotone", "flush_on_board", "three_of_suit"):
             return "very_wet"
         if suit == "two_tone":
             return "semi_wet"
         return "static"                       # paired + rainbow
-    if suit in ("monotone", "flush_completed"):
+    if suit in ("monotone", "flush_on_board", "three_of_suit"):
         return "very_wet"
     if connectedness == "connected":
         if suit == "two_tone":

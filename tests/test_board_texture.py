@@ -30,11 +30,22 @@ def test_composite_matches_brief_examples():
 
 
 def test_suit_distribution():
+    # Flop: 'monotone' is only used for the all-3-same-suit case.
     assert classify_board("Jh Th 9h")["suit_distribution"] == "monotone"
     assert classify_board("Jh Th 9c")["suit_distribution"] == "two_tone"
     assert classify_board("As Kh 2d")["suit_distribution"] == "rainbow"
-    assert classify_board("Jh Th 9h 2h")["suit_distribution"] == "flush_completed"
-    assert classify_board("Jh Th 9h 2c")["suit_distribution"] == "monotone"
+    # Turn / river: 4+ of one suit is a board flush; exactly 3 is a flush
+    # threat (three_of_suit) -- NOT 'monotone'; 2 is two_tone; 1 is rainbow.
+    assert classify_board("Jh Th 9h 2h")["suit_distribution"] == "flush_on_board"
+    assert classify_board("Jh Th 9h 2c")["suit_distribution"] == "three_of_suit"
+    # The runout from the test solve: 2c Js 7s 8h As (3 spades, 2 off suit)
+    # is three_of_suit on the river, not monotone.
+    assert classify_board("2c Js 7s 8h As")["suit_distribution"] == "three_of_suit"
+    assert classify_board("Jh Th 9c 8d")["suit_distribution"] == "two_tone"
+    assert classify_board("Jh Tc 9d 8s")["suit_distribution"] == "rainbow"
+    # 5-card boards.
+    assert classify_board("Jh Th 9h 2h 5h")["suit_distribution"] == "flush_on_board"
+    assert classify_board("Jh Th 9h 2c 5d")["suit_distribution"] == "three_of_suit"
 
 
 def test_pair_status():
