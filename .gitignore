@@ -40,3 +40,6 @@ desktop.ini
 
 # Working extraction scratch files
 docs/_*.txt
+
+# Generated pipeline output (demo CSVs etc.)
+test_output/
