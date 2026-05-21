@@ -1,19 +1,23 @@
 """Layer 8: Format Writer.
 
 Writes pipeline questions out as CSV rows in the team's question-template
-column format. Per docs/engineering_brief.docx, the existing columns stay
-unchanged and the pipeline adds 5 new columns: concept_tags, hand_class,
-board_texture, solver_reference, ev_gap_bb.
+column format. The authoritative layout is docs/output_format_examples.xlsx
+(Sheet 1, "Example formatting") -- exactly 35 columns: a leading `No`, the 28
+template columns, the 5 new pipeline columns (concept_tags, hand_class,
+board_texture, solver_reference, ev_gap_bb), and `validation_status`.
 
 Columns the pipeline cannot fill yet carry an explicit placeholder rather than
 being left blank:
   * `[TBD by Layer 6]` -- the question stem, the four options, and the answer
     explanation, all written by the (not-yet-built) LLM Explanation Generator;
   * `[TBD]` -- the cols-A-H UI-rendering fields, whose formatting algorithm the
-    brief defers ("the algo to format those will be done last").
+    brief defers.
 
-Note: the brief states 29 existing columns but its column-group listing names
-only 28; this writer uses the 28 named columns plus the 5 new ones.
+TODO(Layer 6): `Correct Answer` must equal one of the four `option N` strings
+*verbatim*. It currently holds the solver's correct-action verb as a stand-in;
+once Layer 6 generates the option strings, set Correct Answer to the matching
+option's exact text and enforce that equality (the CSV consumer pairs them by
+exact string match).
 
 Uses the standard library `csv` module -- no pandas dependency.
 """
@@ -27,29 +31,34 @@ from pipeline.fact_extractor.spot_data import SpotData
 _LLM_TBD = "[TBD by Layer 6]"     # LLM-generated content
 _TBD = "[TBD]"                    # deferred cols-A-H UI formatting
 
-# The question-template columns, in order: 28 existing + 5 new (the brief's
-# column groups, then the new pipeline columns 30-34).
+# The 35 question-template columns, in order (docs/output_format_examples.xlsx).
 CSV_COLUMNS = [
-    # UI rendering (brief cols 1-7).
+    "No",
+    # UI rendering.
     "User Seat", "User Cards", "Cards on Table", "Table Size",
     "Default Stack", "Seats", "POT",
-    # Question content (cols 8-17).
+    # Question content.
     "Context", "Question", "Question Type", "Hand Stage",
-    "Option 1", "Option 2", "Option 3", "Option 4",
+    "option 1", "option 2", "option 3", "option 4",
     "Correct Answer", "Answer Explanation",
-    # Classification (cols 18-24).
-    "Cash/Tourney", "Live/Online", "Relative Position", "Preflop Pot Type",
+    # Classification.
+    "Cash/Tourney", "Live or Online", "Relative Position", "Preflop Pot Type",
     "Pot Participant", "Stack Depth", "Difficulty Rating",
-    # Skill tags (cols 25-27).
-    "tag_1", "tag_2", "tag_3",
-    # Misc (col 28).
-    "Notes",
-    # New pipeline columns (cols 30-34).
-    "concept_tags", "hand_class", "board_texture", "solver_reference", "ev_gap_bb",
+    # Skill tags + misc.
+    "tag_1", "tag_2", "tag_3", "Notes",
+    # New pipeline columns.
+    "concept_tags", "hand_class", "board_texture", "solver_reference",
+    "ev_gap_bb", "validation_status",
 ]
 
-_PREFLOP_POT_TYPE = {0: "Limped Pot", 1: "Single Raised Pot",
-                     2: "3-Bet Pot", 3: "4-Bet Pot"}
+# Preflop pot type -- prose form for the CSV (matches the sample's wording).
+_PREFLOP_POT_TYPE = {0: "Limped pot", 1: "Single raise pot",
+                     2: "Three bet pot", 3: "Four bet pot"}
+# Preflop pot type -- slug form for the solver_reference path.
+_POT_TYPE_SLUG = {0: "limped_pot", 1: "single_raised_pot",
+                  2: "3bet_pot", 3: "4bet_pot"}
+# Reconcile the board_texture module's rank vocabulary with the sample's.
+_RANK_ALIASES = {"broadway_heavy": "broadway"}
 
 
 def _bb(value: float) -> str:
@@ -57,17 +66,67 @@ def _bb(value: float) -> str:
     return f"{round(value)}bb"
 
 
-def build_row(spot_data: SpotData, difficulty_score: int) -> dict[str, str]:
+def _stack_depth_bucket(effective_stack_bb: float) -> str:
+    """The prose Stack Depth bucket the sample uses, from the effective stack.
+
+    v1 thresholds: < 40bb short, 40-150bb standard, > 150bb deep.
+    """
+    if effective_stack_bb < 40:
+        return "Short stack"
+    if effective_stack_bb <= 150:
+        return "Standard Stack"
+    return "Deep stack"
+
+
+def _board_texture_string(board_texture) -> str:
+    """The 3-axis board_texture string: '{suit}_{connectedness}_{rank}'.
+
+    Example: 'monotone_connected_broadway'. The single composite descriptor
+    (e.g. 'very_wet') is deliberately not emitted -- the sample uses the axes.
+    """
+    if board_texture is None:
+        return ""
+    rank = _RANK_ALIASES.get(board_texture.rank_distribution,
+                             board_texture.rank_distribution)
+    return f"{board_texture.suit_distribution}_{board_texture.connectedness}_{rank}"
+
+
+def _solver_reference(meta) -> str:
+    """A descriptive cache-style path identifying the solve and the spot.
+
+    Built from the scenario metadata on the SpotData, e.g.
+    'PioSolver_Cash_100bb/BB_vs_BTN/single_raised_pot/flop_2cJs7s/AhKh'.
+
+    TODO(Layer 1): fully-formed paths -- the solver build, the table size, and
+    the exact preflop action line (BTN_open/BB_call/...) -- need the scenario
+    registry to carry richer identifiers than a postflop solve provides.
+    """
+    pot_type = _POT_TYPE_SLUG.get(meta.preflop_raise_count, "multi_raised_pot")
+    board = "".join(meta.board)
+    street_segment = f"{meta.street}_{board}" if board else meta.street
+    segments = [
+        f"PioSolver_{meta.game_format.capitalize()}_{round(meta.stack_depth_bb)}bb",
+        meta.position_dynamic or "unknown",
+        pot_type,
+        street_segment,
+        "".join(meta.hero_cards),
+    ]
+    return "/".join(segment for segment in segments if segment)
+
+
+def build_row(spot_data: SpotData, difficulty_score: int,
+              number: int) -> dict[str, str]:
     """Turn one populated SpotData plus its difficulty into a CSV row dict.
 
-    Every column in CSV_COLUMNS is present; the keys that depend on the LLM or
-    on the deferred UI formatter carry an explicit placeholder.
+    `number` is the row's `No` value -- a per-output auto-increment. Every
+    column in CSV_COLUMNS is present; LLM and deferred-UI columns carry an
+    explicit placeholder.
     """
     meta = spot_data.spot_metadata
     decision = spot_data.decision_data
-    raise_count = meta.preflop_raise_count
 
     return {
+        "No": str(number),
         # UI rendering -- formatting algorithm deferred by the brief.
         "User Seat": meta.hero_position or _TBD,
         "User Cards": " ".join(meta.hero_cards) or _TBD,
@@ -81,20 +140,21 @@ def build_row(spot_data: SpotData, difficulty_score: int) -> dict[str, str]:
         "Question": _LLM_TBD,
         "Question Type": "Multiple Choice",
         "Hand Stage": meta.street.capitalize(),
-        "Option 1": _LLM_TBD,
-        "Option 2": _LLM_TBD,
-        "Option 3": _LLM_TBD,
-        "Option 4": _LLM_TBD,
-        "Correct Answer": decision.correct_action or _TBD,
+        "option 1": _LLM_TBD,
+        "option 2": _LLM_TBD,
+        "option 3": _LLM_TBD,
+        "option 4": _LLM_TBD,
+        "Correct Answer": decision.correct_action or _TBD,   # see module TODO
         "Answer Explanation": _LLM_TBD,
         # Classification -- filled from the data block.
         "Cash/Tourney": meta.game_format.capitalize(),
-        "Live/Online": _TBD,
+        "Live or Online": _TBD,
         "Relative Position": meta.position_dynamic or _TBD,
-        "Preflop Pot Type": _PREFLOP_POT_TYPE.get(raise_count, "Multi-Raised Pot"),
+        "Preflop Pot Type": _PREFLOP_POT_TYPE.get(meta.preflop_raise_count,
+                                                  "Multi-raised pot"),
         "Pot Participant": ("Heads-Up" if meta.active_players_on_flop <= 2
-                            else "Multiway"),
-        "Stack Depth": _bb(meta.stack_depth_bb),
+                            else "Multi-Way"),
+        "Stack Depth": _stack_depth_bucket(meta.effective_stack_bb),
         "Difficulty Rating": str(difficulty_score),
         # Skill tags -- the Phase 3 skill taxonomy, not yet mapped.
         "tag_1": "", "tag_2": "", "tag_3": "",
@@ -102,18 +162,19 @@ def build_row(spot_data: SpotData, difficulty_score: int) -> dict[str, str]:
         # The 5 new pipeline columns.
         "concept_tags": ", ".join(spot_data.concept_tags),
         "hand_class": spot_data.hand_class.label if spot_data.hand_class else "",
-        "board_texture": (spot_data.board_texture.composite
-                          if spot_data.board_texture else ""),
-        "solver_reference": meta.node_id or _TBD,
+        "board_texture": _board_texture_string(spot_data.board_texture),
+        "solver_reference": _solver_reference(meta),
         "ev_gap_bb": f"{decision.ev_gap_bb:.2f}",
+        "validation_status": "auto_approved",      # pipeline-generated default
     }
 
 
 def write_csv(path, rows) -> int:
     """Write question rows to a CSV at `path`; return the number of rows written.
 
-    `rows` is an iterable of (SpotData, difficulty_score) pairs. The parent
-    directory is created if needed. The header is always written.
+    `rows` is an iterable of (SpotData, difficulty_score) pairs. The `No` column
+    auto-increments from 1 across the output. The parent directory is created
+    if needed; the header is always written.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +182,7 @@ def write_csv(path, rows) -> int:
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
-        for spot_data, difficulty in rows:
-            writer.writerow(build_row(spot_data, difficulty))
+        for number, (spot_data, difficulty) in enumerate(rows, start=1):
+            writer.writerow(build_row(spot_data, difficulty, number))
             written += 1
     return written

@@ -38,7 +38,7 @@ SAMPLE_SIZE = 50
 RANDOM_SEED = 7
 # The test solve is a 6-max 100bb cash BTN-vs-BB single-raised pot.
 SCENARIO = {"preflop_raise_count": 1, "game_format": "cash",
-            "active_players_on_flop": 2}
+            "active_players_on_flop": 2, "stack_depth_bb": 100}
 
 
 def main(argv=None) -> int:
