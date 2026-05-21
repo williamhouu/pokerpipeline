@@ -49,8 +49,13 @@ def _street_segments(action_sequence):
     return segments
 
 
-def _build_decision_data(spot_context) -> DecisionData:
-    """SpotContext -> DecisionData: options, strategy, EVs, and the action line."""
+def _build_decision_data(spot_context, big_blind: float) -> DecisionData:
+    """SpotContext -> DecisionData: options, strategy, EVs, and the action line.
+
+    Solver EVs are divided by `big_blind` so the data block is bb-denominated
+    (the brief's data-block convention); ev_gap_bb is the gap between the best
+    and second-best action.
+    """
     node = spot_context.node
     actions = spot_context.actions
     hero_side = "OOP" if node.hero_is_oop else "IP"
@@ -73,12 +78,15 @@ def _build_decision_data(spot_context) -> DecisionData:
 
     correct = (_canonical(max(actions, key=lambda a: a.frequency).label)
                if actions else "")
+    evs_bb = sorted((a.ev / big_blind for a in actions), reverse=True)
+    ev_gap_bb = evs_bb[0] - evs_bb[1] if len(evs_bb) >= 2 else 0.0
     return DecisionData(
         options=[a.label for a in actions],
-        hero_combo_evs={_canonical(a.label): a.ev for a in actions},
+        hero_combo_evs={_canonical(a.label): a.ev / big_blind for a in actions},
         range_aggregate_strategy={_canonical(a.label): max(0.0, min(1.0, a.frequency))
                                   for a in actions},
         correct_action=correct,
+        ev_gap_bb=ev_gap_bb,
         option_pot_fractions=option_fractions,
         facing_bet_pot_fraction=facing,
         street_actions=convert(segments[-1]),
@@ -86,14 +94,15 @@ def _build_decision_data(spot_context) -> DecisionData:
     )
 
 
-def _build_spot_metadata(spot_context, scenario: dict) -> SpotMetadata:
+def _build_spot_metadata(spot_context, scenario: dict,
+                         big_blind: float) -> SpotMetadata:
     """SpotContext -> SpotMetadata, with `scenario` supplying the facts a
     postflop solve cannot carry (preflop raise count, game format, ...)."""
     node = spot_context.node
     fields = dict(
         street=node.street,
-        stack_depth_bb=node.effective_stack,        # solve units, not bb
-        effective_stack_bb=node.effective_stack,
+        stack_depth_bb=node.effective_stack / big_blind,
+        effective_stack_bb=node.effective_stack / big_blind,
         spr=node.effective_stack / node.pot if node.pot > 0 else 0.0,
         position_dynamic=f"{node.hero_position}_vs_{node.villain_position}",
         hero_position=node.hero_position,
@@ -105,13 +114,16 @@ def _build_spot_metadata(spot_context, scenario: dict) -> SpotMetadata:
 
 
 def extract_facts(spot_context, *, hero_hand: str | None = None,
-                  scenario: dict | None = None) -> SpotData:
+                  scenario: dict | None = None,
+                  big_blind: float = 1.0) -> SpotData:
     """Build a fully populated SpotData from a Path Sampler SpotContext.
 
     Orchestrates the whole of Layer 5: hand class, board texture, the equity /
     range / blocker extraction, and the concept tagger. `hero_hand` defaults to
     hero's most likely combo at the spot; `scenario` supplies metadata the
-    solve does not carry (e.g. preflop_raise_count).
+    solve does not carry (e.g. preflop_raise_count); `big_blind` is the chip
+    value of one big blind, used to express EVs and stacks in bb (leave at 1.0
+    to keep raw solver units).
 
     The equity pass runs once here and is shared by the equity_data and
     range_data builders.
@@ -129,8 +141,8 @@ def extract_facts(spot_context, *, hero_hand: str | None = None,
         [hero_hand[:2], hero_hand[2:]], spot_context.villain_range, board)
 
     spot = SpotData(
-        spot_metadata=_build_spot_metadata(spot_context, scenario or {}),
-        decision_data=_build_decision_data(spot_context),
+        spot_metadata=_build_spot_metadata(spot_context, scenario or {}, big_blind),
+        decision_data=_build_decision_data(spot_context, big_blind),
         equity_data=compute_equity_data(spot_context, hero_hand, hero_equity),
         range_data=compute_range_data(spot_context, hero_hand, villain_combo_equity),
         hand_class=(HandClass.from_cards(hero_hand, board)
