@@ -66,6 +66,12 @@ def effective_stack(pot_field: str, starting_pot: float,
     return max(0.0, remaining)
 
 
+def amount_to_call(pot_field: str, hero_is_oop: bool) -> float:
+    """Chips hero must put in to call -- the unmatched portion of the pot field."""
+    oop, ip, _ = (float(t) for t in pot_field.split())
+    return max(0.0, (ip - oop) if hero_is_oop else (oop - ip))
+
+
 def street_of(board: list[str]) -> str:
     """The street implied by the board: 3 cards = flop, 4 = turn, 5 = river."""
     return {3: "flop", 4: "turn", 5: "river"}.get(len(board), "preflop")
@@ -116,6 +122,7 @@ class DecisionNode:
     board: list[str]
     pot: float
     effective_stack: float
+    amount_to_call: float                          # chips hero must call (0 if no bet faced)
     hero_position: str                             # whoever acts at this node
     villain_position: str
     hero_is_oop: bool
@@ -212,6 +219,7 @@ class PathSampler:
             pot=total_pot(info["pot"]),
             effective_stack=effective_stack(info["pot"], self._starting_pot,
                                             self._starting_stack),
+            amount_to_call=amount_to_call(info["pot"], is_oop),
             hero_position=self.oop_position if is_oop else self.ip_position,
             villain_position=self.ip_position if is_oop else self.oop_position,
             hero_is_oop=is_oop,

@@ -13,8 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.path_sampler import (                                   # noqa: E402
-    PathSampler, _is_card, _sample_evenly, effective_stack, label_action,
-    street_of, total_pot,
+    PathSampler, _is_card, _sample_evenly, amount_to_call, effective_stack,
+    label_action, street_of, total_pot,
 )
 from pipeline.piosolver import PioSolverClient, find_piosolver         # noqa: E402
 
@@ -39,6 +39,15 @@ def test_effective_stack():
     assert effective_stack("0 0 127", 55, 975) == 939
     # Both all-in -> zero effective stack.
     assert effective_stack("975 512 55", 55, 975) == 0
+
+
+def test_amount_to_call():
+    # Nobody has bet -- nothing to call.
+    assert amount_to_call("0 0 55", hero_is_oop=True) == 0
+    # OOP bet 36; IP (not OOP) must call 36.
+    assert amount_to_call("36 0 55", hero_is_oop=False) == 36
+    # OOP bet 36, IP raised to 102; OOP must call the 66 difference.
+    assert amount_to_call("36 102 55", hero_is_oop=True) == 66
 
 
 def test_street_of():
@@ -85,6 +94,7 @@ def test_path_sampler_on_real_solve():
             assert len(node.board) == depth[node.street], node.node_id
             assert node.pot > 0, node.node_id
             assert node.effective_stack >= 0, node.node_id
+            assert node.amount_to_call >= 0, node.node_id
             assert {node.hero_position, node.villain_position} == {"BB", "BTN"}
             assert node.available_actions, node.node_id
             assert node.parent_node_id, node.node_id

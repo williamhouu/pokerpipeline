@@ -4,5 +4,139 @@ Turns solver output into the structured data block every explanation is built
 from: hand class, board texture, equity math, and concept tags. All strategic
 reasoning lives here, in deterministic Python -- never in the LLM.
 
+`extract_facts` is the top-level entry point: it takes a Path Sampler
+SpotContext and orchestrates the whole layer -- hand class, board texture,
+equity / range / blocker extraction, and the concept tagger -- into one fully
+populated SpotData.
+
 See docs/engineering_brief.docx, "Layer 5: Fact Extractor".
 """
+from __future__ import annotations
+
+from pipeline.fact_extractor.board_texture import classify_board  # noqa: F401
+from pipeline.fact_extractor.concept_tags.registry import compute_tags
+from pipeline.fact_extractor.equity import equity_vs_range
+from pipeline.fact_extractor.equity_range_blockers import (
+    compute_equity_data, compute_range_data,
+)
+from pipeline.fact_extractor.hand_class import classify_hand  # noqa: F401
+from pipeline.fact_extractor.spot_data import (
+    BoardTexture, DecisionData, HandClass, SpotData, SpotMetadata,
+)
+
+
+def _canonical(label: str) -> str:
+    """Action label -> canonical verb: 'bet 36' -> 'bet', 'check' -> 'check'."""
+    return label.split()[0]
+
+
+def _amount(label: str) -> float | None:
+    """The chip amount embedded in an action label, if any ('bet 36' -> 36)."""
+    parts = label.split()
+    if len(parts) == 2 and parts[1].replace(".", "", 1).isdigit():
+        return float(parts[1])
+    return None
+
+
+def _street_segments(action_sequence):
+    """Split an action sequence into per-street segments at the card deals."""
+    segments: list[list] = [[]]
+    for actor, label in action_sequence:
+        if actor == "deal":
+            segments.append([])
+        else:
+            segments[-1].append((actor, label))
+    return segments
+
+
+def _build_decision_data(spot_context) -> DecisionData:
+    """SpotContext -> DecisionData: options, strategy, EVs, and the action line."""
+    node = spot_context.node
+    actions = spot_context.actions
+    hero_side = "OOP" if node.hero_is_oop else "IP"
+
+    segments = _street_segments(node.action_sequence)
+    convert = lambda entries: [("hero" if actor == hero_side else "villain",
+                                _canonical(label)) for actor, label in entries]
+
+    option_fractions = {}
+    for action in actions:
+        amount = _amount(action.label)
+        if amount is not None and node.pot > 0:
+            option_fractions[_canonical(action.label)] = amount / node.pot
+
+    facing = None
+    if node.amount_to_call > 0:
+        pot_before = node.pot - node.amount_to_call
+        if pot_before > 0:
+            facing = node.amount_to_call / pot_before
+
+    correct = (_canonical(max(actions, key=lambda a: a.frequency).label)
+               if actions else "")
+    return DecisionData(
+        options=[a.label for a in actions],
+        hero_combo_evs={_canonical(a.label): a.ev for a in actions},
+        range_aggregate_strategy={_canonical(a.label): max(0.0, min(1.0, a.frequency))
+                                  for a in actions},
+        correct_action=correct,
+        option_pot_fractions=option_fractions,
+        facing_bet_pot_fraction=facing,
+        street_actions=convert(segments[-1]),
+        prior_street_actions=convert(segments[-2]) if len(segments) >= 2 else [],
+    )
+
+
+def _build_spot_metadata(spot_context, scenario: dict) -> SpotMetadata:
+    """SpotContext -> SpotMetadata, with `scenario` supplying the facts a
+    postflop solve cannot carry (preflop raise count, game format, ...)."""
+    node = spot_context.node
+    fields = dict(
+        street=node.street,
+        stack_depth_bb=node.effective_stack,        # solve units, not bb
+        effective_stack_bb=node.effective_stack,
+        spr=node.effective_stack / node.pot if node.pot > 0 else 0.0,
+        position_dynamic=f"{node.hero_position}_vs_{node.villain_position}",
+        hero_position=node.hero_position,
+        villain_position=node.villain_position,
+        hero_in_position=not node.hero_is_oop,
+    )
+    fields.update(scenario)                         # caller-supplied overrides
+    return SpotMetadata(**fields)
+
+
+def extract_facts(spot_context, *, hero_hand: str | None = None,
+                  scenario: dict | None = None) -> SpotData:
+    """Build a fully populated SpotData from a Path Sampler SpotContext.
+
+    Orchestrates the whole of Layer 5: hand class, board texture, the equity /
+    range / blocker extraction, and the concept tagger. `hero_hand` defaults to
+    hero's most likely combo at the spot; `scenario` supplies metadata the
+    solve does not carry (e.g. preflop_raise_count).
+
+    The equity pass runs once here and is shared by the equity_data and
+    range_data builders.
+    """
+    node = spot_context.node
+    board = node.board
+    if hero_hand is None:
+        playable = {c: w for c, w in spot_context.hero_range.items()
+                    if not ({c[:2], c[2:]} & set(board))}
+        if not playable:
+            raise ValueError("spot_context has no playable hero combos")
+        hero_hand = max(playable, key=playable.get)
+
+    hero_equity, villain_combo_equity = equity_vs_range(
+        [hero_hand[:2], hero_hand[2:]], spot_context.villain_range, board)
+
+    spot = SpotData(
+        spot_metadata=_build_spot_metadata(spot_context, scenario or {}),
+        decision_data=_build_decision_data(spot_context),
+        equity_data=compute_equity_data(spot_context, hero_hand, hero_equity),
+        range_data=compute_range_data(spot_context, hero_hand, villain_combo_equity),
+        hand_class=(HandClass.from_cards(hero_hand, board)
+                    if len(board) >= 3 else None),
+        board_texture=(BoardTexture.from_board(board)
+                       if len(board) >= 3 else None),
+    )
+    spot.concept_tags = compute_tags(spot)
+    return spot

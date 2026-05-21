@@ -1,0 +1,155 @@
+"""Tests for the Layer 5 fact extractor -- equity, range, blockers, orchestration.
+
+Run directly (`python tests/test_fact_extractor.py`) or under pytest. Every test
+is pure: SpotContexts are built synthetically, so no PioSolver is needed.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline.fact_extractor import extract_facts                     # noqa: E402
+from pipeline.fact_extractor.equity import (                          # noqa: E402
+    equity_vs_range, hand_equity, rank_hand,
+)
+from pipeline.fact_extractor.equity_range_blockers import (           # noqa: E402
+    compute_equity_data, compute_range_data,
+)
+from pipeline.path_sampler import ActionOption, DecisionNode, SpotContext  # noqa: E402
+
+
+def _context(board, hero_range, villain_range, *, pot=200.0, to_call=0.0,
+             hero_is_oop=True):
+    """A synthetic SpotContext (no solver) for testing the fact extractor."""
+    street = {3: "flop", 4: "turn", 5: "river"}[len(board)]
+    node = DecisionNode(
+        node_id="r:0", node_type="OOP_DEC" if hero_is_oop else "IP_DEC",
+        street=street, board=board, pot=pot, effective_stack=900.0,
+        amount_to_call=to_call,
+        hero_position="BB" if hero_is_oop else "BTN",
+        villain_position="BTN" if hero_is_oop else "BB",
+        hero_is_oop=hero_is_oop, parent_node_id="r", action_to_reach="",
+        action_sequence=[("OOP", "check"), ("IP", "bet 50")],
+        available_actions=["fold", "call"])
+    actions = [ActionOption("fold", "r:0:f", 0.3, 0.0),
+               ActionOption("call", "r:0:c", 0.7, 12.0)]
+    return SpotContext(node=node, hero_range=hero_range,
+                       villain_range=villain_range, actions=actions)
+
+
+# --- hand evaluator ----------------------------------------------------------
+def test_rank_hand_category_ordering():
+    straight_flush = rank_hand(["As", "Ks", "Qs", "Js", "Ts"])
+    quads = rank_hand(["Ac", "Ah", "Ad", "As", "Kh"])
+    flush = rank_hand(["Ah", "Jh", "9h", "6h", "3h"])
+    straight = rank_hand(["Ah", "Kd", "Qc", "Js", "Th"])
+    assert straight_flush > quads > flush > straight
+    # The category element settles every cross-category comparison.
+    assert straight_flush[0] == 8 and quads[0] == 7 and flush[0] == 5
+
+
+def test_rank_hand_tiebreakers_and_wheel():
+    # Pair rank outranks kickers: KK beats QQ even with QQ holding A-K kickers.
+    assert (rank_hand(["Kh", "Kd", "9c", "5s", "2h"])
+            > rank_hand(["Qh", "Qd", "Ac", "Ks", "2h"]))
+    # The wheel is a 5-high straight.
+    assert rank_hand(["Ah", "2d", "3c", "4s", "5h"]) == (4, 5)
+    # A 7-card hand picks its best five.
+    assert rank_hand(["As", "Ks", "Qs", "Js", "Ts", "2c", "3d"]) == (8, 14)
+
+
+# --- equity ------------------------------------------------------------------
+def test_hand_equity_exact_river():
+    river = ["As", "Kd", "9h", "4c", "2s"]
+    # Trip aces vs a pair -> hero always wins (no cards left to come).
+    assert hand_equity(["Ah", "Ac"], ["Qh", "Qc"], river) == 1.0
+    # Both players play the board's straight -> a tie is 0.5 equity.
+    straight_board = ["5h", "6s", "7d", "8c", "9h"]
+    assert hand_equity(["2c", "3c"], ["2d", "3d"], straight_board) == 0.5
+
+
+def test_hand_equity_flop_dominant():
+    # An overpair crushes air on a dry flop.
+    equity = hand_equity(["Ah", "Ad"], ["7c", "2c"], ["Ks", "8h", "3d"])
+    assert equity > 0.80
+
+
+def test_equity_vs_range():
+    river = ["As", "Kd", "9h", "4c", "2s"]
+    villain = {"QhQc": 1.0, "JsTs": 1.0, "8h7h": 1.0}
+    hero_equity, per_combo = equity_vs_range(["Ah", "Ac"], villain, river)
+    assert hero_equity == 1.0                       # trip aces beats them all
+    assert all(eq == 0.0 for eq in per_combo.values())
+
+
+# --- equity_data / range_data ------------------------------------------------
+def test_compute_equity_data():
+    ctx = _context(["As", "Kd", "9h", "4c", "2s"], {"AhAc": 1.0},
+                   {"QhQc": 1.0}, pot=200.0, to_call=50.0)
+    hero_equity, _ = equity_vs_range(["Ah", "Ac"], ctx.villain_range,
+                                     ctx.node.board)
+    equity_data = compute_equity_data(ctx, "AhAc", hero_equity)
+    assert equity_data.hero_raw_equity_vs_continuing == 1.0
+    assert equity_data.pot_odds_required == 0.25     # 50 to call into a 200 pot
+    assert equity_data.mdf == 0.75
+
+
+def test_compute_range_data():
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    hero_range = {"AhAc": 1.0}
+    villain_range = {"QhQc": 1.0, "JsTs": 1.0, "8h7h": 1.0}
+    ctx = _context(board, hero_range, villain_range)
+    _, per_combo = equity_vs_range(["Ah", "Ac"], villain_range, board)
+    range_data = compute_range_data(ctx, "AhAc", per_combo)
+    assert len(range_data.villain_range) == 3
+    assert len(range_data.hero_range) == 1
+    # Hero holds trip aces; villain's range has no value (premium/strong) hands.
+    assert range_data.hero_strong_hand_count > 0
+    assert range_data.villain_strong_hand_count == 0
+    assert 0.0 <= range_data.hero_total_equity <= 1.0
+
+
+# --- extract_facts orchestration ---------------------------------------------
+def test_extract_facts_populates_spotdata():
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    hero_range = {"AhAc": 1.0, "AhKh": 1.0, "KhKs": 0.8, "9s9c": 0.6}
+    villain_range = {"QhQc": 1.0, "JsTs": 1.0, "8h7h": 1.0, "6c5c": 1.0}
+    spot = extract_facts(_context(board, hero_range, villain_range,
+                                  pot=200.0, to_call=50.0))
+
+    # equity_data and range_data are no longer empty.
+    assert spot.equity_data.hero_raw_equity_vs_continuing == 1.0
+    assert spot.equity_data.pot_odds_required == 0.25
+    assert spot.range_data.villain_range and spot.range_data.hero_range
+    assert spot.range_data.hero_total_equity > 0.55
+
+    # hand class and board texture are filled.
+    assert spot.hand_class is not None and spot.board_texture is not None
+
+    # The tagger now fires on real fact data -- hero crushes villain here.
+    assert spot.concept_tags, "no concept tags fired"
+    assert "range_advantage_hero" in spot.concept_tags
+
+
+def test_extract_facts_picks_most_likely_hero_hand():
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    spot = extract_facts(_context(board, {"AhAc": 0.2, "7h7d": 0.9},
+                                  {"QhQc": 1.0}))
+    # 7h7d carries the most weight, so it is the hand the spot is built around.
+    assert spot.hand_class.made_hand in ("two_pair_mid", "second_pair",
+                                         "pocket_pair_below_overcards")
+
+
+if __name__ == "__main__":
+    suite = sorted((n, f) for n, f in globals().items()
+                   if n.startswith("test_") and callable(f))
+    failed = 0
+    for name, fn in suite:
+        try:
+            fn()
+            print(f"  [PASS] {name}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"  [FAIL] {name}: {exc}")
+    print(f"\n{len(suite) - failed}/{len(suite)} tests passed")
+    sys.exit(1 if failed else 0)
