@@ -1,0 +1,542 @@
+"""Layer 6: Explanation Generator.
+
+The only layer that calls an external LLM. Every other layer is deterministic
+Python; this one takes a fully populated SpotData (Layer 5) and asks the model
+to *narrate* the solver-derived facts in the team's coaching voice.
+
+Per the brief's "the LLM never thinks about poker" principle, the model is not
+allowed to reason strategically here: it receives the decision class, concept
+tags, equity numbers, range shape, and the correct action, and writes prose
+for the six question-facing CSV columns:
+
+    option_1, option_2, option_3, option_4, correct_answer, answer_explanation
+
+Voice is locked by an 8-rule system prompt distilled from the team's gold
+examples (docs/output_format_examples.xlsx Sheet 2), an in-context exemplar
+block of ~8 of those gold rows, and the brief's banned-phrase list (no em
+dashes, no semicolons, no corporate phrasing). Output is JSON for parsing.
+
+Option style is chosen from solver signals before the call -- binary action
+(Call/Fold), frequency (Always/Mostly/Sometimes), or sizing (33%/75%/135%) --
+and passed to the LLM as an explicit instruction so the model doesn't pick.
+
+Validation: the `correct_answer` string must equal one of `option_1`...
+`option_4` exactly. A mismatch triggers one corrective retry; a second failure
+raises `ExplanationValidationError` so Layer 7 can route the question to human
+review.
+
+Usage:
+
+    from pipeline.explanation_generator import generate_explanation
+    explanation = generate_explanation(spot_data)        # reads ANTHROPIC_API_KEY
+
+The Anthropic SDK call uses prompt caching on the system block and the gold
+example block, since both are identical across thousands of generations.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from pipeline.fact_extractor.spot_data import SpotData
+
+# Default Anthropic model. The brief asks for an Opus-class model in production
+# (better at voice fidelity), but Sonnet 4.6 is the cost/latency-balanced
+# default for batch generation and is what the demo script runs against.
+DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
+DEFAULT_MAX_TOKENS = 1500                  # 4 short options + a 2-5 sentence explanation
+GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"
+GOLD_XLSX = (Path(__file__).resolve().parent.parent
+             / "docs" / "output_format_examples.xlsx")
+
+# Banned-phrase patterns -- the brief lists em dashes, semicolons, and "corporate
+# phrasing." The corporate-phrasing list is seeded from common LLM tells; the
+# Layer 7 voice checker will grow it from observed failures.
+BANNED_LITERAL_PHRASES = (
+    "—",                                   # em dash
+    ";",                                   # semicolon
+    "let's dive in", "let us dive in",
+    "in conclusion",
+    "it is important to note",
+    "it's important to note",
+    "at the end of the day",
+    "leverage",                            # corporate verb
+    "synergy",
+    "moving forward",
+    "circle back",
+)
+
+
+# --- the eight voice rules ---------------------------------------------------
+# Distilled from the gold examples in docs/output_format_examples.xlsx Sheet 2,
+# "Golden explanation examples - I". Embedded in the system prompt verbatim.
+VOICE_RULES = [
+    # 1. Verdict first
+    "Open with the verdict. The first sentence states the correct action "
+    "plainly (\"The best play is to call.\", \"You should always check here.\", "
+    "\"This is a clear fold.\"). Do not bury the answer.",
+    # 2. Second-person coaching
+    "Address the reader directly in second person (\"you\", \"your hand\", "
+    "\"you're holding\"). Never refer to \"the player\" or \"hero\" -- the "
+    "student IS hero.",
+    # 3. Structure: verdict -> reasoning -> optional exploit caveat
+    "Structure the body as: (a) verdict, (b) the reasoning (range, equity, "
+    "position, board), (c) an optional one-line exploitative note when the "
+    "spot is population-sensitive. Skip (c) if it doesn't apply.",
+    # 4. Length: 2-5 sentences
+    "Keep the explanation between 2 and 5 sentences. Tight is better than "
+    "thorough. If you can say it in 3 sentences, say it in 3.",
+    # 5. Concrete naming
+    "Name things concretely: positions by abbreviation (UTG, HJ, CO, BTN, "
+    "SB, BB), hands by class (top pair top kicker, open-ended straight draw, "
+    "third pair), board features (paired, monotone, broadway-heavy).",
+    # 6. Plain-language solver facts
+    "Translate solver numbers into plain language. Say \"you have the "
+    "stronger range here\" rather than \"hero range advantage = 4.2%\"; say "
+    "\"you have very little of your range that can continue\" rather than "
+    "\"continuing range frequency 18%\".",
+    # 7. No em dashes, no semicolons
+    "Never use an em dash. Never use a semicolon. Use periods, commas, and "
+    "short sentences. Do not use any phrase from the BANNED PHRASES list.",
+    # 8. Confident instructive tone
+    "Write with the confidence of a coach who has solved the spot. Do not "
+    "hedge with \"it might be\", \"perhaps\", \"in theory\". State what the "
+    "right play is and why, plainly.",
+]
+
+
+# --- public dataclass --------------------------------------------------------
+@dataclass
+class GeneratedExplanation:
+    """The six LLM-written columns for one CSV row.
+
+    `option_3` and `option_4` are empty strings when the decision has fewer
+    than four options. `correct_answer` always equals one of `option_1`...
+    `option_4` exactly (enforced by `_validate`).
+    """
+
+    option_1: str
+    option_2: str
+    option_3: str
+    option_4: str
+    correct_answer: str
+    answer_explanation: str
+
+    def options(self) -> list[str]:
+        """The non-empty option strings, in order."""
+        return [opt for opt in (self.option_1, self.option_2,
+                                self.option_3, self.option_4) if opt]
+
+
+class ExplanationValidationError(RuntimeError):
+    """Raised when the LLM's output fails validation after one retry.
+
+    Layer 7 catches this and routes the spot to human review.
+    """
+
+
+# --- option-style detection (deterministic, no LLM) --------------------------
+_BET_VERBS = ("bet", "raise", "donk", "overbet", "shove", "jam")
+
+
+def _detect_option_style(spot_data: SpotData) -> str:
+    """Pick the option style from solver signals.
+
+    Returns one of:
+      * "sizing"        -- multiple bet/raise sizes available (e.g. flop bet 33%
+                           pot vs 75% pot). Options should list pot fractions
+                           or chip amounts.
+      * "frequency"     -- a single dominant action below 80% frequency: the
+                           strategy is meaningfully mixed. Options should be
+                           Always X / Mostly X / Mostly Y / Always Y.
+      * "binary_action" -- a clearly-dominant single action with no sizing
+                           choice. Options are the raw verbs (Call, Fold,
+                           Raise) like the team's simpler gold rows.
+    """
+    bet_sizes = [frac for action, frac in
+                 spot_data.decision_data.option_pot_fractions.items()
+                 if any(v in action for v in _BET_VERBS) and frac > 0]
+    if len({round(f, 2) for f in bet_sizes}) >= 2:
+        return "sizing"
+    strategy = spot_data.decision_data.range_aggregate_strategy
+    if strategy and max(strategy.values()) < 0.80:
+        return "frequency"
+    return "binary_action"
+
+
+def _option_style_instruction(style: str, spot_data: SpotData) -> str:
+    """The natural-language instruction the LLM gets for option formatting."""
+    if style == "sizing":
+        fractions = sorted({round(f * 100)
+                            for action, f in
+                            spot_data.decision_data.option_pot_fractions.items()
+                            if any(v in action for v in _BET_VERBS) and f > 0})
+        examples = ", ".join(f"\"{p}% pot\"" for p in fractions[:4]) or \
+            "\"33% pot\", \"75% pot\", \"135% pot\""
+        return (
+            "OPTION STYLE: sizing. The decision is between bet sizes. Each "
+            f"option must be a sizing label such as {examples}. If the "
+            "solver also offers a check or fold, include that as option_1; "
+            "list the bet sizes in ascending order after it. Use 2 to 4 "
+            "options total; leave unused options as empty strings."
+        )
+    if style == "frequency":
+        return (
+            "OPTION STYLE: frequency. The solver mixes between two actions. "
+            "Use exactly four options in this template: \"Always <action A>\", "
+            "\"Mostly <action A>\", \"Mostly <action B>\", \"Always <action B>\", "
+            "where action A is the action the solver picks more often. "
+            "Examples from the gold set: \"Always check\" / \"Mostly check\" / "
+            "\"Mostly bet\" / \"Always bet\"; \"Always fold\" / \"Mostly fold, "
+            "sometimes call\" / \"Always call\" / \"Mostly call, sometimes raise\"."
+        )
+    return (
+        "OPTION STYLE: binary action. The decision has a clear best action "
+        "with no sizing nuance. Each option must be a single verb: \"Call\", "
+        "\"Fold\", \"Check\", \"Bet\", \"Raise\". Use 2 or 3 options that match "
+        "the actions the solver offers; leave unused options as empty strings."
+    )
+
+
+# --- prompt assembly ---------------------------------------------------------
+def _format_voice_rules() -> str:
+    return "\n".join(f"{i + 1}. {rule}" for i, rule in enumerate(VOICE_RULES))
+
+
+def _format_banned_phrases() -> str:
+    return ", ".join(f"\"{p}\"" for p in BANNED_LITERAL_PHRASES)
+
+
+def build_system_prompt() -> str:
+    """The static system prompt: voice rules, banned phrases, output schema.
+
+    Stable across every call, so the SDK call marks it cacheable.
+    """
+    return (
+        "You are the explanation generator for a poker training app. You "
+        "translate solver-derived facts into short, on-voice coaching "
+        "explanations. You never reason about poker yourself: every "
+        "strategic claim in your output must be supported by a field in "
+        "the SOLVER DATA block the user gives you.\n\n"
+        "VOICE RULES (all eight apply to every output):\n"
+        f"{_format_voice_rules()}\n\n"
+        f"BANNED PHRASES (never appear in any output field): {_format_banned_phrases()}.\n\n"
+        "OUTPUT FORMAT: respond with a single JSON object and nothing else. "
+        "No prose before or after, no markdown fences. The object has exactly "
+        "these six keys, all string-valued:\n"
+        "  option_1, option_2, option_3, option_4, correct_answer, answer_explanation\n"
+        "Empty options must be empty strings (\"\"), not null. The "
+        "correct_answer string must equal one of option_1..option_4 "
+        "character-for-character; the consumer pairs them by exact string match."
+    )
+
+
+def _trim_spot_data(spot_data: SpotData) -> dict:
+    """A compact view of the SpotData for the user prompt.
+
+    The full to_dict() is heavy with empty Combo lists; the LLM only needs the
+    decision-relevant fields. Empty collections and zero floats are dropped to
+    keep the prompt readable.
+    """
+    raw = spot_data.to_dict()
+
+    def trim(value):
+        if isinstance(value, dict):
+            return {k: trim(v) for k, v in value.items()
+                    if v not in ("", None, [], {}, 0.0, 0)}
+        if isinstance(value, list):
+            return [trim(item) for item in value]
+        return value
+
+    # Always keep `street` even if "preflop" -- it isn't optional.
+    trimmed = trim(raw)
+    trimmed.setdefault("spot_metadata", {})["street"] = raw["spot_metadata"]["street"]
+    return trimmed
+
+
+def _question_framing(spot_data: SpotData) -> str:
+    """The plain-English description of what's being decided at this spot."""
+    meta = spot_data.spot_metadata
+    decision = spot_data.decision_data
+    hero = meta.hero_position or "hero"
+    villain = meta.villain_position or "villain"
+    actions = ", ".join(decision.options) or "(no options recorded)"
+    return (
+        f"Stage: {meta.street}. Hero ({hero}) is deciding against "
+        f"{villain}. Available actions in the solver: {actions}. The "
+        f"solver-correct action is \"{decision.correct_action}\" "
+        f"(frequency dominant). The explanation must justify exactly "
+        f"that action."
+    )
+
+
+@lru_cache(maxsize=1)
+def load_gold_examples(path: str | None = None) -> tuple[dict, ...]:
+    """Load the gold question/explanation pairs from the .xlsx sample.
+
+    Cached so repeated generations don't re-parse the file. Returns a tuple of
+    plain dicts with the in-prompt fields the model needs to mimic; non-data
+    cells are skipped. The path argument is the cache key (a string so the
+    decorator can hash it).
+    """
+    import openpyxl                            # imported lazily -- demo-only dep
+
+    src = Path(path) if path else GOLD_XLSX
+    wb = openpyxl.load_workbook(src, data_only=True)
+    ws = wb["Golden explanation examples - I"]
+    headers = [c.value for c in ws[1]]
+    keep = ("Hand Stage", "Question", "option 1", "option 2", "option 3",
+            "option 4", "Correct Answer", "Answer Explanation",
+            "Preflop Pot Type", "Pot Participant", "Stack Depth")
+    examples = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        record = dict(zip(headers, row))
+        if not (record.get("Question") and record.get("Answer Explanation")):
+            continue
+        examples.append({k: (record.get(k) or "") for k in keep})
+    return tuple(examples)
+
+
+def _format_gold_examples(examples) -> str:
+    """Render the gold-example block for the user prompt."""
+    parts = []
+    for index, ex in enumerate(examples, start=1):
+        options = [ex["option 1"], ex["option 2"], ex["option 3"], ex["option 4"]]
+        parts.append(
+            f"--- GOLD EXAMPLE {index} ({ex['Hand Stage'] or 'unspecified'}) ---\n"
+            f"Question: {ex['Question']}\n"
+            f"Options: {options}\n"
+            f"Correct Answer: {ex['Correct Answer']}\n"
+            f"Answer Explanation:\n{ex['Answer Explanation']}"
+        )
+    return "\n\n".join(parts)
+
+
+def build_user_prompt(spot_data: SpotData,
+                      gold_examples,
+                      style: str) -> str:
+    """The per-call user prompt: gold examples + framing + solver data.
+
+    Returned as one string so the SDK call can split it into a cached
+    gold-examples block and a per-call live block.
+    """
+    return (
+        "Read these gold examples to lock in the voice. Imitate the cadence, "
+        "verdict-first structure, and concrete naming. Do not copy phrasing.\n\n"
+        f"{_format_gold_examples(gold_examples)}\n\n"
+        "=== NEW QUESTION TO WRITE ===\n\n"
+        f"{_question_framing(spot_data)}\n\n"
+        f"{_option_style_instruction(style, spot_data)}\n\n"
+        "SOLVER DATA (every strategic claim in your output must trace back "
+        "to a field below; do not invent equity numbers or range claims):\n"
+        f"{json.dumps(_trim_spot_data(spot_data), indent=2, default=str)}\n\n"
+        "Now write the JSON object."
+    )
+
+
+def _build_messages_payload(spot_data: SpotData,
+                            gold_examples,
+                            style: str) -> tuple[list, list]:
+    """The (system, messages) payload for client.messages.create.
+
+    Splits the user prompt into a cached gold-example block and a live block
+    so the Anthropic prompt cache hits across thousands of generations.
+    """
+    system = [{
+        "type": "text",
+        "text": build_system_prompt(),
+        "cache_control": {"type": "ephemeral"},
+    }]
+    cached_block = (
+        "Read these gold examples to lock in the voice. Imitate the cadence, "
+        "verdict-first structure, and concrete naming. Do not copy phrasing.\n\n"
+        f"{_format_gold_examples(gold_examples)}"
+    )
+    live_block = (
+        "\n\n=== NEW QUESTION TO WRITE ===\n\n"
+        f"{_question_framing(spot_data)}\n\n"
+        f"{_option_style_instruction(style, spot_data)}\n\n"
+        "SOLVER DATA (every strategic claim in your output must trace back "
+        "to a field below; do not invent equity numbers or range claims):\n"
+        f"{json.dumps(_trim_spot_data(spot_data), indent=2, default=str)}\n\n"
+        "Now write the JSON object."
+    )
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": cached_block,
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": live_block},
+        ],
+    }]
+    return system, messages
+
+
+# --- response parsing & validation -------------------------------------------
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+def parse_response(text: str) -> GeneratedExplanation:
+    """Parse the LLM's response (a JSON object) into a GeneratedExplanation.
+
+    Tolerates accidental code fences (the system prompt forbids them but
+    Sonnet still emits them occasionally) and a leading prose preamble: we
+    scan for the first { ... } object and parse that.
+    """
+    cleaned = _JSON_FENCE_RE.sub("", text).strip()
+    # Pull out the first JSON object if there's extra prose.
+    if not cleaned.startswith("{"):
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise ExplanationValidationError(
+                f"no JSON object in LLM response: {text!r}")
+        cleaned = cleaned[start:end + 1]
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ExplanationValidationError(
+            f"LLM response was not valid JSON: {exc}") from exc
+
+    required = ("option_1", "option_2", "option_3", "option_4",
+                "correct_answer", "answer_explanation")
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ExplanationValidationError(
+            f"LLM response missing keys: {missing}")
+    return GeneratedExplanation(**{k: (data[k] or "") for k in required})
+
+
+def _validate(explanation: GeneratedExplanation) -> str | None:
+    """Return None if valid, else a short error message for the retry prompt."""
+    options = explanation.options()
+    if not options:
+        return "the response had no non-empty options"
+    if not explanation.correct_answer:
+        return "correct_answer was empty"
+    if explanation.correct_answer not in options:
+        return (f"correct_answer {explanation.correct_answer!r} did not "
+                f"match any of the four options exactly: {options!r}")
+    if not explanation.answer_explanation.strip():
+        return "answer_explanation was empty"
+    return None
+
+
+# --- main entry point --------------------------------------------------------
+def generate_explanation(spot_data: SpotData, *,
+                         client=None,
+                         model: str = DEFAULT_MODEL,
+                         temperature: float = DEFAULT_TEMPERATURE,
+                         max_tokens: int = DEFAULT_MAX_TOKENS,
+                         gold_examples=None,
+                         max_retries: int = 1) -> GeneratedExplanation:
+    """Run Layer 6 on a SpotData and return the six LLM-written columns.
+
+    Reads ``ANTHROPIC_API_KEY`` from the environment when constructing the
+    default client. Pass a mock ``client`` (any object with ``messages.create``)
+    for tests. ``gold_examples`` defaults to the team's .xlsx gold pool; pass a
+    list for tests to avoid hitting the file.
+
+    Retries once with a corrective message when the response fails validation
+    (most commonly: ``correct_answer`` not matching any ``option_N`` exactly).
+    A second failure raises ``ExplanationValidationError`` so Layer 7 can flag
+    the question for human review.
+    """
+    if client is None:
+        from anthropic import Anthropic        # imported lazily -- runtime dep
+        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    if gold_examples is None:
+        gold_examples = list(load_gold_examples())[:GOLD_EXAMPLE_COUNT]
+
+    style = _detect_option_style(spot_data)
+    system, messages = _build_messages_payload(spot_data, gold_examples, style)
+
+    last_error: str | None = None
+    for attempt in range(max_retries + 1):
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            system=system, messages=messages,
+        )
+        text = _extract_text(response)
+        try:
+            explanation = parse_response(text)
+            error = _validate(explanation)
+            if error is None:
+                return explanation
+            last_error = error
+        except ExplanationValidationError as exc:
+            last_error = str(exc)
+
+        # One retry with a corrective assistant + user turn. Append, don't
+        # restart -- keeps the gold-example cache block warm.
+        messages = messages + [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content":
+             "That response failed validation: "
+             f"{last_error}. Re-emit the JSON object, correcting only that "
+             "issue. Keep the same options and explanation otherwise."},
+        ]
+
+    raise ExplanationValidationError(
+        f"Layer 6 failed after {max_retries + 1} attempts; last error: "
+        f"{last_error}. Spot routed to human review.")
+
+
+def _extract_text(response) -> str:
+    """Pull the assistant text out of an Anthropic Messages response.
+
+    Tolerates both the SDK's content-block list and a raw string (handy for
+    mocking in tests).
+    """
+    if isinstance(response, str):
+        return response
+    content = getattr(response, "content", None)
+    if content is None:
+        raise ExplanationValidationError(
+            f"Anthropic response had no content: {response!r}")
+    # SDK content is a list of TextBlock objects; we want the first text block.
+    for block in content:
+        text = getattr(block, "text", None)
+        if text is not None:
+            return text
+        if isinstance(block, dict) and "text" in block:
+            return block["text"]
+    raise ExplanationValidationError(
+        f"no text block in Anthropic response: {content!r}")
+
+
+# --- helper for the demo / tests: turn an explanation into row overrides -----
+def explanation_to_row_overrides(explanation: GeneratedExplanation) -> dict:
+    """The six column values Layer 8's CSV row should pick up from Layer 6.
+
+    Format Writer fills these in place of its `[TBD by Layer 6]` placeholders.
+    """
+    return {
+        "option 1": explanation.option_1,
+        "option 2": explanation.option_2,
+        "option 3": explanation.option_3,
+        "option 4": explanation.option_4,
+        "Correct Answer": explanation.correct_answer,
+        "Answer Explanation": explanation.answer_explanation,
+    }
+
+
+__all__ = [
+    "GeneratedExplanation",
+    "ExplanationValidationError",
+    "VOICE_RULES",
+    "BANNED_LITERAL_PHRASES",
+    "DEFAULT_MODEL",
+    "GOLD_XLSX",
+    "build_system_prompt",
+    "build_user_prompt",
+    "parse_response",
+    "generate_explanation",
+    "explanation_to_row_overrides",
+    "load_gold_examples",
+]

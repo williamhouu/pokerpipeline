@@ -75,11 +75,22 @@ Each layer is a Python module with clear inputs and outputs:
    (raw solver numbers **and** strategic conclusions: decision class, equity math,
    range shape, blocker effects, concept tags). Every claim in the final explanation
    must trace back to here. See "Concept tags" below.
-6. **Explanation Generator** — one LLM call. Prompt = format/voice rules + banned
-   phrases, 8–12 similar gold examples retrieved from the ~800-question gold pool,
-   the spot description, and the Layer-5 data block. The LLM translates, never reasons.
-   Example retrieval matches on **structured features** (street, position, hand class,
-   board texture, action context), not raw text.
+6. **Explanation Generator** (`pipeline/explanation_generator.py`) — the **only**
+   layer that calls an external LLM. One Anthropic API call (Claude Sonnet 4.6 by
+   default, temperature 0.3) per spot; reads `ANTHROPIC_API_KEY` from the
+   environment. Inputs: a populated SpotData, the 8 voice rules distilled from
+   the gold examples in `docs/output_format_examples.xlsx` Sheet 2, the brief's
+   banned-phrase list, and ~8 in-context gold examples. Output: a
+   `GeneratedExplanation` dataclass (`option_1..4`, `correct_answer`,
+   `answer_explanation`) — the six LLM-written CSV columns. Option style is
+   detected from solver signals before the call (binary action / frequency /
+   sizing). Validation: `correct_answer` must equal one of the four options
+   exactly; one corrective retry, then `ExplanationValidationError` for Layer 7.
+   The system prompt and gold-example block use prompt caching since they are
+   identical across thousands of generations. Example retrieval (Phase-2 work)
+   will match on **structured features** (street, position, hand class, board
+   texture, action context), not raw text — for now the same 8 examples ship
+   on every call.
 7. **Validator Stack** — five checks in series; a question ships only if it passes all:
    format checker, number checker (equity/pot-odds verified, reject if off >3%),
    strategy checker (LLM rechecks claims vs the data block), failure-pattern checker
@@ -248,8 +259,13 @@ postflop), card-emoji formatting, and validation hooks for legal action order.
 
 - **Python 3.11+** (`venv/` is 3.13.13). Activate before running anything:
   PowerShell `venv\Scripts\Activate.ps1`, cmd `venv\Scripts\activate.bat`.
-- No pipeline dependencies are installed yet. Expected external services as code lands:
-  a Claude LLM API (Opus-class) for explanations and LLM checkers, an embedding API for
-  example search, and an equity calculator for the number checker.
+- **`ANTHROPIC_API_KEY` is required** for Layer 6 (`pipeline/explanation_generator.py`)
+  and the LLM-based Layer 7 checkers. Every other layer is deterministic and runs
+  without it. The Layer 6 demo (`scripts/demo_layer6_real_api.py`) skips cleanly
+  when the key is unset; tests use a mock client and never touch the real API.
+- Installed pipeline dependencies so far: `anthropic` (Layer 6 SDK), `openpyxl`
+  (loads `docs/output_format_examples.xlsx` for the gold-example pool), and
+  `python-docx` (reads the engineering brief). An embedding API for example search
+  and an equity calculator for the number checker are still expected.
 - `.cfr` files are large (GBs). Add a `.gitignore` for `venv/` and `test_solves/`
   before `git init` — this directory is not yet a git repository.
