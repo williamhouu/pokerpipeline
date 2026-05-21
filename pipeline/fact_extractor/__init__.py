@@ -94,8 +94,8 @@ def _build_decision_data(spot_context, big_blind: float) -> DecisionData:
     )
 
 
-def _build_spot_metadata(spot_context, scenario: dict,
-                         big_blind: float) -> SpotMetadata:
+def _build_spot_metadata(spot_context, scenario: dict, big_blind: float,
+                         hero_hand: str) -> SpotMetadata:
     """SpotContext -> SpotMetadata, with `scenario` supplying the facts a
     postflop solve cannot carry (preflop raise count, game format, ...)."""
     node = spot_context.node
@@ -108,6 +108,11 @@ def _build_spot_metadata(spot_context, scenario: dict,
         hero_position=node.hero_position,
         villain_position=node.villain_position,
         hero_in_position=not node.hero_is_oop,
+        parent_node_id=node.parent_node_id,
+        action_to_reach=node.action_to_reach,
+        node_id=node.node_id,
+        hero_cards=(hero_hand[:2], hero_hand[2:]),
+        board=list(node.board),
     )
     fields.update(scenario)                         # caller-supplied overrides
     return SpotMetadata(**fields)
@@ -141,7 +146,8 @@ def extract_facts(spot_context, *, hero_hand: str | None = None,
         [hero_hand[:2], hero_hand[2:]], spot_context.villain_range, board)
 
     spot = SpotData(
-        spot_metadata=_build_spot_metadata(spot_context, scenario or {}, big_blind),
+        spot_metadata=_build_spot_metadata(spot_context, scenario or {},
+                                           big_blind, hero_hand),
         decision_data=_build_decision_data(spot_context, big_blind),
         equity_data=compute_equity_data(spot_context, hero_hand, hero_equity),
         range_data=compute_range_data(spot_context, hero_hand, villain_combo_equity),

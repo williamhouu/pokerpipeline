@@ -180,8 +180,13 @@ class SpotMetadata:
     active_players_on_flop: int = 2                      # multiway_pot
     parent_node_id: str = ""                             # hand-replay metadata
     action_to_reach: str = ""                            # hand-replay metadata
+    node_id: str = ""                                    # solver node id (solver_reference)
+    hero_cards: tuple = ()                               # hero's two hole cards
+    board: list = field(default_factory=list)            # community cards
 
     def __post_init__(self) -> None:
+        self.hero_cards = tuple(self.hero_cards)
+        self.board = list(self.board)
         if self.street not in STREETS:
             raise ValueError(f"street must be one of {STREETS}, got {self.street!r}")
         if self.game_format not in GAME_FORMATS:
