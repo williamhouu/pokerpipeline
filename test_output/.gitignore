@@ -1,0 +1,6 @@
+# test_output/ holds artifacts written by the demo and batch scripts:
+# generated questions, CSVs, screenshots, ad-hoc diagnostics. None of it is
+# source. Ignore everything in this directory except this file itself, so the
+# directory still exists in the repo for scripts that write here.
+*
+!.gitignore

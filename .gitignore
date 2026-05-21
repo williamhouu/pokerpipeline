@@ -41,5 +41,8 @@ desktop.ini
 # Working extraction scratch files
 docs/_*.txt
 
-# Generated pipeline output (demo CSVs etc.)
-test_output/
+# Generated pipeline output (demo CSVs etc.) -- the directory's own
+# .gitignore narrows this to "ignore contents, keep the dir," so scripts have
+# somewhere to write and we still version the ignore rule itself.
+test_output/*
+!test_output/.gitignore
