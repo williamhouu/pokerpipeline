@@ -197,6 +197,27 @@ Optional column 35 `validation_status` (`draft`/`auto_approved`/`flagged`/
 `needs_review`/`approved`/`rejected`). Migrate off Sheets to Airtable/Firestore only
 around 7k–10k active questions.
 
+### Authoritative format sample — `docs/output_format_examples.xlsx`
+
+A real sample of the team's output, and the **authoritative format spec**. Two sheets:
+
+- **Sheet 1 "Example formatting"** — 6 fully-populated example rows. The real layout
+  is **35 columns** (0-indexed `No` … `validation_status`): a leading `No` (question
+  id), 28 template columns, the 5 new columns (`concept_tags`, `hand_class`,
+  `board_texture`, `solver_reference`, `ev_gap_bb`), then `validation_status`. So the
+  brief's "29 existing" = `No` + the 28 named template columns. This is the spec
+  Layer 8 (`format_writer.py`) must match.
+- **Sheet 2 "Golden explanation examples - I"** — ~10 sample `Answer Explanation`s
+  showing the coaching voice Layer 6's LLM prompt must reproduce.
+
+Format conventions from the sample: headers are lowercase `option 1`…`option 4` and
+`Live or Online`; `User Cards` / `Cards on Table` use `rank-suitword` form
+(`T-hearts, 9-hearts`); the `Question` narrative and explanations use suit emojis
+(♠️❤️♦️♣️); `board_texture` is a 3-axis string (`monotone_connected_broadway`), not
+the single `composite` word; `solver_reference` is a descriptive cache-style path;
+`Stack Depth` / `Preflop Pot Type` / `Pot Participant` are prose buckets. The current
+`format_writer.py` predates this sample and does not yet fully match it.
+
 ## Action history format (deterministic, no LLM)
 
 The context block and action-history block before every question are produced by a
