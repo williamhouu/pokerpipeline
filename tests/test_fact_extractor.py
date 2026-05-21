@@ -13,7 +13,8 @@ from pipeline.fact_extractor.equity import (                          # noqa: E4
     equity_vs_range, hand_equity, rank_hand,
 )
 from pipeline.fact_extractor.equity_range_blockers import (           # noqa: E402
-    compute_equity_data, compute_range_data,
+    _board_top_combos, _range_weight_in, compute_equity_data,
+    compute_range_data,
 )
 from pipeline.path_sampler import ActionOption, DecisionNode, SpotContext  # noqa: E402
 
@@ -107,6 +108,44 @@ def test_compute_range_data():
     assert range_data.hero_strong_hand_count > 0
     assert range_data.villain_strong_hand_count == 0
     assert 0.0 <= range_data.hero_total_equity <= 1.0
+
+
+# --- top-5% combos -----------------------------------------------------------
+def test_board_top_combos_contains_made_nuts():
+    # Dry As-Kd-9h-4c-2s river: nut combos are sets / two pair on aces+kings.
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    top = _board_top_combos(board, pct=0.05)
+    # AA combos (set of aces) sit at the top.
+    assert frozenset(("Ah", "Ac")) in top
+    assert frozenset(("Ah", "Ad")) in top
+    # 7-deuce offsuit (air) does not.
+    assert frozenset(("7h", "2c")) not in top
+    # Size: 5% of C(47, 2) = 0.05 * 1081 ~= 54 combos.
+    assert 40 <= len(top) <= 70, len(top)
+
+
+def test_range_weight_in_top_combos():
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    top = _board_top_combos(board, pct=0.05)
+    # A hero range of mostly nut combos -- weight in top should be the full sum.
+    hero_range = {"AhAc": 1.0, "AhAd": 0.5, "7h2c": 1.0}
+    in_top = _range_weight_in(hero_range, top)
+    # Aces are in top, 7-2 is not; weight = 1.0 + 0.5 = 1.5.
+    assert in_top == 1.5
+
+
+def test_compute_range_data_uses_universal_top_combos():
+    """nut_advantage now reads the board's universal top-5% pool, not the
+    premium-bucket count. On a dry A-K-9-4-2 board hero (with AA only) holds
+    more universal top-5% weight than villain (with QQ/JT/87)."""
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    hero_range = {"AhAc": 1.0}                          # set of aces -> in top 5%
+    villain_range = {"QhQc": 1.0, "JsTs": 1.0, "8h7h": 1.0}   # none nutted
+    ctx = _context(board, hero_range, villain_range)
+    _, per_combo = equity_vs_range(["Ah", "Ac"], villain_range, board)
+    rd = compute_range_data(ctx, "AhAc", per_combo)
+    assert rd.hero_top_5pct_combos > 0
+    assert rd.villain_top_5pct_combos == 0
 
 
 # --- extract_facts orchestration ---------------------------------------------

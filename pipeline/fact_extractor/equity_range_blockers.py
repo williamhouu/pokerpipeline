@@ -15,12 +15,19 @@ v1 limitations, documented where they bite:
   * Villain's calling-only sub-range is not modelled separately from the
     continuing range; hero_raw_equity_vs_calling reuses the continuing-range
     equity.
-  * "Top 5%" combo counts use the hand_class `premium` bucket as a proxy for
-    the nutted hands; "value" / "bluff" use the premium+strong / air buckets.
+  * "value" / "bluff" use the premium+strong / air strength buckets. The
+    "top 5%" combo count was originally a premium-bucket proxy too; it now
+    ranks the universe of board-legal combos by hand strength (rank_hand on
+    each combo + board) and counts the weight each player carries in the
+    top 5% (Section E nut_advantage tags read these counts).
 """
 from __future__ import annotations
 
-from pipeline.fact_extractor.equity import range_vs_range_equity
+from itertools import combinations
+
+from pipeline.fact_extractor.equity import (
+    FULL_DECK, range_vs_range_equity, rank_hand,
+)
 from pipeline.fact_extractor.hand_class import classify_hand
 from pipeline.fact_extractor.spot_data import Combo, EquityData, RangeData
 
@@ -29,6 +36,8 @@ _BLUFF_BUCKET = "air"                      # no showdown value
 # Equity bands for villain range-shape analysis (mirror Section A's bands).
 _TOP_BAND = 0.75
 _BOTTOM_BAND = 0.30
+# Nut-advantage threshold: the fraction of board-legal combos considered "top".
+_NUT_PCT = 0.05
 
 
 def _clamp01(value: float) -> float:
@@ -97,9 +106,16 @@ def compute_range_data(spot_context, hero_hand: str,
         draw_total += weight
         draw_weight += weight if info["draws"] else 0.0
 
-    hero_strong, hero_top = _strength_counts(spot_context.hero_range, board)
-    villain_strong, villain_top = _strength_counts(spot_context.villain_range,
-                                                   board, villain_class)
+    hero_strong, _ = _strength_counts(spot_context.hero_range, board)
+    villain_strong, _ = _strength_counts(spot_context.villain_range,
+                                         board, villain_class)
+    # Top-5% combo counts use the absolute strength of every board-legal combo
+    # so the comparison ranks ranges against the same universal pool -- the
+    # earlier premium-bucket proxy fired too readily because the bucket holds
+    # ~20% of typical ranges, not 5%.
+    top_combos = _board_top_combos(board, pct=_NUT_PCT)
+    hero_top = _range_weight_in(spot_context.hero_range, top_combos)
+    villain_top = _range_weight_in(spot_context.villain_range, top_combos)
 
     # Villain range as Combos (hero-blocked combos dropped), with per-combo
     # equity; hero range carries weights only (no tag needs hero-combo equity).
@@ -136,8 +152,14 @@ def compute_range_data(spot_context, hero_hand: str,
 
 
 def _strength_counts(combo_range, board, classified=None):
-    """Weighted counts of (strong-bucket combos, premium-bucket combos)."""
-    strong = top = 0.0
+    """Weighted count of value-bucket combos in a range.
+
+    The second tuple slot used to also return the premium-bucket weight as a
+    "top 5%" proxy; that is now computed against the universal top-of-board
+    pool via `_board_top_combos` (see below). The slot stays for back-compat
+    but the caller discards it.
+    """
+    strong = 0.0
     for combo, weight in combo_range.items():
         if classified is not None:
             info = classified.get(combo)        # None -> conflicts with board
@@ -149,9 +171,40 @@ def _strength_counts(combo_range, board, classified=None):
             continue
         if info["strength_bucket"] in _VALUE_BUCKETS:
             strong += weight
-        if info["strength_bucket"] == "premium":
-            top += weight
-    return strong, top
+    return strong, 0.0
+
+
+def _board_top_combos(board, pct: float = _NUT_PCT) -> set[frozenset]:
+    """The {a, b} combos in the top `pct` strongest on this board.
+
+    Ranks every 2-card combo that does not share a card with the board by
+    `rank_hand(combo + board)` (the same poker evaluator the equity calc uses)
+    and returns the strongest pct slice as a set of frozensets, so a player's
+    range membership can be tested by frozenset({card_a, card_b}) in the set.
+
+    Used by Section E nut_advantage to count each player's weight in the
+    board's nut-tier combos. v1 ranks at the current street -- on the flop and
+    turn, hands strong now usually stay strong (sets, two pair); a more careful
+    runout-weighted score is a tune-against-gold improvement.
+    """
+    board_set = set(board)
+    deck = [c for c in FULL_DECK if c not in board_set]
+    ranked: list[tuple[tuple, frozenset]] = []
+    for a, b in combinations(deck, 2):
+        strength = rank_hand([a, b] + list(board))
+        ranked.append((strength, frozenset((a, b))))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    cutoff = max(1, int(round(len(ranked) * pct)))
+    return {combo for _, combo in ranked[:cutoff]}
+
+
+def _range_weight_in(combo_range, top_combos: set[frozenset]) -> float:
+    """Total weight in `combo_range` of combos that lie in `top_combos`."""
+    weight = 0.0
+    for combo, w in combo_range.items():
+        if frozenset(_cards(combo)) in top_combos:
+            weight += w
+    return weight
 
 
 def _range_shape(villain_combos) -> str:
