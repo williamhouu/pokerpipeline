@@ -105,95 +105,85 @@ def failure_marker_path(spec: SolverSpec, flop: Flop, *,
     return solve_root / spec.cache_dir_name / f"{flop_filename_stem(flop)}.{kind}"
 
 
-# --- UPI tree configuration -------------------------------------------------
-def _set_isomorphism(client: PioSolverClient, spec: SolverSpec) -> None:
-    """Disable / enable solver isomorphism per spec.
+# --- UPI tree configuration: template-driven --------------------------------
+# Background: PioSolver Edge's UPI write-side doesn't expose a single
+# high-level "configure this tree" verb. Instead the GUI tree-builder
+# produces a `.txt` template whose body is literal UPI commands (set_range,
+# set_board, set_eff_stack, set_pot, add_line ... build_tree). The Edge 3
+# UPI dialect requires specific argument shapes:
+#
+#   set_range OOP <1326 floats>     -- combo-level weights, not 169 hand cells
+#   set_board 2cJs7s                -- concatenated cards, no spaces
+#   set_bet_sizes OOP 33,75         -- plural verb; per-actor; comma-separated
+#
+# Some verbs we guessed (set_range_oop, set_board with spaces, set_bet_size
+# singular, build_postflop_tree) don't exist on this Edge build. See
+# test_output/upi_findings.md for the full discovery log.
+#
+# Architecture: read the template, swap the `set_board` line for the
+# target flop, issue every non-comment line as a UPI command. The template
+# encodes ranges, sizings, and (via add_line) the betting tree -- so a
+# single file substitution per flop drives the entire solve setup.
 
-    Pio's `set_isomorphism <suits> <board>` controls whether the solver
-    treats suit-isomorphic boards as identical. For Tier 1 we leave both
-    off (matches the hand-solved test_solves file).
+# Lines we never replay from a template (they're setup directives Pio runs
+# differently when scripted vs read from the GUI).
+_TEMPLATE_SKIP_PREFIXES = ("#",)
+
+
+def _is_command_line(line: str) -> bool:
+    """A template line is a UPI command iff it's non-empty and not metadata."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return not stripped.startswith(_TEMPLATE_SKIP_PREFIXES)
+
+
+def _swap_board_line(line: str, flop: Flop) -> str:
+    """If `line` is a `set_board ...` UPI command, replace its argument
+    with the target flop's concatenated form (e.g. '2cJs7s'). Other lines
+    pass through unchanged."""
+    stripped = line.lstrip()
+    if stripped.startswith("set_board "):
+        return f"set_board {flop_filename_stem(flop)}"
+    return line
+
+
+def _load_template_lines(template_path: Path) -> list[str]:
+    """Read a Pio tree template and return the UPI command lines, in order.
+
+    Metadata header lines (starting with `#`) and blank lines are dropped.
+    Returns lines verbatim (no normalisation); the caller is responsible
+    for any board substitution before issuing.
     """
-    client.command(
-        f"set_isomorphism {int(spec.iso_suits)} {int(spec.iso_board)}",
-        timeout=30.0)
-
-
-def _set_pot_and_stack(client: PioSolverClient, spec: SolverSpec) -> None:
-    """Apply pot and effective-stack geometry from the spec.
-
-    UPI:
-      `set_eff_stack <chips>`   -- the postflop effective stack
-      `set_pot <oop_inv> <ip_inv> <carried>`
-                                -- the 3-tuple Pio stores in the pot field;
-                                   for a postflop solve root, both
-                                   invested-this-street values are 0.
-    """
-    client.command(
-        f"set_eff_stack {spec.starting_postflop_stack_chips}", timeout=30.0)
-    client.command(
-        f"set_pot 0 0 {spec.pot_after_preflop_chips}", timeout=30.0)
-
-
-def _set_ranges(client: PioSolverClient, spec: SolverSpec) -> None:
-    """Apply OOP/IP ranges -- inline strings or .txt file paths."""
-    for side, range_spec in (("OOP", spec.oop_range), ("IP", spec.ip_range)):
-        if spec.range_is_file(side):
-            # PioSolver loads a 13x13 grid file via `set_range_<side> <path>`.
-            # The path must be reachable from Pio's cwd; we pass an absolute
-            # path so cwd-resolution can't bite us.
-            argument = str(Path(range_spec).resolve())
-        else:
-            argument = range_spec
-        # UPI command names: `set_range_ip` / `set_range_oop`. Some Pio
-        # builds use the lowercase verb without the underscore -- if a
-        # future Pio version errors here, this is where to adjust.
-        client.command(
-            f"set_range_{side.lower()} {argument}", timeout=60.0)
-
-
-def _set_board(client: PioSolverClient, flop: Flop) -> None:
-    """Pin the flop. UPI: `set_board <cards>` (space-separated)."""
-    client.command(f"set_board {flop_board_string(flop)}", timeout=30.0)
-
-
-def _configure_bet_sizings(client: PioSolverClient,
-                           spec: SolverSpec) -> None:
-    """Apply the postflop bet/raise sizing tree.
-
-    PioSolver Edge's typical UPI for configuring sizings is per-position:
-      `set_bet_size <position> <size1>,<size2>,...`        (bet sizes)
-      `set_raise_size <position> <size1>,...`              (raise sizes)
-    Sizes are integer percentages of pot. Pio applies them to every
-    postflop street unless street-specific overrides are added; the brief
-    permits this v1 simplification.
-    """
-    oop_bets = ",".join(str(s) for s in spec.bet_sizes_oop_pct)
-    ip_bets = ",".join(str(s) for s in spec.bet_sizes_ip_pct)
-    raises = ",".join(str(s) for s in spec.raise_sizes_pct)
-    client.command(f"set_bet_size OOP {oop_bets}", timeout=30.0)
-    client.command(f"set_bet_size IP {ip_bets}", timeout=30.0)
-    if spec.raise_sizes_pct:
-        client.command(f"set_raise_size OOP {raises}", timeout=30.0)
-        client.command(f"set_raise_size IP {raises}", timeout=30.0)
+    text = template_path.read_text(encoding="utf-8")
+    return [line.rstrip("\r\n") for line in text.splitlines()
+            if _is_command_line(line)]
 
 
 def _configure_tree(client: PioSolverClient,
                     spec: SolverSpec, flop: Flop) -> None:
-    """Issue every UPI setup command, in order, for one (spec, flop).
+    """Drive the tree setup by issuing every UPI command in the template,
+    with `set_board` swapped for the target flop.
 
-    Order matters: ranges first (so isomorphism can be computed against
-    the populated ranges), then geometry (pot/stack), then board, then
-    sizings, then build_tree.
+    The template's last line is `build_tree`, so on return Pio has a built
+    (but unsolved) tree. Callers issue `set_accuracy`, `go`,
+    `wait_for_solver`, `dump_tree` to finish the solve.
     """
-    _set_isomorphism(client, spec)
-    _set_ranges(client, spec)
-    _set_pot_and_stack(client, spec)
-    _set_board(client, flop)
-    _configure_bet_sizings(client, spec)
-    # build_tree expands the configured ranges + sizings into the full
-    # game tree. This can take a few seconds on large sizing trees but
-    # is fast compared to solving.
-    client.command("build_tree", timeout=300.0)
+    if not spec.pio_template_path:
+        raise PioSolverError(
+            f"spec {spec.name!r} has no pio_template_path; template-driven "
+            f"solves are the only supported mode in Tier 1")
+    template_path = Path(spec.pio_template_path)
+    if not template_path.is_file():
+        raise PioSolverError(
+            f"Pio template not found at {template_path}; check the "
+            f"SolverSpec.pio_template_path or Pio's install dir")
+    for line in _load_template_lines(template_path):
+        cmd = _swap_board_line(line, flop)
+        # set_range with 1326 weights produces a very long line; bump the
+        # timeout to keep transient slowness from looking like a hang.
+        timeout = 600.0 if cmd.startswith(("set_range ", "build_tree")) else 30.0
+        client.command(cmd, timeout=timeout)
 
 
 def _reset_for_next_solve(client: PioSolverClient) -> None:

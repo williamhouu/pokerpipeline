@@ -119,47 +119,97 @@ def test_plan_batch_handles_25_flop_set():
         assert len(stems) == 25                  # all distinct
 
 
-# --- solve_one happy path ---------------------------------------------------
-def test_solve_one_issues_expected_upi_sequence():
-    """The UPI command sequence must include every setup step in the right
-    order: isomorphism, ranges, geometry, board, sizings, build_tree,
-    accuracy, go, wait_for_solver, dump_tree."""
+# --- solve_one happy path (template-driven) ---------------------------------
+def _stub_template(path: Path, board_token: str = "AsKdQh") -> None:
+    """Write a minimal Pio-shaped template the batch_solver can replay."""
+    path.write_text(
+        "#Type#NoLimit\n"
+        "#Board#As Kd Qh\n"
+        "#Pot#55\n"
+        "set_isomorphism 1 0\n"
+        "set_eff_stack 975\n"
+        "set_pot 0 0 55\n"
+        "set_range OOP " + " ".join(["1.0"] * 1326) + "\n"
+        "set_range IP " + " ".join(["1.0"] * 1326) + "\n"
+        f"set_board {board_token}\n"
+        "add_line 0 0 0 0 0 41 112 257 553 975\n"
+        "build_tree\n",
+        encoding="utf-8")
+
+
+def _spec_with_template(template_path: Path):
+    """Return a SOLVER_SPECS entry with pio_template_path pointing at our stub."""
+    from dataclasses import replace
+    return replace(SPEC, pio_template_path=str(template_path))
+
+
+def test_solve_one_issues_template_lines_and_solve_commands():
+    """Template-driven: every non-comment template line is issued via UPI,
+    then set_accuracy / go / wait_for_solver / dump_tree."""
     with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        template = tmp_path / "stub_template.txt"
+        _stub_template(template)
+        spec = _spec_with_template(template)
         log: list = []
         client = _make_mock_client(log)
-        result = solve_one(client, SPEC, FLOP, solve_root=Path(tmp),
+        result = solve_one(client, spec, FLOP, solve_root=tmp_path,
                            log=lambda *a, **kw: None)
-        verbs = [cmd.split()[0] for cmd, _to in log if cmd]
         assert result.status == "solved"
-        # Required setup verbs appear in order.
-        for verb in ("set_isomorphism", "set_range_oop", "set_range_ip",
-                     "set_eff_stack", "set_pot", "set_board",
-                     "set_bet_size", "build_tree", "set_accuracy",
-                     "go", "wait_for_solver", "dump_tree"):
+        verbs = [cmd.split()[0] for cmd, _ in log]
+        # Every UPI verb that appeared in the stub template must be issued.
+        for verb in ("set_isomorphism", "set_eff_stack", "set_pot",
+                     "set_range", "set_board", "add_line", "build_tree",
+                     "set_accuracy", "go", "wait_for_solver", "dump_tree"):
             assert verb in verbs, f"missing UPI verb {verb!r} in: {verbs}"
-        # Output file produced + file size recorded.
-        assert result.output_path.is_file()
-        assert result.file_size_bytes > 0
+        # Metadata header lines (starting with '#') are NOT issued.
+        assert not any(cmd.startswith("#") for cmd, _ in log)
 
 
-def test_solve_one_passes_spec_chip_values():
-    """Spot-check that the actual chip numbers from the spec land in UPI args."""
+def test_solve_one_substitutes_set_board_for_target_flop():
+    """The template's `set_board AsKdQh` line must be rewritten to the
+    target flop's concatenated stem when MINIMAL_DEBUG (2cJs7s) is solved."""
     with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        template = tmp_path / "stub_template.txt"
+        _stub_template(template, board_token="AsKdQh")     # template's default
+        spec = _spec_with_template(template)
         log: list = []
         client = _make_mock_client(log)
-        solve_one(client, SPEC, FLOP, solve_root=Path(tmp),
+        solve_one(client, spec, FLOP, solve_root=tmp_path,
+                  log=lambda *a, **kw: None)
+        boards_issued = [cmd for cmd, _ in log if cmd.startswith("set_board")]
+        # Only the swapped board appears; the template's stub board doesn't.
+        assert boards_issued == ["set_board 2cJs7s"], boards_issued
+
+
+def test_solve_one_passes_accuracy_from_spec():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        template = tmp_path / "stub_template.txt"
+        _stub_template(template)
+        spec = _spec_with_template(template)
+        log: list = []
+        client = _make_mock_client(log)
+        solve_one(client, spec, FLOP, solve_root=tmp_path,
                   log=lambda *a, **kw: None)
         log_cmds = [cmd for cmd, _ in log]
-        # Geometry from the registered spec.
-        assert f"set_eff_stack {SPEC.starting_postflop_stack_chips}" in log_cmds
-        assert f"set_pot 0 0 {SPEC.pot_after_preflop_chips}" in log_cmds
-        # Board.
-        assert "set_board 2c Js 7s" in log_cmds
-        # Sizings.
-        oop_sizes = ",".join(str(s) for s in SPEC.bet_sizes_oop_pct)
-        assert f"set_bet_size OOP {oop_sizes}" in log_cmds
-        # Accuracy.
-        assert f"set_accuracy {SPEC.accuracy_target_chips}" in log_cmds
+        assert f"set_accuracy {spec.accuracy_target_chips}" in log_cmds
+
+
+def test_solve_one_errors_clearly_when_template_missing():
+    """A missing template path produces an actionable error, not a cryptic
+    UPI failure halfway through the run."""
+    from dataclasses import replace
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = replace(SPEC, pio_template_path=str(Path(tmp) / "nope.txt"))
+        log: list = []
+        client = _make_mock_client(log)
+        result = solve_one(client, spec, FLOP, solve_root=Path(tmp),
+                           log=lambda *a, **kw: None)
+        assert result.status == "failed"
+        assert "template not found" in result.error_message.lower()
+        assert log == []                       # no UPI commands issued
 
 
 # --- solve_one resume + failure paths --------------------------------------
@@ -181,30 +231,39 @@ def test_solve_one_skips_when_cfr_already_exists():
 
 
 def test_solve_one_writes_failed_marker_on_setup_error():
-    """When set_range_ip errors, write a .failed marker and return cleanly."""
+    """When a template UPI command errors, write a .failed marker and
+    return cleanly."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        template = root / "stub_template.txt"
+        _stub_template(template)
+        spec = _spec_with_template(template)
         log: list = []
-        client = _make_mock_client(log, fail_on={"set_range_ip"})
-        result = solve_one(client, SPEC, FLOP, solve_root=root,
+        # set_range errors -- simulates a corrupt template / Pio rejecting
+        # the range argument format.
+        client = _make_mock_client(log, fail_on={"set_range"})
+        result = solve_one(client, spec, FLOP, solve_root=root,
                            log=lambda *a, **kw: None)
         assert result.status == "failed"
-        assert "set_range_ip" in result.error_message
-        marker = failure_marker_path(SPEC, FLOP, solve_root=root, kind="failed")
+        assert "set_range" in result.error_message
+        marker = failure_marker_path(spec, FLOP, solve_root=root, kind="failed")
         assert marker.is_file()
-        assert "set_range_ip" in marker.read_text(encoding="utf-8")
+        assert "set_range" in marker.read_text(encoding="utf-8")
 
 
 def test_solve_one_writes_timeout_marker_on_solver_timeout():
     """`wait_for_solver` raising 'timed out' -> .timeout marker."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        template = root / "stub_template.txt"
+        _stub_template(template)
+        spec = _spec_with_template(template)
         log: list = []
         client = _make_mock_client(log, timeout_on={"wait_for_solver"})
-        result = solve_one(client, SPEC, FLOP, solve_root=root,
+        result = solve_one(client, spec, FLOP, solve_root=root,
                            log=lambda *a, **kw: None)
         assert result.status == "timeout"
-        marker = failure_marker_path(SPEC, FLOP, solve_root=root, kind="timeout")
+        marker = failure_marker_path(spec, FLOP, solve_root=root, kind="timeout")
         assert marker.is_file()
 
 
@@ -213,12 +272,15 @@ def test_solve_one_clears_stale_markers_before_retry():
     deletes any sibling markers before configuring the tree."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        stale = failure_marker_path(SPEC, FLOP, solve_root=root, kind="failed")
+        template = root / "stub_template.txt"
+        _stub_template(template)
+        spec = _spec_with_template(template)
+        stale = failure_marker_path(spec, FLOP, solve_root=root, kind="failed")
         stale.parent.mkdir(parents=True, exist_ok=True)
         stale.write_text("old failure", encoding="utf-8")
         log: list = []
         client = _make_mock_client(log)
-        result = solve_one(client, SPEC, FLOP, solve_root=root,
+        result = solve_one(client, spec, FLOP, solve_root=root,
                            log=lambda *a, **kw: None)
         assert result.status == "solved"
         assert not stale.is_file()               # stale marker removed

@@ -67,6 +67,23 @@ class SolverSpec:
     Frozen so it can be shared across many solves in a batch run without any
     chance of accidental mutation between iterations.
 
+    Two ways to drive a solve:
+
+      * **Template-driven (recommended).** `pio_template_path` points at one
+        of Pio's shipped `.txt` templates under `C:\\PioSOLVER\\TreeBuilding\\`.
+        Layer 2 reads the template line-by-line, substitutes the target
+        flop into the `set_board` line, and issues each command via UPI.
+        The template encodes ranges, sizings, and (via `add_line`) the
+        complete betting tree -- this matches Pio's GUI tree-builder output
+        exactly and reproduces the hand-solved test `.cfr`. See the May-2026
+        UPI findings doc for why this is the correct architecture.
+
+      * **Programmatic (fallback).** If `pio_template_path` is None, Layer 2
+        builds the tree from scratch via individual UPI commands using the
+        spec's range/sizing fields. Not currently supported for Tier 1
+        (the precise UPI dialect for tree construction varies across Pio
+        builds); keep template-driven for production.
+
     Fields:
       * `name` -- registry key; also the directory name under `solves/`.
       * `format` -- "cash" or "tournament" (Tier 1 is cash only).
@@ -76,27 +93,27 @@ class SolverSpec:
       * `oop_position` / `ip_position` -- e.g. "BB" / "BTN". Pio doesn't
         care about position labels; these are recorded for downstream
         rendering and for cache-path readability.
-      * `oop_range` / `ip_range` -- Pio range string OR a path to a .txt
-        range file. The batch solver dispatches on the string shape.
+      * `oop_range` / `ip_range` -- DOCUMENTARY in template-driven mode --
+        the actual range weights come from the template. Kept on the spec
+        so the registry remains self-describing without opening the
+        template file. Pio range string OR a path to a .txt range file.
       * `pot_after_preflop_chips` -- the carried pot at the flop root, in
-        chips. Equals (preflop investment by both players + dead blinds).
-      * `starting_postflop_stack_chips` -- effective stack remaining at the
-        flop root, in chips. Equals (stack_bb_chips - preflop_invested_chips).
-      * `bet_sizes_oop_pct` / `bet_sizes_ip_pct` -- bet sizes available at
-        every postflop street, expressed as integer % of pot. e.g. [33, 75]
-        means a 33%-pot and a 75%-pot bet are allowed.
-      * `raise_sizes_pct` -- raise sizes available, also as % of pot. The
-        brief recommends one realistic raise size per street.
-      * `accuracy_target_chips` -- solve exploitability target in chips.
-        Brief target: < 0.5% of starting pot. For pot=495 chips, that's
-        about 2.5 chips.
-      * `iso_suits` / `iso_board` -- PioSolver isomorphism flags. Defaults
-        (`iso_suits=False, iso_board=False`) reproduce the existing
-        hand-solved test .cfr; the batch solver issues `set_isomorphism 0 0`.
-      * `preflop_action_description` -- human-readable preflop line, used in
-        log messages and (eventually) when synthesising a ScenarioConfig.
-      * `bb_in_chips` -- chip value of 1bb at this stack scale. Used to
-        compute display dollars and to validate stack/pot consistency.
+        chips. Must match the template's `#Pot#` value when template-driven.
+      * `starting_postflop_stack_chips` -- effective stack at the flop root.
+        Must match the template's `#EffectiveStacks#` value.
+      * `bet_sizes_oop_pct` / `bet_sizes_ip_pct` / `raise_sizes_pct` --
+        documentary in template-driven mode (actual sizings come from the
+        template's `#FlopConfig.BetSize#` etc. fields).
+      * `accuracy_target_chips` -- solve exploitability target in chips
+        (~0.5% of pot per the brief). Templates don't carry this -- Layer 2
+        issues `set_accuracy <chips>` after loading the template.
+      * `iso_suits` / `iso_board` -- documentary; the template's
+        `set_isomorphism` line dictates the actual setting at solve time.
+      * `bb_in_chips` -- chip value of 1bb at this stack scale.
+      * `pio_template_path` -- absolute path to the Pio tree template.
+        For Tier 1, `C:\\PioSOLVER\\TreeBuilding\\100bb\\2bpot-full.txt`.
+      * `preflop_action_description` -- human-readable preflop line, used
+        in log messages and (eventually) when synthesising a ScenarioConfig.
     """
 
     name: str
@@ -116,6 +133,7 @@ class SolverSpec:
     iso_suits: bool = False
     iso_board: bool = False
     preflop_action_description: str = ""
+    pio_template_path: str = ""                  # template-driven solve source
 
     def __post_init__(self) -> None:
         if self.format not in ("cash", "tournament"):
@@ -182,28 +200,33 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         stack_bb=100,
         oop_position="BB",
         ip_position="BTN",
-        # Placeholder ranges -- see header comment. Swap for Ryan's preferred
-        # ranges before Tier 1 production solves.
+        # Documentary -- the template's `set_range OOP <1326 weights>`
+        # supplies the actual range. Strings here are starting placeholders
+        # for the day we drive Layer 2 from spec (not template).
         oop_range=BB_CALL_VS_BTN_OPEN_PLACEHOLDER,
         ip_range=BTN_OPEN_100BB_PLACEHOLDER,
-        # Pot geometry: 100bb stacks, $0.25/$0.50 blinds analogue at 90 chips/bb.
-        # SB folds (0.5bb = 45 chips), BTN opens 2.5bb (225), BB calls (225).
-        # Flop pot = SB (45) + BTN (225) + BB (225) = 495 chips.
-        # Postflop stack = 9000 - 225 = 8775 chips.
-        pot_after_preflop_chips=495,
-        starting_postflop_stack_chips=8775,
-        bb_in_chips=90,
-        # Brief: flop 33/75, turn 50/75, river 50/75/125. v1 uses a flat
-        # per-actor pair; per-street nuance can be added later by extending
-        # SolverSpec without breaking callers.
-        bet_sizes_oop_pct=(33, 75),
-        bet_sizes_ip_pct=(33, 75),
-        raise_sizes_pct=(50,),
-        # 2.5 chips = 0.5% of 495-chip pot, the brief's accuracy target.
-        accuracy_target_chips=2.5,
-        iso_suits=False,
+        # Pio's `2bpot-full.txt` template chip scale (#Pot#55 #EffectiveStacks#975).
+        # 1bb ~= 10 chips at this scale (55 = 5.5bb, 975 = ~100bb). Different
+        # from a naive 90 chips/bb derivation -- Pio's template uses its own
+        # canonical scale, and the existing hand-solved test_solves/btn_vs_bb_srp_2cJs7s.cfr
+        # confirms it via show_effective_stack() = 975.
+        pot_after_preflop_chips=55,
+        starting_postflop_stack_chips=975,
+        bb_in_chips=10,
+        # Documentary -- the template's `add_line` sequences encode the
+        # actual bet/raise chip amounts used at solve time. The %s recorded
+        # here match the template's `#FlopConfig.BetSize#65` etc. fields.
+        bet_sizes_oop_pct=(65,),                  # flop default; turn/river vary
+        bet_sizes_ip_pct=(65,),
+        raise_sizes_pct=(52,),                    # template's #*.RaiseSize#52
+        # 0.28 chips = ~0.5% of the 55-chip pot, the brief's accuracy target.
+        accuracy_target_chips=0.28,
+        iso_suits=True,                           # template uses set_isomorphism 1 0
         iso_board=False,
         preflop_action_description="BTN opens 2.5bb, SB folds, BB calls",
+        # Pio Edge's shipped template for 100bb 2-bet pot (BTN vs BB SRP).
+        # See test_output/upi_findings.md for why this is the right primitive.
+        pio_template_path=r"C:\PioSOLVER\TreeBuilding\100bb\2bpot-full.txt",
     ),
 }
 

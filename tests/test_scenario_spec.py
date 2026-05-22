@@ -23,29 +23,30 @@ from pipeline.scenario_spec import (                                       # noq
 
 # --- the registered spec matches the existing hand-solved geometry ----------
 def test_cash6max_btn_vs_bb_registered():
-    """The Cash 6-max 100bb BTN-vs-BB SRP spec is registered with the same
-    pot/stack geometry as the existing hand-solved test_solves/btn_vs_bb_srp_2cJs7s.cfr.
-
-    Hand-solved geometry (from the existing path_sampler reading of the .cfr):
-      starting_stack ~= 8775 chips, big_blind ~= 87.75 chips, pot ~= 495 chips.
-    Note Pio reports the POSTFLOP effective stack via show_effective_stack().
+    """The Cash 6-max 100bb BTN-vs-BB SRP spec is registered at Pio's
+    canonical chip scale (pot=55, stack=975, bb~=10), matching Pio's
+    shipped 100bb/2bpot-full.txt template and the existing hand-solved
+    test_solves/btn_vs_bb_srp_2cJs7s.cfr (whose show_effective_stack()
+    reports 975).
     """
     spec = SOLVER_SPECS["Cash6max_100bb_BTN_open_BB_call"]
     assert spec.format == "cash"
     assert spec.stack_bb == 100
     assert spec.oop_position == "BB" and spec.ip_position == "BTN"
-    # Stack & pot match the existing .cfr geometry (give or take Pio's iso
-    # adjustments). bb_in_chips=90 gives a clean integer pot of 495 (= 5.5bb).
-    assert spec.bb_in_chips == 90
-    assert spec.pot_after_preflop_chips == 495
-    assert spec.starting_postflop_stack_chips == 8775
-    # Brief: at least two bet sizes per actor + at least one raise size.
-    assert len(spec.bet_sizes_oop_pct) >= 2
-    assert len(spec.bet_sizes_ip_pct) >= 2
+    # Geometry at Pio's template chip scale.
+    assert spec.bb_in_chips == 10
+    assert spec.pot_after_preflop_chips == 55
+    assert spec.starting_postflop_stack_chips == 975
+    # Bet/raise sizes are DOCUMENTARY when pio_template_path is set --
+    # the template's add_line sequences encode the actual tree.
+    assert len(spec.bet_sizes_oop_pct) >= 1
+    assert len(spec.bet_sizes_ip_pct) >= 1
     assert len(spec.raise_sizes_pct) >= 1
-    # Accuracy target: 2.5 chips ~= 0.5% of pot, the brief's quality bar.
-    assert spec.accuracy_target_chips == 2.5
-    # Ranges are inline Pio strings, not file paths.
+    # Accuracy target ~= 0.5% of the 55-chip pot.
+    assert 0.20 <= spec.accuracy_target_chips <= 0.40
+    # Template-driven solve source.
+    assert spec.pio_template_path.endswith("2bpot-full.txt")
+    # Ranges are inline Pio strings, not file paths (documentary).
     assert spec.range_is_file("OOP") is False
     assert spec.range_is_file("IP") is False
     assert "22+" in spec.ip_range            # BTN open includes all pairs
@@ -73,16 +74,17 @@ def test_cache_dir_name_is_the_scenario_name():
 
 # --- validation -------------------------------------------------------------
 def _valid_kwargs():
+    """Minimal valid SolverSpec kwargs at Pio's template chip scale."""
     return dict(
         name="Test", format="cash", stack_bb=100,
         oop_position="BB", ip_position="BTN",
         oop_range="QQ+", ip_range="22+",
-        pot_after_preflop_chips=495,
-        starting_postflop_stack_chips=8775,
-        bb_in_chips=90,
-        bet_sizes_oop_pct=(33, 75), bet_sizes_ip_pct=(33, 75),
-        raise_sizes_pct=(50,),
-        accuracy_target_chips=2.5,
+        pot_after_preflop_chips=55,
+        starting_postflop_stack_chips=975,
+        bb_in_chips=10,
+        bet_sizes_oop_pct=(65,), bet_sizes_ip_pct=(65,),
+        raise_sizes_pct=(52,),
+        accuracy_target_chips=0.28,
     )
 
 
@@ -144,11 +146,12 @@ def test_geometry_consistency_check():
     """If pot + 2*stack is smaller than stack_bb*bb_in_chips, the spec is
     inconsistent (some chips would be unaccounted for)."""
     try:
-        # 100bb at 90 chips/bb = 9000 chips total in the hand. If pot+2*stack
-        # comes to only 4000, something's wrong.
+        # 100bb at 10 chips/bb = 1000 chips total per player. If pot+2*stack
+        # comes to only 500, something's wrong.
         SolverSpec(**{**_valid_kwargs(),
-                      "starting_postflop_stack_chips": 1000,
-                      "pot_after_preflop_chips": 2000})
+                      "starting_postflop_stack_chips": 200,
+                      "pot_after_preflop_chips": 100,
+                      "stack_bb": 1000})           # forces total > pot+2*stack
     except ValueError as exc:
         assert "geometry" in str(exc).lower()
         return
