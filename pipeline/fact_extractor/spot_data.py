@@ -221,7 +221,13 @@ class DecisionData:
     """The decision: available options, EVs, strategy, and the action line."""
 
     options: list[str] = field(default_factory=list)
-    hero_combo_evs: dict[str, float] = field(default_factory=dict)
+    # range_mean_evs_per_action: PioSolver's range-weighted mean EV at each
+    # action's CHILD node, keyed by canonical verb ("call", "bet", ...). Values
+    # are bb-denominated. This is the AGGREGATE across hero's range -- not the
+    # specific hero combo's EV. The May-2026 audit caught the LLM citing these
+    # as combo-specific ("Ks3s has EV +27bb"); the explicit name + a doc-block
+    # in Layer 6's prompt make the aggregate framing unambiguous.
+    range_mean_evs_per_action: dict[str, float] = field(default_factory=dict)
     hero_combo_strategy: dict[str, float] = field(default_factory=dict)
     range_aggregate_strategy: dict[str, float] = field(default_factory=dict)
     correct_action: str = ""

@@ -28,7 +28,7 @@ def _full_spot() -> SpotData:
             parent_node_id="flop_node_142", action_to_reach="check_bet33_call"),
         decision_data=DecisionData(
             options=["fold", "call", "raise"],
-            hero_combo_evs={"fold": 0.0, "call": 0.5, "raise": -2.0},
+            range_mean_evs_per_action={"fold": 0.0, "call": 0.5, "raise": -2.0},
             hero_combo_strategy={"call": 1.0},
             range_aggregate_strategy={"fold": 0.40, "call": 0.50, "raise": 0.10},
             correct_action="call", ev_gap_bb=0.5,

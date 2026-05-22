@@ -22,7 +22,7 @@ def _spot(eqr=1.0, raw_equity=0.0, pot_odds=0.0, mdf=0.0, call_ev=None,
     evs = {} if call_ev is None else {"call": call_ev}
     return SpotData(
         SpotMetadata("flop"),
-        decision_data=DecisionData(hero_combo_evs=evs,
+        decision_data=DecisionData(range_mean_evs_per_action=evs,
                                    range_aggregate_strategy=range_strategy or {},
                                    facing_bet_pot_fraction=facing_bet),
         equity_data=EquityData(equity_realization_ratio=eqr,

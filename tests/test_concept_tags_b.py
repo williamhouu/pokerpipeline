@@ -22,7 +22,7 @@ def _spot(evs=None, equity=None, range_data=None, hand_class=None,
           metadata=None, **decision_kw):
     return SpotData(
         metadata or SpotMetadata("flop"),
-        decision_data=DecisionData(hero_combo_evs=evs or {}, **decision_kw),
+        decision_data=DecisionData(range_mean_evs_per_action=evs or {}, **decision_kw),
         equity_data=equity or EquityData(),
         range_data=range_data or RangeData(),
         hand_class=hand_class,

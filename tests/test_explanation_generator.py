@@ -57,7 +57,7 @@ def _binary_spot() -> SpotData:
         decision_data=DecisionData(
             options=["call", "fold"], correct_action="call", ev_gap_bb=1.4,
             range_aggregate_strategy={"call": 0.88, "fold": 0.12},
-            hero_combo_evs={"call": 1.2, "fold": -0.2}),
+            range_mean_evs_per_action={"call": 1.2, "fold": -0.2}),
         hand_class=HandClass("top_pair_top_kicker", strength_bucket="strong",
                              label="top_pair_top_kicker_no_draws"),
         board_texture=BoardTexture("two_tone", "unpaired", "disconnected",

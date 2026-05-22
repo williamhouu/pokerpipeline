@@ -80,6 +80,13 @@ def _build_decision_data(spot_context, big_blind: float) -> DecisionData:
         if pot_before > 0:
             facing = node.amount_to_call / pot_before
 
+    # correct_action: the verb of the MAX-FREQUENCY action. At a converged
+    # equilibrium -- which PioSolver Edge reaches at <0.5% pot exploitability
+    # per the brief -- every mixed action has the same EV, so max-frequency
+    # equals max-EV. The 5-row audit (May 2026) confirmed empirically: every
+    # spot had pio_top_freq == pio_top_ev. If this pipeline runs against a
+    # non-equilibrium solve in the future, the freq/EV equivalence may not
+    # hold and this line should be revisited.
     correct = (_canonical(max(actions, key=lambda a: a.frequency).label)
                if actions else "")
     # ev_gap_bb convention (verified end-to-end against the BTN-vs-BB SRP
@@ -102,7 +109,8 @@ def _build_decision_data(spot_context, big_blind: float) -> DecisionData:
     ev_gap_bb = evs_bb[0] - evs_bb[1] if len(evs_bb) >= 2 else 0.0
     return DecisionData(
         options=[a.label for a in actions],
-        hero_combo_evs={_canonical(a.label): a.ev / big_blind for a in actions},
+        range_mean_evs_per_action={_canonical(a.label): a.ev / big_blind
+                                   for a in actions},
         range_aggregate_strategy={_canonical(a.label): max(0.0, min(1.0, a.frequency))
                                   for a in actions},
         correct_action=correct,

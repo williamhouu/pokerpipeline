@@ -16,8 +16,8 @@ _MDF_MARGIN = 0.05
 
 
 def _ev(spot: SpotData, action: str):
-    """Hero's combo EV for an action, or None when the action isn't offered."""
-    return spot.decision_data.hero_combo_evs.get(action)
+    """Range-mean EV for an action (bb), or None when the action isn't offered."""
+    return spot.decision_data.range_mean_evs_per_action.get(action)
 
 
 def equity_under_realized(spot: SpotData) -> bool:

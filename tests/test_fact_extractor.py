@@ -185,8 +185,8 @@ def test_ev_gap_bb_convention():
     # (12 - 0) / 9 == 1.333... bb. Use approx because we are dividing floats.
     assert abs(spot.decision_data.ev_gap_bb - (12.0 / 9.0)) < 1e-9
     # And per-action EVs in the data block are in bb, not chips.
-    assert abs(spot.decision_data.hero_combo_evs["call"] - (12.0 / 9.0)) < 1e-9
-    assert spot.decision_data.hero_combo_evs["fold"] == 0.0
+    assert abs(spot.decision_data.range_mean_evs_per_action["call"] - (12.0 / 9.0)) < 1e-9
+    assert spot.decision_data.range_mean_evs_per_action["fold"] == 0.0
     # Stack depth derives from the same big_blind: 900 / 9 == 100bb.
     assert abs(spot.spot_metadata.effective_stack_bb - 100.0) < 1e-9
 

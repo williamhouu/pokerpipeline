@@ -25,7 +25,7 @@ def _spot(street=None, prior=None, options=None, evs=None,
                      hero_is_preflop_raiser=is_pfr),
         decision_data=DecisionData(
             street_actions=street or [], prior_street_actions=prior or [],
-            options=options or [], hero_combo_evs=evs or {},
+            options=options or [], range_mean_evs_per_action=evs or {},
             option_pot_fractions=option_pot_fractions or {},
             facing_bet_pot_fraction=facing_bet_pot_fraction),
     )

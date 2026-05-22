@@ -34,8 +34,8 @@ def _did(line, actor: str, action: str) -> bool:
 
 
 def _near_best(spot: SpotData, option: str) -> bool:
-    """Whether an offered option's EV is within _NEAR_BEST_BB of the best EV."""
-    evs = spot.decision_data.hero_combo_evs
+    """Whether an action's range-mean EV is within _NEAR_BEST_BB of the best EV."""
+    evs = spot.decision_data.range_mean_evs_per_action
     if option not in evs:
         return False
     return max(evs.values()) - evs[option] <= _NEAR_BEST_BB
