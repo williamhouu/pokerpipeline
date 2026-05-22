@@ -140,6 +140,41 @@ class ExplanationValidationError(RuntimeError):
     """
 
 
+# --- frequency-to-prefix mapping (deterministic, no LLM) ---------------------
+# Brackets for the Always/Mostly/Sometimes/Rarely prefix in frequency-style
+# options. Inclusive at the lower bound: freq >= 0.95 -> "Always", etc. Below
+# 0.05 -> empty string (the action is essentially not played).
+#
+# Used by:
+#   * _expected_correct_prefix to compute the hard-constraint prefix the LLM
+#     receives in the frequency-style option-style instruction;
+#   * validators.validate_correct_answer_verb to check the LLM honoured it.
+#
+# The May-2026 audit (test_output/audit_report.md, item #3) flagged this as
+# LLM-controlled with no Python threshold; brought under Python control here.
+_FREQ_PREFIX_BRACKETS = (
+    (0.95, "Always"),
+    (0.60, "Mostly"),
+    (0.20, "Sometimes"),
+    (0.05, "Rarely"),
+)
+
+
+def frequency_to_verb_prefix(freq: float) -> str:
+    """Map a Pio frequency to its deterministic option-label prefix.
+
+      [0.95, 1.0]  -> "Always"
+      [0.60, 0.95) -> "Mostly"
+      [0.20, 0.60) -> "Sometimes"
+      [0.05, 0.20) -> "Rarely"
+      [0,    0.05) -> ""               (action essentially not played)
+    """
+    for floor, label in _FREQ_PREFIX_BRACKETS:
+        if freq >= floor:
+            return label
+    return ""
+
+
 # --- option-style detection (deterministic, no LLM) --------------------------
 _BET_VERBS = ("bet", "raise", "donk", "overbet", "shove", "jam")
 
@@ -169,6 +204,35 @@ def _detect_option_style(spot_data: SpotData) -> str:
     return "binary_action"
 
 
+def _expected_correct_prefix(spot_data: SpotData) -> str | None:
+    """The deterministic prefix the LLM must use for correct_answer.
+
+    Applies only to frequency-style spots -- binary_action and sizing styles
+    use bare verbs or sizing labels with no prefix. Returns None when no
+    prefix constraint applies.
+    """
+    if _detect_option_style(spot_data) != "frequency":
+        return None
+    strategy = spot_data.decision_data.range_aggregate_strategy
+    if not strategy:
+        return None
+    return frequency_to_verb_prefix(max(strategy.values()))
+
+
+def _top_two_verbs(spot_data: SpotData) -> tuple[str, str] | None:
+    """The two highest-frequency verbs from Pio's range strategy, or None.
+
+    Used by the frequency-style instruction to pin the option set's verb
+    coverage (so the LLM cannot silently drop an action the solver plays --
+    the Row 1 defect from the May-2026 audit).
+    """
+    strategy = spot_data.decision_data.range_aggregate_strategy
+    if not strategy or len(strategy) < 2:
+        return None
+    ranked = sorted(strategy.items(), key=lambda kv: kv[1], reverse=True)
+    return ranked[0][0], ranked[1][0]
+
+
 def _option_style_instruction(style: str, spot_data: SpotData) -> str:
     """The natural-language instruction the LLM gets for option formatting."""
     if style == "sizing":
@@ -186,14 +250,35 @@ def _option_style_instruction(style: str, spot_data: SpotData) -> str:
             "options total; leave unused options as empty strings."
         )
     if style == "frequency":
+        prefix = _expected_correct_prefix(spot_data) or "Mostly"
+        top_two = _top_two_verbs(spot_data)
+        verb_coverage = ""
+        if top_two:
+            verb_a, verb_b = top_two
+            verb_coverage = (
+                f" The two highest-frequency verbs in Pio's range strategy "
+                f"are {verb_a!r} (dominant) and {verb_b!r}. Your option set "
+                f"MUST include both of these verbs across the four options "
+                f"-- do not drop either one in favour of a more elegant "
+                f"template (this is the Row-1 defect the May-2026 audit "
+                f"caught: the LLM offered call-vs-raise options when the "
+                f"actual strategy was call-vs-fold)."
+            )
         return (
             "OPTION STYLE: frequency. The solver mixes between two actions. "
             "Use exactly four options in this template: \"Always <action A>\", "
-            "\"Mostly <action A>\", \"Mostly <action B>\", \"Always <action B>\", "
-            "where action A is the action the solver picks more often. "
-            "Examples from the gold set: \"Always check\" / \"Mostly check\" / "
-            "\"Mostly bet\" / \"Always bet\"; \"Always fold\" / \"Mostly fold, "
-            "sometimes call\" / \"Always call\" / \"Mostly call, sometimes raise\"."
+            "\"<PREFIX> <action A>\", \"<PREFIX> <action B>\", \"Always "
+            "<action B>\", where action A is the action the solver picks "
+            "more often and <PREFIX> is the deterministic prefix below. "
+            "If the deterministic prefix is \"Sometimes\" or \"Rarely\", "
+            "use it in place of \"Mostly\" so the correct_answer can be "
+            "exactly the prefix + action A.\n\n"
+            f"HARD CONSTRAINT -- correct_answer must equal exactly "
+            f"\"{prefix} <action A>\" where <action A> is the verb of Pio's "
+            f"highest-frequency action. The prefix {prefix!r} is computed "
+            f"deterministically by Python from Pio's range frequency; do "
+            f"NOT substitute your own judgement (e.g. do not pick \"Always\" "
+            f"when Python says \"Mostly\").{verb_coverage}"
         )
     return (
         "OPTION STYLE: binary action. The decision has a clear best action "
@@ -226,6 +311,22 @@ def build_system_prompt() -> str:
         "VOICE RULES (all eight apply to every output):\n"
         f"{_format_voice_rules()}\n\n"
         f"BANNED PHRASES (never appear in any output field): {_format_banned_phrases()}.\n\n"
+        "DETERMINISTIC FREQUENCY PREFIX MAPPING: When a frequency-style "
+        "option-style instruction specifies a required prefix for "
+        "correct_answer, use it exactly. The prefix is computed in Python "
+        "from Pio's range frequency of the dominant action:\n"
+        "  >= 95%   -> \"Always\"\n"
+        "  60-95%   -> \"Mostly\"\n"
+        "  20-60%   -> \"Sometimes\"\n"
+        "  5-20%    -> \"Rarely\"\n"
+        "Do NOT substitute your own judgement (e.g. do not write "
+        "\"Always check\" when Python supplied \"Mostly\").\n\n"
+        "AGGREGATE vs PER-COMBO: the SOLVER DATA field "
+        "`range_mean_evs_per_action` is the RANGE-WEIGHTED mean EV across "
+        "hero's whole range -- not the specific hero combo's EV. Never "
+        "attribute these numbers to a specific combo (\"Ks3s specifically "
+        "has EV +27bb\" is wrong; \"on average across your range, betting "
+        "is worth +27bb\" is right).\n\n"
         "OUTPUT FORMAT: respond with a single JSON object and nothing else. "
         "No prose before or after, no markdown fences. The object has exactly "
         "these six keys, all string-valued:\n"
@@ -539,4 +640,5 @@ __all__ = [
     "generate_explanation",
     "explanation_to_row_overrides",
     "load_gold_examples",
+    "frequency_to_verb_prefix",
 ]

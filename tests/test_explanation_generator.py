@@ -25,8 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.explanation_generator import (                             # noqa: E402
     BANNED_LITERAL_PHRASES, DEFAULT_MODEL, ExplanationValidationError,
     GeneratedExplanation, VOICE_RULES, _detect_option_style,
-    _extract_text, build_system_prompt, build_user_prompt,
-    explanation_to_row_overrides, generate_explanation, parse_response,
+    _expected_correct_prefix, _extract_text, _top_two_verbs,
+    build_system_prompt, build_user_prompt, explanation_to_row_overrides,
+    frequency_to_verb_prefix, generate_explanation, parse_response,
 )
 from pipeline.fact_extractor.spot_data import (                          # noqa: E402
     BoardTexture, DecisionData, HandClass, SpotData, SpotMetadata,
@@ -276,6 +277,77 @@ def test_default_model_passed_to_client():
     generate_explanation(_binary_spot(), client=client,
                         gold_examples=_GOLD_STUB)
     assert client._calls[0]["model"] == DEFAULT_MODEL
+
+
+def test_frequency_to_verb_prefix_brackets():
+    """Brackets are inclusive at the lower bound."""
+    # Always: 0.95 and above.
+    assert frequency_to_verb_prefix(1.0) == "Always"
+    assert frequency_to_verb_prefix(0.95) == "Always"
+    # Mostly: 0.60 to 0.95.
+    assert frequency_to_verb_prefix(0.9499) == "Mostly"
+    assert frequency_to_verb_prefix(0.66) == "Mostly"
+    assert frequency_to_verb_prefix(0.60) == "Mostly"
+    # Sometimes: 0.20 to 0.60.
+    assert frequency_to_verb_prefix(0.59) == "Sometimes"
+    assert frequency_to_verb_prefix(0.57) == "Sometimes"     # v3 Row 8's freq
+    assert frequency_to_verb_prefix(0.20) == "Sometimes"
+    # Rarely: 0.05 to 0.20.
+    assert frequency_to_verb_prefix(0.19) == "Rarely"
+    assert frequency_to_verb_prefix(0.05) == "Rarely"
+    # Below 0.05: empty (action essentially not played).
+    assert frequency_to_verb_prefix(0.04) == ""
+    assert frequency_to_verb_prefix(0.0008) == ""            # v3 Row 1's raise
+
+
+def test_expected_correct_prefix_only_for_frequency_style():
+    """The deterministic prefix applies only to frequency-style spots --
+    binary_action and sizing styles use bare verbs / sizing labels."""
+    # frequency style: top freq < 0.80, strategy is mixed.
+    freq_spot = SpotData(
+        SpotMetadata("flop"),
+        decision_data=DecisionData(
+            range_aggregate_strategy={"call": 0.66, "fold": 0.34}))
+    assert _expected_correct_prefix(freq_spot) == "Mostly"
+    # binary_action style: top freq >= 0.80 -- bare verbs, no prefix.
+    binary_spot = SpotData(
+        SpotMetadata("flop"),
+        decision_data=DecisionData(
+            range_aggregate_strategy={"call": 0.94, "fold": 0.06}))
+    assert _expected_correct_prefix(binary_spot) is None
+
+
+def test_top_two_verbs_orders_by_frequency():
+    """_top_two_verbs returns (dominant, second) so the prompt can pin
+    which two actions must appear in the option set."""
+    spot = SpotData(
+        SpotMetadata("flop"),
+        decision_data=DecisionData(
+            range_aggregate_strategy={"call": 0.66, "fold": 0.34, "raise": 0.001}))
+    assert _top_two_verbs(spot) == ("call", "fold")
+    # When fewer than two actions are recorded, return None.
+    no_strategy = SpotData(SpotMetadata("flop"),
+                           decision_data=DecisionData(
+                               range_aggregate_strategy={"call": 1.0}))
+    assert _top_two_verbs(no_strategy) is None
+
+
+def test_frequency_style_instruction_pins_prefix_and_verbs():
+    """The frequency-style instruction now hard-pins the prefix Python
+    chose and names the top-two verbs the option set must cover."""
+    from pipeline.explanation_generator import _option_style_instruction
+    spot = SpotData(
+        SpotMetadata("flop"),
+        decision_data=DecisionData(
+            range_aggregate_strategy={"call": 0.66, "fold": 0.34, "raise": 0.001}))
+    instruction = _option_style_instruction("frequency", spot)
+    assert "HARD CONSTRAINT" in instruction
+    assert "'Mostly'" in instruction or "\"Mostly\"" in instruction
+    # Both top verbs explicitly named.
+    assert "'call'" in instruction
+    assert "'fold'" in instruction
+    # Raise (freq=0.001) is NOT named -- only top-two.
+    assert "'raise'" not in instruction
 
 
 def test_explanation_to_row_overrides_maps_six_csv_columns():
