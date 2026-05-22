@@ -170,6 +170,27 @@ def test_extract_facts_populates_spotdata():
     assert "range_advantage_hero" in spot.concept_tags
 
 
+def test_ev_gap_bb_convention():
+    """Pins the ev_gap_bb formula: action EVs are CHIPS at each child node;
+    `ev_gap_bb = (best - second) / big_blind`, where `big_blind = effective_stack
+    / 100`. A silent regression here (forgetting the divide, dividing twice,
+    using per-combo spreads instead of action means) would make every Layer 4
+    decision wrong, so we check the math directly against a synthetic spot.
+    """
+    board = ["As", "Kd", "9h", "4c", "2s"]
+    # Synthetic node: effective_stack=900 chips, so a 100bb solve has big_blind=9.
+    # Action child-mean EVs: fold=0 chips, call=+12 chips (ours, via _context).
+    ctx = _context(board, {"AhAc": 1.0}, {"QhQc": 1.0})
+    spot = extract_facts(ctx, big_blind=9.0)
+    # (12 - 0) / 9 == 1.333... bb. Use approx because we are dividing floats.
+    assert abs(spot.decision_data.ev_gap_bb - (12.0 / 9.0)) < 1e-9
+    # And per-action EVs in the data block are in bb, not chips.
+    assert abs(spot.decision_data.hero_combo_evs["call"] - (12.0 / 9.0)) < 1e-9
+    assert spot.decision_data.hero_combo_evs["fold"] == 0.0
+    # Stack depth derives from the same big_blind: 900 / 9 == 100bb.
+    assert abs(spot.spot_metadata.effective_stack_bb - 100.0) < 1e-9
+
+
 def test_extract_facts_picks_most_likely_hero_hand():
     board = ["As", "Kd", "9h", "4c", "2s"]
     spot = extract_facts(_context(board, {"AhAc": 0.2, "7h7d": 0.9},

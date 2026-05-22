@@ -52,9 +52,13 @@ def _street_segments(action_sequence):
 def _build_decision_data(spot_context, big_blind: float) -> DecisionData:
     """SpotContext -> DecisionData: options, strategy, EVs, and the action line.
 
-    Solver EVs are divided by `big_blind` so the data block is bb-denominated
-    (the brief's data-block convention); ev_gap_bb is the gap between the best
-    and second-best action.
+    Solver EVs (PioSolver's range-weighted mean of net-from-baseline chips at
+    each action's CHILD node -- see the EV-gap convention block below) are
+    divided by `big_blind` so the data block is bb-denominated. For a 100bb
+    solve `big_blind == effective_stack / 100`; callers in `scripts/` derive it
+    from `client.show_effective_stack()` so this stays exact across stack depths.
+    `ev_gap_bb` is the bb-denominated gap between the best and second-best
+    action's child-mean EV -- Layer 4's question-worthiness signal.
     """
     node = spot_context.node
     actions = spot_context.actions
@@ -78,6 +82,22 @@ def _build_decision_data(spot_context, big_blind: float) -> DecisionData:
 
     correct = (_canonical(max(actions, key=lambda a: a.frequency).label)
                if actions else "")
+    # ev_gap_bb convention (verified end-to-end against the BTN-vs-BB SRP
+    # 2c Js 7s test solve, May 2026 -- the investigation that produced this
+    # file's docstrings):
+    #   * `a.ev` is the range-weighted mean EV at the CHILD node reached by
+    #     action `a`, in chips. PioSolver's `calc_ev` returns net-from-baseline
+    #     chips per combo; `path_sampler._weighted_mean` weights those by hero's
+    #     range at the decision node. Mean is over the child, NOT the parent --
+    #     so the gap means "this action's downstream value vs that action's
+    #     downstream value", which is the only framing that makes the 0.5bb
+    #     threshold in `question_extractor.MIN_EV_GAP_BB` meaningful.
+    #   * `big_blind` is `effective_stack / 100` (every Tier 1 solve is 100bb
+    #     deep); dividing chips by `big_blind` gives a bb figure.
+    #   * `ev_gap_bb` is best-minus-second over ACTIONS, not combos. (Per-combo
+    #     spreads can be huge even when the range-mean gap is small -- e.g. an
+    #     AKo combo and a 22 combo in the same range will swing wildly on a
+    #     single river card while the action's range-EV barely moves.)
     evs_bb = sorted((a.ev / big_blind for a in actions), reverse=True)
     ev_gap_bb = evs_bb[0] - evs_bb[1] if len(evs_bb) >= 2 else 0.0
     return DecisionData(
@@ -127,8 +147,11 @@ def extract_facts(spot_context, *, hero_hand: str | None = None,
     range / blocker extraction, and the concept tagger. `hero_hand` defaults to
     hero's most likely combo at the spot; `scenario` supplies metadata the
     solve does not carry (e.g. preflop_raise_count); `big_blind` is the chip
-    value of one big blind, used to express EVs and stacks in bb (leave at 1.0
-    to keep raw solver units).
+    value of one big blind, used to express EVs and stacks in bb. Real callers
+    pass `client.show_effective_stack() / 100` (every Tier 1 solve is 100bb
+    deep); leave the default 1.0 only when keeping raw solver chips on purpose
+    -- e.g. in unit tests with synthetic SpotContexts. See
+    `_build_decision_data` for the full EV-gap convention.
 
     The equity pass runs once here and is shared by the equity_data and
     range_data builders.
