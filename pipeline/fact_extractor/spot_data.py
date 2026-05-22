@@ -183,10 +183,20 @@ class SpotMetadata:
     node_id: str = ""                                    # solver node id (solver_reference)
     hero_cards: tuple = ()                               # hero's two hole cards
     board: list = field(default_factory=list)            # community cards
+    # Rendering context for the deterministic action-history block (Layer 8).
+    # Populated by extract_facts; tag functions don't read these.
+    action_sequence: list = field(default_factory=list)  # full (actor, label) path
+    big_blind_chips: float = 1.0                         # chips per bb in this solve
+    pot_bb: float = 0.0                                  # pot at the decision in bb
 
     def __post_init__(self) -> None:
         self.hero_cards = tuple(self.hero_cards)
         self.board = list(self.board)
+        self.action_sequence = list(self.action_sequence)
+        if self.big_blind_chips <= 0:
+            raise ValueError(f"big_blind_chips must be > 0, "
+                             f"got {self.big_blind_chips!r}")
+        _nonneg("SpotMetadata.pot_bb", self.pot_bb)
         if self.street not in STREETS:
             raise ValueError(f"street must be one of {STREETS}, got {self.street!r}")
         if self.game_format not in GAME_FORMATS:

@@ -26,7 +26,9 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from pipeline.action_history import format_action_history
 from pipeline.fact_extractor.spot_data import SpotData
+from pipeline.scenario_config import ScenarioConfig, spot_to_hand
 
 _LLM_TBD = "[TBD by Layer 6]"     # LLM-generated content
 _TBD = "[TBD]"                    # deferred cols-A-H UI formatting
@@ -114,30 +116,78 @@ def _solver_reference(meta) -> str:
     return "/".join(segment for segment in segments if segment)
 
 
-def build_row(spot_data: SpotData, difficulty_score: int,
-              number: int) -> dict[str, str]:
+def _dollars(amount: float) -> str:
+    """Cash amount as a string. Integer dollars render '$50'; cents '$1.25'."""
+    if isinstance(amount, float) and not amount.is_integer():
+        return f"${amount:,.2f}"
+    return f"${int(amount):,}"
+
+
+def _villain_seat(meta, scenario: ScenarioConfig) -> str:
+    """Simplified Seats column -- the villain's seat and remaining stack.
+
+    The .xlsx sample uses a richer 'SB-$29.65-$11.60-bet' format that encodes
+    each villain's last action; replicating that needs per-villain commitment
+    tracking. For Tier 1 heads-up SRP the simple `<position>-$<stack>` form
+    is enough to populate the column from real data; the richer form is left
+    for a later pass.
+    """
+    villain_remaining = meta.effective_stack_bb * scenario.dollars_per_bb
+    return f"{meta.villain_position}-{_dollars(round(villain_remaining, 2))}"
+
+
+def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
+              scenario: ScenarioConfig | None = None) -> dict[str, str]:
     """Turn one populated SpotData plus its difficulty into a CSV row dict.
 
     `number` is the row's `No` value -- a per-output auto-increment. Every
     column in CSV_COLUMNS is present; LLM and deferred-UI columns carry an
     explicit placeholder.
+
+    `scenario` carries the per-solve facts the postflop `.cfr` file doesn't
+    know -- table size, blinds, online/live, the preflop action line. When
+    passed (the normal pipeline path via `pipeline.scenario_config.get_scenario`)
+    the Context, Question, Table Size, Default Stack, Live or Online, Seats,
+    and POT columns are filled from real data; when omitted (legacy tests
+    that haven't been updated) those columns stay as `[TBD]` so the row
+    structure is unchanged.
     """
     meta = spot_data.spot_metadata
     decision = spot_data.decision_data
 
+    if scenario is not None:
+        context = scenario.context
+        hand = spot_to_hand(spot_data, scenario)
+        question = format_action_history(hand)
+        table_size = str(scenario.table_size)
+        default_stack = _dollars(scenario.default_stack_dollars)
+        live_or_online = scenario.live_or_online
+        seats = _villain_seat(meta, scenario)
+        pot = _dollars(round(meta.pot_bb * scenario.dollars_per_bb, 2))
+    else:
+        context = _LLM_TBD
+        question = _LLM_TBD
+        table_size = _TBD
+        default_stack = _bb(meta.effective_stack_bb)
+        live_or_online = _TBD
+        seats = _TBD
+        pot = _TBD
+
     return {
         "No": str(number),
-        # UI rendering -- formatting algorithm deferred by the brief.
+        # UI rendering -- now filled from the scenario when one is provided.
         "User Seat": meta.hero_position or _TBD,
         "User Cards": " ".join(meta.hero_cards) or _TBD,
         "Cards on Table": " ".join(meta.board) or _TBD,
-        "Table Size": _TBD,
-        "Default Stack": _bb(meta.effective_stack_bb),
-        "Seats": _TBD,
-        "POT": _TBD,
-        # Question content -- the LLM writes the prose (Layer 6).
-        "Context": _LLM_TBD,
-        "Question": _LLM_TBD,
+        "Table Size": table_size,
+        "Default Stack": default_stack,
+        "Seats": seats,
+        "POT": pot,
+        # Question content -- Context and Question are deterministic
+        # (action_history.format_action_history); the LLM writes options +
+        # correct answer + explanation (Layer 6).
+        "Context": context,
+        "Question": question,
         "Question Type": "Multiple Choice",
         "Hand Stage": meta.street.capitalize(),
         "option 1": _LLM_TBD,
@@ -148,7 +198,7 @@ def build_row(spot_data: SpotData, difficulty_score: int,
         "Answer Explanation": _LLM_TBD,
         # Classification -- filled from the data block.
         "Cash/Tourney": meta.game_format.capitalize(),
-        "Live or Online": _TBD,
+        "Live or Online": live_or_online,
         "Relative Position": meta.position_dynamic or _TBD,
         "Preflop Pot Type": _PREFLOP_POT_TYPE.get(meta.preflop_raise_count,
                                                   "Multi-raised pot"),
@@ -169,12 +219,13 @@ def build_row(spot_data: SpotData, difficulty_score: int,
     }
 
 
-def write_csv(path, rows) -> int:
+def write_csv(path, rows, *, scenario: ScenarioConfig | None = None) -> int:
     """Write question rows to a CSV at `path`; return the number of rows written.
 
     `rows` is an iterable of (SpotData, difficulty_score) pairs. The `No` column
     auto-increments from 1 across the output. The parent directory is created
-    if needed; the header is always written.
+    if needed; the header is always written. `scenario` is forwarded to every
+    `build_row` call so Context / Question / etc. fill from real data.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,6 +234,7 @@ def write_csv(path, rows) -> int:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for number, (spot_data, difficulty) in enumerate(rows, start=1):
-            writer.writerow(build_row(spot_data, difficulty, number))
+            writer.writerow(build_row(spot_data, difficulty, number,
+                                      scenario=scenario))
             written += 1
     return written

@@ -15,10 +15,13 @@ from pipeline.fact_extractor.spot_data import (                       # noqa: E4
     BoardTexture, DecisionData, HandClass, SpotData, SpotMetadata,
 )
 from pipeline.format_writer import CSV_COLUMNS, build_row, write_csv  # noqa: E402
+from pipeline.scenario_config import SCENARIOS                        # noqa: E402
 
 
 def _spot(effective_stack_bb: float = 98.0,
-          rank_distribution: str = "middling") -> SpotData:
+          rank_distribution: str = "middling",
+          action_sequence=None,
+          pot_bb: float = 5.5) -> SpotData:
     """A populated SpotData fixture for a flop BB-vs-BTN single-raised pot."""
     return SpotData(
         SpotMetadata("flop", hero_position="BB", villain_position="BTN",
@@ -26,7 +29,9 @@ def _spot(effective_stack_bb: float = 98.0,
                      preflop_raise_count=1, active_players_on_flop=2,
                      stack_depth_bb=100.0, effective_stack_bb=effective_stack_bb,
                      node_id="r:0:c:b36", hero_cards=("Ah", "Kh"),
-                     board=["2c", "Js", "7s"]),
+                     board=["2c", "Js", "7s"],
+                     action_sequence=action_sequence or [],
+                     big_blind_chips=87.75, pot_bb=pot_bb),
         decision_data=DecisionData(correct_action="bet", ev_gap_bb=1.37),
         hand_class=HandClass("top_pair_top_kicker", strength_bucket="strong",
                              label="top_pair_top_kicker_no_draws"),
@@ -90,11 +95,61 @@ def test_classification_wording():
 
 
 def test_placeholders_for_unbuilt_columns():
+    """Without a scenario, the scenario-derived columns stay as `[TBD]` and the
+    LLM-written columns stay as `[TBD by Layer 6]` -- the legacy default the
+    pre-Layer-1 pipeline relied on."""
     row = build_row(_spot(), 1500, 1)
-    for column in ("Question", "option 1", "option 4", "Answer Explanation"):
+    for column in ("Context", "Question", "option 1", "option 4",
+                   "Answer Explanation"):
         assert row[column] == "[TBD by Layer 6]", column
-    for column in ("Table Size", "Seats", "POT"):
+    for column in ("Table Size", "Seats", "POT", "Live or Online"):
         assert row[column] == "[TBD]", column
+
+
+def test_scenario_populated_columns():
+    """With a scenario, the seven previously-TBD columns now fill from real data.
+
+    Context comes from scenario.context; Question is the deterministic action
+    history with suit emojis; Table Size, Default Stack, Live or Online, Seats,
+    POT all come from scenario fields (or scenario * spot_metadata math).
+    """
+    scenario = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    # Flop spot, hero (BB) facing a BTN cbet of 41 chips (~$0.23).
+    spot = _spot(action_sequence=[("OOP", "check"), ("IP", "bet 41")],
+                 pot_bb=5.96)              # ~$2.98 pot after the cbet
+    row = build_row(spot, 1500, 1, scenario=scenario)
+
+    # No more [TBD] in any of the seven scenario-driven columns.
+    for column in ("Context", "Question", "Table Size", "Default Stack",
+                   "Live or Online", "Seats", "POT"):
+        assert "[TBD" not in row[column], (column, row[column])
+
+    # Spot-check each value.
+    assert row["Context"] == "6-Handed, $0.25/$0.50, Stacks $50.00"
+    assert row["Table Size"] == "6"
+    assert row["Default Stack"] == "$50"
+    assert row["Live or Online"] == "Online"
+    assert row["Seats"].startswith("BTN-$")                 # villain seat + stack
+    assert row["POT"].startswith("$")                       # dollar-prefixed
+    # Question starts with the team's voice; references hero hole cards with
+    # suit emoji; includes the preflop line; includes a Flop section.
+    q = row["Question"]
+    assert q.startswith("You're in the Big Blind with A")
+    assert "The Button opens to $1.25" in q                 # _VILLAIN_REF rendering
+    assert "You call." in q
+    assert "Flop ($2.75)" in q                              # preflop pot rendered
+    # And the postflop dollar conversion fired: 41 chips ~ $0.23 at this scale.
+    assert "$0.23" in q
+
+
+def test_scenario_question_has_no_tbd_token():
+    """The Question column under a scenario must never contain '[TBD' --
+    that's how the v3 batch counts 'TBDs eliminated'."""
+    scenario = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    row = build_row(_spot(action_sequence=[("OOP", "check")]), 1500, 1,
+                    scenario=scenario)
+    assert "[TBD" not in row["Question"]
+    assert "[TBD" not in row["Context"]
 
 
 def test_write_csv_round_trip():

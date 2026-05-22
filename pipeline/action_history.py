@@ -58,8 +58,18 @@ def _num(value) -> str:
 
 
 def _chips(amount, is_tournament: bool) -> str:
-    """A chip amount: '$50' for cash, '25bb' for tournaments."""
-    return f"{_num(amount)}bb" if is_tournament else f"${_num(amount)}"
+    """A chip amount: '$50' for cash, '25bb' for tournaments.
+
+    Non-integer cash amounts (e.g. $0.23, $4.50) render with 2-decimal
+    precision so a chip-to-dollar conversion in `scenario_config.spot_to_hand`
+    doesn't produce stray "$0.5" / "$1.25" inconsistencies. Integer dollars
+    stay as "$50" -- matches the brief's worked examples 1-10.
+    """
+    if is_tournament:
+        return f"{_num(amount)}bb"
+    if isinstance(amount, float) and not amount.is_integer():
+        return f"${amount:,.2f}"
+    return f"${int(amount):,}"
 
 
 def format_card(card: str) -> str:

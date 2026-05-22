@@ -48,11 +48,14 @@ from pipeline.format_writer import CSV_COLUMNS, build_row                # noqa:
 from pipeline.path_sampler import PathSampler                            # noqa: E402
 from pipeline.piosolver import PioSolverClient, find_piosolver           # noqa: E402
 from pipeline.question_extractor import evaluate_spot                    # noqa: E402
+from pipeline.scenario_config import get_scenario                        # noqa: E402
 
 DEFAULT_CFR = REPO_ROOT / "test_solves" / "btn_vs_bb_srp_2cJs7s.cfr"
 DEFAULT_OUTPUT_CSV = REPO_ROOT / "test_output" / "batch_30_questions.csv"
 RANDOM_SEED = 7
-# The test solve is a 6-max 100bb cash BTN-vs-BB single-raised pot.
+# Scenario metadata extract_facts attaches to every SpotData. The full scenario
+# (stakes, table size, etc.) comes from pipeline.scenario_config.get_scenario;
+# these are the smaller subset Layer 5 reads directly off the data block.
 SCENARIO = {"preflop_raise_count": 1, "game_format": "cash",
             "active_players_on_flop": 2, "stack_depth_bb": 100}
 STREETS = ("flop", "turn", "river")
@@ -184,7 +187,7 @@ class BatchResult:
     usage: UsageTally = field(default_factory=UsageTally)
 
 
-def _generate_one(spot, client, result: BatchResult) -> bool:
+def _generate_one(spot, client, scenario, result: BatchResult) -> bool:
     """Run Layer 6 once and append the resulting CSV row. Returns success."""
     try:
         explanation = generate_explanation(spot, client=client)
@@ -196,13 +199,13 @@ def _generate_one(spot, client, result: BatchResult) -> bool:
         return False
 
     row = build_row(spot, difficulty_score=evaluate_spot(spot).difficulty_score,
-                    number=len(result.rows) + 1)
+                    number=len(result.rows) + 1, scenario=scenario)
     row.update(explanation_to_row_overrides(explanation))
     result.rows.append(row)
     return True
 
 
-def run_batch(sampler, big_blind: float, client, *,
+def run_batch(sampler, big_blind: float, client, scenario, *,
               target: int, per_street: int) -> BatchResult:
     """Walk the stratified pool until `target` questions have been generated."""
     print("Enumerating decision spots ...")
@@ -231,7 +234,7 @@ def run_batch(sampler, big_blind: float, client, *,
             result.filter_failed += 1
             continue
 
-        ok = _generate_one(spot, client, result)
+        ok = _generate_one(spot, client, scenario, result)
         if ok:
             print(f"  [{len(result.rows):>2d}/{target}] "
                   f"{spot.spot_metadata.street:<5s} "
@@ -358,13 +361,19 @@ def main(argv=None) -> int:
 
     explanation_generator.generate_explanation = _generate
 
+    # Look up the scenario for this solve (raises a clear error if unregistered).
+    scenario = get_scenario(args.cfr)
+    print(f"Scenario  : {scenario.format} -- {scenario.stakes} -- "
+          f"{scenario.preflop_action}\n")
+
     start = time.time()
     try:
         with PioSolverClient(exe) as pio:
             pio.load_tree(args.cfr)
             big_blind = (pio.show_effective_stack() or 100) / 100.0   # 100bb
-            sampler = PathSampler(pio, oop_position="BB", ip_position="BTN")
-            result = run_batch(sampler, big_blind, client,
+            sampler = PathSampler(pio, oop_position=scenario.oop_position,
+                                  ip_position=scenario.ip_position)
+            result = run_batch(sampler, big_blind, client, scenario,
                                target=args.target, per_street=args.per_street)
     finally:
         explanation_generator.generate_explanation = original

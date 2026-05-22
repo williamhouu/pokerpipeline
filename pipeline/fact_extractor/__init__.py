@@ -133,6 +133,10 @@ def _build_spot_metadata(spot_context, scenario: dict, big_blind: float,
         node_id=node.node_id,
         hero_cards=(hero_hand[:2], hero_hand[2:]),
         board=list(node.board),
+        # Rendering context for the deterministic action-history block.
+        action_sequence=list(node.action_sequence),
+        big_blind_chips=big_blind,
+        pot_bb=node.pot / big_blind,
     )
     fields.update(scenario)                         # caller-supplied overrides
     return SpotMetadata(**fields)
