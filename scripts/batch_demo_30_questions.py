@@ -7,14 +7,16 @@ in Layer 7. This is the script that produces the read-by-hand batch.
 
 What it does:
   * loads the BTN-vs-BB test solve via Path Sampler;
-  * stratifies decision spots across flop / turn / river so the batch isn't
-    100% flop;
-  * walks the stratified pool until 30 spots survive Layer 4's filters;
+  * buckets decision spots by street and walks each bucket in shuffled order;
+  * generates a fixed `--per-street-target` (default 10) questions per street,
+    so the batch is balanced across flop / turn / river -- one street's pool
+    running short reports a clear warning and the run continues;
   * runs each survivor through Layer 5 -> Layer 6 -> Layer 8 with a SHARED
     Anthropic client, so the prompt cache hits on every call after the first;
   * writes test_output/batch_30_questions.csv (35 columns, all populated);
   * reports wall time, approximate API cost (from token usage + Sonnet 4.6
-    pricing), and distributions by street / hand class / concept tag.
+    pricing), per-street tally (evaluated/passed/generated/target), and
+    distributions by street / hand class / concept tag.
 
 This hits the real Anthropic API. It is NOT a test. CI never runs it. Skips
 cleanly when ANTHROPIC_API_KEY is unset.
@@ -22,7 +24,7 @@ cleanly when ANTHROPIC_API_KEY is unset.
 Usage:
     set ANTHROPIC_API_KEY=sk-...
     python scripts/batch_demo_30_questions.py [--pio-exe PATH] [--cfr PATH]
-                                              [--target N] [--per-street N]
+                                              [--per-street-target N] [--out PATH]
 """
 from __future__ import annotations
 
@@ -144,47 +146,57 @@ class _UsageRecordingClient:
 
 
 # --- stratified spot pool ---------------------------------------------------
-def _stratified_pool(nodes, per_street: int, seed: int) -> list:
-    """A reordered node list that round-robins across flop/turn/river.
+def _bucket_by_street(nodes, seed: int) -> dict[str, list]:
+    """Shuffle nodes (seeded) and bucket them by street.
 
-    Within each street, nodes are randomly shuffled (seeded). The interleaving
-    means we hit roughly equal coverage of every street as we walk the pool,
-    even if the run is cut short by an API budget.
+    Returns a dict keyed by `flop`/`turn`/`river`; nodes from any other street
+    are dropped (Tier 1 postflop solves only). Within each bucket order is
+    randomised so successive runs sample different decision lines.
     """
     rng = random.Random(seed)
     buckets: dict[str, list] = {street: [] for street in STREETS}
-    other: list = []
     for node in nodes:
-        (buckets.get(node.street) or other).append(node)
+        if node.street in buckets:
+            buckets[node.street].append(node)
     for street in STREETS:
         rng.shuffle(buckets[street])
-
-    # Round-robin across streets, taking up to `per_street` from each bucket
-    # first, then continuing through the leftovers.
-    head: list = []
-    for street in STREETS:
-        head.extend(buckets[street][:per_street])
-    tail: list = []
-    for street in STREETS:
-        tail.extend(buckets[street][per_street:])
-    rng.shuffle(head)               # mix streets within the priority window
-    rng.shuffle(tail)
-    return head + tail + other
+    return buckets
 
 
 # --- generation loop --------------------------------------------------------
+@dataclass
+class StreetTally:
+    """Per-street counters for the run summary."""
+
+    target: int = 0
+    evaluated: int = 0                  # ran extract_facts on
+    passed_layer4: int = 0              # is_question_worthy True
+    generated: int = 0                  # Layer 6 produced a row
+    pool_size: int = 0                  # total candidates available
+
+
 @dataclass
 class BatchResult:
     """Everything we collected during the run, for the summary print."""
 
     rows: list[dict] = field(default_factory=list)
-    evaluated: int = 0
     extract_skipped: int = 0
     extract_errors: list[str] = field(default_factory=list)
-    filter_failed: int = 0
     layer6_validation_failures: list[str] = field(default_factory=list)
     layer6_api_failures: list[str] = field(default_factory=list)
     usage: UsageTally = field(default_factory=UsageTally)
+    per_street: dict[str, StreetTally] = field(
+        default_factory=lambda: {s: StreetTally() for s in STREETS})
+
+    # Backwards-compat aggregates kept on the dataclass so the summary printer
+    # can read both per-street and totals.
+    @property
+    def evaluated(self) -> int:
+        return sum(t.evaluated for t in self.per_street.values())
+
+    @property
+    def filter_failed(self) -> int:
+        return sum(t.evaluated - t.passed_layer4 for t in self.per_street.values())
 
 
 def _generate_one(spot, client, scenario, result: BatchResult) -> bool:
@@ -206,45 +218,68 @@ def _generate_one(spot, client, scenario, result: BatchResult) -> bool:
 
 
 def run_batch(sampler, big_blind: float, client, scenario, *,
-              target: int, per_street: int) -> BatchResult:
-    """Walk the stratified pool until `target` questions have been generated."""
+              per_street_target: int) -> BatchResult:
+    """Walk each street's bucket until `per_street_target` questions have been
+    generated for that street (or the bucket runs out).
+
+    Streets are processed flop -> turn -> river; total target is therefore
+    3 * per_street_target. If a street's pool is too small to hit the target
+    we keep going with the next street and the per-street tally records the
+    shortfall. The Anthropic prompt cache hits regardless of street order
+    (the system+gold-examples payload is identical across calls).
+    """
     print("Enumerating decision spots ...")
     nodes = list(sampler.enumerate_decision_nodes(max_chance_children=2))
-    pool = _stratified_pool(nodes, per_street=per_street, seed=RANDOM_SEED)
-    by_street = Counter(n.street for n in pool)
+    buckets = _bucket_by_street(nodes, seed=RANDOM_SEED)
+    total_target = per_street_target * len(STREETS)
+    pool_sizes = {s: len(buckets[s]) for s in STREETS}
     print(f"  {len(nodes)} found "
-          f"(flop={by_street['flop']}, turn={by_street['turn']}, "
-          f"river={by_street['river']}); processing in stratified order.\n")
+          f"(flop={pool_sizes['flop']}, turn={pool_sizes['turn']}, "
+          f"river={pool_sizes['river']}); "
+          f"target {per_street_target}/street ({total_target} total).\n")
 
     result = BatchResult()
-    for index, node in enumerate(pool, start=1):
-        if len(result.rows) >= target:
-            break
-        try:
-            ctx = sampler.build_spot_context(node)
-            spot = extract_facts(ctx, scenario=SCENARIO, big_blind=big_blind)
-        except (ValueError, KeyError) as exc:
-            result.extract_skipped += 1
-            result.extract_errors.append(f"{node.street} {node.node_id}: {exc}")
-            continue
-        result.evaluated += 1
+    for street in STREETS:
+        tally = result.per_street[street]
+        tally.target = per_street_target
+        tally.pool_size = pool_sizes[street]
+        for node in buckets[street]:
+            if tally.generated >= per_street_target:
+                break
+            try:
+                ctx = sampler.build_spot_context(node)
+                spot = extract_facts(ctx, scenario=SCENARIO,
+                                     big_blind=big_blind)
+            except (ValueError, KeyError) as exc:
+                result.extract_skipped += 1
+                result.extract_errors.append(
+                    f"{street} {node.node_id}: {exc}")
+                continue
+            tally.evaluated += 1
 
-        verdict = evaluate_spot(spot)
-        if not verdict.is_worthy:
-            result.filter_failed += 1
-            continue
+            verdict = evaluate_spot(spot)
+            if not verdict.is_worthy:
+                continue
+            tally.passed_layer4 += 1
 
-        ok = _generate_one(spot, client, scenario, result)
-        if ok:
-            print(f"  [{len(result.rows):>2d}/{target}] "
-                  f"{spot.spot_metadata.street:<5s} "
-                  f"diff={verdict.difficulty_score:<4d} "
-                  f"freq={verdict.top_action_frequency:.2f} "
-                  f"ev_gap={verdict.ev_gap_bb:>5.2f}bb "
-                  f"node={spot.spot_metadata.node_id}")
-        else:
-            print(f"  [skip] {spot.spot_metadata.node_id}: Layer 6 failed",
-                  file=sys.stderr)
+            ok = _generate_one(spot, client, scenario, result)
+            if ok:
+                tally.generated += 1
+                print(f"  [{len(result.rows):>2d}/{total_target}] "
+                      f"{street:<5s} ({tally.generated}/{per_street_target}) "
+                      f"diff={verdict.difficulty_score:<4d} "
+                      f"freq={verdict.top_action_frequency:.2f} "
+                      f"ev_gap={verdict.ev_gap_bb:>5.2f}bb "
+                      f"node={spot.spot_metadata.node_id}")
+            else:
+                print(f"  [skip] {spot.spot_metadata.node_id}: Layer 6 failed",
+                      file=sys.stderr)
+
+        if tally.generated < per_street_target:
+            print(f"  [warn] {street}: only {tally.generated} of "
+                  f"{per_street_target} target generated "
+                  f"(evaluated {tally.evaluated}/{tally.pool_size} candidates, "
+                  f"{tally.passed_layer4} passed Layer 4)", file=sys.stderr)
 
     return result
 
@@ -260,6 +295,14 @@ def _print_summary(result: BatchResult, elapsed: float) -> None:
     print(f"  Layer-6 validation fails: "
           f"{len(result.layer6_validation_failures)}")
     print(f"  Layer-6 API failures    : {len(result.layer6_api_failures)}")
+    print()
+    print("  Per-street tally (evaluated / passed Layer 4 / generated / target):")
+    for street in STREETS:
+        t = result.per_street[street]
+        flag = "" if t.generated == t.target else "  <-- short of target"
+        print(f"    {street:<6s} {t.evaluated:>4d} / {t.passed_layer4:>4d} / "
+              f"{t.generated:>2d} / {t.target:>2d}   "
+              f"(pool {t.pool_size}){flag}")
     print()
     u = result.usage
     print(f"  Anthropic calls         : {u.api_calls}")
@@ -309,11 +352,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pio-exe", help="path to the PioSolver Edge executable")
     parser.add_argument("--cfr", type=Path, default=DEFAULT_CFR)
-    parser.add_argument("--target", type=int, default=30,
-                        help="number of questions to generate (default 30)")
-    parser.add_argument("--per-street", type=int, default=15,
-                        help="priority pool size per street before round-robin "
-                             "fills from the tail (default 15)")
+    parser.add_argument("--per-street-target", type=int, default=10,
+                        help="questions to generate per street (flop/turn/river); "
+                             "total = 3 * this (default 10 -> 30 total)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT_CSV,
                         help="output CSV path (default test_output/batch_30_questions.csv)")
     args = parser.parse_args(argv)
@@ -334,7 +375,8 @@ def main(argv=None) -> int:
 
     print(f"PioSolver : {exe}")
     print(f"Solve     : {args.cfr.name}")
-    print(f"Target    : {args.target} questions\n")
+    print(f"Target    : {args.per_street_target} questions/street "
+          f"({args.per_street_target * len(STREETS)} total)\n")
 
     # Pre-load gold examples once so the cached payload is the same on every
     # Layer-6 call -- otherwise the cache key won't match call to call.
@@ -374,7 +416,7 @@ def main(argv=None) -> int:
             sampler = PathSampler(pio, oop_position=scenario.oop_position,
                                   ip_position=scenario.ip_position)
             result = run_batch(sampler, big_blind, client, scenario,
-                               target=args.target, per_street=args.per_street)
+                               per_street_target=args.per_street_target)
     finally:
         explanation_generator.generate_explanation = original
 
