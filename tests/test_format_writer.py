@@ -157,7 +157,7 @@ def test_write_csv_round_trip():
         path = Path(tmp) / "nested" / "questions.csv"        # parent auto-created
         count = write_csv(path, [(_spot(), 1500), (_spot(), 800)])
         assert count == 2
-        with open(path, newline="", encoding="utf-8") as handle:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
             reader = csv.reader(handle)
             header = next(reader)
             data_rows = list(reader)

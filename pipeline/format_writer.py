@@ -230,7 +230,10 @@ def write_csv(path, rows, *, scenario: ScenarioConfig | None = None) -> int:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with open(path, "w", newline="", encoding="utf-8") as handle:
+    # utf-8-sig writes a BOM so Excel on Windows auto-detects UTF-8 instead
+    # of falling back to cp1252 and mojibake-ing the suit emoji bytes
+    # (♥ ♦ ♣ ♠ + U+FE0F variation selector) as Latin-1.
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for number, (spot_data, difficulty) in enumerate(rows, start=1):
