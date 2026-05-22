@@ -64,6 +64,10 @@ Each layer is a Python module with clear inputs and outputs:
    PioSolver Edge solve (30 min–2 hr each, solved to <0.5% pot exploitability).
    Preflop = Monker output or a pre-solved range pack. **Saves the full solver output
    file** to the local cache as the canonical record — never just extracted points.
+   The batch driver is `pipeline/batch_solver.py` with CLI at
+   `scripts/batch_solve.py`; specs in `pipeline/scenario_spec.py:SOLVER_SPECS`
+   and flop sets in `pipeline/flop_sets.py:FLOP_SETS`. See "Adding a new
+   scenario" below.
 3. **Path Sampler** — sets up individual decision spots inside a solved tree: action
    sequence, hero's hand (from hero's range), board, pot/stack sizes (computed from
    action history). Tags each decision with `parent_node_id` + `action_to_reach`.
@@ -123,13 +127,66 @@ Solve conventions that are **architectural decisions, not optional**:
 - Every question carries `parent_node_id` + `action_to_reach` so full-hand replay
   can be added later with no schema change.
 
-Cache layout — hierarchical by format / scenario / board:
+Cache layout — hierarchical by format / scenario / board. The Layer 2 batch
+solver writes to `solves/<scenario_name>/<flop_stem>.cfr`; the brief's
+deeper hierarchy is for a future migration once we span multiple formats.
 
 ```
-/solves/6max_100bb/srp_BTN_vs_BB/flop_AhKsQd.solve
-/solves/6max_100bb/3b_BB_vs_BTN/...
-/solves/preflop/6max_100bb_full_tree.monker
+/solves/Cash6max_100bb_BTN_open_BB_call/2cJs7s.cfr
+/solves/Cash6max_100bb_BTN_open_BB_call/AsKd9h.cfr
+/solves/Cash6max_100bb_3bet_BB_vs_BTN/...
 ```
+
+## Layer 2: running batch solves
+
+The driver is `scripts/batch_solve.py`. Required: PioSolver Edge installed
+locally (auto-detected via `pipeline.piosolver.find_piosolver` or pass
+`--pio-exe`). Each solve takes 30 min–2 hr to hit ~0.5%-pot exploitability
+on a 100bb spot.
+
+```bash
+# 1. Dry-run first — no compute, just validate the spec + show the plan.
+python scripts/batch_solve.py \
+    --scenario Cash6max_100bb_BTN_open_BB_call \
+    --flop-set MINIMAL_DEBUG --dry-run
+
+# 2. Real run on the single MINIMAL_DEBUG flop (2c Js 7s) — verifies Layer 2
+#    produces a solve structurally equivalent to test_solves/btn_vs_bb_srp_2cJs7s.cfr.
+python scripts/batch_solve.py \
+    --scenario Cash6max_100bb_BTN_open_BB_call \
+    --flop-set MINIMAL_DEBUG
+
+# 3. Overnight: 25 flops × scenario count. Resume-safe — re-running skips
+#    existing .cfrs, so an interrupted run can be picked up cleanly.
+python scripts/batch_solve.py \
+    --scenario Cash6max_100bb_BTN_open_BB_call \
+    --flop-set STANDARD_25_FLOPS
+```
+
+Per-flop failures don't stop the batch — a `.failed` or `.timeout` marker
+file is written next to where the `.cfr` would have been, and the next flop
+proceeds. The 4-hour-per-solve wall-clock cap raises a `.timeout` marker if
+hit (very slow solves should be investigated, not silently absorbed).
+
+### Adding a new scenario
+
+1. **Register the solver spec** in `pipeline/scenario_spec.py:SOLVER_SPECS`.
+   The dataclass requires: format, stack_bb, oop/ip positions, OOP/IP
+   ranges (Pio range string or .txt path), pot/stack chip geometry, bet
+   sizes per actor, raise sizes, accuracy target, bb_in_chips. Naming
+   convention: `<Format><TableSize>_<StackBB>_<preflop_action>` (e.g.
+   `Cash6max_100bb_3bet_BB_vs_BTN`).
+2. **Pick a flop set** from `pipeline/flop_sets.py:FLOP_SETS`, or add a
+   new one if STANDARD_25_FLOPS isn't the right coverage. Register the new
+   set in the same module and update tests.
+3. **Dry-run, then real run.** Phase-0 audit checklist in
+   `pipeline/scenario_spec.py`'s docstring describes the placeholder
+   ranges to confirm with Ryan before Tier 1 production.
+4. **Register a ScenarioConfig** for downstream rendering. Today this is
+   hand-authored in `pipeline/scenario_config.py:SCENARIOS`, keyed by
+   `.cfr` filename stem. A future refactor will auto-derive ScenarioConfig
+   from SolverSpec + flop so the registry doesn't grow linearly with
+   solve count.
 
 ## Scenario tiers
 
