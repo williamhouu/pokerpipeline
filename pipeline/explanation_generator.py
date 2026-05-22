@@ -557,6 +557,11 @@ def generate_explanation(spot_data: SpotData, *,
     style = _detect_option_style(spot_data)
     system, messages = _build_messages_payload(spot_data, gold_examples, style)
 
+    # Layer 7 validators (pipeline.validators) need the DecisionData; we run
+    # them in the retry loop AFTER the structural _validate check, so a
+    # malformed JSON fails before we ever look at the strategic content.
+    from pipeline.validators import run_audit_validators
+
     last_error: str | None = None
     for attempt in range(max_retries + 1):
         response = client.messages.create(
@@ -568,7 +573,12 @@ def generate_explanation(spot_data: SpotData, *,
             explanation = parse_response(text)
             error = _validate(explanation)
             if error is None:
-                return explanation
+                # Structural check passed; now the Layer 7 strategic checks.
+                audit_result = run_audit_validators(explanation,
+                                                    spot_data.decision_data)
+                if audit_result.is_valid:
+                    return explanation
+                error = audit_result.error_message
             last_error = error
         except ExplanationValidationError as exc:
             last_error = str(exc)

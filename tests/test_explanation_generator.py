@@ -229,6 +229,68 @@ def test_retry_recovers_after_one_failure():
     assert "failed validation" in retry_messages[-1]["content"]
 
 
+def test_audit_validators_trigger_retry_on_row1_defect():
+    """Layer 7 wiring: a Row-1-shape defect (LLM drops Pio's #2 action from
+    the option set) is caught by validate_option_set_completeness on attempt
+    1, the wrapper retries with corrective feedback, attempt 2 ships clean."""
+    # A frequency-style spot where Pio plays call(66) / fold(34) / raise(0.001).
+    # Same shape as v3 Row 1.
+    spot = _binary_spot()
+    spot.decision_data = DecisionData(
+        options=["call", "fold", "raise 608"], correct_action="call",
+        ev_gap_bb=2.83,
+        range_aggregate_strategy={"call": 0.6557, "fold": 0.3435,
+                                  "raise": 0.0008})
+
+    # Attempt 1: Row-1 defect -- fold absent from options.
+    bad = (
+        '{"option_1": "Always call", "option_2": "Mostly call", '
+        '"option_3": "Mostly raise", "option_4": "Always raise", '
+        '"correct_answer": "Mostly call", '
+        '"answer_explanation": "Trap the check-raise with the set."}'
+    )
+    # Attempt 2: corrected -- fold present.
+    good = (
+        '{"option_1": "Always call", "option_2": "Mostly call", '
+        '"option_3": "Mostly fold", "option_4": "Always fold", '
+        '"correct_answer": "Mostly call", '
+        '"answer_explanation": "Trap the check-raise with the set."}'
+    )
+    client = _mock_client([bad, good])
+    explanation = generate_explanation(spot, client=client,
+                                       gold_examples=_GOLD_STUB)
+    assert explanation.correct_answer == "Mostly call"
+    assert explanation.option_3 == "Mostly fold"
+    assert len(client._calls) == 2
+    # The corrective retry message names the missing action.
+    retry_msg = client._calls[1]["messages"][-1]["content"]
+    assert "fold" in retry_msg.lower()
+
+
+def test_audit_validators_raise_after_two_failures():
+    """If both attempts emit the same Row-1 defect, ExplanationValidationError."""
+    spot = _binary_spot()
+    spot.decision_data = DecisionData(
+        options=["call", "fold", "raise 608"], correct_action="call",
+        ev_gap_bb=2.83,
+        range_aggregate_strategy={"call": 0.6557, "fold": 0.3435,
+                                  "raise": 0.0008})
+    bad = (
+        '{"option_1": "Always call", "option_2": "Mostly call", '
+        '"option_3": "Mostly raise", "option_4": "Always raise", '
+        '"correct_answer": "Mostly call", '
+        '"answer_explanation": "ok."}'
+    )
+    client = _mock_client([bad, bad])
+    try:
+        generate_explanation(spot, client=client, gold_examples=_GOLD_STUB)
+    except ExplanationValidationError as exc:
+        assert "fold" in str(exc).lower()
+        assert "human review" in str(exc)
+        return
+    raise AssertionError("expected ExplanationValidationError after both retries failed")
+
+
 def test_no_retry_when_first_response_is_good():
     good = (
         '{"option_1": "Call", "option_2": "Fold", "option_3": "", '
