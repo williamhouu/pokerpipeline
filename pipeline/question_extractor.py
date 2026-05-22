@@ -4,13 +4,17 @@ Decides whether a decision spot is worth turning into a training question, and
 rates how hard it is.
 
 Per docs/engineering_brief.docx, "Layer 4: Question Extractor", a spot makes a
-good question when BOTH filters pass:
+good question when ALL THREE filters pass:
 
   * the solver's highest-frequency action sits between 55% and 95% -- dominant
     enough that there is a clear answer to teach, not so dominant the answer is
     obvious;
   * the EV gap between the best action and the second-best is at least 0.5bb --
     big enough that choosing the wrong answer costs real money, not solver noise.
+  * the EV gap is at most 15bb -- above this the right answer is brutally
+    obvious in chips (typically near-all-in river spots where call-vs-fold is a
+    ~pot decision) and not worth a training question. Symmetric to the
+    MAX_TOP_FREQUENCY ceiling -- both kill "too obvious to teach" spots.
 
 Difficulty is the brief's MVP formula, mapping the top action's frequency onto
 a 500-3000 scale (500 = easiest, 3000 = hardest).
@@ -25,6 +29,7 @@ from pipeline.fact_extractor.spot_data import SpotData
 MIN_TOP_FREQUENCY = 0.55          # below: no clear best answer to teach
 MAX_TOP_FREQUENCY = 0.95          # above: the answer is too obvious
 MIN_EV_GAP_BB = 0.5               # below: overlaps with solver noise
+MAX_EV_GAP_BB = 15.0              # above: the right answer is too obvious in chips
 
 _DIFFICULTY_CEILING = 3000        # hardest
 _DIFFICULTY_FLOOR = 500           # easiest
@@ -55,16 +60,19 @@ def difficulty_score(spot_data: SpotData) -> int:
 def is_question_worthy(spot_data: SpotData, *,
                        min_frequency: float = MIN_TOP_FREQUENCY,
                        max_frequency: float = MAX_TOP_FREQUENCY,
-                       min_ev_gap_bb: float = MIN_EV_GAP_BB) -> bool:
-    """Whether a spot passes both of the brief's question-worthiness filters.
+                       min_ev_gap_bb: float = MIN_EV_GAP_BB,
+                       max_ev_gap_bb: float = MAX_EV_GAP_BB) -> bool:
+    """Whether a spot passes all three of the brief's question-worthiness filters.
 
-    Filter 1 (frequency) is inclusive at both ends; filter 2 (EV gap) is "at
-    least", so a gap of exactly the threshold passes.
+    The frequency window is inclusive at both ends; the EV gap window is also
+    inclusive, so a gap of exactly `min_ev_gap_bb` or exactly `max_ev_gap_bb`
+    passes.
     """
     frequency = top_action_frequency(spot_data)
     if not min_frequency <= frequency <= max_frequency:
         return False
-    return spot_data.decision_data.ev_gap_bb >= min_ev_gap_bb
+    ev_gap = spot_data.decision_data.ev_gap_bb
+    return min_ev_gap_bb <= ev_gap <= max_ev_gap_bb
 
 
 @dataclass

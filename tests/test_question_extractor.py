@@ -52,18 +52,29 @@ def test_frequency_filter_boundaries():
 
 
 def test_ev_gap_filter_boundary():
-    # The EV gap filter is "at least" -- exactly 0.5bb passes.
+    # The EV gap floor is "at least" -- exactly 0.5bb passes.
     assert is_question_worthy(_spot(0.70, 0.50)) is True
     assert is_question_worthy(_spot(0.70, 0.49)) is False
     assert is_question_worthy(_spot(0.70, 2.0)) is True
 
 
-def test_both_filters_must_pass():
+def test_ev_gap_ceiling_boundary():
+    # Symmetric to the frequency ceiling: 15bb is the inclusive top; just above fails.
+    # A 50-70bb river-all-in spot mechanically has the right answer settled in
+    # chips and shouldn't ship as a training question even at a 60% frequency.
+    assert is_question_worthy(_spot(0.70, 15.0)) is True       # exactly at the cap
+    assert is_question_worthy(_spot(0.70, 15.01)) is False     # just above
+    assert is_question_worthy(_spot(0.70, 70.59)) is False     # the v2 max gap
+
+
+def test_all_three_filters_must_pass():
     # Good frequency but a thin EV gap -> not worthy.
     assert is_question_worthy(_spot(0.70, 0.1)) is False
     # Good EV gap but a too-obvious frequency -> not worthy.
     assert is_question_worthy(_spot(0.98, 3.0)) is False
-    # Both pass.
+    # Good frequency but the EV gap is brutally obvious -> not worthy.
+    assert is_question_worthy(_spot(0.70, 25.0)) is False
+    # All three pass.
     assert is_question_worthy(_spot(0.70, 1.0)) is True
 
 
