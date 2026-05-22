@@ -50,7 +50,7 @@ from pipeline.piosolver import PioSolverClient, find_piosolver           # noqa:
 from pipeline.question_extractor import evaluate_spot                    # noqa: E402
 
 DEFAULT_CFR = REPO_ROOT / "test_solves" / "btn_vs_bb_srp_2cJs7s.cfr"
-OUTPUT_CSV = REPO_ROOT / "test_output" / "batch_30_questions.csv"
+DEFAULT_OUTPUT_CSV = REPO_ROOT / "test_output" / "batch_30_questions.csv"
 RANDOM_SEED = 7
 # The test solve is a 6-max 100bb cash BTN-vs-BB single-raised pot.
 SCENARIO = {"preflop_raise_count": 1, "game_format": "cash",
@@ -311,6 +311,8 @@ def main(argv=None) -> int:
     parser.add_argument("--per-street", type=int, default=15,
                         help="priority pool size per street before round-robin "
                              "fills from the tail (default 15)")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT_CSV,
+                        help="output CSV path (default test_output/batch_30_questions.csv)")
     args = parser.parse_args(argv)
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -370,15 +372,19 @@ def main(argv=None) -> int:
     elapsed = time.time() - start
     result.usage = usage
 
-    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as handle:
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.out, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for row in result.rows:
             writer.writerow(row)
 
     _print_summary(result, elapsed)
-    print(f"\n  output CSV: {OUTPUT_CSV.relative_to(REPO_ROOT)}")
+    try:
+        out_display = args.out.relative_to(REPO_ROOT)
+    except ValueError:
+        out_display = args.out
+    print(f"\n  output CSV: {out_display}")
     print("\nRead a sample of the generated rows by hand -- the brief's "
           "Phase-1 quality gate. Real failure modes here drive Layer 7's "
           "checker priorities.")
