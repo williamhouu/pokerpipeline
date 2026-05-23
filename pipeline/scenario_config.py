@@ -198,6 +198,17 @@ SCENARIOS: dict[str, ScenarioConfig] = {
                          ("BTN", "3-bet", 4.00),
                          ("CO", "call")),
     ),
+    # Scenario 8 (May 2026): HJ open, BB 3-bet, HJ call (3BP). BB
+    # 3-bets to ~12bb = $6.00 (pack '182%' token). Only surviving seats
+    # are HJ and BB.
+    "hj_vs_bb_3bp_template": _srp_scenario_template(
+        cfr_key="hj_vs_bb_3bp_template",
+        preflop_action="HJ open 2.5bb, BB 3-bet 12bb, HJ call",
+        oop_position="BB", ip_position="HJ",
+        preflop_actions=(("HJ", "open", 1.25),
+                         ("BB", "3-bet", 6.00),
+                         ("HJ", "call")),
+    ),
 }
 
 
