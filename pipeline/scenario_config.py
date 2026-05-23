@@ -187,6 +187,17 @@ SCENARIOS: dict[str, ScenarioConfig] = {
                          ("BB", "3-bet", 6.00),
                          ("BTN", "call")),
     ),
+    # Scenario 7 (May 2026): CO open, BTN 3-bet, CO call (3BP). BTN
+    # 3-bets to ~8bb = $4.00 (pack '77%' token over ~4bb pre-3bet pot).
+    # Only surviving seats are CO and BTN.
+    "co_vs_btn_3bp_template": _srp_scenario_template(
+        cfr_key="co_vs_btn_3bp_template",
+        preflop_action="CO open 2.5bb, BTN 3-bet 8bb, CO call",
+        oop_position="CO", ip_position="BTN",
+        preflop_actions=(("CO", "open", 1.25),
+                         ("BTN", "3-bet", 4.00),
+                         ("CO", "call")),
+    ),
 }
 
 

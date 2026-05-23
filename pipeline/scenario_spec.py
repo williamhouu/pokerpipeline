@@ -407,6 +407,24 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         preflop_action_description=(
             "UTG, HJ, CO fold, BTN opens 2.5bb, SB folds, BB 3-bets, BTN calls"),
     ),
+    # Scenario 7 (May 2026): CO opens, BTN 3-bets, CO calls (3BP). Pack
+    # uses BTN 3-bet token '77%' -- significantly smaller than BB's 182%
+    # 3-bets because IP doesn't need the same fold-equity pressure.
+    # Ranges from docs/ryan_range_pack_index.md scenario #7.
+    "Cash6max_100bb_CO_open_BTN_3bet_CO_call": _3bp_spec(
+        name="Cash6max_100bb_CO_open_BTN_3bet_CO_call",
+        oop_position="CO", ip_position="BTN",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/CO/"
+                   "UTG_Fold_HJ_Fold_CO_60%_BTN_77%_SB_Fold_BB_Fold_CO_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BTN/"
+                  "UTG_Fold_HJ_Fold_CO_60%_BTN_77%.txt"),
+        template_basename=(
+            "Cash6max_100bb_CO_open_BTN_3bet_CO_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG, HJ fold, CO opens 2.5bb, BTN 3-bets, SB and BB fold, CO calls"),
+    ),
 }
 
 
