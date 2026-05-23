@@ -266,6 +266,17 @@ SCENARIOS: dict[str, ScenarioConfig] = {
                          ("HJ", "4-bet", 12.50),
                          ("BB", "call")),
     ),
+    # Scenario 14 (May 2026): UTG open, BB 3-bet, UTG 4-bet, BB call
+    # (4BP). UTG 4-bets to ~22bb = $11.00 (pack '49%' token).
+    "utg_vs_bb_4bp_template": _srp_scenario_template(
+        cfr_key="utg_vs_bb_4bp_template",
+        preflop_action="UTG open 2.5bb, BB 3-bet 10bb, UTG 4-bet 22bb, BB call",
+        oop_position="BB", ip_position="UTG",
+        preflop_actions=(("UTG", "open", 1.25),
+                         ("BB", "3-bet", 5.00),
+                         ("UTG", "4-bet", 11.00),
+                         ("BB", "call")),
+    ),
 }
 
 

@@ -571,6 +571,24 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
             "UTG folds, HJ opens 2.5bb, CO, BTN, SB fold, "
             "BB 3-bets, HJ 4-bets, BB calls"),
     ),
+    # Scenario 14 (May 2026): UTG opens, BB 3-bets, UTG 4-bets, BB calls
+    # (4BP). Pack uses UTG 4-bet token '49%' (vs '50%' for HJ/BTN, '95%'
+    # for CO). From docs scenario #14.
+    "Cash6max_100bb_UTG_open_BB_3bet_UTG_4bet_BB_call": _4bp_spec(
+        name="Cash6max_100bb_UTG_open_BB_3bet_UTG_4bet_BB_call",
+        oop_position="BB", ip_position="UTG",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold_BB_155%_UTG_49%_BB_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/UTG/"
+                  "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold_BB_155%_UTG_49%.txt"),
+        template_basename=(
+            "Cash6max_100bb_UTG_open_BB_3bet_UTG_4bet_BB_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG opens 2.5bb, HJ, CO, BTN, SB fold, "
+            "BB 3-bets, UTG 4-bets, BB calls"),
+    ),
 }
 
 
