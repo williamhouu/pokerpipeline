@@ -337,6 +337,25 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         preflop_action_description=(
             "UTG folds, HJ opens 2.5bb, CO, BTN, SB fold, BB calls"),
     ),
+    # Scenario 3 (May 2026): BTN opens vs SB call (SRP, thin SB-flat).
+    # Postflop order: SB -> BTN, so SB is OOP. Per
+    # docs/ryan_range_pack_index.md Open Questions A: SB only flats with
+    # ~6% of hands vs BTN open (the bulk of SB's defense is 3-bet,
+    # see Scenario 9). Wired for completeness; Ryan will decide whether
+    # to keep it in production.
+    "Cash6max_100bb_BTN_open_SB_call": _srp_spec(
+        name="Cash6max_100bb_BTN_open_SB_call",
+        oop_position="SB", ip_position="BTN",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/SB/"
+                   "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BTN/"
+                  "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%.txt"),
+        template_basename="Cash6max_100bb_BTN_open_SB_call_ryan_ranges.txt",
+        preflop_action_description=(
+            "UTG, HJ, CO fold, BTN opens 2.5bb, SB calls, BB folds"),
+    ),
 }
 
 

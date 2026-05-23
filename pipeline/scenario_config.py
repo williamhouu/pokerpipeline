@@ -166,6 +166,15 @@ SCENARIOS: dict[str, ScenarioConfig] = {
         oop_position="BB", ip_position="HJ",
         preflop_actions=(("HJ", "open", 1.25), ("BB", "call")),
     ),
+    # Scenario 3 (May 2026): BTN opens vs SB call (SRP, thin). Postflop
+    # order is SB -> BTN, so SB is OOP. BB folds before action returns,
+    # so only BTN and SB are surviving seats in preflop_actions.
+    "btn_vs_sb_srp_template": _srp_scenario_template(
+        cfr_key="btn_vs_sb_srp_template",
+        preflop_action="BTN open 2.5bb, SB call",
+        oop_position="SB", ip_position="BTN",
+        preflop_actions=(("BTN", "open", 1.25), ("SB", "call")),
+    ),
 }
 
 
