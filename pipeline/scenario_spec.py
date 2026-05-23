@@ -304,6 +304,24 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         preflop_action_description=(
             "UTG and HJ fold, CO opens 2.5bb, BTN and SB fold, BB calls"),
     ),
+    # Scenario 4 (May 2026): SB opens vs BB call (BvB SRP). Postflop order
+    # is SB->BB so SB is OOP at the flop. The pack's SB-open node labels
+    # itself "76%" but we model it as 2.5x to keep the shared 5.5bb-pot
+    # Tier-1 geometry; see docs/ryan_range_pack_index.md "Sizing convention"
+    # for the open question still owed to Ryan.
+    "Cash6max_100bb_SB_open_BB_call": _srp_spec(
+        name="Cash6max_100bb_SB_open_BB_call",
+        oop_position="SB", ip_position="BB",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/SB/"
+                   "UTG_Fold_HJ_Fold_CO_Fold_BTN_Fold_SB_76%.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                  "UTG_Fold_HJ_Fold_CO_Fold_BTN_Fold_SB_76%_BB_Call.txt"),
+        template_basename="Cash6max_100bb_SB_open_BB_call_ryan_ranges.txt",
+        preflop_action_description=(
+            "UTG, HJ, CO, BTN fold, SB opens 2.5bb, BB calls (BvB)"),
+    ),
 }
 
 

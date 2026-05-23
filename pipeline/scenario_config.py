@@ -148,6 +148,15 @@ SCENARIOS: dict[str, ScenarioConfig] = {
         oop_position="BB", ip_position="CO",
         preflop_actions=(("CO", "open", 1.25), ("BB", "call")),
     ),
+    # Scenario 4 (May 2026): SB opens vs BB call (BvB). Postflop order is
+    # SB->BB so SB is the OOP side. preflop_actions includes only the
+    # surviving seats; UTG/HJ/CO/BTN all fold before action reaches SB.
+    "sb_vs_bb_srp_template": _srp_scenario_template(
+        cfr_key="sb_vs_bb_srp_template",
+        preflop_action="SB open 2.5bb, BB call",
+        oop_position="SB", ip_position="BB",
+        preflop_actions=(("SB", "open", 1.25), ("BB", "call")),
+    ),
 }
 
 

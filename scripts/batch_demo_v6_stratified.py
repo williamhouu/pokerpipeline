@@ -81,6 +81,7 @@ RANDOM_SEED = 7
 SCENARIO_DIR_TO_TEMPLATE_KEY = {
     "Cash6max_100bb_BTN_open_BB_call": "btn_vs_bb_srp_2cJs7s",
     "Cash6max_100bb_CO_open_BB_call":  "co_vs_bb_srp_template",
+    "Cash6max_100bb_SB_open_BB_call":  "sb_vs_bb_srp_template",
 }
 
 LAYER5_SCENARIO = {"preflop_raise_count": 1, "game_format": "cash",
