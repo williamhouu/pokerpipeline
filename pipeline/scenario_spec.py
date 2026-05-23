@@ -535,6 +535,24 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
             "UTG, HJ, CO fold, BTN opens 2.5bb, SB folds, "
             "BB 3-bets, BTN 4-bets, BB calls"),
     ),
+    # Scenario 12 (May 2026): CO opens, BTN 3-bets, CO 4-bets, BTN calls
+    # (4BP). Pack uses CO 4-bet token '95%' (vs '50%' for BTN/HJ/UTG
+    # 4-bets) -- notably larger. From docs scenario #12.
+    "Cash6max_100bb_CO_open_BTN_3bet_CO_4bet_BTN_call": _4bp_spec(
+        name="Cash6max_100bb_CO_open_BTN_3bet_CO_4bet_BTN_call",
+        oop_position="CO", ip_position="BTN",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/CO/"
+                   "UTG_Fold_HJ_Fold_CO_60%_BTN_77%_SB_Fold_BB_Fold_CO_95%.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BTN/"
+                  "UTG_Fold_HJ_Fold_CO_60%_BTN_77%_SB_Fold_BB_Fold_CO_95%_BTN_Call.txt"),
+        template_basename=(
+            "Cash6max_100bb_CO_open_BTN_3bet_CO_4bet_BTN_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG, HJ fold, CO opens 2.5bb, BTN 3-bets, "
+            "SB and BB fold, CO 4-bets, BTN calls"),
+    ),
 }
 
 
