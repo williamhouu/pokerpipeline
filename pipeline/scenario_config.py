@@ -165,6 +165,26 @@ def _split_segments(action_sequence: Iterable[tuple[str, str]]) -> list[list[tup
     return segments
 
 
+def round_to_nearest_increment(amount: float, increment: float) -> float:
+    """Round `amount` to the nearest multiple of `increment`.
+
+    Used to snap converted bet/raise dollar amounts in the action-history
+    prose to the nearest small blind so chip-derived numbers like
+    `$1.85 / $5.23 / $12.15` render as `$1.75 / $5.25 / $12.25` -- the
+    sizes a real player at $0.25/$0.50 would actually wager. Underlying
+    EV math stays in chips; only the displayed prose is rounded.
+
+    Banker's-rounding-free: ties round to the nearest even multiple of
+    `increment` would be a surprise here, so we use Python's `round` on
+    the multiple-count which already does banker's rounding -- acceptable
+    because the inputs are not exact halfway points in practice. If a
+    later spec wants away-from-zero rounding we can swap.
+    """
+    if increment <= 0:
+        raise ValueError(f"increment must be > 0, got {increment!r}")
+    return round(amount / increment) * increment
+
+
 def _convert_postflop(entries: list[tuple[str, str]],
                       scenario: ScenarioConfig,
                       chips_per_bb: float) -> list[tuple]:
@@ -172,11 +192,16 @@ def _convert_postflop(entries: list[tuple[str, str]],
     (position, verb, dollars) form `pipeline.action_history` expects.
 
     Bet/raise amounts come through PioSolver in chips and are converted to
-    cash dollars (rounded to the nearest cent) using
+    cash dollars using
         chips -> bb:   chips / chips_per_bb
         bb    -> $:    scenario.dollars_per_bb
+    The final dollar amount is rounded to the nearest small blind so the
+    action-history prose reads like a real player's wager (Ryan-feedback
+    item #1, Apr 2026). Cent-precision rounding is the last-resort fallback
+    when `stakes_sb` isn't set on the scenario.
     """
     converted: list[tuple] = []
+    sb = scenario.stakes_sb if getattr(scenario, "stakes_sb", 0) > 0 else 0.01
     for actor, label in entries:
         position = (scenario.oop_position if actor == "OOP"
                     else scenario.ip_position)
@@ -184,9 +209,12 @@ def _convert_postflop(entries: list[tuple[str, str]],
         verb = parts[0]
         if len(parts) == 2:
             chips = float(parts[1])
-            amount = round(chips / chips_per_bb * scenario.dollars_per_bb, 2)
-            # action_history validates amounts > 0; clamp very-tiny rounding to 1c.
-            amount = max(amount, 0.01)
+            raw_dollars = chips / chips_per_bb * scenario.dollars_per_bb
+            amount = round_to_nearest_increment(raw_dollars, sb)
+            # action_history validates amounts > 0; clamp very-tiny rounding to one
+            # increment (so the smallest non-zero wager is one SB, not a fractional
+            # cent that the formatter would render as $0.00).
+            amount = max(amount, sb)
             converted.append((position, verb, amount))
         else:
             converted.append((position, verb))
@@ -247,5 +275,6 @@ __all__ = [
     "ScenarioConfig",
     "SCENARIOS",
     "get_scenario",
+    "round_to_nearest_increment",
     "spot_to_hand",
 ]

@@ -14,7 +14,8 @@ from pipeline.fact_extractor.spot_data import (                       # noqa: E4
     DecisionData, SpotData, SpotMetadata,
 )
 from pipeline.scenario_config import (                                # noqa: E402
-    SCENARIOS, ScenarioConfig, get_scenario, spot_to_hand,
+    SCENARIOS, ScenarioConfig, get_scenario,
+    round_to_nearest_increment, spot_to_hand,
 )
 
 
@@ -107,6 +108,58 @@ def test_oop_ip_must_differ():
     raise AssertionError("expected ValueError")
 
 
+# --- round_to_nearest_increment ---------------------------------------------
+def test_round_to_nearest_increment_ryan_feedback_examples():
+    """The exact examples Ryan listed in his Apr-2026 V6 review."""
+    sb = 0.25
+    assert round_to_nearest_increment(1.85, sb) == 1.75
+    assert round_to_nearest_increment(5.23, sb) == 5.25
+    assert round_to_nearest_increment(12.15, sb) == 12.25
+    assert round_to_nearest_increment(26.26, sb) == 26.25
+
+
+def test_round_to_nearest_increment_below_increment():
+    """Sub-SB amounts round to either 0 or one increment, depending on side."""
+    assert round_to_nearest_increment(0.10, 0.25) == 0.0
+    assert round_to_nearest_increment(0.13, 0.25) == 0.25
+    # The conversion in _convert_postflop clamps the result to at least one
+    # increment, so a sub-SB raw amount still renders as a real wager.
+
+
+def test_round_to_nearest_increment_rejects_nonpositive_increment():
+    try:
+        round_to_nearest_increment(1.85, 0)
+    except ValueError as exc:
+        assert "increment" in str(exc).lower()
+        return
+    raise AssertionError("expected ValueError")
+
+
+def test_convert_postflop_rounds_dollars_to_sb():
+    """The Ryan-feedback example values from his V6 review, threaded through
+    the production conversion pipeline. Chip amounts chosen so the raw
+    $-conversion lands on each of the four examples Ryan listed."""
+    scenario = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    # chips_per_bb = 87.75. dollars_per_bb = 0.50. So
+    #   chips * (0.50 / 87.75) = dollars.
+    # Pick chips so raw dollars match Ryan's examples.
+    cases = [
+        (324.7, 1.85, 1.75),    # 1.85 -> 1.75
+        (917.85, 5.23, 5.25),   # 5.23 -> 5.25
+        (2132.3, 12.15, 12.25), # 12.15 -> 12.25
+        (4608.4, 26.26, 26.25), # 26.26 -> 26.25
+    ]
+    for chips, raw, snapped in cases:
+        # Verify our chip choices reproduce the raw dollar amounts to 2 decimals.
+        derived_raw = chips / 87.75 * 0.50
+        assert abs(derived_raw - raw) < 0.01, f"{chips} chips -> {derived_raw} != {raw}"
+        # Then verify the conversion snaps to the expected SB multiple.
+        from pipeline.scenario_config import _convert_postflop
+        out = _convert_postflop([("IP", f"bet {chips}")], scenario, 87.75)
+        assert out[0] == ("BTN", "bet", snapped), \
+            f"{chips} chips: expected snap to {snapped}, got {out[0]}"
+
+
 # --- spot_to_hand bridge -----------------------------------------------------
 def test_spot_to_hand_basic_shape():
     """spot_to_hand produces a dict format_action_history can render -- no error."""
@@ -123,9 +176,12 @@ def test_spot_to_hand_basic_shape():
     assert hand["hero_position"] == "BB"
     assert hand["preflop_actions"] == [("BTN", "open", 1.25), ("BB", "call")]
     assert hand["board"] == {"flop": ["2c", "Js", "7s"], "turn": None, "river": None}
-    # OOP -> BB, IP -> BTN, label parsed and chips converted to dollars
-    # 41 chips / 87.75 chips/bb * $0.50/bb = $0.234 -> rounds to $0.23
-    assert hand["flop_actions"] == [("BB", "check"), ("BTN", "bet", 0.23)]
+    # OOP -> BB, IP -> BTN, label parsed and chips converted to dollars.
+    # 41 chips / 87.75 chips/bb * $0.50/bb = $0.234, rounded to nearest
+    # small blind ($0.25) per Ryan's Apr-2026 feedback so the prose reads
+    # like a real wager. The smallest-rounded-up clamp also kicks in so a
+    # below-SB bet still renders as exactly one SB.
+    assert hand["flop_actions"] == [("BB", "check"), ("BTN", "bet", 0.25)]
     assert hand["turn_actions"] == []
     assert hand["river_actions"] == []
 
@@ -148,9 +204,10 @@ def test_spot_to_hand_river_line_renders_end_to_end():
     hand = spot_to_hand(spot, scenario)
     rendered = format_action_history(hand)
     assert rendered.startswith("You're in the Big Blind with A")
-    # Postflop action lines reference dollar amounts (the chip-to-dollar
-    # conversion fired): a bet of 38 chips ~= $0.22 at this scale.
-    assert "$0.22" in rendered or "$0.21" in rendered, rendered
+    # Postflop action lines reference dollar amounts. A bet of 38 chips
+    # is $0.22 raw -> snaps to $0.25 (one SB) after the Ryan-feedback
+    # round-to-nearest-SB step.
+    assert "$0.25" in rendered, rendered
     # Three street sections appear (flop / turn / river).
     assert "Flop" in rendered and "Turn" in rendered and "River" in rendered
 
