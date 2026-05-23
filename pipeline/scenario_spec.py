@@ -460,6 +460,23 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         preflop_action_description=(
             "UTG, HJ, CO fold, BTN opens 2.5bb, SB 3-bets, BB folds, BTN calls"),
     ),
+    # Scenario 10 (May 2026): UTG opens, BB 3-bets, UTG calls (3BP).
+    # Pack uses BB 3-bet token '155%'. Tightest BB 3-bet range, since
+    # UTG opens tightest. From docs/ryan_range_pack_index.md scenario #10.
+    "Cash6max_100bb_UTG_open_BB_3bet_UTG_call": _3bp_spec(
+        name="Cash6max_100bb_UTG_open_BB_3bet_UTG_call",
+        oop_position="BB", ip_position="UTG",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold_BB_155%.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/UTG/"
+                  "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold_BB_155%_UTG_Call.txt"),
+        template_basename=(
+            "Cash6max_100bb_UTG_open_BB_3bet_UTG_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG opens 2.5bb, HJ, CO, BTN, SB fold, BB 3-bets, UTG calls"),
+    ),
 }
 
 
