@@ -41,16 +41,18 @@ def _spot(effective_stack_bb: float = 98.0,
     )
 
 
-def test_thirty_five_column_structure():
-    assert len(CSV_COLUMNS) == 35
-    # The columns the .xlsx sample adds beyond the original 28.
+def test_thirty_six_column_structure():
+    """Apr-2026 Ryan-feedback Fix 3 added `action_frequencies` after
+    validation_status, taking the layout from 35 to 36 columns."""
+    assert len(CSV_COLUMNS) == 36
     assert CSV_COLUMNS[0] == "No"
-    assert CSV_COLUMNS[-1] == "validation_status"
-    # Header casing fixes.
+    assert CSV_COLUMNS[-2] == "validation_status"            # was last
+    assert CSV_COLUMNS[-1] == "action_frequencies"           # new tail
+    # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 35
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 36
 
 
 def test_no_and_validation_status():
@@ -68,6 +70,33 @@ def test_new_pipeline_columns():
     assert row["solver_reference"] == (
         "PioSolver_Cash_100bb/BB_vs_BTN/single_raised_pot/flop_2cJs7s/AhKh")
     assert row["ev_gap_bb"] == "1.37"
+
+
+def test_action_frequencies_column_renders_descending_percentages():
+    """Fix 3: action_frequencies summarises Pio's range strategy as
+    '<verb>: <integer>%' entries, descending by frequency."""
+    from pipeline.fact_extractor.spot_data import DecisionData
+    spot = _spot()
+    # Replace the decision with one that has an explicit strategy.
+    object.__setattr__(spot, "decision_data", DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.601, "fold": 0.199,
+                                  "raise": 0.10, "all-in": 0.10},
+        ev_gap_bb=0.74))
+    row = build_row(spot, 1500, 1)
+    assert row["action_frequencies"] == \
+        "call: 60%, fold: 20%, raise: 10%, all-in: 10%"
+
+
+def test_action_frequencies_column_handles_empty_strategy():
+    """When the strategy is empty, the column is the empty string -- the
+    row is still valid, the field is just blank."""
+    from pipeline.fact_extractor.spot_data import DecisionData
+    spot = _spot()
+    object.__setattr__(spot, "decision_data", DecisionData(
+        correct_action="bet", range_aggregate_strategy={}, ev_gap_bb=0.0))
+    row = build_row(spot, 1500, 1)
+    assert row["action_frequencies"] == ""
 
 
 def test_board_texture_broadway_alias():
@@ -138,8 +167,9 @@ def test_scenario_populated_columns():
     assert "The Button opens to $1.25" in q                 # _VILLAIN_REF rendering
     assert "You call." in q
     assert "Flop ($2.75)" in q                              # preflop pot rendered
-    # And the postflop dollar conversion fired: 41 chips ~ $0.23 at this scale.
-    assert "$0.23" in q
+    # Postflop conversion fires: 41 chips ~ $0.234 raw -> snaps to $0.25
+    # under Fix 1's round-to-nearest-SB step (Ryan-feedback Apr 2026).
+    assert "$0.25" in q
 
 
 def test_scenario_question_has_no_tbd_token():

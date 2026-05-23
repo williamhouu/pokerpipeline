@@ -2,9 +2,14 @@
 
 Writes pipeline questions out as CSV rows in the team's question-template
 column format. The authoritative layout is docs/output_format_examples.xlsx
-(Sheet 1, "Example formatting") -- exactly 35 columns: a leading `No`, the 28
-template columns, the 5 new pipeline columns (concept_tags, hand_class,
+(Sheet 1, "Example formatting") -- 35 baseline columns: a leading `No`, the
+28 template columns, the 5 pipeline columns (concept_tags, hand_class,
 board_texture, solver_reference, ev_gap_bb), and `validation_status`.
+
+A 36th column `action_frequencies` was added per Ryan-feedback Fix 3 (Apr
+2026): a comma-separated `<verb>: <integer>%` summary of the solver's
+range-aggregate strategy at the decision point, so the QA reviewer can see
+the mix at a glance without opening the .cfr.
 
 Columns the pipeline cannot fill yet carry an explicit placeholder rather than
 being left blank:
@@ -51,6 +56,8 @@ CSV_COLUMNS = [
     # New pipeline columns.
     "concept_tags", "hand_class", "board_texture", "solver_reference",
     "ev_gap_bb", "validation_status",
+    # Ryan-feedback Fix 3 (Apr 2026): "fold: 10%, call: 60%, raise: 20%, all-in: 10%".
+    "action_frequencies",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -121,6 +128,24 @@ def _dollars(amount: float) -> str:
     if isinstance(amount, float) and not amount.is_integer():
         return f"${amount:,.2f}"
     return f"${int(amount):,}"
+
+
+def _format_action_frequencies(strategy: dict[str, float]) -> str:
+    """The Fix-3 action_frequencies column value.
+
+    Renders `decision.range_aggregate_strategy` (a `{verb: freq}` map)
+    as a comma-separated list of `<verb>: <integer>%` entries, ordered by
+    descending frequency. Example: `{"call": 0.66, "fold": 0.34}` ->
+    `"call: 66%, fold: 34%"`.
+
+    Empty strategy -> empty string (the column is best-effort: spots
+    without a populated strategy still produce a valid CSV row).
+    """
+    if not strategy:
+        return ""
+    by_freq_desc = sorted(strategy.items(), key=lambda kv: -kv[1])
+    parts = [f"{verb}: {round(100 * freq)}%" for verb, freq in by_freq_desc]
+    return ", ".join(parts)
 
 
 def _villain_seat(meta, scenario: ScenarioConfig) -> str:
@@ -216,6 +241,10 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         "solver_reference": _solver_reference(meta),
         "ev_gap_bb": f"{decision.ev_gap_bb:.2f}",
         "validation_status": "auto_approved",      # pipeline-generated default
+        # Ryan-feedback Fix 3: surface the action mix at the decision node
+        # so the QA reviewer can read it without opening the .cfr.
+        "action_frequencies": _format_action_frequencies(
+            decision.range_aggregate_strategy),
     }
 
 
