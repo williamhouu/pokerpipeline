@@ -44,13 +44,19 @@ def test_cash6max_btn_vs_bb_registered():
     assert len(spec.raise_sizes_pct) >= 1
     # Accuracy target ~= 0.5% of the 55-chip pot.
     assert 0.20 <= spec.accuracy_target_chips <= 0.40
-    # Template-driven solve source.
-    assert spec.pio_template_path.endswith("2bpot-full.txt")
-    # Ranges are inline Pio strings, not file paths (documentary).
-    assert spec.range_is_file("OOP") is False
-    assert spec.range_is_file("IP") is False
-    assert "22+" in spec.ip_range            # BTN open includes all pairs
-    assert "65s" in spec.oop_range           # BB call has suited connectors
+    # Template-driven solve source -- now the Ryan-ranges template under
+    # templates/ rather than Pio's shipped 2bpot-full.txt.
+    assert spec.pio_template_path.endswith(
+        "Cash6max_100bb_BTN_open_BB_call_ryan_ranges.txt")
+    assert spec.using_ryan_ranges is True
+    # Ranges now point at Ryan's pack files (canonical Tier-1 source per
+    # docs/ryan_range_pack_index.md), not inline Pio strings.
+    assert spec.range_is_file("OOP") is True
+    assert spec.range_is_file("IP") is True
+    assert "BB/UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Fold_BB_Call.txt" \
+        in spec.oop_range.replace("\\", "/")
+    assert "BTN/UTG_Fold_HJ_Fold_CO_Fold_BTN_60%.txt" \
+        in spec.ip_range.replace("\\", "/")
 
 
 def test_get_solver_spec_known_and_unknown():
@@ -161,10 +167,11 @@ def test_geometry_consistency_check():
 # --- range file detection ---------------------------------------------------
 def test_range_is_file_detection():
     """A .txt extension AND existing file -> True; inline string -> False."""
-    # Inline string (the registered default).
+    # The registered S1 spec now uses Ryan-pack file paths (repo-relative);
+    # both should detect as files.
     spec = SOLVER_SPECS["Cash6max_100bb_BTN_open_BB_call"]
-    assert spec.range_is_file("OOP") is False
-    assert spec.range_is_file("IP") is False
+    assert spec.range_is_file("OOP") is True
+    assert spec.range_is_file("IP") is True
     # A real .txt path that exists.
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tmp:
         tmp.write(b"22+,A2s+\n")

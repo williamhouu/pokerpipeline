@@ -129,6 +129,25 @@ def failure_marker_path(spec: SolverSpec, flop: Flop, *,
 # differently when scripted vs read from the GUI).
 _TEMPLATE_SKIP_PREFIXES = ("#",)
 
+# Repo root for resolving repo-relative template paths (custom Ryan-ranges
+# templates live at `templates/...` in the repo; Pio's shipped ones at
+# absolute Windows paths).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_template_path(raw: str) -> Path:
+    """Resolve `SolverSpec.pio_template_path` to a real filesystem path.
+
+    Absolute paths pass through unchanged (Pio's shipped templates live at
+    `C:\\PioSOLVER\\TreeBuilding\\...`). Relative paths are resolved against
+    the repo root so a `templates/...` entry works whether the batch driver
+    is invoked from the repo root or from `scripts/`.
+    """
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    return _REPO_ROOT / candidate
+
 
 def _is_command_line(line: str) -> bool:
     """A template line is a UPI command iff it's non-empty and not metadata."""
@@ -173,7 +192,7 @@ def _configure_tree(client: PioSolverClient,
         raise PioSolverError(
             f"spec {spec.name!r} has no pio_template_path; template-driven "
             f"solves are the only supported mode in Tier 1")
-    template_path = Path(spec.pio_template_path)
+    template_path = _resolve_template_path(spec.pio_template_path)
     if not template_path.is_file():
         raise PioSolverError(
             f"Pio template not found at {template_path}; check the "
