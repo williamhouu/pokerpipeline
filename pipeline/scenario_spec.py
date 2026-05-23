@@ -213,6 +213,34 @@ class SolverSpec:
 #   <Format><TableSize>_<StackBB>_<OOPpos>_<preflop_action_summary>
 # Filesystem-safe (no spaces, no special chars beyond underscore). The same
 # name becomes the cache directory under solves/.
+def _srp_spec(*, name: str, oop_position: str, ip_position: str,
+              oop_range: str, ip_range: str, template_basename: str,
+              preflop_action_description: str) -> "SolverSpec":
+    """Helper: build a Cash6max 100bb SRP SolverSpec. All Tier-1 SRP
+    scenarios share the same chip geometry (pot=55, eff=975) and bet
+    sizings (drawn from PioSolver's shipped 2bpot-full.txt template);
+    only ranges, positions, and the action-description prose differ.
+
+    `template_basename` is the filename (no path) under `templates/`;
+    `oop_range` / `ip_range` are repo-relative paths into Ryan's pack.
+    """
+    return SolverSpec(
+        name=name, format="cash", stack_bb=100,
+        oop_position=oop_position, ip_position=ip_position,
+        oop_range=oop_range, ip_range=ip_range,
+        pot_after_preflop_chips=55,
+        starting_postflop_stack_chips=975,
+        bb_in_chips=10,
+        bet_sizes_oop_pct=(65,), bet_sizes_ip_pct=(65,),
+        raise_sizes_pct=(52,),
+        accuracy_target_chips=0.28,
+        iso_suits=True, iso_board=False,
+        preflop_action_description=preflop_action_description,
+        pio_template_path=f"templates/{template_basename}",
+        using_ryan_ranges=True,
+    )
+
+
 SOLVER_SPECS: dict[str, SolverSpec] = {
     "Cash6max_100bb_BTN_open_BB_call": SolverSpec(
         name="Cash6max_100bb_BTN_open_BB_call",
@@ -260,6 +288,21 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         pio_template_path=(
             "templates/Cash6max_100bb_BTN_open_BB_call_ryan_ranges.txt"),
         using_ryan_ranges=True,
+    ),
+    # Scenario 2 (May 2026): CO opens vs BB call (SRP). Same chip geometry as
+    # BTN-vs-BB; ranges from docs/ryan_range_pack_index.md scenario #2.
+    "Cash6max_100bb_CO_open_BB_call": _srp_spec(
+        name="Cash6max_100bb_CO_open_BB_call",
+        oop_position="BB", ip_position="CO",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_Fold_HJ_Fold_CO_60%_BTN_Fold_SB_Fold_BB_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/CO/"
+                  "UTG_Fold_HJ_Fold_CO_60%.txt"),
+        template_basename="Cash6max_100bb_CO_open_BB_call_ryan_ranges.txt",
+        preflop_action_description=(
+            "UTG and HJ fold, CO opens 2.5bb, BTN and SB fold, BB calls"),
     ),
 }
 

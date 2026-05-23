@@ -100,6 +100,25 @@ class ScenarioConfig:
 
 
 # --- the registry -----------------------------------------------------------
+def _srp_scenario_template(*, cfr_key: str, preflop_action: str,
+                           oop_position: str, ip_position: str,
+                           preflop_actions: tuple) -> "ScenarioConfig":
+    """Helper: build a Cash6max 100bb online SRP ScenarioConfig used as a
+    TEMPLATE -- batch_demo_v6 clones it per actual .cfr via dataclasses.replace.
+    All Tier-1 SRP scenarios share the same stakes/table/stack metadata;
+    only positions, the prose action, and the preflop_actions tuple differ.
+    """
+    return ScenarioConfig(
+        cfr_key=cfr_key,
+        format="Cash 6-max", stakes="$0.25/$0.50",
+        live_or_online="Online", preflop_action=preflop_action,
+        game_format="cash", stakes_sb=0.25, stakes_bb=0.50, table_size=6,
+        default_stack_bb=100, default_stack_dollars=50.00, venue="online",
+        oop_position=oop_position, ip_position=ip_position,
+        preflop_actions=preflop_actions,
+    )
+
+
 SCENARIOS: dict[str, ScenarioConfig] = {
     "btn_vs_bb_srp_2cJs7s": ScenarioConfig(
         cfr_key="btn_vs_bb_srp_2cJs7s",
@@ -119,6 +138,15 @@ SCENARIOS: dict[str, ScenarioConfig] = {
         # BTN opens 2.5bb ($1.25); SB folds (implicit -- only the surviving
         # seats appear in preflop_actions); BB calls.
         preflop_actions=(("BTN", "open", 1.25), ("BB", "call")),
+    ),
+    # Scenario 2 (May 2026): CO opens vs BB call. The "_template" suffix
+    # signals this entry is cloned by batch_demo_v6 per actual .cfr via
+    # dataclasses.replace (the cfr_key field is overridden at clone time).
+    "co_vs_bb_srp_template": _srp_scenario_template(
+        cfr_key="co_vs_bb_srp_template",
+        preflop_action="CO open 2.5bb, BB call",
+        oop_position="BB", ip_position="CO",
+        preflop_actions=(("CO", "open", 1.25), ("BB", "call")),
     ),
 }
 
