@@ -255,6 +255,17 @@ SCENARIOS: dict[str, ScenarioConfig] = {
                          ("CO", "4-bet", 14.00),
                          ("BTN", "call")),
     ),
+    # Scenario 13 (May 2026): HJ open, BB 3-bet, HJ 4-bet, BB call
+    # (4BP). HJ 4-bets to ~25bb = $12.50 (pack '50%' token).
+    "hj_vs_bb_4bp_template": _srp_scenario_template(
+        cfr_key="hj_vs_bb_4bp_template",
+        preflop_action="HJ open 2.5bb, BB 3-bet 12bb, HJ 4-bet 25bb, BB call",
+        oop_position="BB", ip_position="HJ",
+        preflop_actions=(("HJ", "open", 1.25),
+                         ("BB", "3-bet", 6.00),
+                         ("HJ", "4-bet", 12.50),
+                         ("BB", "call")),
+    ),
 }
 
 

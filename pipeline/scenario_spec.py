@@ -553,6 +553,24 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
             "UTG, HJ fold, CO opens 2.5bb, BTN 3-bets, "
             "SB and BB fold, CO 4-bets, BTN calls"),
     ),
+    # Scenario 13 (May 2026): HJ opens, BB 3-bets, HJ 4-bets, BB calls
+    # (4BP). Pack uses HJ 4-bet token '50%'. Extremely tight HJ 4-bet
+    # range (no full-weight hand class other than AA). From docs #13.
+    "Cash6max_100bb_HJ_open_BB_3bet_HJ_4bet_BB_call": _4bp_spec(
+        name="Cash6max_100bb_HJ_open_BB_3bet_HJ_4bet_BB_call",
+        oop_position="BB", ip_position="HJ",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_Fold_HJ_60%_CO_Fold_BTN_Fold_SB_Fold_BB_182%_HJ_50%_BB_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/HJ/"
+                  "UTG_Fold_HJ_60%_CO_Fold_BTN_Fold_SB_Fold_BB_182%_HJ_50%.txt"),
+        template_basename=(
+            "Cash6max_100bb_HJ_open_BB_3bet_HJ_4bet_BB_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG folds, HJ opens 2.5bb, CO, BTN, SB fold, "
+            "BB 3-bets, HJ 4-bets, BB calls"),
+    ),
 }
 
 
