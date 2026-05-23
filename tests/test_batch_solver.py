@@ -230,6 +230,29 @@ def test_solve_one_skips_when_cfr_already_exists():
         assert log == []                         # NO UPI commands issued
 
 
+def test_solve_one_force_resolves_existing_cfr():
+    """With force=True, an existing .cfr is deleted and re-solved; the
+    result is a fresh 'solved' status, not 'skipped'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        template = root / "stub_template.txt"
+        _stub_template(template)
+        spec = _spec_with_template(template)
+        target = cache_path(spec, FLOP, solve_root=root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"STALE_CFR")
+        log: list = []
+        client = _make_mock_client(log)
+        result = solve_one(client, spec, FLOP, solve_root=root,
+                           force=True, log=lambda *a, **kw: None)
+        assert result.status == "solved"
+        # New file written by dump_tree (mock writes 14 bytes); the old
+        # 9-byte STALE_CFR must have been overwritten.
+        assert result.file_size_bytes != 9
+        # UPI commands were issued (skip path would have logged nothing).
+        assert any(cmd.startswith("set_board") for cmd, _ in log)
+
+
 def test_solve_one_writes_failed_marker_on_setup_error():
     """When a template UPI command errors, write a .failed marker and
     return cleanly."""
@@ -324,7 +347,8 @@ def test_run_batch_rollup_partitions_solves_correctly():
             ("failed",  "boom"),
         ])
 
-        def fake_solve_one(client, spec, flop, *, solve_root, timeout_seconds, log):
+        def fake_solve_one(client, spec, flop, *, solve_root, timeout_seconds, log,
+                           force=False):
             status, err = next(outcomes)
             return SolveResult(
                 spec_name=spec.name,

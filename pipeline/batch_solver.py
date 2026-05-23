@@ -249,19 +249,29 @@ def solve_one(client: PioSolverClient,
               *,
               solve_root: Path = DEFAULT_SOLVE_ROOT,
               timeout_seconds: int = SOLVE_TIMEOUT_SECONDS,
+              force: bool = False,
               log=print) -> SolveResult:
-    """Configure + solve + dump one (spec, flop). Returns a SolveResult."""
+    """Configure + solve + dump one (spec, flop). Returns a SolveResult.
+
+    When `force=True`, an existing `.cfr` at the target path is deleted and
+    the solve runs fresh. Use this when the underlying spec changed (e.g.
+    ranges swapped) and the cached solve is stale.
+    """
     output = cache_path(spec, flop, solve_root=solve_root)
     flop_stem = flop_filename_stem(flop)
     result = SolveResult(spec_name=spec.name, flop_stem=flop_stem,
                          output_path=output, status="failed")
 
     if output.is_file():
-        result.status = "skipped"
-        result.file_size_bytes = output.stat().st_size
-        log(f"  [skip] {spec.name}/{flop_stem}.cfr already exists "
-            f"({result.file_size_bytes:,} bytes)")
-        return result
+        if force:
+            output.unlink()
+            log(f"  [force] {spec.name}/{flop_stem}.cfr removed; re-solving ...")
+        else:
+            result.status = "skipped"
+            result.file_size_bytes = output.stat().st_size
+            log(f"  [skip] {spec.name}/{flop_stem}.cfr already exists "
+                f"({result.file_size_bytes:,} bytes)")
+            return result
 
     output.parent.mkdir(parents=True, exist_ok=True)
     # Clear any stale marker so a re-attempt isn't gated by an old failure.
@@ -346,8 +356,10 @@ def run_batch(spec: SolverSpec, flops: tuple, *,
               solve_root: Path = DEFAULT_SOLVE_ROOT,
               timeout_seconds: int = SOLVE_TIMEOUT_SECONDS,
               flop_set_name: str = "",
+              force: bool = False,
               log=print) -> BatchSolveResult:
-    """Solve every (spec, flop). Resumes if .cfr files already exist."""
+    """Solve every (spec, flop). Resumes if .cfr files already exist
+    (or, when `force=True`, deletes existing .cfrs and re-solves)."""
     result = BatchSolveResult(spec_name=spec.name, flop_set_name=flop_set_name)
     if pio_exe is None:
         pio_exe = find_piosolver()
@@ -368,7 +380,8 @@ def run_batch(spec: SolverSpec, flops: tuple, *,
             try:
                 solve = solve_one(client, spec, flop,
                                   solve_root=solve_root,
-                                  timeout_seconds=timeout_seconds, log=log)
+                                  timeout_seconds=timeout_seconds,
+                                  force=force, log=log)
             finally:
                 # Always reset solver state -- if the solve crashed mid-way,
                 # we don't want stale tree config bleeding into the next one.

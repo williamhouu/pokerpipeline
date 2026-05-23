@@ -86,6 +86,11 @@ def main(argv=None) -> int:
                         help="cache root directory (default <repo>/solves)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the execution plan without solving")
+    parser.add_argument("--force-resolve", action="store_true",
+                        help="delete and re-solve any .cfr files already on "
+                             "disk (default: skip and resume). Use this when "
+                             "the spec changed (e.g. ranges swapped) and the "
+                             "cached solves are stale.")
     args = parser.parse_args(argv)
 
     spec = get_solver_spec(args.scenario)
@@ -105,7 +110,8 @@ def main(argv=None) -> int:
     print(f"PioSolver : {pio_exe}\n")
     result = run_batch(spec, flops, pio_exe=pio_exe,
                        solve_root=args.solve_root,
-                       flop_set_name=args.flop_set)
+                       flop_set_name=args.flop_set,
+                       force=args.force_resolve)
     elapsed = time.time() - start
 
     # Summary.
