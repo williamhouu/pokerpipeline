@@ -342,21 +342,23 @@ def test_default_model_passed_to_client():
 
 
 def test_frequency_to_verb_prefix_brackets():
-    """Brackets are inclusive at the lower bound."""
+    """Brackets are inclusive at the lower bound. Pre-Apr-2026 there were
+    four prefixes (Always/Mostly/Sometimes/Rarely); Ryan-feedback Fix 2
+    collapsed the lower three into a single Mostly so standalone
+    \"Sometimes X\" options never appear."""
     # Always: 0.95 and above.
     assert frequency_to_verb_prefix(1.0) == "Always"
     assert frequency_to_verb_prefix(0.95) == "Always"
-    # Mostly: 0.60 to 0.95.
+    # Mostly: everything in [0.05, 0.95). Was Always/Mostly/Sometimes/Rarely
+    # before; now collapsed.
     assert frequency_to_verb_prefix(0.9499) == "Mostly"
     assert frequency_to_verb_prefix(0.66) == "Mostly"
     assert frequency_to_verb_prefix(0.60) == "Mostly"
-    # Sometimes: 0.20 to 0.60.
-    assert frequency_to_verb_prefix(0.59) == "Sometimes"
-    assert frequency_to_verb_prefix(0.57) == "Sometimes"     # v3 Row 8's freq
-    assert frequency_to_verb_prefix(0.20) == "Sometimes"
-    # Rarely: 0.05 to 0.20.
-    assert frequency_to_verb_prefix(0.19) == "Rarely"
-    assert frequency_to_verb_prefix(0.05) == "Rarely"
+    assert frequency_to_verb_prefix(0.59) == "Mostly"
+    assert frequency_to_verb_prefix(0.57) == "Mostly"        # v3 Row 8's freq
+    assert frequency_to_verb_prefix(0.20) == "Mostly"
+    assert frequency_to_verb_prefix(0.19) == "Mostly"
+    assert frequency_to_verb_prefix(0.05) == "Mostly"
     # Below 0.05: empty (action essentially not played).
     assert frequency_to_verb_prefix(0.04) == ""
     assert frequency_to_verb_prefix(0.0008) == ""            # v3 Row 1's raise

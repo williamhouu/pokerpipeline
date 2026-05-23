@@ -242,10 +242,131 @@ def validate_option_set_completeness(
     return ValidationResult.ok()
 
 
+# --- Ryan-feedback Fix 2b validators (Apr 2026) -----------------------------
+# Threshold above which a Pio action is considered "in the mix" for option
+# coverage purposes. Mirrors COMPLETENESS_MIN_FREQ above (also 0.05) but
+# named separately so the two thresholds can drift if Ryan tunes them.
+COMPOSITE_LABEL_MIN_FREQ = 0.05
+
+_COMPOSITE_LABEL_RE = __import__("re").compile(
+    r"^(?:Mostly|mostly)\s+(\w[\w-]*),\s*sometimes\s+(\w[\w-]*)\s*$"
+)
+
+
+def _meaningful_pio_verbs(decision: DecisionData,
+                          min_freq: float = COMPOSITE_LABEL_MIN_FREQ) -> list[str]:
+    """Pio verbs played at frequency >= min_freq, ordered by frequency desc."""
+    strategy = decision.range_aggregate_strategy
+    return [verb for verb, _ in
+            sorted(strategy.items(), key=lambda kv: -kv[1])
+            if strategy[verb] >= min_freq]
+
+
+def validate_no_standalone_sometimes(generated: GeneratedExplanation,
+                                     decision: DecisionData) -> ValidationResult:
+    """No option may be a bare \"Sometimes X\" or \"Rarely X\" label.
+
+    Per Ryan's Apr-2026 V6 review (Fix 2b (a)): standalone Sometimes/Rarely
+    options are ambiguous to players ("Sometimes check" and "Sometimes bet"
+    are not mutually exclusive readings of the strategy). The frequency
+    prefix mapping has been collapsed to Always/Mostly; the LLM uses
+    "sometimes" only as the secondary verb of a composite label like
+    \"Mostly call, sometimes raise\".
+
+    This validator fires regardless of how many Pio actions are in the mix
+    -- a standalone Sometimes/Rarely label is wrong in any context.
+    """
+    offending: list[str] = []
+    for slot, option in zip(("option_1", "option_2", "option_3", "option_4"),
+                            (generated.option_1, generated.option_2,
+                             generated.option_3, generated.option_4)):
+        if not option:
+            continue
+        prefix = extract_frequency_prefix(option)
+        if prefix in ("Sometimes", "Rarely"):
+            # Allow composite "Mostly X, sometimes Y" to pass -- the prefix
+            # we extracted is "Mostly", not "Sometimes". This branch only
+            # fires when the LEADING word is Sometimes/Rarely.
+            offending.append(f"{slot}={option!r}")
+    if offending:
+        return ValidationResult.fail(
+            "standalone \"Sometimes X\" / \"Rarely X\" option labels are "
+            "banned per Apr-2026 review. Use \"Mostly X\" for 2-action "
+            "spots or composite \"Mostly X, sometimes Y\" labels for 3+ "
+            "action spots. Offending options: " + "; ".join(offending)
+        )
+    return ValidationResult.ok()
+
+
+def validate_composite_label_frequencies(generated: GeneratedExplanation,
+                                         decision: DecisionData) -> ValidationResult:
+    """Composite labels of form "Mostly X, sometimes Y" must reflect the
+    actual Pio frequencies (X dominant over Y, both at >= 5%).
+
+    Per Ryan's Apr-2026 V6 review (Fix 2b (b)): a composite label implies a
+    specific strategic shape -- one verb is dominant, another is the
+    secondary mix-in. If Pio's actual frequencies don't fit, the label
+    misrepresents the data block.
+
+    Specifically, for every option matching the literal "Mostly X,
+    sometimes Y" pattern:
+
+      * X must be a Pio-offered verb;
+      * Y must be a Pio-offered verb;
+      * Pio's freq(X) must be >= freq(Y) (otherwise X isn't dominant);
+      * Pio's freq(Y) must be >= COMPOSITE_LABEL_MIN_FREQ (otherwise Y
+        isn't "in the mix" at all and the LLM is fabricating a secondary).
+
+    Options that don't match the composite pattern are skipped (they go
+    through the other validators).
+    """
+    strategy = decision.range_aggregate_strategy
+    if not strategy:
+        return ValidationResult.ok()
+    failures: list[str] = []
+    for slot, option in zip(("option_1", "option_2", "option_3", "option_4"),
+                            (generated.option_1, generated.option_2,
+                             generated.option_3, generated.option_4)):
+        if not option:
+            continue
+        match = _COMPOSITE_LABEL_RE.match(option)
+        if not match:
+            continue
+        x_verb, y_verb = match.group(1).lower(), match.group(2).lower()
+        x_freq = strategy.get(x_verb, 0.0)
+        y_freq = strategy.get(y_verb, 0.0)
+        if x_verb not in strategy:
+            failures.append(
+                f"{slot}={option!r}: composite-label dominant verb {x_verb!r} "
+                f"is not in Pio's strategy {sorted(strategy)}")
+            continue
+        if y_verb not in strategy:
+            failures.append(
+                f"{slot}={option!r}: composite-label secondary verb {y_verb!r}"
+                f" is not in Pio's strategy {sorted(strategy)}")
+            continue
+        if x_freq < y_freq:
+            failures.append(
+                f"{slot}={option!r}: composite label claims {x_verb!r} is "
+                f"dominant over {y_verb!r}, but Pio plays {x_verb} at "
+                f"{x_freq:.2%} < {y_verb} at {y_freq:.2%}")
+            continue
+        if y_freq < COMPOSITE_LABEL_MIN_FREQ:
+            failures.append(
+                f"{slot}={option!r}: secondary verb {y_verb!r} only at "
+                f"{y_freq:.2%} (< {COMPOSITE_LABEL_MIN_FREQ:.0%}), which is "
+                f"below the 'meaningfully mixed' threshold -- omit the "
+                f"composite and use a plain \"Mostly {x_verb}\" or "
+                f"\"Always {x_verb}\" instead")
+    if failures:
+        return ValidationResult.fail("; ".join(failures))
+    return ValidationResult.ok()
+
+
 # --- combined entry point used by Layer 6 retry loop ------------------------
 def run_audit_validators(generated: GeneratedExplanation,
                          decision: DecisionData) -> ValidationResult:
-    """Run all three validators in order; return the first failure or ok.
+    """Run all validators in order; return the first failure or ok.
 
     The retry loop in `explanation_generator.generate_explanation` calls this
     after the structural check (`_validate`) and uses the returned
@@ -253,7 +374,9 @@ def run_audit_validators(generated: GeneratedExplanation,
     """
     for check in (validate_option_set,
                   validate_correct_answer_verb,
-                  validate_option_set_completeness):
+                  validate_option_set_completeness,
+                  validate_no_standalone_sometimes,
+                  validate_composite_label_frequencies):
         result = check(generated, decision)
         if not result.is_valid:
             return result
@@ -261,12 +384,15 @@ def run_audit_validators(generated: GeneratedExplanation,
 
 
 __all__ = [
-    "ValidationResult",
     "COMPLETENESS_MIN_FREQ",
+    "COMPOSITE_LABEL_MIN_FREQ",
+    "ValidationResult",
     "extract_action_verb",
     "extract_frequency_prefix",
-    "validate_option_set",
-    "validate_correct_answer_verb",
-    "validate_option_set_completeness",
     "run_audit_validators",
+    "validate_composite_label_frequencies",
+    "validate_correct_answer_verb",
+    "validate_no_standalone_sometimes",
+    "validate_option_set",
+    "validate_option_set_completeness",
 ]

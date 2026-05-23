@@ -17,7 +17,8 @@ block of ~8 of those gold rows, and the brief's banned-phrase list (no em
 dashes, no semicolons, no corporate phrasing). Output is JSON for parsing.
 
 Option style is chosen from solver signals before the call -- binary action
-(Call/Fold), frequency (Always/Mostly/Sometimes), or sizing (33%/75%/135%) --
+(Call/Fold), frequency (Always/Mostly + composite labels), or sizing
+(33%/75%/135%) --
 and passed to the LLM as an explicit instruction so the model doesn't pick.
 
 Validation: the `correct_answer` string must equal one of `option_1`...
@@ -141,22 +142,26 @@ class ExplanationValidationError(RuntimeError):
 
 
 # --- frequency-to-prefix mapping (deterministic, no LLM) ---------------------
-# Brackets for the Always/Mostly/Sometimes/Rarely prefix in frequency-style
-# options. Inclusive at the lower bound: freq >= 0.95 -> "Always", etc. Below
-# 0.05 -> empty string (the action is essentially not played).
+# Brackets for the Always/Mostly prefix in frequency-style options. Inclusive
+# at the lower bound: freq >= 0.95 -> "Always", freq >= 0.05 -> "Mostly",
+# below 0.05 -> empty string (the action is essentially not played).
+#
+# Pre-Apr-2026 the mapping had four brackets (Always/Mostly/Sometimes/Rarely).
+# Ryan-feedback item #2: a standalone "Sometimes X" option is ambiguous --
+# two such options ("Sometimes check", "Sometimes bet") aren't mutually
+# exclusive readings of the strategy. Collapsing the lower three brackets
+# into a single "Mostly" makes the 2-action option set "Always A / Mostly A
+# / Mostly B / Always B" universally; 3+ action spots use composite labels
+# like "Mostly X, sometimes Y" instead of standalone "Sometimes" labels
+# (see Fix 2b in the option-style instruction and validators).
 #
 # Used by:
 #   * _expected_correct_prefix to compute the hard-constraint prefix the LLM
 #     receives in the frequency-style option-style instruction;
 #   * validators.validate_correct_answer_verb to check the LLM honoured it.
-#
-# The May-2026 audit (test_output/audit_report.md, item #3) flagged this as
-# LLM-controlled with no Python threshold; brought under Python control here.
 _FREQ_PREFIX_BRACKETS = (
     (0.95, "Always"),
-    (0.60, "Mostly"),
-    (0.20, "Sometimes"),
-    (0.05, "Rarely"),
+    (0.05, "Mostly"),
 )
 
 
@@ -164,10 +169,13 @@ def frequency_to_verb_prefix(freq: float) -> str:
     """Map a Pio frequency to its deterministic option-label prefix.
 
       [0.95, 1.0]  -> "Always"
-      [0.60, 0.95) -> "Mostly"
-      [0.20, 0.60) -> "Sometimes"
-      [0.05, 0.20) -> "Rarely"
+      [0.05, 0.95) -> "Mostly"
       [0,    0.05) -> ""               (action essentially not played)
+
+    "Sometimes" and "Rarely" used to be separate prefixes; collapsed into
+    "Mostly" per Ryan's Apr-2026 V6 review (item #2). The LLM uses "sometimes"
+    only as the secondary verb of a composite label like "Mostly call,
+    sometimes raise" -- never as a standalone option prefix.
     """
     for floor, label in _FREQ_PREFIX_BRACKETS:
         if freq >= floor:
@@ -251,6 +259,41 @@ def _option_style_instruction(style: str, spot_data: SpotData) -> str:
         )
     if style == "frequency":
         prefix = _expected_correct_prefix(spot_data) or "Mostly"
+        # Pio actions with non-trivial frequency. The 3+ action branch
+        # (Ryan-feedback Fix 2b) kicks in when at least three verbs are
+        # played at >= 5% -- a true multi-way mix that the 4-option
+        # Always/Mostly template can't represent without standalone
+        # "Sometimes X" labels (banned per Ryan's V6 review).
+        strategy = spot_data.decision_data.range_aggregate_strategy
+        meaningful = [v for v, f in
+                      sorted(strategy.items(), key=lambda kv: -kv[1])
+                      if f >= 0.05]
+        if len(meaningful) >= 3:
+            verb_a = meaningful[0]
+            others = ", ".join(repr(v) for v in meaningful[1:])
+            return (
+                "OPTION STYLE: frequency (3+ actions). The solver mixes "
+                "between three or more actions; the 4-option "
+                "Always/Mostly template would force a standalone "
+                "\"Sometimes X\" label, which is banned per the Apr-2026 "
+                "review (those labels read as ambiguous to players). "
+                f"Use COMPOSITE labels of the form \"Mostly {verb_a}, "
+                f"sometimes Y\" pairing the dominant verb {verb_a!r} with "
+                "each secondary verb. Templates:\n"
+                f"  option_1 = \"Always {verb_a}\"\n"
+                f"  option_2 = \"Mostly {verb_a}, sometimes <secondary>\"\n"
+                f"  option_3 = \"Mostly {verb_a}, sometimes <other secondary>\"\n"
+                f"  option_4 = \"Always <secondary>\" or empty\n"
+                f"Pio plays {verb_a!r} as the dominant action and also "
+                f"{others} at >= 5%. Cover each secondary action in at "
+                f"least one composite label; do NOT emit a standalone "
+                f"\"Sometimes X\" label.\n\n"
+                f"HARD CONSTRAINT -- correct_answer must equal exactly "
+                f"\"{prefix} {verb_a}\" if the dominant action's frequency "
+                f"is below 95%, or \"Always {verb_a}\" if it is at or above "
+                f"95%. The prefix {prefix!r} is computed deterministically "
+                f"by Python from Pio's range frequency."
+            )
         top_two = _top_two_verbs(spot_data)
         verb_coverage = ""
         if top_two:
@@ -267,12 +310,11 @@ def _option_style_instruction(style: str, spot_data: SpotData) -> str:
         return (
             "OPTION STYLE: frequency. The solver mixes between two actions. "
             "Use exactly four options in this template: \"Always <action A>\", "
-            "\"<PREFIX> <action A>\", \"<PREFIX> <action B>\", \"Always "
+            "\"Mostly <action A>\", \"Mostly <action B>\", \"Always "
             "<action B>\", where action A is the action the solver picks "
-            "more often and <PREFIX> is the deterministic prefix below. "
-            "If the deterministic prefix is \"Sometimes\" or \"Rarely\", "
-            "use it in place of \"Mostly\" so the correct_answer can be "
-            "exactly the prefix + action A.\n\n"
+            "more often. Both middle options use \"Mostly\" -- standalone "
+            "\"Sometimes X\" / \"Rarely X\" labels are banned (per Ryan's "
+            "Apr-2026 review: ambiguous, not mutually exclusive).\n\n"
             f"HARD CONSTRAINT -- correct_answer must equal exactly "
             f"\"{prefix} <action A>\" where <action A> is the verb of Pio's "
             f"highest-frequency action. The prefix {prefix!r} is computed "
@@ -316,9 +358,13 @@ def build_system_prompt() -> str:
         "correct_answer, use it exactly. The prefix is computed in Python "
         "from Pio's range frequency of the dominant action:\n"
         "  >= 95%   -> \"Always\"\n"
-        "  60-95%   -> \"Mostly\"\n"
-        "  20-60%   -> \"Sometimes\"\n"
-        "  5-20%    -> \"Rarely\"\n"
+        "  5-95%    -> \"Mostly\"\n"
+        "  < 5%     -> the action is not played; do not emit a prefix.\n"
+        "Per Apr-2026 review (Ryan): standalone \"Sometimes X\" and \"Rarely "
+        "X\" labels are BANNED. They are ambiguous (two such options are not "
+        "mutually exclusive readings of the strategy). In 3+ action spots "
+        "use composite labels like \"Mostly call, sometimes raise\" instead "
+        "-- the option-style instruction shows the template.\n"
         "Do NOT substitute your own judgement (e.g. do not write "
         "\"Always check\" when Python supplied \"Mostly\").\n\n"
         "AGGREGATE vs PER-COMBO: the SOLVER DATA field "

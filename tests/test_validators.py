@@ -20,9 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.explanation_generator import GeneratedExplanation               # noqa: E402
 from pipeline.fact_extractor.spot_data import DecisionData                    # noqa: E402
 from pipeline.validators import (                                              # noqa: E402
-    COMPLETENESS_MIN_FREQ, ValidationResult, extract_action_verb,
-    extract_frequency_prefix, run_audit_validators,
-    validate_correct_answer_verb, validate_option_set,
+    COMPLETENESS_MIN_FREQ, COMPOSITE_LABEL_MIN_FREQ, ValidationResult,
+    extract_action_verb, extract_frequency_prefix, run_audit_validators,
+    validate_composite_label_frequencies, validate_correct_answer_verb,
+    validate_no_standalone_sometimes, validate_option_set,
     validate_option_set_completeness,
 )
 
@@ -138,18 +139,24 @@ def test_validate_correct_answer_verb_fails_on_verb_mismatch():
 
 
 def test_validate_correct_answer_verb_fails_on_prefix_mismatch():
-    """Pio freq 0.57 -> deterministic prefix 'Sometimes'. LLM emitted 'Mostly'."""
+    """Pio freq 0.57 -> deterministic prefix 'Mostly' (post-Apr-2026
+    bracket collapse). LLM emitted 'Always' -- prefix mismatch.
+
+    Pre-Apr-2026 this case caught a 'Mostly' vs 'Sometimes' confusion;
+    post-collapse the only remaining mismatch is Always-when-Mostly-required
+    (or empty-when-Mostly-required for sub-5% actions, but those don't
+    appear as correct_answer)."""
     decision = DecisionData(
         correct_action="check",
         range_aggregate_strategy={"check": 0.57, "bet": 0.43})
     explanation = _explanation(
         option_1="Always check", option_2="Mostly check",
         option_3="Mostly bet", option_4="Always bet",
-        correct_answer="Mostly check")           # Mostly is wrong; should be Sometimes
+        correct_answer="Always check")           # Always wrong; should be Mostly
     result = validate_correct_answer_verb(explanation, decision)
     assert not result.is_valid
-    assert "Sometimes" in result.error_message
     assert "Mostly" in result.error_message
+    assert "Always" in result.error_message
 
 
 def test_validate_correct_answer_verb_skips_prefix_for_binary_style():
@@ -236,6 +243,140 @@ def test_row18_regression_field_rename_propagated():
     prompt = build_system_prompt()
     assert "range_mean_evs_per_action" in prompt
     assert "Never attribute these numbers to a specific combo" in prompt
+
+
+# --- Ryan-feedback Fix 2b validators ----------------------------------------
+def test_validate_no_standalone_sometimes_passes_on_all_mostly():
+    """Pure Always/Mostly option set passes the standalone-Sometimes ban."""
+    decision = DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.66, "fold": 0.34})
+    explanation = _explanation(
+        option_1="Always call", option_2="Mostly call",
+        option_3="Mostly fold", option_4="Always fold",
+        correct_answer="Mostly call")
+    assert validate_no_standalone_sometimes(explanation, decision).is_valid
+
+
+def test_validate_no_standalone_sometimes_fails_on_sometimes_option():
+    """A standalone 'Sometimes X' label is rejected regardless of how many
+    Pio actions are in the mix -- Ryan-feedback Fix 2b (a)."""
+    decision = DecisionData(
+        correct_action="check",
+        range_aggregate_strategy={"check": 0.55, "bet": 0.45})
+    explanation = _explanation(
+        option_1="Always check", option_2="Mostly check",
+        option_3="Sometimes bet", option_4="Always bet",     # standalone Sometimes
+        correct_answer="Mostly check")
+    result = validate_no_standalone_sometimes(explanation, decision)
+    assert not result.is_valid
+    assert "Sometimes" in result.error_message
+    assert "banned" in result.error_message.lower()
+
+
+def test_validate_no_standalone_sometimes_allows_composite_label():
+    """'Mostly X, sometimes Y' starts with 'Mostly' -- composite labels
+    pass the standalone-Sometimes ban (the secondary 'sometimes' is
+    embedded, not a prefix)."""
+    decision = DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.55, "fold": 0.25, "raise": 0.20})
+    explanation = _explanation(
+        option_1="Always call", option_2="Mostly call, sometimes fold",
+        option_3="Mostly call, sometimes raise", option_4="Always raise",
+        correct_answer="Mostly call, sometimes fold")
+    assert validate_no_standalone_sometimes(explanation, decision).is_valid
+
+
+def test_validate_no_standalone_sometimes_catches_rarely_too():
+    """'Rarely X' is also banned -- same ambiguity argument as 'Sometimes'."""
+    decision = DecisionData(
+        correct_action="check",
+        range_aggregate_strategy={"check": 0.85, "bet": 0.15})
+    explanation = _explanation(
+        option_1="Mostly check", option_2="Rarely bet",
+        correct_answer="Mostly check")
+    assert not validate_no_standalone_sometimes(explanation, decision).is_valid
+
+
+def test_validate_composite_label_frequencies_passes_correct_pairing():
+    """'Mostly call, sometimes raise' is valid when call > raise > 5%."""
+    decision = DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.55, "fold": 0.25, "raise": 0.20})
+    explanation = _explanation(
+        option_1="Always call",
+        option_2="Mostly call, sometimes raise",
+        option_3="Mostly call, sometimes fold",
+        option_4="",
+        correct_answer="Mostly call, sometimes raise")
+    assert validate_composite_label_frequencies(explanation, decision).is_valid
+
+
+def test_validate_composite_label_frequencies_fails_on_inverted_dominance():
+    """'Mostly raise, sometimes call' is wrong when call > raise."""
+    decision = DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.60, "raise": 0.20, "fold": 0.20})
+    explanation = _explanation(
+        option_1="Always call",
+        option_2="Mostly raise, sometimes call",          # inverted dominance
+        option_3="Mostly call, sometimes fold",
+        option_4="",
+        correct_answer="Mostly call, sometimes fold")
+    result = validate_composite_label_frequencies(explanation, decision)
+    assert not result.is_valid
+    assert "dominant" in result.error_message
+    assert "20.00%" in result.error_message or "20%" in result.error_message
+
+
+def test_validate_composite_label_frequencies_fails_on_phantom_secondary():
+    """A composite citing a secondary verb Pio plays below 5% is wrong --
+    the label fabricates a 'meaningfully mixed' shape that doesn't exist."""
+    decision = DecisionData(
+        correct_action="call",
+        # raise plays 1% (below COMPOSITE_LABEL_MIN_FREQ = 5%)
+        range_aggregate_strategy={"call": 0.70, "fold": 0.29, "raise": 0.01})
+    explanation = _explanation(
+        option_1="Always call",
+        option_2="Mostly call, sometimes raise",          # raise too rare
+        option_3="Mostly call, sometimes fold",
+        option_4="",
+        correct_answer="Mostly call, sometimes fold")
+    result = validate_composite_label_frequencies(explanation, decision)
+    assert not result.is_valid
+    assert "1.00%" in result.error_message or "1%" in result.error_message
+    assert "fabricat" in result.error_message.lower() \
+        or "below" in result.error_message.lower()
+
+
+def test_validate_composite_label_frequencies_fails_on_invented_verb():
+    """A composite citing a verb Pio never offers is wrong."""
+    decision = DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.66, "fold": 0.34})
+    explanation = _explanation(
+        option_1="Always call",
+        option_2="Mostly call, sometimes raise",          # raise not offered
+        option_3="",
+        option_4="",
+        correct_answer="Always call")
+    result = validate_composite_label_frequencies(explanation, decision)
+    assert not result.is_valid
+    assert "'raise'" in result.error_message
+
+
+def test_validate_composite_label_frequencies_ignores_non_composite_options():
+    """Plain 'Always X' / 'Mostly X' labels are not composites and are
+    untouched by this validator."""
+    decision = DecisionData(
+        correct_action="call",
+        range_aggregate_strategy={"call": 0.66, "fold": 0.34})
+    explanation = _explanation(
+        option_1="Always call", option_2="Mostly call",
+        option_3="Mostly fold", option_4="Always fold",
+        correct_answer="Mostly call")
+    assert validate_composite_label_frequencies(explanation, decision).is_valid
 
 
 # --- run_audit_validators short-circuits ------------------------------------
