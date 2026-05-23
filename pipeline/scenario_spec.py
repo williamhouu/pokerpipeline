@@ -275,6 +275,44 @@ def _3bp_spec(*, name: str, oop_position: str, ip_position: str,
     )
 
 
+def _4bp_spec(*, name: str, oop_position: str, ip_position: str,
+              oop_range: str, ip_range: str, template_basename: str,
+              preflop_action_description: str) -> "SolverSpec":
+    """Helper: build a Cash6max 100bb 4-bet pot SolverSpec. All Tier-1
+    4-bp scenarios (11-14) share the same chip geometry (pot=500,
+    eff=1000) drawn from Pio's HUspots/4betpot.txt (committed to the
+    repo at templates/4bpot-full.txt).
+
+    Geometry caveat: Pio's HU 4bp template was built for a deeper-stacked
+    4-bp situation than a real 6-max 100bb 4-bp post-call (which has
+    pot~44bb / eff~78bb, SPR~1.8 vs Pio's pot=50bb / eff=100bb, SPR=2).
+    Downstream layers that convert solve-chip amounts to display dollars
+    via bb_in_chips=10 will produce numbers consistent with a 125bb HU
+    cash 4-bp rather than a 100bb 6-max 4-bp. The pack ranges are still
+    correct for 100bb 6-max 4-bp; only the postflop pot/stack geometry
+    differs. Same shared-chassis precedent as SRP and 3bp (one canonical
+    geometry, ranges differ per scenario); see commit on 4bpot-full.txt
+    for the original geometry choice.
+
+    Accuracy 2.5 chips ~= 0.5% of the 500-chip pot per the brief.
+    """
+    return SolverSpec(
+        name=name, format="cash", stack_bb=100,
+        oop_position=oop_position, ip_position=ip_position,
+        oop_range=oop_range, ip_range=ip_range,
+        pot_after_preflop_chips=500,
+        starting_postflop_stack_chips=1000,
+        bb_in_chips=10,
+        bet_sizes_oop_pct=(65,), bet_sizes_ip_pct=(65,),
+        raise_sizes_pct=(300,),  # template's '3x' raise size = 300% pot
+        accuracy_target_chips=2.5,
+        iso_suits=True, iso_board=False,
+        preflop_action_description=preflop_action_description,
+        pio_template_path=f"templates/{template_basename}",
+        using_ryan_ranges=True,
+    )
+
+
 SOLVER_SPECS: dict[str, SolverSpec] = {
     "Cash6max_100bb_BTN_open_BB_call": SolverSpec(
         name="Cash6max_100bb_BTN_open_BB_call",
@@ -476,6 +514,26 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
             "Cash6max_100bb_UTG_open_BB_3bet_UTG_call_ryan_ranges.txt"),
         preflop_action_description=(
             "UTG opens 2.5bb, HJ, CO, BTN, SB fold, BB 3-bets, UTG calls"),
+    ),
+    # Scenario 11 (May 2026): BTN opens, BB 3-bets, BTN 4-bets, BB calls
+    # (4BP). Pack uses BTN 4-bet token '50%'. BB's call range (6.4%) is
+    # WIDER than BTN's 4-bet range (3.3%) because BB's 3-bet contains
+    # semi-bluffs that defend by calling vs a 4-bet rather than folding.
+    # From docs/ryan_range_pack_index.md scenario #11.
+    "Cash6max_100bb_BTN_open_BB_3bet_BTN_4bet_BB_call": _4bp_spec(
+        name="Cash6max_100bb_BTN_open_BB_3bet_BTN_4bet_BB_call",
+        oop_position="BB", ip_position="BTN",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Fold_BB_182%_BTN_50%_BB_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BTN/"
+                  "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Fold_BB_182%_BTN_50%.txt"),
+        template_basename=(
+            "Cash6max_100bb_BTN_open_BB_3bet_BTN_4bet_BB_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG, HJ, CO fold, BTN opens 2.5bb, SB folds, "
+            "BB 3-bets, BTN 4-bets, BB calls"),
     ),
 }
 

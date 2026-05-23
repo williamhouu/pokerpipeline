@@ -230,6 +230,18 @@ SCENARIOS: dict[str, ScenarioConfig] = {
                          ("BB", "3-bet", 5.00),
                          ("UTG", "call")),
     ),
+    # Scenario 11 (May 2026): BTN open, BB 3-bet, BTN 4-bet, BB call
+    # (4BP). BTN 4-bets to ~25bb = $12.50 (pack '50%' token over ~25bb
+    # pre-4bet 3bp). Only surviving seats are BTN and BB.
+    "btn_vs_bb_4bp_template": _srp_scenario_template(
+        cfr_key="btn_vs_bb_4bp_template",
+        preflop_action="BTN open 2.5bb, BB 3-bet 12bb, BTN 4-bet 25bb, BB call",
+        oop_position="BB", ip_position="BTN",
+        preflop_actions=(("BTN", "open", 1.25),
+                         ("BB", "3-bet", 6.00),
+                         ("BTN", "4-bet", 12.50),
+                         ("BB", "call")),
+    ),
 }
 
 
