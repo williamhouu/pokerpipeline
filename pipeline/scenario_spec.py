@@ -241,6 +241,40 @@ def _srp_spec(*, name: str, oop_position: str, ip_position: str,
     )
 
 
+def _3bp_spec(*, name: str, oop_position: str, ip_position: str,
+              oop_range: str, ip_range: str, template_basename: str,
+              preflop_action_description: str) -> "SolverSpec":
+    """Helper: build a Cash6max 100bb 3-bet pot SolverSpec. All Tier-1
+    3-bp scenarios (6-10) share the same chip geometry (pot=180, eff=910)
+    drawn from Pio's shipped 100bb/3bpot-full.txt (also committed to the
+    repo at templates/3bpot-full.txt); only ranges, positions, and the
+    preflop action prose differ.
+
+    The pack's 3-bet size token varies by actor (77%, 150%, 155%, 182%)
+    but we model all 3bp scenarios with one canonical postflop geometry
+    -- same shared-chassis precedent the SRP scenarios use (see
+    docs/ryan_range_pack_index.md "Sizing convention" for the open
+    question still owed to Ryan).
+
+    Accuracy 0.9 chips ~= 0.5% of the 180-chip pot per the brief.
+    """
+    return SolverSpec(
+        name=name, format="cash", stack_bb=100,
+        oop_position=oop_position, ip_position=ip_position,
+        oop_range=oop_range, ip_range=ip_range,
+        pot_after_preflop_chips=180,
+        starting_postflop_stack_chips=910,
+        bb_in_chips=10,
+        bet_sizes_oop_pct=(52,), bet_sizes_ip_pct=(52,),
+        raise_sizes_pct=(45,),
+        accuracy_target_chips=0.9,
+        iso_suits=True, iso_board=False,
+        preflop_action_description=preflop_action_description,
+        pio_template_path=f"templates/{template_basename}",
+        using_ryan_ranges=True,
+    )
+
+
 SOLVER_SPECS: dict[str, SolverSpec] = {
     "Cash6max_100bb_BTN_open_BB_call": SolverSpec(
         name="Cash6max_100bb_BTN_open_BB_call",
@@ -355,6 +389,23 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         template_basename="Cash6max_100bb_BTN_open_SB_call_ryan_ranges.txt",
         preflop_action_description=(
             "UTG, HJ, CO fold, BTN opens 2.5bb, SB calls, BB folds"),
+    ),
+    # Scenario 6 (May 2026): BTN opens, BB 3-bets, BTN calls (3BP).
+    # Pack uses BB 3-bet token '182%'. Ranges from
+    # docs/ryan_range_pack_index.md scenario #6.
+    "Cash6max_100bb_BTN_open_BB_3bet_BTN_call": _3bp_spec(
+        name="Cash6max_100bb_BTN_open_BB_3bet_BTN_call",
+        oop_position="BB", ip_position="BTN",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Fold_BB_182%.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BTN/"
+                  "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Fold_BB_182%_BTN_Call.txt"),
+        template_basename=(
+            "Cash6max_100bb_BTN_open_BB_3bet_BTN_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG, HJ, CO fold, BTN opens 2.5bb, SB folds, BB 3-bets, BTN calls"),
     ),
 }
 

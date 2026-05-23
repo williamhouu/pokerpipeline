@@ -175,6 +175,18 @@ SCENARIOS: dict[str, ScenarioConfig] = {
         oop_position="SB", ip_position="BTN",
         preflop_actions=(("BTN", "open", 1.25), ("SB", "call")),
     ),
+    # Scenario 6 (May 2026): BTN open, BB 3-bet, BTN call (3BP). BB
+    # raises to ~12bb = $6.00 (pack '182%' token over a 4bb pre-3bet pot
+    # = ~8bb raise, rounded for display). Only surviving seats are BTN
+    # and BB.
+    "btn_vs_bb_3bp_template": _srp_scenario_template(
+        cfr_key="btn_vs_bb_3bp_template",
+        preflop_action="BTN open 2.5bb, BB 3-bet 12bb, BTN call",
+        oop_position="BB", ip_position="BTN",
+        preflop_actions=(("BTN", "open", 1.25),
+                         ("BB", "3-bet", 6.00),
+                         ("BTN", "call")),
+    ),
 }
 
 
