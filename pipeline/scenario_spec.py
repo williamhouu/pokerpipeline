@@ -442,6 +442,24 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         preflop_action_description=(
             "UTG folds, HJ opens 2.5bb, CO, BTN, SB fold, BB 3-bets, HJ calls"),
     ),
+    # Scenario 9 (May 2026): BTN opens, SB 3-bets, BTN calls (3BP). Pack
+    # uses SB 3-bet token '150%'. SB is OOP at the flop (postflop order
+    # SB->BTN). BB folds during round 2 before BTN's response (so the
+    # range file path includes the BB_Fold token). From docs scenario #9.
+    "Cash6max_100bb_BTN_open_SB_3bet_BTN_call": _3bp_spec(
+        name="Cash6max_100bb_BTN_open_SB_3bet_BTN_call",
+        oop_position="SB", ip_position="BTN",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/SB/"
+                   "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_150%.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/BTN/"
+                  "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_150%_BB_Fold_BTN_Call.txt"),
+        template_basename=(
+            "Cash6max_100bb_BTN_open_SB_3bet_BTN_call_ryan_ranges.txt"),
+        preflop_action_description=(
+            "UTG, HJ, CO fold, BTN opens 2.5bb, SB 3-bets, BB folds, BTN calls"),
+    ),
 }
 
 

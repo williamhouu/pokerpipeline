@@ -209,6 +209,17 @@ SCENARIOS: dict[str, ScenarioConfig] = {
                          ("BB", "3-bet", 6.00),
                          ("HJ", "call")),
     ),
+    # Scenario 9 (May 2026): BTN open, SB 3-bet, BTN call (3BP). SB
+    # 3-bets to ~10bb = $5.00 (pack '150%' token). SB is OOP at the
+    # flop. BB folds during the round between SB's 3-bet and BTN's call.
+    "btn_vs_sb_3bp_template": _srp_scenario_template(
+        cfr_key="btn_vs_sb_3bp_template",
+        preflop_action="BTN open 2.5bb, SB 3-bet 10bb, BTN call",
+        oop_position="SB", ip_position="BTN",
+        preflop_actions=(("BTN", "open", 1.25),
+                         ("SB", "3-bet", 5.00),
+                         ("BTN", "call")),
+    ),
 }
 
 
