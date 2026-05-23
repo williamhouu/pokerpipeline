@@ -322,6 +322,21 @@ SOLVER_SPECS: dict[str, SolverSpec] = {
         preflop_action_description=(
             "UTG, HJ, CO, BTN fold, SB opens 2.5bb, BB calls (BvB)"),
     ),
+    # Scenario 5 (May 2026): HJ opens vs BB call (SRP). Ranges from
+    # docs/ryan_range_pack_index.md scenario #5.
+    "Cash6max_100bb_HJ_open_BB_call": _srp_spec(
+        name="Cash6max_100bb_HJ_open_BB_call",
+        oop_position="BB", ip_position="HJ",
+        oop_range=("ranges/ryan_preflop_tree/"
+                   "PioViewer - NLH 6max 100bb 2.5x Open/BB/"
+                   "UTG_Fold_HJ_60%_CO_Fold_BTN_Fold_SB_Fold_BB_Call.txt"),
+        ip_range=("ranges/ryan_preflop_tree/"
+                  "PioViewer - NLH 6max 100bb 2.5x Open/HJ/"
+                  "UTG_Fold_HJ_60%.txt"),
+        template_basename="Cash6max_100bb_HJ_open_BB_call_ryan_ranges.txt",
+        preflop_action_description=(
+            "UTG folds, HJ opens 2.5bb, CO, BTN, SB fold, BB calls"),
+    ),
 }
 
 

@@ -157,6 +157,15 @@ SCENARIOS: dict[str, ScenarioConfig] = {
         oop_position="SB", ip_position="BB",
         preflop_actions=(("SB", "open", 1.25), ("BB", "call")),
     ),
+    # Scenario 5 (May 2026): HJ opens vs BB call (SRP). preflop_actions
+    # includes only the surviving seats; UTG folds before HJ, and CO/BTN/SB
+    # fold after HJ's open.
+    "hj_vs_bb_srp_template": _srp_scenario_template(
+        cfr_key="hj_vs_bb_srp_template",
+        preflop_action="HJ open 2.5bb, BB call",
+        oop_position="BB", ip_position="HJ",
+        preflop_actions=(("HJ", "open", 1.25), ("BB", "call")),
+    ),
 }
 
 
