@@ -154,7 +154,8 @@ def test_scenario_populated_columns():
         assert "[TBD" not in row[column], (column, row[column])
 
     # Spot-check each value.
-    assert row["Context"] == "6-Handed, $0.25/$0.50, Stacks $50.00"
+    # Whole-dollar stack drops trailing '.00' per Ryan-feedback Fix 1 (May 2026).
+    assert row["Context"] == "6-Handed, $0.25/$0.50, Stacks $50"
     assert row["Table Size"] == "6"
     assert row["Default Stack"] == "$50"
     assert row["Live or Online"] == "Online"

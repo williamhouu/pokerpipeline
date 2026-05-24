@@ -29,6 +29,17 @@ from typing import Iterable
 from pipeline.fact_extractor.spot_data import SpotData
 
 
+def _format_dollars(amount: float) -> str:
+    """Cash amount as a string. Integer dollars render '$50'; cents '$1.25'.
+
+    Mirrors pipeline.format_writer._dollars so the two layers stay in sync.
+    Ryan-feedback Fix 1 (May 2026): drop trailing '.00' on whole-dollar amounts.
+    """
+    if isinstance(amount, float) and not amount.is_integer():
+        return f"${amount:,.2f}"
+    return f"${int(amount):,}"
+
+
 @dataclass(frozen=True)
 class ScenarioConfig:
     """Per-solve metadata that the postflop `.cfr` file does not carry.
@@ -85,12 +96,14 @@ class ScenarioConfig:
             raise ValueError("oop_position and ip_position must differ")
         if self.dollars_per_bb <= 0:
             raise ValueError("default_stack_dollars / default_stack_bb must be > 0")
-        # Match the team's online-cash Context format from the .xlsx sample row 1:
-        # "6-Handed, $0.25/$0.50, Stacks $50.00".
+        # Match the team's online-cash Context format. Whole-dollar stacks
+        # render without trailing ".00" (e.g. "Stacks $50", not "Stacks $50.00")
+        # per Ryan-feedback Fix 1, May 2026 -- the .00 reads as fractional-cent
+        # precision that's pointless when the value is integer dollars.
         object.__setattr__(
             self, "context",
             f"{self.table_size}-Handed, {self.stakes}, "
-            f"Stacks ${self.default_stack_dollars:.2f}",
+            f"Stacks {_format_dollars(self.default_stack_dollars)}",
         )
 
     @property

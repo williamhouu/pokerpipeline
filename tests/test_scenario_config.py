@@ -54,7 +54,9 @@ def test_btn_vs_bb_srp_registered():
     assert s.oop_position == "BB" and s.ip_position == "BTN"
     assert s.game_format == "cash" and s.venue == "online"
     # Derived context string -- matches sample row 1's online-cash format.
-    assert s.context == "6-Handed, $0.25/$0.50, Stacks $50.00"
+    # Whole-dollar stack drops the trailing '.00' per Ryan-feedback Fix 1
+    # (May 2026); a non-integer stack would still render as e.g. "Stacks $52.50".
+    assert s.context == "6-Handed, $0.25/$0.50, Stacks $50"
     # $/bb = 50/100 = 0.5
     assert s.dollars_per_bb == 0.5
 
