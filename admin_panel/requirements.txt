@@ -1,0 +1,8 @@
+# Admin panel runtime dependencies. Install alongside the main pipeline:
+#   venv/bin/pip install -r requirements.txt
+#   venv/bin/pip install -r admin_panel/requirements.txt
+#
+# Streamlit serves the web UI; pandas renders generated-question tables.
+
+streamlit==1.57.0
+pandas==3.0.3

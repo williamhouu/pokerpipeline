@@ -1,0 +1,953 @@
+"""Streamlit admin panel for the poker question pipeline.
+
+Run from repo root:
+    venv/bin/streamlit run admin_panel/app.py
+
+Three pages selected via the sidebar:
+
+  * Files     -- shows solves/ and ranges/ disk state; upload widgets for
+                 adding new ones (uploads not wired to backend in this
+                 preview).
+  * Generate  -- full UI for configuring + launching a generation batch.
+                 The Generate button is disabled until solves are present
+                 on disk (since the pipeline can't run without them).
+  * Browse    -- table view of the shipped test_output/tier1_consolidated.csv
+                 to demonstrate what generated-question browsing will look
+                 like when batches start producing output.
+
+Known limitations of this v1 preview:
+  * No backend wiring for the Generate button -- this is a UI scaffold to
+    validate the design before we hook up the real pipeline.
+  * No file-upload handling -- the widgets are visual placeholders.
+  * "Stake scaling" and a few other deferred features show up as disabled
+    controls so the design is visible.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+# Imports from the pipeline (safe at module load -- these touch no I/O and
+# don't require a PioSolver binary or API key to import).
+from pipeline.explanation_generator import build_system_prompt
+from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS
+
+# --- repo paths -------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SOLVES_DIR = REPO_ROOT / "solves"
+RANGES_DIR = REPO_ROOT / "ranges"
+RANGES_SUBDIR = (
+    RANGES_DIR / "ryan_preflop_tree" / "PioViewer - NLH 6max 100bb 2.5x Open"
+)
+TIER1_CSV = REPO_ROOT / "test_output" / "tier1_consolidated.csv"
+
+POSITION_FOLDERS = ("BB", "BTN", "CO", "HJ", "SB", "UTG")
+EXPECTED_RANGE_COUNTS = {
+    "BB": 3815,
+    "BTN": 3649,
+    "CO": 3473,
+    "HJ": 3293,
+    "SB": 2999,
+    "UTG": 2977,
+}
+
+# Board-texture filter options. The composite descriptor values are produced
+# by pipeline/fact_extractor/board_texture.py:_composite() -- six categories
+# spanning the dryness ladder. Suit + pair status are separate axes the user
+# can layer on for tighter filtering.
+BOARD_COMPOSITES = (
+    "dry",
+    "static",
+    "semi_wet",
+    "wet",
+    "very_wet",
+    "dynamic",
+)
+BOARD_SUIT_DISTRIBUTIONS = ("rainbow", "two_tone", "monotone", "flush_on_board")
+BOARD_PAIR_STATUSES = ("unpaired", "paired", "trips_on_board")
+
+
+# --- registered scenario metadata ------------------------------------------
+# Hand-extracted from pipeline/scenario_spec.py + the templates/ folder
+# (14 Tier-1 scenarios). Hard-coded here so this preview runs without
+# importing the pipeline (which would otherwise need a working PioSolver
+# binary on PATH for some imports). Will be replaced with a proper import
+# once the real generation backend is wired in.
+@dataclass
+class ScenarioMeta:
+    name: str
+    format: str  # "Cash" / "MTT"
+    stack_bb: int
+    table_size: int  # 6 / 9 / etc.
+    pot_type: str  # "SRP" / "3-bet pot" / "4-bet pot"
+    preflop_action: str  # human-readable summary
+
+
+SCENARIOS: list[ScenarioMeta] = [
+    # --- 5 SRP ---
+    ScenarioMeta(
+        "Cash6max_100bb_BTN_open_BB_call",
+        "Cash",
+        100,
+        6,
+        "SRP",
+        "BTN opens 2.5bb → BB calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_BTN_open_SB_call",
+        "Cash",
+        100,
+        6,
+        "SRP",
+        "BTN opens 2.5bb → SB calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_CO_open_BB_call",
+        "Cash",
+        100,
+        6,
+        "SRP",
+        "CO opens 2.5bb → BB calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_HJ_open_BB_call",
+        "Cash",
+        100,
+        6,
+        "SRP",
+        "HJ opens 2.5bb → BB calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_SB_open_BB_call",
+        "Cash",
+        100,
+        6,
+        "SRP",
+        "SB opens 3bb → BB calls",
+    ),
+    # --- 5 3-bet pots ---
+    ScenarioMeta(
+        "Cash6max_100bb_BTN_open_BB_3bet_BTN_call",
+        "Cash",
+        100,
+        6,
+        "3-bet pot",
+        "BTN opens → BB 3-bets → BTN calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_BTN_open_SB_3bet_BTN_call",
+        "Cash",
+        100,
+        6,
+        "3-bet pot",
+        "BTN opens → SB 3-bets → BTN calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_CO_open_BTN_3bet_CO_call",
+        "Cash",
+        100,
+        6,
+        "3-bet pot",
+        "CO opens → BTN 3-bets → CO calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_HJ_open_BB_3bet_HJ_call",
+        "Cash",
+        100,
+        6,
+        "3-bet pot",
+        "HJ opens → BB 3-bets → HJ calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_UTG_open_BB_3bet_UTG_call",
+        "Cash",
+        100,
+        6,
+        "3-bet pot",
+        "UTG opens → BB 3-bets → UTG calls",
+    ),
+    # --- 4 4-bet pots ---
+    ScenarioMeta(
+        "Cash6max_100bb_BTN_open_BB_3bet_BTN_4bet_BB_call",
+        "Cash",
+        100,
+        6,
+        "4-bet pot",
+        "BTN opens → BB 3-bets → BTN 4-bets → BB calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_CO_open_BTN_3bet_CO_4bet_BTN_call",
+        "Cash",
+        100,
+        6,
+        "4-bet pot",
+        "CO opens → BTN 3-bets → CO 4-bets → BTN calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_HJ_open_BB_3bet_HJ_4bet_BB_call",
+        "Cash",
+        100,
+        6,
+        "4-bet pot",
+        "HJ opens → BB 3-bets → HJ 4-bets → BB calls",
+    ),
+    ScenarioMeta(
+        "Cash6max_100bb_UTG_open_BB_3bet_UTG_4bet_BB_call",
+        "Cash",
+        100,
+        6,
+        "4-bet pot",
+        "UTG opens → BB 3-bets → UTG 4-bets → BB calls",
+    ),
+]
+
+
+# --- disk-state detection (the live magic) ---------------------------------
+def count_cfrs(scenario_name: str) -> int:
+    """Return how many .cfr files exist for this scenario, or 0 if missing."""
+    folder = SOLVES_DIR / scenario_name
+    if not folder.is_dir():
+        return 0
+    return len(list(folder.glob("*.cfr")))
+
+
+def ranges_pack_status() -> tuple[bool, dict[str, int]]:
+    """Return (is_complete, per_position_counts) for the ranges pack."""
+    counts = {}
+    for pos in POSITION_FOLDERS:
+        folder = RANGES_SUBDIR / pos
+        counts[pos] = len(list(folder.glob("*.txt"))) if folder.is_dir() else 0
+    is_complete = all(
+        counts[pos] == EXPECTED_RANGE_COUNTS[pos] for pos in POSITION_FOLDERS
+    )
+    return is_complete, counts
+
+
+# --- page: Files -----------------------------------------------------------
+def render_files_page() -> None:
+    st.title("Files")
+    st.caption(
+        "Manage the solves and ranges the pipeline reads from. "
+        "Drag a zip into the upload areas to add new ones."
+    )
+
+    # Ranges section
+    st.subheader("📂 Ranges (preflop pack)")
+    ranges_ok, ranges_counts = ranges_pack_status()
+    total_files = sum(ranges_counts.values())
+    if ranges_ok:
+        st.success(
+            f"✅ Ranges pack is complete: {total_files:,} files across "
+            "6 position folders."
+        )
+    elif total_files == 0:
+        st.error(
+            "❌ No ranges pack uploaded yet. Pipeline cannot generate "
+            "questions without preflop ranges."
+        )
+    else:
+        st.warning(
+            f"⚠️ Ranges pack is partial: {total_files:,} files present, expected 20,206."
+        )
+
+    ranges_df = pd.DataFrame(
+        [
+            {
+                "Position": pos,
+                "Files present": f"{ranges_counts[pos]:,}",
+                "Expected": f"{EXPECTED_RANGE_COUNTS[pos]:,}",
+                "Status": "✅"
+                if ranges_counts[pos] == EXPECTED_RANGE_COUNTS[pos]
+                else ("⚠️" if ranges_counts[pos] > 0 else "❌"),
+            }
+            for pos in POSITION_FOLDERS
+        ]
+    )
+    st.dataframe(ranges_df, hide_index=True, use_container_width=True)
+    st.file_uploader(
+        "Replace ranges pack (drop a zip)",
+        type=["zip"],
+        key="ranges_upload",
+        disabled=True,
+        help="Upload not wired in this preview. The ranges/ folder is "
+        "managed manually for now.",
+    )
+
+    st.divider()
+
+    # Solves section
+    st.subheader("📂 Solves (PioSolver .cfr files)")
+    rows = []
+    total_cfrs = 0
+    for s in SCENARIOS:
+        n = count_cfrs(s.name)
+        total_cfrs += n
+        if n == 25:
+            status = "✅"
+            note = "complete (25/25 flops)"
+        elif n == 0:
+            status = "❌"
+            note = "missing"
+        else:
+            status = "⚠️"
+            note = f"partial ({n}/25 flops)"
+        rows.append(
+            {
+                "Scenario": s.name,
+                "Pot type": s.pot_type,
+                ".cfrs": f"{n}/25",
+                "Status": status,
+                "Note": note,
+            }
+        )
+
+    if total_cfrs == 0:
+        st.error(
+            "❌ No solves uploaded yet. Waiting on William to share the "
+            "current `solves/` folder via Google Drive."
+        )
+    elif total_cfrs == len(SCENARIOS) * 25:
+        st.success(
+            f"✅ All scenarios solved: {total_cfrs} .cfr files across "
+            f"{len(SCENARIOS)} scenarios."
+        )
+    else:
+        st.warning(
+            f"⚠️ Partial solves: {total_cfrs} .cfr files across "
+            f"{len(SCENARIOS)} scenarios."
+        )
+
+    solves_df = pd.DataFrame(rows)
+    st.dataframe(solves_df, hide_index=True, use_container_width=True)
+    st.file_uploader(
+        "Add solves (drop per-scenario zips)",
+        type=["zip"],
+        key="solves_upload",
+        disabled=True,
+        accept_multiple_files=True,
+        help="Upload not wired in this preview. solves/ is managed manually for now.",
+    )
+
+
+# --- page: Generate --------------------------------------------------------
+def render_generate_page() -> None:
+    st.title("Generate questions")
+    st.caption(
+        "Configure a batch run. Filters cascade — pick a format, then "
+        "stack, then scenarios. Only options with available solves are "
+        "selectable."
+    )
+
+    # Discover what's actually available on disk
+    available_scenarios = [s for s in SCENARIOS if count_cfrs(s.name) > 0]
+    available_formats = sorted({s.format for s in available_scenarios})
+    if not available_formats:
+        available_formats = ["Cash"]  # show the UI even with no solves
+
+    # --- Cascading filters ---
+    st.subheader("1. Game settings")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        fmt = st.selectbox(
+            "Format",
+            options=["Cash", "MTT"],
+            index=0,
+            help="MTT solves aren't loaded yet. Only formats with "
+            "available solves are usable.",
+        )
+    with col2:
+        stack = st.selectbox(
+            "Stack depth",
+            options=["100 bb", "60 bb", "40 bb"],
+            index=0,
+            help="Only 100bb solves exist in Ryan's pack. Others would "
+            "need different range packs.",
+        )
+    with col3:
+        table = st.selectbox(
+            "Table size",
+            options=["6-max", "9-max", "Heads-Up"],
+            index=0,
+        )
+
+    # Filter scenarios by the above selections
+    def matches(s: ScenarioMeta) -> bool:
+        if s.format != fmt:
+            return False
+        if s.stack_bb != int(stack.split()[0]):
+            return False
+        if table == "6-max" and s.table_size != 6:
+            return False
+        if table == "9-max" and s.table_size != 9:
+            return False
+        return True
+
+    scenarios_after_filter = [s for s in SCENARIOS if matches(s)]
+    if not scenarios_after_filter:
+        st.error(
+            f"⚠️ No scenarios match `{fmt}` / `{stack}` / `{table}`. "
+            f"This combination has no registered scenarios yet."
+        )
+        return
+
+    # --- Scenario picker ---
+    st.subheader("2. Scenarios")
+    st.caption(
+        f"{len(scenarios_after_filter)} registered scenarios match. "
+        "Greyed-out ones are missing solves."
+    )
+    selected_scenarios = []
+    for s in scenarios_after_filter:
+        n = count_cfrs(s.name)
+        if n == 25:
+            label = f"✅  **{s.name}**  ·  {s.preflop_action}"
+            picked = st.checkbox(label, value=False, key=f"sc_{s.name}")
+            if picked:
+                selected_scenarios.append(s)
+        elif n == 0:
+            st.checkbox(
+                f"❌  ~~{s.name}~~  ·  {s.preflop_action}  ·  *no solves*",
+                value=False,
+                disabled=True,
+                key=f"sc_{s.name}",
+            )
+        else:
+            label = f"⚠️  **{s.name}**  ·  {s.preflop_action}  ·  *only {n}/25 flops*"
+            picked = st.checkbox(label, value=False, key=f"sc_{s.name}")
+            if picked:
+                selected_scenarios.append(s)
+
+    st.divider()
+
+    # --- Content filters (hand class + board texture) ---
+    st.subheader("3. Content filters")
+    st.caption(
+        "Optional. Narrow what kinds of spots show up. Leave empty to "
+        "include everything that survives Layer 4."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        _hand_classes = st.multiselect(
+            "Hero hand strength buckets",
+            options=list(STRENGTH_BUCKETS),
+            default=[],
+            help=(
+                "Sourced from pipeline/fact_extractor/hand_class.py. "
+                "Each spot's hero hand maps to one bucket. Empty = all."
+            ),
+        )
+    with col2:
+        _board_composites = st.multiselect(
+            "Board texture (composite)",
+            options=list(BOARD_COMPOSITES),
+            default=[],
+            help=("From board_texture.py's composite descriptor. Empty = all."),
+        )
+    col1, col2 = st.columns(2)
+    with col1:
+        _board_suits = st.multiselect(
+            "Board suit distribution",
+            options=list(BOARD_SUIT_DISTRIBUTIONS),
+            default=[],
+        )
+    with col2:
+        _board_pairs = st.multiselect(
+            "Board pair status",
+            options=list(BOARD_PAIR_STATUSES),
+            default=[],
+        )
+
+    st.divider()
+
+    # --- Difficulty ---
+    st.subheader("4. Difficulty")
+    st.caption("How dominant the correct answer is in the solver.")
+    preset = st.radio(
+        "Preset",
+        options=["Easy", "Medium", "Hard", "Mixed", "Custom"],
+        index=4,
+        horizontal=True,
+        key="difficulty_preset",
+    )
+    presets_map = {
+        "Easy": (85, 95),
+        "Medium": (70, 85),
+        "Hard": (55, 70),
+        "Mixed": (55, 95),
+        "Custom": (65, 75),  # default custom value
+    }
+    default_low, default_high = presets_map[preset]
+    freq_low, freq_high = st.slider(
+        "Solver frequency window (%) — correct answer is this dominant",
+        min_value=50,
+        max_value=100,
+        value=(default_low, default_high),
+        disabled=(preset != "Custom"),
+        help="Lower = harder (close decisions). Higher = easier (clear-cut).",
+    )
+
+    st.divider()
+
+    # --- Answer style ---
+    st.subheader("5. Answer option style")
+    col1, col2 = st.columns([2, 3])
+    with col1:
+        answer_style = st.radio(
+            "Style",
+            options=[
+                "Basic (fold/call/raise)",
+                "GTO (always/mostly)",
+                "Sizing (33%/75%/150%) — coming soon",
+                "Auto-pick",
+            ],
+            index=1,
+            help="Basic and GTO work today. Sizing variant needs ~2-3 "
+            "days of pipeline work.",
+        )
+    with col2:
+        st.caption("Style preview:")
+        if answer_style.startswith("Basic"):
+            st.code("option 1: Fold\noption 2: Call\noption 3: Raise")
+        elif answer_style.startswith("GTO"):
+            st.code(
+                "option 1: Always check\n"
+                "option 2: Mostly check, sometimes bet\n"
+                "option 3: Mostly bet, sometimes check\n"
+                "option 4: Always bet"
+            )
+        elif answer_style.startswith("Sizing"):
+            st.code(
+                "option 1: Check\noption 2: Bet $5 (33%)\n"
+                "option 3: Bet $11 (75%)\noption 4: Bet $22 (150%)"
+            )
+        else:
+            st.code("Layer 6 chooses Basic / GTO / Sizing per spot")
+
+    st.divider()
+
+    # --- Sampling targets ---
+    st.subheader("6. How many questions, where")
+    mode = st.radio(
+        "Targeting mode",
+        options=[
+            "Total batch size (auto-distribute)",
+            "Per-street targets (power user)",
+        ],
+        index=0,
+        horizontal=True,
+    )
+    if mode.startswith("Total"):
+        total = st.number_input(
+            "Total questions in this batch",
+            min_value=1,
+            max_value=10_000,
+            value=20,
+            step=5,
+        )
+        st.caption(
+            "Will spread evenly across selected scenarios + streets, "
+            "with diversity-stratified sampling within each bucket."
+        )
+        # Compute per-bucket distribution preview
+        flop_t = turn_t = river_t = 0
+        if selected_scenarios:
+            per_scenario = total // len(selected_scenarios)
+            flop_t = max(1, per_scenario // 5)
+            turn_t = max(1, (per_scenario * 2) // 5)
+            river_t = per_scenario - flop_t - turn_t
+        st.caption(
+            f"Distribution preview: {len(selected_scenarios)} scenarios × "
+            f"({flop_t} flop + {turn_t} turn + {river_t} river) = "
+            f"{len(selected_scenarios) * (flop_t + turn_t + river_t)} "
+            "questions"
+        )
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            flop_t = st.number_input("Flop / scenario", 0, 25, 1)
+        with col2:
+            turn_t = st.number_input("Turn / scenario", 0, 25, 2)
+        with col3:
+            river_t = st.number_input("River / scenario", 0, 25, 2)
+        with col4:
+            _per_cfr_cap = st.number_input("Max per .cfr", 1, 25, 5)
+        total = len(selected_scenarios) * (flop_t + turn_t + river_t)
+        st.caption(f"Total questions: **{total}**")
+
+    st.divider()
+
+    # --- Output options ---
+    st.subheader("7. Output")
+    col1, col2 = st.columns(2)
+    with col1:
+        _currency = st.radio(
+            "Display amounts as",
+            options=["Dollars ($1.25)", "Big blinds (2.5 bb)"],
+            index=0,
+            horizontal=True,
+        )
+    with col2:
+        _out_filename = st.text_input(
+            "Output filename",
+            value="batch_2026-05-24.csv",
+        )
+    _stake_disabled = st.toggle(
+        "Stake scaling (coming soon)",
+        value=False,
+        disabled=True,
+        help="$0.25/$0.50 hard-coded for now. Stake scaler is ~2 hours "
+        "of work; deferred to v2.",
+    )
+
+    st.divider()
+
+    # --- Model + API settings ---
+    st.subheader("8. Model + API settings")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        model = st.radio(
+            "Model",
+            options=["Opus 4.7 (highest fidelity)", "Sonnet 4.6 (5× cheaper, faster)"],
+            index=0,
+            help="Use Sonnet 4.6 for experimentation, Opus 4.7 for batches "
+            "you'll ship.",
+        )
+    with col2:
+        batch_size = st.selectbox(
+            "Questions per API call",
+            options=[1, 5, 10, 25],
+            index=1,
+            help="5 is the recommended starting sweet spot. Higher = "
+            "faster but more risk if a call fails.",
+        )
+    with col3:
+        dry_run = st.toggle(
+            "Dry run (no API calls)",
+            help="Show what would be generated without spending API tokens.",
+        )
+
+    # Estimated cost
+    est_cost_per_q = 0.40 if model.startswith("Opus") else 0.08
+    est_total_cost = total * est_cost_per_q if total else 0
+    est_minutes = total * 0.5 / max(batch_size, 1) if total else 0
+
+    st.info(
+        f"**Estimated**: {total} questions · "
+        f"~${est_total_cost:.2f} · "
+        f"~{est_minutes:.1f} min · "
+        f"model={model.split()[0]} · "
+        f"batch={batch_size}"
+    )
+
+    st.divider()
+
+    # --- Generate button ---
+    can_generate = (
+        len(selected_scenarios) > 0
+        and total > 0
+        and (dry_run or True)  # API key check would go here
+    )
+    waiting_on_solves = not any(count_cfrs(s.name) > 0 for s in scenarios_after_filter)
+
+    if waiting_on_solves:
+        st.button(
+            "⏳ GENERATE BATCH  (awaiting solves from William)",
+            disabled=True,
+            type="primary",
+            use_container_width=True,
+        )
+        st.caption(
+            "The Generate button activates as soon as solves are uploaded "
+            "to `solves/`. Tracking via task #4."
+        )
+    elif not can_generate:
+        st.button(
+            "GENERATE BATCH",
+            disabled=True,
+            type="primary",
+            use_container_width=True,
+        )
+        st.caption("Select at least one scenario and set a target above.")
+    else:
+        if st.button("GENERATE BATCH", type="primary", use_container_width=True):
+            st.warning(
+                "Backend not wired yet. This preview shows the UI design; "
+                "real generation lands once Layer 6 batching is implemented "
+                "(task #10) and solves are present."
+            )
+
+
+# --- page: Browse ----------------------------------------------------------
+def render_browse_page() -> None:
+    st.title("Browse generated questions")
+    st.caption(
+        "Showing the existing 70-question Tier-1 dataset. Once batches "
+        "start generating, this view shows live results."
+    )
+
+    if not TIER1_CSV.exists():
+        st.error(f"No CSV at {TIER1_CSV}")
+        return
+
+    df = pd.read_csv(TIER1_CSV, encoding="utf-8-sig")
+    st.metric("Questions in dataset", len(df))
+
+    # --- Filters ---
+    st.subheader("Filters")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        scenarios_filter = st.multiselect(
+            "Scenarios",
+            options=sorted(df["scenario"].unique()),
+            default=[],
+        )
+    with col2:
+        stages_filter = st.multiselect(
+            "Hand stage",
+            options=sorted(df["Hand Stage"].unique()),
+            default=[],
+        )
+    with col3:
+        difficulty_range = st.slider(
+            "Difficulty Rating",
+            int(df["Difficulty Rating"].min()),
+            int(df["Difficulty Rating"].max()),
+            (int(df["Difficulty Rating"].min()), int(df["Difficulty Rating"].max())),
+        )
+
+    filtered = df
+    if scenarios_filter:
+        filtered = filtered[filtered["scenario"].isin(scenarios_filter)]
+    if stages_filter:
+        filtered = filtered[filtered["Hand Stage"].isin(stages_filter)]
+    filtered = filtered[
+        (filtered["Difficulty Rating"] >= difficulty_range[0])
+        & (filtered["Difficulty Rating"] <= difficulty_range[1])
+    ]
+
+    st.caption(f"Showing {len(filtered)} of {len(df)} questions.")
+
+    # --- Table ---
+    display_cols = [
+        "No",
+        "scenario",
+        "Hand Stage",
+        "User Cards",
+        "Cards on Table",
+        "Correct Answer",
+        "Difficulty Rating",
+        "ev_gap_bb",
+        "concept_tags",
+        "validation_status",
+    ]
+    st.dataframe(
+        filtered[display_cols],
+        hide_index=True,
+        use_container_width=True,
+        height=400,
+    )
+
+    # --- Row detail ---
+    if len(filtered) > 0:
+        st.subheader("Row detail")
+        row_no = st.selectbox(
+            "Question No",
+            options=filtered["No"].tolist(),
+        )
+        row = filtered[filtered["No"] == row_no].iloc[0]
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Question**")
+            st.text(row["Question"])
+            st.markdown("**Options**")
+            for i in (1, 2, 3, 4):
+                opt = row[f"option {i}"]
+                if pd.notna(opt) and str(opt).strip():
+                    marker = "✅ " if opt == row["Correct Answer"] else "   "
+                    st.text(f"{marker}{opt}")
+        with col2:
+            st.markdown("**Answer Explanation**")
+            st.write(row["Answer Explanation"])
+            st.markdown("**Meta**")
+            st.text(f"Difficulty:    {row['Difficulty Rating']}")
+            st.text(f"EV gap (bb):   {row['ev_gap_bb']}")
+            st.text(f"Hand class:    {row['hand_class']}")
+            st.text(f"Board texture: {row['board_texture']}")
+            st.text(f"Action freq:   {row['action_frequencies']}")
+
+
+# --- page: Prompt -----------------------------------------------------------
+def render_prompt_page() -> None:
+    st.title("System prompt editor")
+    st.caption(
+        "Edit the system prompt Layer 6 sends to Claude for explanation "
+        "generation. Version everything; test on one spot before "
+        "committing to a batch."
+    )
+
+    # In v1 preview the only "version" is the current default built in code.
+    # When the prompt-versioning backend lands, this dropdown lists saved
+    # versions from admin_panel/prompts/*.txt (or a DB table).
+    versions = ["v1-default (built-in)"]
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        active_version = st.selectbox(
+            "Active version",
+            options=versions,
+            index=0,
+            help=(
+                "Versioning UI is wired here, but saved versions need "
+                "the backend store. Right now only v1-default exists."
+            ),
+        )
+    with col2:
+        st.write("")  # spacer for vertical alignment
+        st.button(
+            "+ New version",
+            disabled=True,
+            help="Backend prompt-version store not implemented yet.",
+        )
+
+    # Pull the actual current default prompt from the pipeline so what
+    # you see here is exactly what generation would send.
+    try:
+        prompt_text = build_system_prompt()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not load default prompt: {exc}")
+        return
+
+    st.caption(
+        f"Active: **{active_version}** · "
+        f"{len(prompt_text):,} chars · "
+        f"~{len(prompt_text) // 4:,} tokens (rough estimate)"
+    )
+    edited = st.text_area(
+        "Prompt content (edit live)",
+        value=prompt_text,
+        height=600,
+        help=(
+            "Currently displays the built-in default from "
+            "pipeline.explanation_generator.build_system_prompt(). Edits "
+            "to this box are local to your browser session until the "
+            "version-store backend lands."
+        ),
+    )
+
+    # Show edit indicator
+    if edited != prompt_text:
+        st.warning(
+            f"Edits not yet saved. Diff: {len(edited) - len(prompt_text):+,} "
+            "chars from default."
+        )
+
+    st.divider()
+
+    # --- Action buttons ---
+    st.subheader("Actions")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.button(
+            "💾  Save as new version",
+            disabled=True,
+            use_container_width=True,
+            help="Saves to admin_panel/prompts/<name>.txt (backend pending).",
+        )
+    with col2:
+        st.button(
+            "🧪  Test on 1 spot",
+            disabled=True,
+            use_container_width=True,
+            help=(
+                "Generates a single question with this prompt so you can "
+                "verify output format before running a batch. Needs ANTHROPIC_API_KEY + a sample spot."
+            ),
+        )
+    with col3:
+        st.button(
+            "↺  Reset to default",
+            disabled=True,
+            use_container_width=True,
+        )
+    with col4:
+        st.button(
+            "✅  Set as default",
+            disabled=True,
+            type="primary",
+            use_container_width=True,
+            help="Future batches use this version unless overridden.",
+        )
+
+    st.divider()
+
+    # --- Safety notes ---
+    st.subheader("⚠️  Editing the prompt — what to know")
+    st.markdown(
+        """
+- **Test on 1 spot before any batch** — a typo in the prompt can break
+  the JSON output format and waste a batch's API spend.
+- **Versions are tracked.** Every generated question records which prompt
+  version produced it. If a batch comes out badly, you can trace which
+  prompt is responsible.
+- **The default prompt encodes hard-won lessons** (9 voice rules, banned
+  phrases, archetype framing, the May 2026 Ryan-feedback fixes). Treat
+  rewrites as research, not editing — keep the original around as
+  `v1-default` and ship from named alternatives.
+- **Big prompt changes change Claude's behavior in non-obvious ways.**
+  When experimenting, use Sonnet 4.6 first (cheap) and only validate the
+  winners with Opus 4.7.
+        """
+    )
+
+
+# --- main router ------------------------------------------------------------
+def main() -> None:
+    st.set_page_config(
+        page_title="Poker Pipeline Admin",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    st.sidebar.title("🎰 Poker Pipeline")
+    st.sidebar.caption("Admin panel · v1 preview")
+    page = st.sidebar.radio(
+        "Page",
+        options=["Files", "Generate", "Browse", "Prompt"],
+        index=0,
+    )
+
+    # Sidebar status indicators
+    st.sidebar.divider()
+    st.sidebar.subheader("Status")
+    ranges_ok, _ = ranges_pack_status()
+    st.sidebar.text(f"Ranges: {'✅ ready' if ranges_ok else '❌ missing'}")
+    total_cfrs = sum(count_cfrs(s.name) for s in SCENARIOS)
+    expected_cfrs = len(SCENARIOS) * 25
+    if total_cfrs == 0:
+        st.sidebar.text("Solves: ❌ awaiting William")
+    elif total_cfrs == expected_cfrs:
+        st.sidebar.text(f"Solves: ✅ {total_cfrs}/{expected_cfrs}")
+    else:
+        st.sidebar.text(f"Solves: ⚠️  {total_cfrs}/{expected_cfrs}")
+
+    st.sidebar.divider()
+    st.sidebar.caption(
+        "This is a preview build. Generate is wired to the UI but not "
+        "to the backend yet — see task #10/#11 for full integration."
+    )
+
+    if page == "Files":
+        render_files_page()
+    elif page == "Generate":
+        render_generate_page()
+    elif page == "Browse":
+        render_browse_page()
+    elif page == "Prompt":
+        render_prompt_page()
+
+
+if __name__ == "__main__":
+    main()

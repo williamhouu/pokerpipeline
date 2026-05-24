@@ -49,6 +49,16 @@ ignore_missing_imports = true
 # don't block on them. New code in admin_panel/ is strict (see override).
 exclude = ["pipeline/", "scripts/", "tests/", "venv/"]
 
+# When admin_panel imports from pipeline.* (which we do for build_system_prompt
+# and the hand-class / board-texture constants), mypy by default follows the
+# import and reports errors found inside pipeline/ -- the exclude only stops
+# *direct* checking, not transitive. ignore_errors silences imported-module
+# errors so admin_panel work isn't blocked by pre-existing pipeline typing
+# debt. When/if we type-clean pipeline, drop this override.
+[[tool.mypy.overrides]]
+module = "pipeline.*"
+ignore_errors = true
+
 [[tool.mypy.overrides]]
 module = "admin_panel.*"
 disallow_untyped_defs = true
