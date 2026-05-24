@@ -14,8 +14,8 @@ from pipeline.fact_extractor.spot_data import (                       # noqa: E4
     DecisionData, SpotData, SpotMetadata,
 )
 from pipeline.scenario_config import (                                # noqa: E402
-    SCENARIOS, ScenarioConfig, get_scenario,
-    round_to_nearest_increment, spot_to_hand,
+    COMMON_STAKE_LEVELS_BB_DOLLARS, SCENARIOS, ScenarioConfig, get_scenario,
+    round_to_nearest_increment, scale_scenario, spot_to_hand,
 )
 
 
@@ -244,6 +244,122 @@ def test_spot_to_hand_requires_big_blind_chips():
         assert "big_blind_chips" in str(exc)
         return
     raise AssertionError("expected ValueError")
+
+
+# --- scale_scenario ---------------------------------------------------------
+def test_scale_scenario_basic_5_10():
+    """$0.25/$0.50 default scaled to $5/$10. Ratio is 20x."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    scaled = scale_scenario(base, target_bb_dollars=10.0)
+    assert scaled.stakes_sb == 5.0
+    assert scaled.stakes_bb == 10.0
+    assert scaled.default_stack_dollars == 1000.0   # 100bb * $10
+    assert scaled.default_stack_bb == 100            # unchanged (stack depth in bb)
+    assert scaled.stakes == "$5/$10"
+    assert scaled.context == "6-Handed, $5/$10, Stacks $1,000"
+
+
+def test_scale_scenario_preflop_actions_scaled():
+    """The dollar amounts inside preflop_actions tuples get rescaled too."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    # base has preflop_actions=(("BTN", "open", 1.25), ("BB", "call"))
+    scaled = scale_scenario(base, target_bb_dollars=2.0)   # 4x ratio
+    actions = list(scaled.preflop_actions)
+    assert actions[0] == ("BTN", "open", 5.0)    # 1.25 * 4 = 5.0
+    assert actions[1] == ("BB", "call")           # 2-tuple unchanged
+
+
+def test_scale_scenario_dollars_per_bb_property_updates():
+    """The derived `dollars_per_bb` property reflects the scaled stack."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    scaled = scale_scenario(base, target_bb_dollars=2.0)
+    assert scaled.dollars_per_bb == 2.0           # was 0.50
+
+
+def test_scale_scenario_preserves_non_dollar_fields():
+    """cfr_key, positions, table_size, game_format, etc. unchanged."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    scaled = scale_scenario(base, target_bb_dollars=10.0)
+    assert scaled.cfr_key == base.cfr_key
+    assert scaled.oop_position == base.oop_position
+    assert scaled.ip_position == base.ip_position
+    assert scaled.table_size == base.table_size
+    assert scaled.game_format == base.game_format
+    assert scaled.preflop_action == base.preflop_action
+    assert scaled.live_or_online == base.live_or_online
+
+
+def test_scale_scenario_identity_scaling():
+    """Scaling to the same BB returns equivalent values (no math drift)."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    same = scale_scenario(base, target_bb_dollars=base.stakes_bb)
+    assert same.stakes_sb == base.stakes_sb
+    assert same.stakes_bb == base.stakes_bb
+    assert same.default_stack_dollars == base.default_stack_dollars
+    assert same.stakes == base.stakes
+
+
+def test_scale_scenario_micro_stakes_rounding():
+    """Scaling down to micro stakes — preflop bet amounts round to cents."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    scaled = scale_scenario(base, target_bb_dollars=0.10)   # 0.2x ratio
+    assert scaled.stakes_sb == 0.05
+    assert scaled.stakes_bb == 0.10
+    assert scaled.default_stack_dollars == 10.0   # 100bb * $0.10
+    # preflop_actions: 1.25 * 0.2 = 0.25
+    actions = list(scaled.preflop_actions)
+    assert actions[0] == ("BTN", "open", 0.25)
+
+
+def test_scale_scenario_high_stakes():
+    """$50/$100 stakes — biggest in COMMON_STAKE_LEVELS_BB_DOLLARS."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    scaled = scale_scenario(base, target_bb_dollars=100.0)
+    assert scaled.stakes_sb == 50.0
+    assert scaled.stakes_bb == 100.0
+    assert scaled.default_stack_dollars == 10_000.0   # 100bb * $100
+    assert scaled.stakes == "$50/$100"
+
+
+def test_scale_scenario_rejects_nonpositive():
+    """Zero or negative target raises ValueError with a clear message."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    for bad in (0, -1, -0.50):
+        try:
+            scale_scenario(base, target_bb_dollars=bad)
+        except ValueError as exc:
+            assert "target_bb_dollars" in str(exc)
+            continue
+        raise AssertionError(
+            f"expected ValueError for target_bb_dollars={bad}"
+        )
+
+
+def test_scale_scenario_returns_frozen_dataclass():
+    """The returned config is still frozen (no accidental mutation)."""
+    base = SCENARIOS["btn_vs_bb_srp_2cJs7s"]
+    scaled = scale_scenario(base, target_bb_dollars=10.0)
+    try:
+        scaled.stakes_bb = 5.0  # type: ignore[misc]
+    except dataclasses_FrozenInstanceError:
+        return
+    raise AssertionError("expected FrozenInstanceError")
+
+
+# Imported lazily so the import doesn't shadow the dataclasses module in the
+# rest of the file.
+from dataclasses import FrozenInstanceError as dataclasses_FrozenInstanceError  # noqa: E402
+
+
+def test_common_stake_levels_constant():
+    """The advertised stake levels are all positive, sorted, and unique."""
+    levels = COMMON_STAKE_LEVELS_BB_DOLLARS
+    assert len(levels) >= 5                        # enough for a real dropdown
+    assert all(level > 0 for level in levels)
+    assert list(levels) == sorted(levels)          # ascending order
+    assert len(set(levels)) == len(levels)         # unique
+    # Tier-1 default is in the list.
+    assert 0.50 in levels
 
 
 if __name__ == "__main__":

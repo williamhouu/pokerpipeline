@@ -22,11 +22,29 @@ registry mechanism does not change.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 from pipeline.fact_extractor.spot_data import SpotData
+
+
+# Common cash-game stake levels offered in the admin panel's stake-scaling
+# dropdown. Each value is the BB size in dollars; SB is assumed to be half.
+# Add custom levels via scale_scenario(scenario, target_bb_dollars=X).
+COMMON_STAKE_LEVELS_BB_DOLLARS: tuple[float, ...] = (
+    0.10,    # $0.05/$0.10
+    0.25,    # $0.10/$0.25  (non-standard SB ratio)
+    0.50,    # $0.25/$0.50  (current Tier-1 default)
+    1.00,    # $0.50/$1
+    2.00,    # $1/$2
+    5.00,    # $2/$5        (non-standard SB ratio)
+    10.00,   # $5/$10
+    25.00,   # $10/$25      (non-standard SB ratio)
+    50.00,   # $25/$50
+    100.00,  # $50/$100
+)
 
 
 def _format_dollars(amount: float) -> str:
@@ -110,6 +128,64 @@ class ScenarioConfig:
     def dollars_per_bb(self) -> float:
         """Display-cash value of one big blind."""
         return self.default_stack_dollars / self.default_stack_bb
+
+
+# --- stake scaling ----------------------------------------------------------
+def scale_scenario(scenario: "ScenarioConfig",
+                   target_bb_dollars: float) -> "ScenarioConfig":
+    """Return a new ScenarioConfig with stakes rescaled to target_bb_dollars/BB.
+
+    Use this to render the same strategic spot at any cash-game stake level
+    without re-solving. Stack depth in bb is preserved (a 100bb game stays
+    100bb regardless of the dollar value of BB); all dollar amounts -- SB,
+    BB, default stack, preflop_action bet sizes -- scale linearly. The
+    derived `context` string and `stakes` display string are regenerated.
+
+    The SB/BB *ratio* is preserved -- if the input scenario has stakes_sb
+    half of stakes_bb (the common case), the output does too. If the input
+    has an unusual SB/BB ratio (some live games), that ratio is preserved.
+
+    The `cfr_key`, solve geometry, table size, preflop action language, and
+    all non-dollar fields are unchanged.
+
+    Args:
+      scenario: The base ScenarioConfig to rescale.
+      target_bb_dollars: New BB size in dollars (e.g. 2.0 = $1/$2 game).
+
+    Returns:
+      A new frozen ScenarioConfig at the requested stake level.
+
+    Raises:
+      ValueError: if target_bb_dollars <= 0.
+    """
+    if target_bb_dollars <= 0:
+        raise ValueError(
+            f"target_bb_dollars must be > 0, got {target_bb_dollars}"
+        )
+
+    ratio = target_bb_dollars / scenario.stakes_bb
+    new_sb = round(scenario.stakes_sb * ratio, 2)
+    new_bb = round(scenario.stakes_bb * ratio, 2)
+    new_stack = round(scenario.default_stack_dollars * ratio, 2)
+
+    # preflop_actions entries are 2-tuples (no amount, e.g. ("BB", "call"))
+    # or 3-tuples (with amount in dollars, e.g. ("BTN", "open", 1.25)).
+    # Only the 3-tuple amounts need rescaling.
+    new_preflop_actions = tuple(
+        (action[0], action[1], round(action[2] * ratio, 2))
+        if len(action) == 3
+        else action
+        for action in scenario.preflop_actions
+    )
+
+    return dataclasses.replace(
+        scenario,
+        stakes_sb=new_sb,
+        stakes_bb=new_bb,
+        default_stack_dollars=new_stack,
+        stakes=f"{_format_dollars(new_sb)}/{_format_dollars(new_bb)}",
+        preflop_actions=new_preflop_actions,
+    )
 
 
 # --- the registry -----------------------------------------------------------

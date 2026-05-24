@@ -3,24 +3,30 @@
 Run from repo root:
     venv/bin/streamlit run admin_panel/app.py
 
-Three pages selected via the sidebar:
+Four pages selected via the sidebar:
 
-  * Files     -- shows solves/ and ranges/ disk state; upload widgets for
-                 adding new ones (uploads not wired to backend in this
-                 preview).
-  * Generate  -- full UI for configuring + launching a generation batch.
-                 The Generate button is disabled until solves are present
-                 on disk (since the pipeline can't run without them).
-  * Browse    -- table view of the shipped test_output/tier1_consolidated.csv
-                 to demonstrate what generated-question browsing will look
+  * Files     -- live disk scan of solves/ and ranges/; per-scenario status
+                 indicators. Upload widgets are visual-only in this preview.
+  * Generate  -- full UI for configuring a batch: cascading filters (format
+                 → stack → table → scenarios), content filters (hand class /
+                 board texture), difficulty (presets + custom slider),
+                 answer style, sampling targets, model + batch size, stake
+                 scaling (real -- backed by pipeline.scenario_config.
+                 scale_scenario), currency toggle, dry run. The Generate
+                 button is disabled until solves are present on disk.
+  * Browse    -- table view of test_output/tier1_consolidated.csv to
+                 demonstrate what generated-question browsing will look
                  like when batches start producing output.
+  * Prompt    -- system-prompt editor; shows the actual default from
+                 build_system_prompt(). Save/Test/Reset/Set-default buttons
+                 are disabled pending the version-store backend.
 
 Known limitations of this v1 preview:
   * No backend wiring for the Generate button -- this is a UI scaffold to
     validate the design before we hook up the real pipeline.
   * No file-upload handling -- the widgets are visual placeholders.
-  * "Stake scaling" and a few other deferred features show up as disabled
-    controls so the design is visible.
+  * Prompt versioning store not implemented; only the built-in default
+    appears in the version dropdown.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ import streamlit as st
 # don't require a PioSolver binary or API key to import).
 from pipeline.explanation_generator import build_system_prompt
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS
+from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS
 
 # --- repo paths -------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -595,13 +602,52 @@ def render_generate_page() -> None:
             "Output filename",
             value="batch_2026-05-24.csv",
         )
-    _stake_disabled = st.toggle(
-        "Stake scaling (coming soon)",
-        value=False,
-        disabled=True,
-        help="$0.25/$0.50 hard-coded for now. Stake scaler is ~2 hours "
-        "of work; deferred to v2.",
-    )
+
+    # Stake scaling: pick from common levels or specify a custom BB-in-dollars
+    # value. The pipeline's scale_scenario() helper rebuilds each scenario at
+    # the chosen stake. Stack depth (in bb) is preserved -- a 100bb game stays
+    # 100bb at any stake.
+    def _stake_label(bb_dollars: float) -> str:
+        sb = bb_dollars / 2
+        sb_str = f"${sb:.2f}".rstrip("0").rstrip(".") if sb < 1 else f"${int(sb)}"
+        bb_str = (
+            f"${bb_dollars:.2f}".rstrip("0").rstrip(".")
+            if bb_dollars < 1
+            else f"${int(bb_dollars)}"
+        )
+        return f"{sb_str}/{bb_str}"
+
+    stake_options = [_stake_label(bb) for bb in COMMON_STAKE_LEVELS_BB_DOLLARS]
+    default_stake_index = list(COMMON_STAKE_LEVELS_BB_DOLLARS).index(0.50)
+    col_stake1, col_stake2 = st.columns([2, 1])
+    with col_stake1:
+        _stake_choice = st.selectbox(
+            "Stake level (rendered in output CSV)",
+            options=stake_options + ["Custom..."],
+            index=default_stake_index,
+            help=(
+                "All dollar amounts in the generated questions render at "
+                "this stake. The underlying chip math is identical -- only "
+                "the displayed dollar values change. Stack depth in bb is "
+                "preserved."
+            ),
+        )
+    with col_stake2:
+        if _stake_choice == "Custom...":
+            _custom_bb = st.number_input(
+                "Custom BB ($)",
+                min_value=0.01,
+                max_value=10_000.0,
+                value=0.50,
+                step=0.25,
+                format="%.2f",
+            )
+            st.caption(f"= {_stake_label(_custom_bb)}")
+        else:
+            picked_bb = COMMON_STAKE_LEVELS_BB_DOLLARS[
+                stake_options.index(_stake_choice)
+            ]
+            st.caption(f"BB = ${picked_bb:g}")
 
     st.divider()
 
