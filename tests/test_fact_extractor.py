@@ -199,6 +199,48 @@ def test_villain_top_value_combos_empty_when_no_range():
     assert rd.villain_top_value_combos == []
 
 
+# --- Ryan ask (May 2026): ip_range_snapshot / oop_range_snapshot ------------
+def test_extract_facts_populates_range_snapshots():
+    """extract_facts maps hero/villain to ip/oop based on hero_in_position
+    and populates the 169-class snapshots from each player's combo range."""
+    board = ["As", "Kd", "9h"]
+    # hero is OOP (hero_is_oop=True), so hero -> oop_range_snapshot.
+    hero_range = {"AhAc": 1.0, "QcQd": 0.5}
+    villain_range = {"KhKs": 1.0, "JhJs": 1.0}
+    ctx = _context(board, hero_range, villain_range)
+    spot = extract_facts(ctx, hero_hand="AhAc")
+    # 169-entry snapshots on both sides.
+    assert len(spot.ip_range_snapshot) == 169
+    assert len(spot.oop_range_snapshot) == 169
+    # hero (OOP) had AA at full weight; AcAd is the only unblocked AA combo
+    # (AhAc shares Ah... wait actually only AhAc is in the range). Mean of
+    # the one entry = 1.0.
+    assert spot.oop_range_snapshot["AA"] == 1.0
+    # Hero's QQ class: QcQd at 0.5 weight, one combo present -> mean 0.5.
+    assert spot.oop_range_snapshot["QQ"] == 0.5
+    # IP (villain) has KK and JJ at full weight (KhKs and JhJs each).
+    assert spot.ip_range_snapshot["KK"] == 1.0
+    assert spot.ip_range_snapshot["JJ"] == 1.0
+    # Classes absent from villain's range remain 0.
+    assert spot.ip_range_snapshot["AA"] == 0.0
+
+
+def test_extract_facts_snapshots_swap_when_hero_is_ip():
+    """Mirror test: when hero is IP, hero_range -> ip_range_snapshot."""
+    board = ["As", "Kd", "9h"]
+    hero_range = {"AhAc": 1.0}
+    villain_range = {"QhQd": 1.0}
+    ctx = _context(board, hero_range, villain_range, hero_is_oop=False)
+    spot = extract_facts(ctx, hero_hand="AhAc")
+    assert spot.spot_metadata.hero_in_position is True
+    # hero (IP) has AA -> shows up in ip_range_snapshot, NOT oop.
+    assert spot.ip_range_snapshot["AA"] == 1.0
+    assert spot.oop_range_snapshot["AA"] == 0.0
+    # villain (OOP) has QQ -> shows up in oop_range_snapshot.
+    assert spot.oop_range_snapshot["QQ"] == 1.0
+    assert spot.ip_range_snapshot["QQ"] == 0.0
+
+
 # --- extract_facts orchestration ---------------------------------------------
 def test_extract_facts_populates_spotdata():
     board = ["As", "Kd", "9h", "4c", "2s"]

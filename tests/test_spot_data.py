@@ -140,9 +140,12 @@ def test_validation_rejects_bad_input():
 # --- serialization -----------------------------------------------------------
 def test_to_dict_has_data_block_shape():
     block = _full_spot().to_dict()
+    # ip_range_snapshot / oop_range_snapshot added per Ryan ask, May 2026
+    # (UI range-grid columns; SpotData top-level fields).
     assert set(block) == {"spot_metadata", "decision_data", "equity_data",
                           "range_data", "hand_class", "board_texture",
-                          "population_baseline", "concept_tags"}
+                          "population_baseline", "concept_tags",
+                          "ip_range_snapshot", "oop_range_snapshot"}
     assert block["hand_class"]["made_hand"] == "overpair"
     assert block["range_data"]["villain_range"][0]["cards"] == ("Ah", "Kh")
 

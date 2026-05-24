@@ -541,8 +541,18 @@ def _trim_spot_data(spot_data: SpotData) -> dict:
     The full to_dict() is heavy with empty Combo lists; the LLM only needs the
     decision-relevant fields. Empty collections and zero floats are dropped to
     keep the prompt readable.
+
+    The 169-entry ip_range_snapshot / oop_range_snapshot dicts (Ryan ask, May
+    2026) are dropped entirely -- they're for Layer 8's UI-range-grid CSV
+    columns, not for the LLM. Leaving them in would add ~3KB of mostly-zero
+    weights to every prompt for no decision-relevant signal (Layer 6 already
+    gets `villain_top_value_combos` for the actionable per-class view).
     """
     raw = spot_data.to_dict()
+    # Drop the two snapshot fields before the recursive trim so they cannot
+    # leak into the LLM data block.
+    raw.pop("ip_range_snapshot", None)
+    raw.pop("oop_range_snapshot", None)
 
     def trim(value):
         if isinstance(value, dict):

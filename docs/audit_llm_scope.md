@@ -5,14 +5,15 @@ V6: "what exactly is the LLM doing, and what is it not allowed to do?" It
 classifies every column in the pipeline's CSV output by its data source and
 shows how the LLM-written columns are constrained.
 
-**Scope.** The 36-column output schema as of Apr 2026 (post-Fix 3, see
-`pipeline/format_writer.py:CSV_COLUMNS`). Cross-referenced against V7's
-production output at `test_output/batch_questions_v7.csv` (gitignored).
+**Scope.** The 38-column output schema as of May 2026 (post-Fix 3 +
+post-Ryan-range-grid ask, see `pipeline/format_writer.py:CSV_COLUMNS`).
+Cross-referenced against V7's production output at
+`test_output/batch_questions_v7.csv` (gitignored).
 
 **Bottom line.** Only **one** column is true free-form LLM prose
 (`Answer Explanation`). Five more are LLM-generated but heavily templated
 and validator-checked (the four `option N` columns + `Correct Answer`).
-The remaining **30 columns** are deterministic Python output of solver
+The remaining **32 columns** are deterministic Python output of solver
 facts, scenario configuration, or pipeline metadata. **Zero** columns are
 populated from LLM "reasoning about poker" — the LLM never decides what
 the correct answer is, what the action mix is, what the equity is, or
@@ -48,7 +49,7 @@ what concepts a spot teaches.
 |  8 | POT               | DERIVED_FACT   | `_dollars(meta.pot_bb * scenario.dollars_per_bb)` |
 |  9 | Context           | SCENARIO_CONFIG| `scenario.context` |
 | 10 | Question          | DERIVED_FACT   | `format_action_history(spot_to_hand(spot, scenario))` — 230-line deterministic renderer in `pipeline/action_history.py`, zero LLM |
-| 11 | Question Type     | METADATA       | hard-coded `"Multiple Choice"` |
+| 11 | Question Type     | METADATA       | hard-coded `"Hand Scenario Question."` (Ryan-feedback Fix 2, May 2026) |
 | 12 | Hand Stage        | SOLVER_FACT    | `meta.street.capitalize()` |
 | 13 | option 1          | LLM_PROSE      | `generate_explanation(...).option_1` |
 | 14 | option 2          | LLM_PROSE      | `generate_explanation(...).option_2` |
@@ -74,17 +75,19 @@ what concepts a spot teaches.
 | 34 | ev_gap_bb         | SOLVER_FACT    | `decision.ev_gap_bb` |
 | 35 | validation_status | METADATA       | hard-coded `"auto_approved"` default |
 | 36 | action_frequencies| SOLVER_FACT    | `_format_action_frequencies(decision.range_aggregate_strategy)` — direct render of Pio's range strategy |
+| 37 | ip_range          | SOLVER_FACT    | `format_hand_class_range(spot_data.ip_range_snapshot)` — 169-class snapshot of the IP player's range at this node, in Ryan-pack canonical ordering. Aggregated from Pio's per-combo weights by `aggregate_combo_range_to_classes`. Enables future UI range-grid rendering. (Ryan ask, May 2026.) |
+| 38 | oop_range         | SOLVER_FACT    | `format_hand_class_range(spot_data.oop_range_snapshot)` — same as ip_range but for the OOP player. (Ryan ask, May 2026.) |
 
 ### Source counts
 
 | Source | Columns |
 |---|---:|
-| SOLVER_FACT     | 8  |
+| SOLVER_FACT     | 10 |
 | DERIVED_FACT    | 13 |
 | SCENARIO_CONFIG | 4  |
 | METADATA        | 7  |
 | **LLM_PROSE**   | **6** |
-| **Total**       | **36** |
+| **Total**       | **38** |
 
 ## How LLM_PROSE columns are constrained
 

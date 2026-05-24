@@ -387,6 +387,16 @@ class SpotData:
     board_texture: BoardTexture | None = None            # None for preflop spots
     population_baseline: PopulationBaseline = field(default_factory=PopulationBaseline)
     concept_tags: list[str] = field(default_factory=list)   # filled by the tagger
+    # Ryan ask (May 2026): 169-class snapshot of each player's range at this
+    # decision node, in canonical preflop-pack ordering (AA, A2s, A2o, ...,
+    # KQs, KQo, KK). Aggregated from per-combo weights as the mean weight per
+    # unblocked combo per class. Used by Layer 8's ip_range / oop_range CSV
+    # columns to enable future UI range-grid rendering -- the same shape Ryan's
+    # existing preflop pack uses. Deterministic from solver output; SOLVER_FACT
+    # category in docs/audit_llm_scope.md, NOT consumed by Layer 6 (the LLM
+    # data block strips these in `_trim_spot_data` to keep prompt size sane).
+    ip_range_snapshot: dict = field(default_factory=dict)
+    oop_range_snapshot: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         sections = {"spot_metadata": SpotMetadata, "decision_data": DecisionData,

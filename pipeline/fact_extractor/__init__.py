@@ -26,6 +26,7 @@ from pipeline.fact_extractor.hand_class import classify_hand  # noqa: F401
 from pipeline.fact_extractor.spot_data import (
     BoardTexture, DecisionData, HandClass, SpotData, SpotMetadata,
 )
+from pipeline.preflop_ranges import aggregate_combo_range_to_classes
 
 
 def _canonical(label: str) -> str:
@@ -207,4 +208,17 @@ def extract_facts(spot_context, *, hero_hand: str | None = None,
     )
     spot.decision_data.recommended_action_archetype = (
         classify_recommended_archetype(spot))
+    # Ryan ask (May 2026): 169-class range snapshots for the UI range-grid
+    # column. hero_range / villain_range are combo-level dicts on the spot
+    # context; the spot_metadata's hero_in_position tells us which side is IP.
+    hero_classes = aggregate_combo_range_to_classes(
+        spot_context.hero_range, board)
+    villain_classes = aggregate_combo_range_to_classes(
+        spot_context.villain_range, board)
+    if spot.spot_metadata.hero_in_position:
+        spot.ip_range_snapshot = hero_classes
+        spot.oop_range_snapshot = villain_classes
+    else:
+        spot.oop_range_snapshot = hero_classes
+        spot.ip_range_snapshot = villain_classes
     return spot

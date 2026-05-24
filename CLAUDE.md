@@ -251,7 +251,8 @@ explanations before the tagger goes to production.
 ## Output format
 
 Source of truth is **Google Sheets**. The existing **29 columns stay unchanged**; the
-pipeline writes to them via a formatter and adds **5 new columns**:
+pipeline writes to them via a formatter and adds **8 new columns** (5 from the
+brief + 1 from Apr-2026 Ryan-feedback Fix 3 + 2 from May-2026 Ryan ask):
 
 | Col | Name | Purpose |
 |-----|------|---------|
@@ -260,21 +261,26 @@ pipeline writes to them via a formatter and adds **5 new columns**:
 | 32 | `board_texture` | single label, e.g. `monotone_connected_broadway` |
 | 33 | `solver_reference` | path back to the exact solve node — the key QA/debugging column |
 | 34 | `ev_gap_bb` | EV gap to second-best action; `<0.30` surfaces questionable questions |
+| 35 | `validation_status` | `draft`/`auto_approved`/`flagged`/`needs_review`/`approved`/`rejected` |
+| 36 | `action_frequencies` | comma-separated `<verb>: <integer>%` (Fix 3, Apr 2026) — Pio's range strategy at a glance |
+| 37 | `ip_range` | 169-entry preflop-pack-format snapshot of the IP player's range at this node (`AA:1.0,A2s:0.621,...`). Enables future UI range-grid rendering per question. (Ryan ask, May 2026.) |
+| 38 | `oop_range` | same as `ip_range`, for the OOP player |
 
-Optional column 35 `validation_status` (`draft`/`auto_approved`/`flagged`/
-`needs_review`/`approved`/`rejected`). Migrate off Sheets to Airtable/Firestore only
-around 7k–10k active questions.
+Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 
 ### Authoritative format sample — `docs/output_format_examples.xlsx`
 
 A real sample of the team's output, and the **authoritative format spec**. Two sheets:
 
-- **Sheet 1 "Example formatting"** — 6 fully-populated example rows. The real layout
-  is **35 columns** (0-indexed `No` … `validation_status`): a leading `No` (question
-  id), 28 template columns, the 5 new columns (`concept_tags`, `hand_class`,
-  `board_texture`, `solver_reference`, `ev_gap_bb`), then `validation_status`. So the
-  brief's "29 existing" = `No` + the 28 named template columns. This is the spec
-  Layer 8 (`format_writer.py`) must match.
+- **Sheet 1 "Example formatting"** — 6 fully-populated example rows. The baseline
+  layout is **35 columns** (0-indexed `No` … `validation_status`): a leading `No`
+  (question id), 28 template columns, the 5 brief-spec'd new columns
+  (`concept_tags`, `hand_class`, `board_texture`, `solver_reference`,
+  `ev_gap_bb`), then `validation_status`. So the brief's "29 existing" = `No` +
+  the 28 named template columns. Layer 8 (`format_writer.py`) emits this layout
+  plus three additional columns added post-baseline: `action_frequencies` (Fix
+  3, Apr 2026) and `ip_range` + `oop_range` (Ryan ask, May 2026) — current
+  total 38 columns.
 - **Sheet 2 "Golden explanation examples - I"** — ~10 sample `Answer Explanation`s
   showing the coaching voice Layer 6's LLM prompt must reproduce.
 

@@ -13,9 +13,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop_ranges import (                                       # noqa: E402
-    CARD_COUNT, HAND_COUNT, card_label, combo_cards, combo_label,
-    combo_to_hand_class, expand_to_combo_weights, format_set_range_line,
-    parse_range_file,
+    CARD_COUNT, HAND_COUNT, aggregate_combo_range_to_classes,
+    canonical_169_hand_classes, card_label, combo_cards, combo_label,
+    combo_str_to_hand_class, combo_to_hand_class, expand_to_combo_weights,
+    format_hand_class_range, format_set_range_line, parse_range_file,
 )
 
 
@@ -212,6 +213,104 @@ def test_format_set_range_line_rejects_bad_side():
         assert "OOP" in str(exc) or "IP" in str(exc)
         return
     raise AssertionError("expected ValueError")
+
+
+# --- Ryan ask (May 2026): canonical 169 + aggregator + serialiser -----------
+def test_canonical_169_count_and_endpoints():
+    classes = canonical_169_hand_classes()
+    assert len(classes) == 169
+    # Ryan-pack ordering: A row first (25 entries), 2 row (23), ..., K row (1).
+    assert classes[:5] == ["AA", "A2s", "A2o", "A3s", "A3o"]
+    assert classes[24] == "AKo"                  # last of A row
+    assert classes[25] == "22"                   # start of 2 row
+    assert classes[26] == "32s"
+    assert classes[-1] == "KK"
+
+
+def test_canonical_169_matches_real_ryan_pack_order():
+    """The canonical enumeration must match what Ryan's pack files actually
+    write, so the new ip_range / oop_range columns are drop-in compatible."""
+    sample = parse_range_file(Path(__file__).resolve().parent.parent
+                              / "ranges" / "ryan_preflop_tree"
+                              / "PioViewer - NLH 6max 100bb 2.5x Open"
+                              / "BB"
+                              / "UTG_Fold_HJ_Fold_CO_Fold_BTN_60%_SB_Fold_BB_Call.txt")
+    assert list(sample) == canonical_169_hand_classes()
+
+
+def test_combo_str_to_hand_class():
+    assert combo_str_to_hand_class("AhAd") == "AA"
+    assert combo_str_to_hand_class("AhKh") == "AKs"
+    assert combo_str_to_hand_class("AhKs") == "AKo"
+    assert combo_str_to_hand_class("2c3c") == "32s"
+    assert combo_str_to_hand_class("2c3d") == "32o"
+
+
+def test_aggregate_filters_board_blocked_combos():
+    """Combos sharing a card with the board are excluded from both the
+    numerator and the denominator -- they're impossible holdings."""
+    # Board has Ah. AhAd, AhAc, AhAs are all blocked (share Ah).
+    # Only AcAd, AcAs, AdAs are unblocked.
+    board = ["Ah", "Kd", "9c"]
+    combo_range = {
+        # AA: 3 of 6 combos blocked by board's Ah; 3 unblocked at varying weights.
+        "AhAd": 1.0, "AhAc": 1.0, "AhAs": 1.0,
+        "AcAd": 1.0, "AcAs": 0.5, "AdAs": 0.0,
+    }
+    out = aggregate_combo_range_to_classes(combo_range, board)
+    # AA class: mean of unblocked weights = (1.0 + 0.5 + 0.0) / 3 = 0.5.
+    assert out["AA"] == 0.5
+    # All other classes 0 (no combos in range).
+    assert out["KK"] == 0.0
+    assert out["AKs"] == 0.0
+
+
+def test_aggregate_emits_full_169_entries():
+    """Even when only a few classes have weight, the output is the full 169
+    canonical entries -- the 169-entry assertion is the contract."""
+    out = aggregate_combo_range_to_classes({"AhAd": 1.0}, board=["2c", "3d", "4h"])
+    assert len(out) == 169
+    assert set(out) == set(canonical_169_hand_classes())
+    assert out["AA"] == 1.0
+    assert sum(1 for v in out.values() if v > 0) == 1
+
+
+def test_aggregate_mean_per_unblocked_combo():
+    """Sanity: when 3 of 4 AKs combos are in range at full weight on a board
+    with no A or K, the class weight is 3/4 = 0.75 (not 3.0 / 4 / 6)."""
+    board = ["2c", "3d", "4h"]
+    # 4 AKs combos: AhKh, AdKd, AcKc, AsKs. Range has 3 at full weight, 1
+    # absent (zero-weight equivalent).
+    combo_range = {"AhKh": 1.0, "AdKd": 1.0, "AcKc": 1.0}
+    out = aggregate_combo_range_to_classes(combo_range, board)
+    # 3 combos sum to 3.0; only 3 are in the dict, so count=3 -> mean=1.0.
+    # The absent AsKs is NOT counted (not in the dict).
+    assert out["AKs"] == 1.0
+
+
+def test_format_hand_class_range_canonical_order_and_format():
+    """The serialised string starts with 'AA:<weight>,A2s:<weight>,...' and
+    has 169 comma-separated entries -- drop-in match for Ryan's pack format."""
+    weights = {cls: 0.0 for cls in canonical_169_hand_classes()}
+    weights["AA"] = 1.0
+    weights["KK"] = 0.5
+    s = format_hand_class_range(weights)
+    parts = s.split(",")
+    assert len(parts) == 169
+    assert parts[0] == "AA:1"
+    assert parts[1] == "A2s:0"
+    # Compact float formatting matches the pack (trailing zeros stripped).
+    assert "KK:0.5" in parts
+
+
+def test_format_hand_class_range_rejects_short_input():
+    weights = {"AA": 1.0, "KK": 0.5}
+    try:
+        format_hand_class_range(weights)
+    except ValueError as exc:
+        assert "169 entries" in str(exc)
+    else:
+        raise AssertionError("format_hand_class_range should have rejected 2-entry dict")
 
 
 if __name__ == "__main__":

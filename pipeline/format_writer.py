@@ -33,6 +33,7 @@ from pathlib import Path
 
 from pipeline.action_history import format_action_history
 from pipeline.fact_extractor.spot_data import SpotData
+from pipeline.preflop_ranges import format_hand_class_range
 from pipeline.scenario_config import ScenarioConfig, spot_to_hand
 
 _LLM_TBD = "[TBD by Layer 6]"     # LLM-generated content
@@ -58,6 +59,11 @@ CSV_COLUMNS = [
     "ev_gap_bb", "validation_status",
     # Ryan-feedback Fix 3 (Apr 2026): "fold: 10%, call: 60%, raise: 20%, all-in: 10%".
     "action_frequencies",
+    # Ryan ask (May 2026): 169-class range snapshots in canonical Ryan-pack
+    # ordering ('AA:0.0,A2s:1.0,...'). Enables future UI range-grid rendering
+    # alongside each question. SOLVER_FACT category (deterministic from solver
+    # output, not LLM-generated). Last two columns of the schema.
+    "ip_range", "oop_range",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -247,6 +253,13 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # so the QA reviewer can read it without opening the .cfr.
         "action_frequencies": _format_action_frequencies(
             decision.range_aggregate_strategy),
+        # Ryan ask (May 2026): 169-class range snapshots for UI range-grid
+        # rendering. Empty dict (test fixtures, legacy SpotData) -> empty
+        # string so the schema stays consistent across rows.
+        "ip_range": (format_hand_class_range(spot_data.ip_range_snapshot)
+                     if spot_data.ip_range_snapshot else ""),
+        "oop_range": (format_hand_class_range(spot_data.oop_range_snapshot)
+                      if spot_data.oop_range_snapshot else ""),
     }
 
 

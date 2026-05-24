@@ -76,6 +76,103 @@ def combo_to_hand_class(card_a_idx: int, card_b_idx: int) -> str:
     return _RANKS[high_rank] + _RANKS[low_rank] + suited
 
 
+def combo_str_to_hand_class(combo: str) -> str:
+    """Hand-class label for a 4-character combo string like 'AhKc' or 'AhAd'."""
+    rank_a = _RANKS.index(combo[0])
+    rank_b = _RANKS.index(combo[2])
+    suit_a = _SUITS.index(combo[1])
+    suit_b = _SUITS.index(combo[3])
+    return combo_to_hand_class(rank_a * 4 + suit_a, rank_b * 4 + suit_b)
+
+
+# Ryan-pack canonical pivot order for the 169 hand classes: A row first, then
+# 2 row, 3 row, ..., K row. For each pivot, list the pair, then every
+# remaining rank suited+offsuit (higher-rank shown first in the label).
+# Verified against the first 100 chars of the BB-call-vs-BTN-open pack file:
+#   AA:0.0,A2s:1.0,A2o:0.0,A3s:1.0,...,AKo:0.0,22:1.0,32s:1.0,32o:0.0,...
+_RYAN_PIVOT_ORDER = "A23456789TJQK"
+
+
+def canonical_169_hand_classes() -> list[str]:
+    """The 169 preflop hand-class labels in Ryan's pack canonical ordering.
+
+    Used by Layer 8's ip_range / oop_range CSV columns (May 2026 Ryan ask)
+    so the serialized order matches the team's existing preflop pack format
+    -- enables future UI to consume both interchangeably without re-sorting.
+
+    Total = 25 (A row) + 23 (2) + 21 (3) + ... + 1 (K) = 169.
+    """
+    rank_values = {r: i for i, r in enumerate(_RANKS)}
+    classes: list[str] = []
+    for i, pivot in enumerate(_RYAN_PIVOT_ORDER):
+        classes.append(pivot + pivot)            # pair first
+        for other in _RYAN_PIVOT_ORDER[i + 1:]:
+            high = pivot if rank_values[pivot] > rank_values[other] else other
+            low = other if high == pivot else pivot
+            classes.append(high + low + "s")
+            classes.append(high + low + "o")
+    return classes
+
+
+def aggregate_combo_range_to_classes(combo_range: dict[str, float],
+                                      board: list[str]) -> dict[str, float]:
+    """Aggregate a combo-level range to 169 preflop hand-class weights.
+
+    `combo_range` maps 4-char combo strings (e.g. 'AhAd', 'AhKc') to per-combo
+    weights in [0, 1]. `board` is the list of community cards to filter out
+    board-blocked combos.
+
+    For each of the 169 hand classes, the result is the MEAN weight over the
+    unblocked combos of that class that appear in `combo_range`. Classes with
+    no unblocked combos in the range map to 0.0 -- typically because every
+    combo of the class shares a card with the board, or because the player's
+    range simply doesn't include any combo of that class.
+
+    The 169-entry assertion validates downstream UI assumptions: the output
+    is always a complete 169-entry dict, even when most classes are 0.0.
+    """
+    board_cards = set(board)
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for combo, weight in combo_range.items():
+        # Skip combos that share a card with the board (impossible holdings).
+        if combo[:2] in board_cards or combo[2:] in board_cards:
+            continue
+        cls = combo_str_to_hand_class(combo)
+        sums[cls] = sums.get(cls, 0.0) + float(weight)
+        counts[cls] = counts.get(cls, 0) + 1
+    out: dict[str, float] = {}
+    for cls in canonical_169_hand_classes():
+        c = counts.get(cls, 0)
+        out[cls] = sums[cls] / c if c > 0 else 0.0
+    if len(out) != 169:
+        raise AssertionError(
+            f"hand-class aggregation produced {len(out)} entries; expected 169")
+    return out
+
+
+def format_hand_class_range(class_weights: dict[str, float]) -> str:
+    """Serialise a 169-class weight dict in Ryan's pack format.
+
+    Output is a single line: 'AA:0.0,A2s:1.0,A2o:0.0,A3s:1.0,...' -- 169
+    comma-separated `Hand:weight` pairs in canonical Ryan-pack order. Weights
+    are formatted compactly (trailing zeros stripped), matching the pack files.
+    Used by Layer 8's ip_range / oop_range CSV columns; consumers can either
+    parse it back via `parse_range_file` or render directly into a UI grid.
+    """
+    if len(class_weights) != 169:
+        raise ValueError(
+            f"format_hand_class_range expected 169 entries, got {len(class_weights)}")
+    parts = []
+    for cls in canonical_169_hand_classes():
+        if cls not in class_weights:
+            raise KeyError(
+                f"class {cls!r} missing from input dict -- aggregator must "
+                f"emit the full 169-entry canonical set, including zeros.")
+        parts.append(f"{cls}:{_format_weight(class_weights[cls])}")
+    return ",".join(parts)
+
+
 def parse_range_file(path: Path | str) -> dict[str, float]:
     """Parse a Ryan-pack range file into a `{hand_class: weight}` dict.
 
@@ -145,11 +242,15 @@ def _format_weight(w: float) -> str:
 __all__ = [
     "CARD_COUNT",
     "HAND_COUNT",
+    "aggregate_combo_range_to_classes",
+    "canonical_169_hand_classes",
     "card_label",
     "combo_cards",
     "combo_label",
+    "combo_str_to_hand_class",
     "combo_to_hand_class",
     "expand_to_combo_weights",
+    "format_hand_class_range",
     "format_set_range_line",
     "parse_range_file",
 ]

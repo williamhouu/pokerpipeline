@@ -41,18 +41,23 @@ def _spot(effective_stack_bb: float = 98.0,
     )
 
 
-def test_thirty_six_column_structure():
-    """Apr-2026 Ryan-feedback Fix 3 added `action_frequencies` after
-    validation_status, taking the layout from 35 to 36 columns."""
-    assert len(CSV_COLUMNS) == 36
+def test_thirty_eight_column_structure():
+    """Column-count history:
+      * 35 baseline (.xlsx Sheet 1)
+      * 36 = +action_frequencies (Apr 2026 Ryan-feedback Fix 3)
+      * 38 = +ip_range +oop_range (May 2026 Ryan ask: UI range-grid columns)
+    """
+    assert len(CSV_COLUMNS) == 38
     assert CSV_COLUMNS[0] == "No"
-    assert CSV_COLUMNS[-2] == "validation_status"            # was last
-    assert CSV_COLUMNS[-1] == "action_frequencies"           # new tail
+    assert CSV_COLUMNS[-4] == "validation_status"
+    assert CSV_COLUMNS[-3] == "action_frequencies"
+    assert CSV_COLUMNS[-2] == "ip_range"                     # new tail (May 2026)
+    assert CSV_COLUMNS[-1] == "oop_range"
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 36
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 38
 
 
 def test_no_and_validation_status():
@@ -97,6 +102,32 @@ def test_action_frequencies_column_handles_empty_strategy():
         correct_action="bet", range_aggregate_strategy={}, ev_gap_bb=0.0))
     row = build_row(spot, 1500, 1)
     assert row["action_frequencies"] == ""
+
+
+# --- Ryan ask (May 2026): ip_range / oop_range UI columns -------------------
+def test_ip_oop_range_columns_empty_string_when_snapshots_missing():
+    """Legacy SpotData (no snapshots populated) -> empty-string columns; the
+    row is still valid, the columns are blank. Keeps back-compat for tests
+    that construct minimal SpotData fixtures without going through Layer 5."""
+    row = build_row(_spot(), 1500, 1)
+    assert row["ip_range"] == ""
+    assert row["oop_range"] == ""
+
+
+def test_ip_oop_range_columns_populated_from_snapshot():
+    """When the snapshots are populated, the columns serialise to Ryan-pack
+    format: 169 'Hand:weight' pairs in canonical order, comma-separated."""
+    from pipeline.preflop_ranges import canonical_169_hand_classes
+    spot = _spot()
+    classes = canonical_169_hand_classes()
+    spot.ip_range_snapshot = {c: (1.0 if c == "AA" else 0.0) for c in classes}
+    spot.oop_range_snapshot = {c: (0.5 if c == "KK" else 0.0) for c in classes}
+    row = build_row(spot, 1500, 1)
+    # Both columns are 169-entry, comma-separated strings.
+    assert row["ip_range"].split(",")[0] == "AA:1"
+    assert len(row["ip_range"].split(",")) == 169
+    assert "KK:0.5" in row["oop_range"].split(",")
+    assert len(row["oop_range"].split(",")) == 169
 
 
 def test_board_texture_broadway_alias():
