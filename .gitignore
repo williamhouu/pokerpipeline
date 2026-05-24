@@ -50,3 +50,7 @@ docs/_*.txt
 # somewhere to write and we still version the ignore rule itself.
 test_output/*
 !test_output/.gitignore
+# Whitelist exception: the consolidated Tier-1 dataset IS a shipped artifact
+# (handoff deliverable for downstream consumers), so it stays tracked while
+# the per-batch verification CSVs (v7, v7_1, v7_3, ...) stay local.
+!test_output/tier1_consolidated.csv

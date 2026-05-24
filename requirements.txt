@@ -1,0 +1,18 @@
+# Direct dependencies. Pinned to the versions verified against the V7.3
+# verification batch + the Tier-1 consolidated batch (May 2026).
+#
+# anthropic       -- Layer 6 explanation generator. Reads ANTHROPIC_API_KEY.
+# openpyxl        -- loads the gold-example pool from
+#                    docs/output_format_examples.xlsx for the Layer 6 prompt.
+# python-docx     -- reads docs/engineering_brief.docx (reference doc, not
+#                    pipeline-critical; safe to drop if you don't need it).
+# pytest          -- test suite (292 tests). Not a runtime dependency.
+#
+# Transitive deps are pinned by pip's resolver at install time; this file
+# only locks the direct ones. Run `pip freeze > requirements.lock.txt` if
+# you need a fully-reproducible lock file.
+
+anthropic==0.104.0
+openpyxl==3.1.5
+python-docx==1.2.0
+pytest==9.0.3
