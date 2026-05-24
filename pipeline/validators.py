@@ -242,6 +242,57 @@ def validate_option_set_completeness(
     return ValidationResult.ok()
 
 
+# --- Ryan-feedback Fix 3 soft validator (May 2026) --------------------------
+# Plain-text suit notation in an answer_explanation indicates the LLM bypassed
+# voice rule 9 (use suit emojis). Regex matches a run of one-or-more rank+suit
+# pairs ([2-9TJQKA] followed by [shdc]), bordered by non-alphanumeric chars or
+# string edges. This catches both standalone "Kh" and concatenated "KsKh" /
+# "AdKdQd" forms PioSolver dumps cards in. English words like "Adam" or "is"
+# never match (the rank letter isn't followed by a suit letter at the right
+# spot, and the boundary lookarounds reject letter-adjacent fragments).
+import re as _re
+
+_PLAIN_CARD_RE = _re.compile(
+    r"(?<![A-Za-z0-9])"                  # left edge: non-alnum or start of string
+    r"([2-9TJQKA][shdc])"                # one rank+suit pair, captured
+    r"(?:[2-9TJQKA][shdc])*"             # optional further pairs in the same run
+    r"(?![A-Za-z0-9])"                   # right edge: non-alnum or end of string
+)
+_PLAIN_CARD_TOKEN_RE = _re.compile(r"[2-9TJQKA][shdc]")
+
+
+def validate_no_plain_card_notation(
+        generated: GeneratedExplanation,
+        decision: DecisionData) -> ValidationResult:
+    """Soft check: answer_explanation must not contain plain-text card notation.
+
+    Voice rule 9 says specific card / combo citations use suit emojis (♠️ ❤️
+    ♦️ ♣️). Plain forms like "Kh" or "AdKd" are internal solver notation and
+    don't belong in coaching prose. This is the lighter sibling of the other
+    validators: warnings are SURFACED (printed to stderr) but the validator
+    returns ok so the explanation isn't rejected outright. Track failures for
+    a follow-up hard validator if they persist after the prompt change lands.
+    """
+    # Find every run of plain-card pattern, then expand each run into its
+    # individual rank+suit tokens for the warning (so "KsKh" reports both
+    # "Ks" and "Kh" rather than just the first match).
+    runs = _PLAIN_CARD_RE.finditer(generated.answer_explanation)
+    tokens: set[str] = set()
+    for run in runs:
+        for tok in _PLAIN_CARD_TOKEN_RE.findall(run.group(0)):
+            tokens.add(tok)
+    if tokens:
+        unique = sorted(tokens)
+        # Print to stderr so batch logs surface the warning without polluting
+        # the validator's binary ok/fail contract.
+        import sys
+        print(f"  [soft-warn validate_no_plain_card_notation] "
+              f"explanation contains plain card notation {unique} (voice "
+              f"rule 9 requires suit emojis like K♠️). "
+              f"Not retrying.", file=sys.stderr)
+    return ValidationResult.ok()
+
+
 # --- Ryan-feedback Fix 2b validators (Apr 2026) -----------------------------
 # Threshold above which a Pio action is considered "in the mix" for option
 # coverage purposes. Mirrors COMPLETENESS_MIN_FREQ above (also 0.05) but
@@ -380,6 +431,8 @@ def run_audit_validators(generated: GeneratedExplanation,
         result = check(generated, decision)
         if not result.is_valid:
             return result
+    # Soft validators last: they may print warnings but never fail.
+    validate_no_plain_card_notation(generated, decision)
     return ValidationResult.ok()
 
 
@@ -392,6 +445,7 @@ __all__ = [
     "run_audit_validators",
     "validate_composite_label_frequencies",
     "validate_correct_answer_verb",
+    "validate_no_plain_card_notation",
     "validate_no_standalone_sometimes",
     "validate_option_set",
     "validate_option_set_completeness",

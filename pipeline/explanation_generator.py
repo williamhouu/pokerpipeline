@@ -108,7 +108,35 @@ VOICE_RULES = [
     "Write with the confidence of a coach who has solved the spot. Do not "
     "hedge with \"it might be\", \"perhaps\", \"in theory\". State what the "
     "right play is and why, plainly.",
+    # 9. Suit emojis for specific card references (Ryan-feedback Fix 3, May 2026)
+    "When referencing a SPECIFIC card or two-card combo in prose, use the "
+    "suit emoji form: A♠️, K❤️, T♦️, "
+    "9♣️ (rank letter immediately followed by the suit emoji, no "
+    "space). Never use plain-text suit letters like 'Kh', 'Ad', or 'JsTs' in "
+    "the answer explanation -- those are internal solver notation, not voice. "
+    "This matches the suit-emoji convention already used in the Question "
+    "column. Hand-class names (\"top pair top kicker\", \"open-ended straight "
+    "draw\") stay as plain prose -- the emoji rule only applies when you "
+    "actually name specific cards.",
 ]
+
+
+# --- Ryan-feedback Fix 3 supplementary gold examples (May 2026) --------------
+# These pin the suit-emoji convention (rule 9) by showing concrete villain
+# combo callouts in the team voice. The .xlsx gold pool predates the convention
+# so we ship these inline; the cached prompt block carries them on every call.
+SUPPLEMENTARY_EXAMPLES_SUIT_EMOJI = (
+    "When BTN raises the flop and barrels turn, the strongest combos he can "
+    "show up with are K♠️K♣️ and J♦️J♣️ "
+    "for sets, plus K❤️J❤️ and Q❤️J❤️ "
+    "as the strongest two-pair combos.",
+    "BB's flop check-raise range here is loaded with two-pair: 8♠️"
+    "5♦️, 8♦️3♦️, and 5♣️3♣️ "
+    "are all in there at full weight.",
+    "Villain's continuing range is mostly draws: 9❤️7❤️, "
+    "T❤️8❤️, A♦️K♦️. None of those "
+    "have you in bad shape on this river.",
+)
 
 
 # --- public dataclass --------------------------------------------------------
@@ -339,6 +367,12 @@ def _format_banned_phrases() -> str:
     return ", ".join(f"\"{p}\"" for p in BANNED_LITERAL_PHRASES)
 
 
+def _format_supplementary_examples() -> str:
+    parts = [f"  EX{i + 1}. {ex}"
+             for i, ex in enumerate(SUPPLEMENTARY_EXAMPLES_SUIT_EMOJI)]
+    return "\n".join(parts)
+
+
 def build_system_prompt() -> str:
     """The static system prompt: voice rules, banned phrases, output schema.
 
@@ -350,8 +384,13 @@ def build_system_prompt() -> str:
         "explanations. You never reason about poker yourself: every "
         "strategic claim in your output must be supported by a field in "
         "the SOLVER DATA block the user gives you.\n\n"
-        "VOICE RULES (all eight apply to every output):\n"
+        "VOICE RULES (all nine apply to every output):\n"
         f"{_format_voice_rules()}\n\n"
+        "SUIT-EMOJI CITATION EXAMPLES (Ryan-feedback Fix 3, May 2026 -- "
+        "these supplement the .xlsx gold pool, which predates the emoji "
+        "convention). When you cite specific combos in the answer "
+        "explanation, match this voice and notation:\n"
+        f"{_format_supplementary_examples()}\n\n"
         f"BANNED PHRASES (never appear in any output field): {_format_banned_phrases()}.\n\n"
         "DETERMINISTIC FREQUENCY PREFIX MAPPING: When a frequency-style "
         "option-style instruction specifies a required prefix for "

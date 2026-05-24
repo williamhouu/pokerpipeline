@@ -109,7 +109,8 @@ def _mock_client(responses):
 # --- (a) prompt assembly carries all 8 voice rules + banned phrases ---------
 def test_system_prompt_includes_every_voice_rule():
     system = build_system_prompt()
-    assert len(VOICE_RULES) == 8
+    # Rule 9 (suit-emoji citation) added per Ryan-feedback Fix 3, May 2026.
+    assert len(VOICE_RULES) == 9
     for rule in VOICE_RULES:
         # Rules are long; assert on the leading clause so a future word-tweak
         # doesn't break the test.

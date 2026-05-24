@@ -23,8 +23,8 @@ from pipeline.validators import (                                              #
     COMPLETENESS_MIN_FREQ, COMPOSITE_LABEL_MIN_FREQ, ValidationResult,
     extract_action_verb, extract_frequency_prefix, run_audit_validators,
     validate_composite_label_frequencies, validate_correct_answer_verb,
-    validate_no_standalone_sometimes, validate_option_set,
-    validate_option_set_completeness,
+    validate_no_plain_card_notation, validate_no_standalone_sometimes,
+    validate_option_set, validate_option_set_completeness,
 )
 
 
@@ -406,6 +406,49 @@ def test_run_audit_validators_passes_when_all_valid():
         option_3="Mostly fold", option_4="Always fold",
         correct_answer="Mostly call")
     assert run_audit_validators(explanation, decision).is_valid
+
+
+# --- Ryan-feedback Fix 3 soft validator (May 2026) --------------------------
+def test_no_plain_card_notation_passes_with_emoji_text(capsys):
+    # Emoji-style citations are clean; no warning printed, returns ok.
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 1.0})
+    explanation = _explanation(
+        option_1="Call", correct_answer="Call",
+        answer_explanation="Villain shows up with K♠️K♣️ "
+                            "and J♦️J♠️ for sets.")
+    assert validate_no_plain_card_notation(explanation, decision).is_valid
+    assert "soft-warn" not in capsys.readouterr().err
+
+
+def test_no_plain_card_notation_warns_on_plain_form(capsys):
+    # Plain "Kh"/"Ad"/"5c" notation triggers a stderr warning but the validator
+    # returns ok (soft validator, no rejection initially per Ryan's instruction).
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 1.0})
+    explanation = _explanation(
+        option_1="Call", correct_answer="Call",
+        answer_explanation="BTN can show up with KsKh and JdJc here.")
+    result = validate_no_plain_card_notation(explanation, decision)
+    assert result.is_valid                       # soft -- does not fail
+    err = capsys.readouterr().err
+    assert "soft-warn validate_no_plain_card_notation" in err
+    # Each plain-card token appears in the warning.
+    assert "Kh" in err and "Js" not in err       # extracted unique tokens
+
+
+def test_no_plain_card_notation_ignores_non_card_text(capsys):
+    # English words like "is", "as", "the", "ad" (as in "ad-hoc") should not
+    # match. The regex requires a rank LETTER [2-9TJQKA] followed by a single
+    # lowercase suit letter; "is"/"as"/"the" fail the rank prefix.
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 1.0})
+    explanation = _explanation(
+        option_1="Call", correct_answer="Call",
+        answer_explanation="It is clear that the call is the right play, as "
+                            "your hand value is high and the pot is laid.")
+    assert validate_no_plain_card_notation(explanation, decision).is_valid
+    assert "soft-warn" not in capsys.readouterr().err
 
 
 if __name__ == "__main__":
