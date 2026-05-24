@@ -1,6 +1,8 @@
 # test_output/ holds artifacts written by the demo and batch scripts:
-# generated questions, CSVs, screenshots, ad-hoc diagnostics. None of it is
-# source. Ignore everything in this directory except this file itself, so the
-# directory still exists in the repo for scripts that write here.
+# generated questions, CSVs, screenshots, ad-hoc diagnostics. Most of it is
+# local-only (per-batch verification CSVs, logs). The consolidated Tier-1
+# dataset is an exception: it IS a shipped artifact for downstream consumers,
+# so it stays tracked.
 *
 !.gitignore
+!tier1_consolidated.csv
