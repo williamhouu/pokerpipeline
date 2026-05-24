@@ -43,6 +43,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from pipeline.fact_extractor.archetypes import (
+    ARCHETYPE_GUIDANCE, RECOMMENDED_ACTION_ARCHETYPES,
+)
 from pipeline.fact_extractor.spot_data import SpotData
 
 # Default Anthropic model. The brief asks for an Opus-class model in production
@@ -147,6 +150,77 @@ SUPPLEMENTARY_EXAMPLES_SUIT_EMOJI = (
     "Villain's continuing range is mostly draws: 9❤️7❤️, "
     "T❤️8❤️, A♦️K♦️. None of those "
     "have you in bad shape on this river.",
+)
+
+# --- Ryan-feedback Fix 5 archetype-aware gold examples (May 2026) ------------
+# Per the user spec, six new gold explanations covering the most-confused
+# archetypes from the V7.1 audit. Each example is structured as
+# (archetype, hand_stage, hand_class_label, prose) so we can render them
+# grouped by archetype in the cached prompt block. The trap_check example
+# is the canonical V7.1 failure-mode: strong hand on a later street where
+# hero had the betting lead, recommended check, prior LLM frame was wrong.
+SUPPLEMENTARY_EXAMPLES_ARCHETYPE = (
+    {"archetype": "trap_check",
+     "hand_stage": "Turn",
+     "hand_class": "set_no_draws",
+     "prose":
+         "The best play is to check here. You raised the flop and got "
+         "called, then spiked a set on the 8♠️ turn. Your hand is too "
+         "strong to fold villain out by betting -- BB will fold the "
+         "9❤️7❤️, T❤️9♣️ semi-bluffs you want to keep in. Letting BB "
+         "barrel river turns those bluffs into chips. BB's continuing "
+         "range here is mostly K♣️J♣️, T♠️T♣️ for sets, plus 6♥6♣ and "
+         "the straight combos 4♦️3♦️, 7♣️6♣️ -- you cover all of them, "
+         "and only the straights would call a turn bet."},
+    {"archetype": "pot_control_check",
+     "hand_stage": "Turn",
+     "hand_class": "top_pair_good_kicker_no_draws",
+     "prose":
+         "Check it back. Top pair good kicker plays best in a controlled "
+         "pot here: betting builds a pot you don't want with one pair, "
+         "BB's worse hands like K♦️T♣️ and Q♠️J♠️ all fold, and BB's "
+         "better hands (A♣️K♣️, K♠️K♦️) keep going. Checking takes "
+         "the free showdown card with your second-pair-class equity."},
+    {"archetype": "bluff_catch",
+     "hand_stage": "River",
+     "hand_class": "second_pair_no_draws",
+     "prose":
+         "Call. BB is overbetting a polarised range: A♠️A♣️ and "
+         "K♦️K♥ for the value, against missed flush draws like J♣️9♣️ "
+         "and 7♦️6♦️ for the bluffs. You only need 33% to call this "
+         "price, and second pair beats every bluff combo BB is using. "
+         "This is not a value call -- you're calling because the price "
+         "is right vs the bluff frequency, not because your hand is "
+         "strong."},
+    {"archetype": "protection_bet",
+     "hand_stage": "Flop",
+     "hand_class": "top_pair_weak_kicker_no_draws",
+     "prose":
+         "Bet 33% of the pot. Top pair with a weak kicker needs to deny "
+         "equity to BB's continuing range -- the gutshots Q♠️J♠️, "
+         "J❤️T❤️ and the under-pair pairs 6♦️6♠️, 5♣️5♥ all "
+         "realise meaningful equity if you check. A small bet folds out "
+         "the air and charges the draws, without bloating the pot vs "
+         "the slowplays."},
+    {"archetype": "bluff",
+     "hand_stage": "Flop",
+     "hand_class": "no_pair_air_with_flush_draw",
+     "prose":
+         "Bet 75% pot. You have nine outs to the nut flush plus three "
+         "overs, and BB's range here is mostly weak pairs and "
+         "broadway-air that folds to a turn barrel. K♣️J♣️ and "
+         "Q♣️J♣️ continue, but the bulk of villain's range (the "
+         "Q♥️J♥, J♦️T♦️, 9♠️8♠️ class) folds today, and the "
+         "draw equity is the backup when called."},
+    {"archetype": "fold_to_polar",
+     "hand_stage": "River",
+     "hand_class": "two_pair_top_no_draws",
+     "prose":
+         "Fold. BB has overbet polar on a board that completed straights "
+         "and flushes -- the value combos K❤️Q❤️, 7♦️6♦️, T♣️9♣️ "
+         "all crush you, and BB's range is too thin on bluffs to justify "
+         "calling at this price. Top two looks strong, but the overbet "
+         "is sized exactly for value here."},
 )
 
 
@@ -384,6 +458,23 @@ def _format_supplementary_examples() -> str:
     return "\n".join(parts)
 
 
+def _format_archetype_examples() -> str:
+    parts = []
+    for i, ex in enumerate(SUPPLEMENTARY_EXAMPLES_ARCHETYPE, start=1):
+        parts.append(
+            f"  ARCH{i}. archetype={ex['archetype']}  "
+            f"({ex['hand_stage']}, hand_class={ex['hand_class']})\n"
+            f"    {ex['prose']}")
+    return "\n".join(parts)
+
+
+def _format_archetype_catalog() -> str:
+    parts = []
+    for archetype in RECOMMENDED_ACTION_ARCHETYPES:
+        parts.append(f"  - {archetype}: {ARCHETYPE_GUIDANCE[archetype]}")
+    return "\n".join(parts)
+
+
 def build_system_prompt() -> str:
     """The static system prompt: voice rules, banned phrases, output schema.
 
@@ -402,6 +493,17 @@ def build_system_prompt() -> str:
         "convention). When you cite specific combos in the answer "
         "explanation, match this voice and notation:\n"
         f"{_format_supplementary_examples()}\n\n"
+        "STRATEGIC ARCHETYPES (Ryan-feedback Fix 5, May 2026). The data "
+        "block carries a `decision_data.recommended_action_archetype` field. "
+        "It is the STRATEGIC FRAME your explanation must be built around -- "
+        "the action itself is in `decision_data.correct_action`. The 13 "
+        "archetypes and the frame each one demands:\n"
+        f"{_format_archetype_catalog()}\n\n"
+        "ARCHETYPE-FRAMED GOLD EXAMPLES (Ryan-feedback Fix 5, May 2026 -- "
+        "these target the archetype-mismatch failures from the V7.1 audit, "
+        "especially trap_check on later streets where hero had the betting "
+        "lead). Match the strategic frame each one carries:\n"
+        f"{_format_archetype_examples()}\n\n"
         f"BANNED PHRASES (never appear in any output field): {_format_banned_phrases()}.\n\n"
         "DETERMINISTIC FREQUENCY PREFIX MAPPING: When a frequency-style "
         "option-style instruction specifies a required prefix for "
@@ -463,13 +565,26 @@ def _question_framing(spot_data: SpotData) -> str:
     hero = meta.hero_position or "hero"
     villain = meta.villain_position or "villain"
     actions = ", ".join(decision.options) or "(no options recorded)"
-    return (
+    framing = (
         f"Stage: {meta.street}. Hero ({hero}) is deciding against "
         f"{villain}. Available actions in the solver: {actions}. The "
         f"solver-correct action is \"{decision.correct_action}\" "
         f"(frequency dominant). The explanation must justify exactly "
         f"that action."
     )
+    # Ryan-feedback Fix 5 (May 2026): when the classifier picked an archetype,
+    # surface its specific guidance in the live prompt so the LLM can't miss
+    # the strategic frame in the catalog. The trap_check guidance in
+    # particular has explicit anti-pattern instructions ("DO NOT frame as
+    # 'pot control' / 'villain has the nut advantage'") that need to be
+    # this close to the data block for V7.1's failure mode to stop recurring.
+    archetype = decision.recommended_action_archetype
+    if archetype and archetype in ARCHETYPE_GUIDANCE:
+        framing += (
+            f"\n\nRECOMMENDED-ACTION ARCHETYPE: {archetype}.\n"
+            f"{ARCHETYPE_GUIDANCE[archetype]}"
+        )
+    return framing
 
 
 @lru_cache(maxsize=1)

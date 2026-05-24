@@ -13,6 +13,9 @@ See docs/engineering_brief.docx, "Layer 5: Fact Extractor".
 """
 from __future__ import annotations
 
+from pipeline.fact_extractor.archetypes import (
+    aggression_history_from_action_sequence, classify_recommended_archetype,
+)
 from pipeline.fact_extractor.board_texture import classify_board  # noqa: F401
 from pipeline.fact_extractor.concept_tags.registry import compute_tags
 from pipeline.fact_extractor.equity import equity_vs_range
@@ -192,4 +195,16 @@ def extract_facts(spot_context, *, hero_hand: str | None = None,
                        if len(board) >= 3 else None),
     )
     spot.concept_tags = compute_tags(spot)
+    # Ryan-feedback Fix 5 (May 2026): derive aggression_history + archetype
+    # AFTER the other layers populate hand_class, range_data, decision_data
+    # (the classifier reads all three). Mutating frozen-by-default fields
+    # would error, so we set via object.__setattr__ on the dataclass instances.
+    object.__setattr__(
+        spot.spot_metadata, "aggression_history",
+        aggression_history_from_action_sequence(
+            node.action_sequence,
+            hero_is_oop=spot.spot_metadata.hero_in_position is False),
+    )
+    spot.decision_data.recommended_action_archetype = (
+        classify_recommended_archetype(spot))
     return spot

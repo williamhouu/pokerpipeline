@@ -152,6 +152,8 @@ def compute_range_data(spot_context, hero_hand: str,
 
     top_value_combos = _villain_top_value_combos(spot_context.villain_range,
                                                   villain_class)
+    hero_disposition = _compute_hero_range_disposition(
+        spot_context.hero_range, hero_top, board)
 
     return RangeData(
         villain_range=villain_combos,
@@ -172,6 +174,7 @@ def compute_range_data(spot_context, hero_hand: str,
         villain_draw_equity_pct=_clamp01(draw_weight / draw_total)
         if draw_total else 0.0,
         villain_top_value_combos=top_value_combos,
+        hero_range_disposition=hero_disposition,
     )
 
 
@@ -229,6 +232,58 @@ def _range_weight_in(combo_range, top_combos: set[frozenset]) -> float:
         if frozenset(_cards(combo)) in top_combos:
             weight += w
     return weight
+
+
+# Ryan-feedback Fix 5 (May 2026): hero range-disposition thresholds.
+# Hero's range is "capped" when its weight in the universal top-5% pool is
+# below the lower threshold (very few nuts available given the action line);
+# "uncapped" above the upper threshold; "linear" in between. The "polarized"
+# variant fires when hero ALSO carries a large air slice -- a top+bottom shape
+# with little middle.
+_CAPPED_TOP_FRAC = 0.05
+_UNCAPPED_TOP_FRAC = 0.15
+_POLARIZED_AIR_FRAC = 0.30
+_POLARIZED_MIDDLE_MAX = 0.40
+
+
+def _compute_hero_range_disposition(hero_range, hero_top_5pct: float,
+                                     board) -> str:
+    """Hero's range shape at this node: capped / uncapped / polarized / linear.
+
+    Per Ryan-feedback Fix 5: Layer 6 uses this to frame whether hero's range
+    can credibly bet for value, must bluff catch, etc. "polarized" trumps
+    "uncapped" when the air slice is large -- a polarized range has nuts AND
+    air, not a smooth value distribution.
+    """
+    total = sum(w for w in hero_range.values()) if hero_range else 0.0
+    if total <= 0:
+        return ""
+    top_frac = hero_top_5pct / total
+
+    # Count air-bucket combos in hero's range for the polarized check.
+    air_weight = 0.0
+    middle_weight = 0.0
+    for combo, weight in hero_range.items():
+        if _on_board(combo, board) or weight <= 0:
+            continue
+        bucket = classify_hand(combo, board)["strength_bucket"]
+        if bucket == "air":
+            air_weight += weight
+        elif bucket in ("medium", "vulnerable", "marginal"):
+            middle_weight += weight
+    air_frac = air_weight / total
+    middle_frac = middle_weight / total
+
+    # Polarized: meaningful top + meaningful air + thin middle.
+    if (top_frac >= _CAPPED_TOP_FRAC
+            and air_frac >= _POLARIZED_AIR_FRAC
+            and middle_frac <= _POLARIZED_MIDDLE_MAX):
+        return "polarized"
+    if top_frac >= _UNCAPPED_TOP_FRAC:
+        return "uncapped"
+    if top_frac < _CAPPED_TOP_FRAC:
+        return "capped"
+    return "linear"
 
 
 def _emoji_combo(combo: str) -> str:

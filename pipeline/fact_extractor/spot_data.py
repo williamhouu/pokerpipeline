@@ -188,6 +188,11 @@ class SpotMetadata:
     action_sequence: list = field(default_factory=list)  # full (actor, label) path
     big_blind_chips: float = 1.0                         # chips per bb in this solve
     pot_bb: float = 0.0                                  # pot at the decision in bb
+    # Ryan-feedback Fix 5 (May 2026): per-street aggressor history. Excludes
+    # preflop (postflop solves don't carry preflop action). Values per entry:
+    # "hero" / "villain" / "check" (no bets that street). One entry per
+    # completed prior street; current-street entry not included.
+    aggression_history: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.hero_cards = tuple(self.hero_cards)
@@ -251,6 +256,10 @@ class DecisionData:
     check_ev_vs_villain_range: float = 0.0               # equity_denial_spot
     bet_ev_vs_calling_range: float = 0.0                 # equity_denial_spot
     float_line_is_positive: bool = False                 # float_call_spot
+    # Ryan-feedback Fix 5 (May 2026): the strategic archetype of the correct
+    # action -- one of the 13 archetypes Layer 6 uses to frame the explanation.
+    # See pipeline.fact_extractor.archetypes.RECOMMENDED_ACTION_ARCHETYPES.
+    recommended_action_archetype: str = ""
 
     def __post_init__(self) -> None:
         _unit_map("hero_combo_strategy", self.hero_combo_strategy)
@@ -338,6 +347,13 @@ class RangeData:
     #     "example_combos": ["K♠️K♣️", ...],
     #   }
     villain_top_value_combos: list[dict] = field(default_factory=list)
+    # Ryan-feedback Fix 5 (May 2026): hero's range disposition at this node.
+    # "capped" -- hero has very few nut-tier combos in range (cannot have
+    # premium hands here); "uncapped" -- hero's range contains nut combos;
+    # "polarized" -- hero's range is mostly nuts + mostly air, little middle.
+    # Layer 6 uses this to frame whether hero's range supports a value-bet,
+    # a bluff_catch, etc.
+    hero_range_disposition: str = ""
 
     def __post_init__(self) -> None:
         self.villain_range = [c if isinstance(c, Combo) else Combo.from_dict(c)

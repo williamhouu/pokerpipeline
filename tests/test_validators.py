@@ -22,10 +22,10 @@ from pipeline.fact_extractor.spot_data import DecisionData                    # 
 from pipeline.validators import (                                              # noqa: E402
     COMPLETENESS_MIN_FREQ, COMPOSITE_LABEL_MIN_FREQ, ValidationResult,
     extract_action_verb, extract_frequency_prefix, run_audit_validators,
-    validate_composite_label_frequencies, validate_correct_answer_verb,
-    validate_no_plain_card_notation, validate_no_standalone_sometimes,
-    validate_option_set, validate_option_set_completeness,
-    validate_villain_combo_citation,
+    validate_archetype_consistency, validate_composite_label_frequencies,
+    validate_correct_answer_verb, validate_no_plain_card_notation,
+    validate_no_standalone_sometimes, validate_option_set,
+    validate_option_set_completeness, validate_villain_combo_citation,
 )
 
 
@@ -505,6 +505,81 @@ def test_villain_combo_citation_silent_when_villain_not_discussed(capsys):
                             "Check it down.")
     assert validate_villain_combo_citation(explanation, decision).is_valid
     assert "soft-warn" not in capsys.readouterr().err
+
+
+# --- Ryan-feedback Fix 5 hard validator (May 2026) --------------------------
+def test_archetype_consistency_passes_when_frame_matches():
+    # trap_check spot framed correctly (inducing villain to bet) -> ok.
+    decision = DecisionData(correct_action="check",
+                            range_aggregate_strategy={"check": 0.7, "bet": 0.3})
+    decision.recommended_action_archetype = "trap_check"
+    explanation = _explanation(
+        option_1="Mostly check", correct_answer="Mostly check",
+        answer_explanation="Check here. Your set is too strong to fold villain "
+                            "out by betting. Letting BB barrel river turns "
+                            "their bluffs into chips.")
+    assert validate_archetype_consistency(explanation, decision).is_valid
+
+
+def test_archetype_consistency_rejects_v71_trap_check_failure():
+    # The exact V7.1 failure: trap_check spot but explanation says "villain
+    # has the nut advantage" -- wrong strategic frame. Must reject.
+    decision = DecisionData(correct_action="check",
+                            range_aggregate_strategy={"check": 0.7, "bet": 0.3})
+    decision.recommended_action_archetype = "trap_check"
+    explanation = _explanation(
+        option_1="Mostly check", correct_answer="Mostly check",
+        answer_explanation="Check here because villain has the nut advantage "
+                            "on this board and your range is weaker.")
+    result = validate_archetype_consistency(explanation, decision)
+    assert not result.is_valid
+    assert "trap_check" in result.error_message
+    assert "anti-pattern" in result.error_message
+
+
+def test_archetype_consistency_rejects_bluff_catch_framed_as_value():
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 0.55, "fold": 0.45})
+    decision.recommended_action_archetype = "bluff_catch"
+    explanation = _explanation(
+        option_1="Mostly call", correct_answer="Mostly call",
+        answer_explanation="Call because you bet for value with second pair "
+                            "and villain's range has air.")
+    result = validate_archetype_consistency(explanation, decision)
+    assert not result.is_valid
+    assert "bluff_catch" in result.error_message
+
+
+def test_archetype_consistency_skips_when_archetype_not_set():
+    # Legacy / test SpotData without an archetype: no check, always ok.
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 1.0})
+    # recommended_action_archetype defaults to "".
+    explanation = _explanation(
+        option_1="Call", correct_answer="Call",
+        answer_explanation="Villain has the nut advantage here.")
+    # Would fail if archetype were set, but isn't -> ok.
+    assert validate_archetype_consistency(explanation, decision).is_valid
+
+
+def test_run_audit_validators_includes_archetype_check():
+    """The Layer 6 retry loop must catch a trap_check anti-pattern -- so the
+    full run_audit_validators returns the failure (not just individual call).
+    Option set covers both verbs so the earlier completeness validator passes,
+    leaving archetype_consistency as the failing check.
+    """
+    decision = DecisionData(
+        correct_action="check",
+        range_aggregate_strategy={"check": 0.7, "bet": 0.3})
+    decision.recommended_action_archetype = "trap_check"
+    explanation = _explanation(
+        option_1="Always check", option_2="Mostly check",
+        option_3="Mostly bet", option_4="Always bet",
+        correct_answer="Mostly check",
+        answer_explanation="Check because villain has the nut advantage.")
+    result = run_audit_validators(explanation, decision)
+    assert not result.is_valid
+    assert "trap_check" in result.error_message
 
 
 if __name__ == "__main__":

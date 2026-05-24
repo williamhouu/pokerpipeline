@@ -242,6 +242,103 @@ def validate_option_set_completeness(
     return ValidationResult.ok()
 
 
+# --- Ryan-feedback Fix 5 hard validator (May 2026) --------------------------
+# Per-archetype ANTI-PATTERN phrases. If any of these substrings appears in
+# answer_explanation when the spot's archetype is set, the framing is wrong
+# and the explanation is rejected (one retry, then routed to human review by
+# the standard Layer 6 retry orchestration).
+#
+# Lowercased for case-insensitive comparison; the validator lowercases the
+# explanation before checking. Substrings are short and unambiguous to keep
+# false positives near zero.
+_ARCHETYPE_ANTI_PATTERNS = {
+    "trap_check": (
+        # V7.1's exact failure: matched "nut_advantage_villain" concept tag
+        # literally and wrote "villain has the nut advantage" -- wrong frame,
+        # hero in trap_check is the one with the strong hand inducing villain.
+        "villain has the nut advantage",
+        "villain has nut advantage",
+        "btn has the nut advantage", "bb has the nut advantage",
+        "co has the nut advantage", "hj has the nut advantage",
+        "utg has the nut advantage", "sb has the nut advantage",
+        "you have the weaker range",
+        "your range is weaker",
+        "you don't have many strong hands",
+        # Pot-control framing is also wrong for trap_check -- hero WANTS the
+        # pot big with this hand, so calling the check "pot control" misframes.
+        "pot control", "controlling the pot size",
+    ),
+    "bluff_catch": (
+        # Bluff catch is NOT a value call; framing it as one is the prior
+        # failure mode the user wants caught.
+        "for value", "you bet for value",
+        "your hand is strong enough to win at showdown most of the time",
+    ),
+    "pot_control_check": (
+        # Pot control is a strong/medium hand checking; "villain has nut
+        # advantage" mis-frames the spot (hero has the equity).
+        "villain has the nut advantage",
+        "villain has nut advantage",
+        "your hand is too weak",
+    ),
+    "value_bet": (
+        # A value bet should not be framed as a bluff or as "fold equity".
+        "fold equity is the primary",
+        "this is a bluff",
+        "fold out better hands",
+    ),
+    "bluff": (
+        # A bluff should not be framed as a value bet.
+        "for thin value",
+        "extracting value from worse hands",
+    ),
+    "fold_to_polar": (
+        # Folding should not be framed as "the price is right" (that's
+        # bluff_catch framing).
+        "the price is right",
+        "you have enough equity",
+    ),
+    "call_drawing": (
+        # Drawing call should not be framed as a bluff catch.
+        "bluff combos outweigh value",
+    ),
+}
+
+
+def validate_archetype_consistency(
+        generated: "GeneratedExplanation",
+        decision: "DecisionData") -> "ValidationResult":
+    """Hard check: explanation prose does NOT contain anti-pattern phrasing
+    for the spot's recommended_action_archetype.
+
+    Per Ryan-feedback Fix 5 (May 2026), this catches the strategic-frame
+    mismatches the V7.1 audit surfaced -- chiefly a trap_check spot framed
+    with 'villain has the nut advantage' (concept-tag matching) instead of
+    'hero checks to induce continued villain aggression' (the archetype
+    frame). Failures route through the standard Layer 6 retry loop: one
+    corrective retry, then ExplanationValidationError for Layer 7 / human
+    review.
+
+    Skips when no archetype is set (test fixtures, legacy SpotData) and
+    when no anti-patterns are configured for the archetype.
+    """
+    archetype = getattr(decision, "recommended_action_archetype", "")
+    if not archetype or archetype not in _ARCHETYPE_ANTI_PATTERNS:
+        return ValidationResult.ok()
+    text = generated.answer_explanation.lower()
+    hits = [p for p in _ARCHETYPE_ANTI_PATTERNS[archetype] if p in text]
+    if hits:
+        return ValidationResult.fail(
+            f"explanation frames a {archetype!r} spot with anti-pattern "
+            f"phrasing: {hits!r}. Re-read the per-archetype guidance in "
+            f"the system prompt (STRATEGIC ARCHETYPES section, entry for "
+            f"{archetype!r}) and re-emit the explanation with the correct "
+            f"strategic frame -- the action stays the same, only the prose "
+            f"changes."
+        )
+    return ValidationResult.ok()
+
+
 # --- Ryan-feedback Fix 4 soft validator (May 2026) --------------------------
 # Detects when answer_explanation discusses villain's range but doesn't name a
 # specific combo or hand class. "Specific" means at least one of: an emoji-card
@@ -495,7 +592,9 @@ def run_audit_validators(generated: GeneratedExplanation,
                   validate_correct_answer_verb,
                   validate_option_set_completeness,
                   validate_no_standalone_sometimes,
-                  validate_composite_label_frequencies):
+                  validate_composite_label_frequencies,
+                  # Ryan-feedback Fix 5: hard validator; runs in the retry loop.
+                  validate_archetype_consistency):
         result = check(generated, decision)
         if not result.is_valid:
             return result
@@ -512,6 +611,7 @@ __all__ = [
     "extract_action_verb",
     "extract_frequency_prefix",
     "run_audit_validators",
+    "validate_archetype_consistency",
     "validate_composite_label_frequencies",
     "validate_correct_answer_verb",
     "validate_no_plain_card_notation",
