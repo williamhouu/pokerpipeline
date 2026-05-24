@@ -30,12 +30,19 @@ hypothetical failure modes are out of scope.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from pipeline.explanation_generator import (
     GeneratedExplanation, frequency_to_verb_prefix,
 )
 from pipeline.fact_extractor.spot_data import DecisionData
+
+# Per-module logger. Callers (CLI scripts, the admin panel) configure handlers.
+# Soft-warn validators emit at WARNING level so progress logs (INFO) can be
+# filtered separately from issues that don't fail the question but reviewers
+# may want to look at.
+logger = logging.getLogger(__name__)
 
 # Known action verbs that may appear as the primary verb in an option string.
 # Sourced from the action-history renderer's `_format_action` + the verbs
@@ -398,12 +405,13 @@ def validate_villain_combo_citation(
     )
     has_class_phrase = any(p in text_lc for p in hand_class_phrases)
     if not has_emoji_combo and not has_class_phrase:
-        import sys
-        print("  [soft-warn validate_villain_combo_citation] explanation "
-              "discusses villain but cites no specific combo (no emoji card "
-              "pair like 'K♠️K♣️') and no hand-class phrase. Voice rule 10 "
-              "requires anchoring abstract villain-range talk to actual "
-              "combos. Not retrying.", file=sys.stderr)
+        logger.warning(
+            "[soft-warn validate_villain_combo_citation] explanation "
+            "discusses villain but cites no specific combo (no emoji card "
+            "pair like 'K♠️K♣️') and no hand-class phrase. Voice rule 10 "
+            "requires anchoring abstract villain-range talk to actual "
+            "combos. Not retrying."
+        )
     return ValidationResult.ok()
 
 
@@ -448,13 +456,13 @@ def validate_no_plain_card_notation(
             tokens.add(tok)
     if tokens:
         unique = sorted(tokens)
-        # Print to stderr so batch logs surface the warning without polluting
-        # the validator's binary ok/fail contract.
-        import sys
-        print(f"  [soft-warn validate_no_plain_card_notation] "
-              f"explanation contains plain card notation {unique} (voice "
-              f"rule 9 requires suit emojis like K♠️). "
-              f"Not retrying.", file=sys.stderr)
+        # WARNING level so batch logs surface this without polluting the
+        # validator's binary ok/fail contract.
+        logger.warning(
+            "[soft-warn validate_no_plain_card_notation] explanation "
+            "contains plain card notation %s (voice rule 9 requires "
+            "suit emojis like K♠️). Not retrying.", unique
+        )
     return ValidationResult.ok()
 
 

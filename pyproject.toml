@@ -1,0 +1,63 @@
+# pokerpipeline tooling config.
+#
+# Ruff: linter + formatter.
+# Mypy: type checker. Strict on new code (admin_panel/), lenient on existing
+#   pipeline so we don't have to fix all of William's pre-existing typing
+#   to land the admin panel work.
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+# Grandfather William's existing pipeline + scripts + tests. They work, they're
+# tested, and bulk-reformatting them would wipe git blame and create a giant
+# diff. New code (admin_panel/, future modules) is enforced strictly.
+# When we organically touch a pipeline file, we can opt into ruff --fix on it.
+extend-exclude = [
+    "venv",
+    "test_output",
+    "test_solves",
+    "solves",
+    "ranges",
+    "pipeline",
+    "scripts",
+    "tests",
+]
+
+[tool.ruff.lint]
+# Sensible default rule set, not exhaustive.
+#   E, W : pycodestyle errors + warnings
+#   F    : pyflakes (unused imports, undefined names, etc.)
+#   I    : isort (import sorting)
+#   B    : flake8-bugbear (likely bugs)
+#   UP   : pyupgrade (modern Python idioms)
+select = ["E", "W", "F", "I", "B", "UP"]
+# Let the formatter handle line length; don't complain twice.
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+ignore_missing_imports = true
+# Same grandfather pattern as ruff: existing pipeline + scripts aren't typed;
+# don't block on them. New code in admin_panel/ is strict (see override).
+exclude = ["pipeline/", "scripts/", "tests/", "venv/"]
+
+[[tool.mypy.overrides]]
+module = "admin_panel.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install runtime + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      # Ruff + mypy enforce strictly on admin_panel/ and any future new
+      # modules. Existing pipeline + scripts + tests are grandfathered via
+      # extend-exclude in pyproject.toml — see comment there for rationale.
+      - name: Lint (ruff check)
+        run: ruff check .
+
+      - name: Format check (ruff format --check)
+        run: ruff format --check .
+
+      - name: Type check (mypy)
+        run: mypy .
+
+      - name: Tests (pytest)
+        # The 3 tests that require ranges/ will fail in CI without the pack.
+        # Skip them via -k filter until we wire ranges/ into CI (or mock).
+        run: |
+          pytest -q \
+            --deselect tests/test_preflop_ranges.py::test_canonical_169_matches_real_ryan_pack_order \
+            --deselect tests/test_scenario_spec.py::test_cash6max_btn_vs_bb_registered \
+            --deselect tests/test_scenario_spec.py::test_range_is_file_detection

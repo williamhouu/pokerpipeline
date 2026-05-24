@@ -243,14 +243,21 @@ def _process_one_cfr(cfr_path: Path, pio: PioSolverClient,
                      client, gold_examples,
                      per_cfr_cap_per_street: int,
                      dry_run: bool,
-                     result: BatchResult) -> CfrTally:
+                     result: BatchResult,
+                     layer5_scenario: dict | None = None) -> CfrTally:
     """Walk one .cfr's tree. The per-cfr cap is applied to EVERY street --
     this is the V6 fix. Returns the per-.cfr tally for the summary.
 
     `dry_run` short-circuits the LLM call (Layer 6). Layer 4 verdicts are still
     computed, so the printed counts reflect what V6 would sample with a real
     API key.
+
+    `layer5_scenario` overrides the module-level LAYER5_SCENARIO default. Pass
+    it explicitly when the caller has scenario-specific values (e.g. 3-bet pot
+    or 4-bet pot preflop_raise_count); leave as None to use the SRP default.
     """
+    if layer5_scenario is None:
+        layer5_scenario = LAYER5_SCENARIO
     cfr_stem = cfr_path.stem
     scenario = _scenario_for_cfr(cfr_path, template)
     print(f"\n--- {cfr_stem} ---")
@@ -287,7 +294,7 @@ def _process_one_cfr(cfr_path: Path, pio: PioSolverClient,
                 break
             try:
                 ctx = sampler.build_spot_context(node)
-                spot = extract_facts(ctx, scenario=LAYER5_SCENARIO,
+                spot = extract_facts(ctx, scenario=layer5_scenario,
                                      big_blind=big_blind)
             except (ValueError, KeyError) as exc:
                 tally.extract_skipped += 1

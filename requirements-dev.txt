@@ -1,0 +1,15 @@
+# Development dependencies. Not needed at runtime.
+#
+# Installed locally alongside requirements.txt:
+#   venv/bin/pip install -r requirements-dev.txt
+#
+# CI installs these too (see .github/workflows/ci.yml).
+
+# Linter + formatter (replaces black + isort + flake8)
+ruff==0.15.14
+
+# Static type checker
+mypy==2.1.0
+
+# Stubs for libraries used in the pipeline
+types-openpyxl==3.1.5.20260518

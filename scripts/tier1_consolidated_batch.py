@@ -163,25 +163,21 @@ def _run_one_scenario(entry: ScenarioEntry, *, pio: PioSolverClient,
                        "active_players_on_flop": 2,
                        "stack_depth_bb": 100}
 
-    # Monkey-patch v6's LAYER5_SCENARIO for the duration of this scenario,
-    # since `_process_one_cfr` reads it from the module global. (v6 was
-    # written for a single SRP scenario; the global hardcoded preflop_raise=1.)
-    import scripts.batch_demo_v6_stratified as v6mod
-    saved_layer5 = v6mod.LAYER5_SCENARIO
-    v6mod.LAYER5_SCENARIO = layer5_scenario
-    try:
-        for cfr_path in cfrs:
-            if _targets_met_per_street(result):
-                remaining = len(cfrs) - result.cfrs_walked
-                print(f"\n--- all targets met; skipping remaining {remaining} .cfrs ---")
-                break
-            result.cfrs_walked += 1
-            _process_one_cfr(cfr_path, pio, template,
-                             client=client, gold_examples=gold_examples,
-                             per_cfr_cap_per_street=per_cfr_cap_per_street,
-                             dry_run=dry_run, result=result)
-    finally:
-        v6mod.LAYER5_SCENARIO = saved_layer5
+    # Per-scenario Layer 5 context is passed explicitly to _process_one_cfr
+    # rather than monkey-patching v6's module global -- this lets multiple
+    # scenarios run concurrently (e.g. from a future admin panel) without
+    # racing on shared state.
+    for cfr_path in cfrs:
+        if _targets_met_per_street(result):
+            remaining = len(cfrs) - result.cfrs_walked
+            print(f"\n--- all targets met; skipping remaining {remaining} .cfrs ---")
+            break
+        result.cfrs_walked += 1
+        _process_one_cfr(cfr_path, pio, template,
+                         client=client, gold_examples=gold_examples,
+                         per_cfr_cap_per_street=per_cfr_cap_per_street,
+                         dry_run=dry_run, result=result,
+                         layer5_scenario=layer5_scenario)
 
     return result
 

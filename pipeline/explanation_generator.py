@@ -48,10 +48,12 @@ from pipeline.fact_extractor.archetypes import (
 )
 from pipeline.fact_extractor.spot_data import SpotData
 
-# Default Anthropic model. The brief asks for an Opus-class model in production
-# (better at voice fidelity), but Sonnet 4.6 is the cost/latency-balanced
-# default for batch generation and is what the demo script runs against.
-DEFAULT_MODEL = "claude-sonnet-4-6"
+# Default Anthropic model. Opus 4.7 is the highest-fidelity model for the
+# voice-sensitive explanation-writing task, per the brief's "Opus-class in
+# production" guidance. Callers (admin panel, scripts) can override `model`
+# for cheaper/faster experimentation (Sonnet 4.6 is ~5x cheaper, ~2x faster,
+# good for iterating on prompts before committing to a real batch).
+DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
 DEFAULT_MAX_TOKENS = 1500                  # 4 short options + a 2-5 sentence explanation
 GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"

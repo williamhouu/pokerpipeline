@@ -12,6 +12,7 @@ tests -- no PioSolver, no Anthropic API. Coverage:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -422,20 +423,21 @@ def test_no_plain_card_notation_passes_with_emoji_text(capsys):
     assert "soft-warn" not in capsys.readouterr().err
 
 
-def test_no_plain_card_notation_warns_on_plain_form(capsys):
-    # Plain "Kh"/"Ad"/"5c" notation triggers a stderr warning but the validator
-    # returns ok (soft validator, no rejection initially per Ryan's instruction).
+def test_no_plain_card_notation_warns_on_plain_form(caplog):
+    # Plain "Kh"/"Ad"/"5c" notation triggers a logger.warning() but the
+    # validator returns ok (soft validator, no rejection initially per Ryan's
+    # instruction).
     decision = DecisionData(correct_action="call",
                             range_aggregate_strategy={"call": 1.0})
     explanation = _explanation(
         option_1="Call", correct_answer="Call",
         answer_explanation="BTN can show up with KsKh and JdJc here.")
-    result = validate_no_plain_card_notation(explanation, decision)
+    with caplog.at_level(logging.WARNING, logger="pipeline.validators"):
+        result = validate_no_plain_card_notation(explanation, decision)
     assert result.is_valid                       # soft -- does not fail
-    err = capsys.readouterr().err
-    assert "soft-warn validate_no_plain_card_notation" in err
+    assert "soft-warn validate_no_plain_card_notation" in caplog.text
     # Each plain-card token appears in the warning.
-    assert "Kh" in err and "Js" not in err       # extracted unique tokens
+    assert "Kh" in caplog.text and "Js" not in caplog.text
 
 
 def test_no_plain_card_notation_ignores_non_card_text(capsys):
@@ -480,7 +482,7 @@ def test_villain_combo_citation_passes_with_hand_class_phrase(capsys):
     assert "soft-warn" not in capsys.readouterr().err
 
 
-def test_villain_combo_citation_warns_on_abstract_villain_talk(capsys):
+def test_villain_combo_citation_warns_on_abstract_villain_talk(caplog):
     # Discusses villain but cites no specific combo OR hand-class -> soft warn.
     # Validator still returns ok (soft per Ryan, doesn't reject the explanation).
     decision = DecisionData(correct_action="call",
@@ -489,10 +491,10 @@ def test_villain_combo_citation_warns_on_abstract_villain_talk(capsys):
         option_1="Call", correct_answer="Call",
         answer_explanation="BTN has value hands and bluffs in this spot. "
                             "Calling realises equity against their range.")
-    result = validate_villain_combo_citation(explanation, decision)
+    with caplog.at_level(logging.WARNING, logger="pipeline.validators"):
+        result = validate_villain_combo_citation(explanation, decision)
     assert result.is_valid                       # soft -- does not fail
-    err = capsys.readouterr().err
-    assert "soft-warn validate_villain_combo_citation" in err
+    assert "soft-warn validate_villain_combo_citation" in caplog.text
 
 
 def test_villain_combo_citation_silent_when_villain_not_discussed(capsys):
