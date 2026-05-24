@@ -39,6 +39,26 @@ _BOTTOM_BAND = 0.30
 # Nut-advantage threshold: the fraction of board-legal combos considered "top".
 _NUT_PCT = 0.05
 
+# Ryan-feedback Fix 4 (May 2026): hand-class ranking constants.
+# How many hand-class entries to surface to Layer 6 from villain's continuing
+# range. The user spec asked for "top 5-8 hand classes"; 6 is the centre of
+# that range and matches what the LLM's 2-3-combo citation in answer_explanation
+# can reasonably ground itself on.
+_VILLAIN_TOP_COMBOS_COUNT = 6
+# How many specific (rank-suit, rank-suit) combos to include per hand class
+# entry, for the LLM to optionally cite directly in prose.
+_EXAMPLES_PER_CLASS = 3
+# Strength-bucket score used in the ranking key (weight * bucket_score).
+# Premium-tier value combos rise to the top of the list; air-tier combos fall
+# to the bottom even when their range weight is non-trivial.
+_BUCKET_SCORE = {
+    "premium": 6, "strong": 5, "medium": 4,
+    "vulnerable": 3, "marginal": 2, "air": 1,
+}
+# Card suit -> emoji (mirrors action_history._SUIT_EMOJI so the data block's
+# example combos render identically to the Question column's hole-card prose).
+_SUIT_EMOJI = {"s": "♠️", "h": "❤️", "d": "♦️", "c": "♣️"}
+
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
@@ -130,6 +150,9 @@ def compute_range_data(spot_context, hero_hand: str,
     hero_total = range_vs_range_equity(spot_context.hero_range,
                                        spot_context.villain_range, board)
 
+    top_value_combos = _villain_top_value_combos(spot_context.villain_range,
+                                                  villain_class)
+
     return RangeData(
         villain_range=villain_combos,
         hero_range=hero_combos,
@@ -148,6 +171,7 @@ def compute_range_data(spot_context, hero_hand: str,
         villain_top_5pct_combos=villain_top,
         villain_draw_equity_pct=_clamp01(draw_weight / draw_total)
         if draw_total else 0.0,
+        villain_top_value_combos=top_value_combos,
     )
 
 
@@ -205,6 +229,69 @@ def _range_weight_in(combo_range, top_combos: set[frozenset]) -> float:
         if frozenset(_cards(combo)) in top_combos:
             weight += w
     return weight
+
+
+def _emoji_combo(combo: str) -> str:
+    """'KsKh' -> 'K♠️K❤️'. Used for example_combos in villain_top_value_combos."""
+    a, b = combo[:2], combo[2:]
+    return f"{a[0]}{_SUIT_EMOJI.get(a[1], a[1])}{b[0]}{_SUIT_EMOJI.get(b[1], b[1])}"
+
+
+def _villain_top_value_combos(combo_range, villain_class,
+                               top_n: int = _VILLAIN_TOP_COMBOS_COUNT) -> list[dict]:
+    """The top N hand classes in villain's continuing range, by total weight *
+    strength-bucket score, with 2-3 highest-weighted concrete combos per class
+    rendered in emoji form for direct citation by Layer 6.
+
+    Per Ryan-feedback Fix 4 (May 2026): Layer 6's prior prose described villain's
+    range abstractly ("villain has value hands and bluffs"); Ryan wants 2-3
+    SPECIFIC combos named ("K♠️K♣️, J♦️J♣️, and 7♠️7♣️ for sets"). This field
+    surfaces the data the LLM needs to comply without inventing combos.
+
+    Empty input or empty class info -> empty list (the LLM degrades to abstract
+    prose for that spot, same as pre-Fix-4 behaviour). Air-bucket classes are
+    NOT excluded -- they may legitimately rise to the top of villain's bluff
+    range and the LLM may want to cite them; the bucket field lets the prompt
+    distinguish bluffs from value calls.
+    """
+    if not combo_range or not villain_class:
+        return []
+
+    # Aggregate combos by hand-class label, tracking total weight, bucket,
+    # and per-combo weight list (for example-combo selection).
+    by_label: dict[str, dict] = {}
+    for combo, weight in combo_range.items():
+        info = villain_class.get(combo)
+        if info is None or weight <= 0:
+            continue
+        label = info["label"]
+        if label not in by_label:
+            by_label[label] = {
+                "hand_class_label": label,
+                "bucket": info["strength_bucket"],
+                "total_weight": 0.0,
+                "_combos": [],
+            }
+        by_label[label]["total_weight"] += weight
+        by_label[label]["_combos"].append((combo, weight))
+
+    # Build each entry's example_combos + combo_count, then drop the working
+    # list so the dict serialises cleanly.
+    entries: list[dict] = []
+    for entry in by_label.values():
+        combos_by_weight = sorted(entry["_combos"], key=lambda cw: -cw[1])
+        entry["combo_count"] = len(entry["_combos"])
+        entry["example_combos"] = [_emoji_combo(c)
+                                   for c, _ in combos_by_weight[:_EXAMPLES_PER_CLASS]]
+        entry["total_weight"] = round(entry["total_weight"], 3)
+        del entry["_combos"]
+        entries.append(entry)
+
+    entries.sort(
+        key=lambda e: e["total_weight"] * _BUCKET_SCORE.get(e["bucket"], 0),
+        reverse=True,
+    )
+    return entries[:top_n]
 
 
 def _range_shape(villain_combos) -> str:

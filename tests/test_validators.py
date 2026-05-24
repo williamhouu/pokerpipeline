@@ -25,6 +25,7 @@ from pipeline.validators import (                                              #
     validate_composite_label_frequencies, validate_correct_answer_verb,
     validate_no_plain_card_notation, validate_no_standalone_sometimes,
     validate_option_set, validate_option_set_completeness,
+    validate_villain_combo_citation,
 )
 
 
@@ -448,6 +449,61 @@ def test_no_plain_card_notation_ignores_non_card_text(capsys):
         answer_explanation="It is clear that the call is the right play, as "
                             "your hand value is high and the pot is laid.")
     assert validate_no_plain_card_notation(explanation, decision).is_valid
+    assert "soft-warn" not in capsys.readouterr().err
+
+
+# --- Ryan-feedback Fix 4 soft validator (May 2026) --------------------------
+def test_villain_combo_citation_passes_with_emoji_combo(capsys):
+    # Explanation discusses villain AND cites at least one emoji combo -> ok,
+    # no warning.
+    decision = DecisionData(correct_action="check",
+                            range_aggregate_strategy={"check": 0.7, "bet": 0.3})
+    explanation = _explanation(
+        option_1="Mostly check", correct_answer="Mostly check",
+        answer_explanation="BTN shows up with K♠️K♣️ for sets here, plus "
+                            "A♠️K♠️ for top two. Pot control is right.")
+    assert validate_villain_combo_citation(explanation, decision).is_valid
+    assert "soft-warn" not in capsys.readouterr().err
+
+
+def test_villain_combo_citation_passes_with_hand_class_phrase(capsys):
+    # Explanation discusses villain and uses a hand-class phrase ("two pair",
+    # "set", "overpair") -> ok, no warning. Combo-emoji is not required when
+    # a clear class is named.
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 1.0})
+    explanation = _explanation(
+        option_1="Call", correct_answer="Call",
+        answer_explanation="BTN's range is heavy on sets and top two pair "
+                            "here. Calling collects value from them.")
+    assert validate_villain_combo_citation(explanation, decision).is_valid
+    assert "soft-warn" not in capsys.readouterr().err
+
+
+def test_villain_combo_citation_warns_on_abstract_villain_talk(capsys):
+    # Discusses villain but cites no specific combo OR hand-class -> soft warn.
+    # Validator still returns ok (soft per Ryan, doesn't reject the explanation).
+    decision = DecisionData(correct_action="call",
+                            range_aggregate_strategy={"call": 1.0})
+    explanation = _explanation(
+        option_1="Call", correct_answer="Call",
+        answer_explanation="BTN has value hands and bluffs in this spot. "
+                            "Calling realises equity against their range.")
+    result = validate_villain_combo_citation(explanation, decision)
+    assert result.is_valid                       # soft -- does not fail
+    err = capsys.readouterr().err
+    assert "soft-warn validate_villain_combo_citation" in err
+
+
+def test_villain_combo_citation_silent_when_villain_not_discussed(capsys):
+    # Explanation doesn't reference villain at all -> no requirement, no warn.
+    decision = DecisionData(correct_action="check",
+                            range_aggregate_strategy={"check": 1.0})
+    explanation = _explanation(
+        option_1="Check", correct_answer="Check",
+        answer_explanation="Your hand has showdown value and the pot is small. "
+                            "Check it down.")
+    assert validate_villain_combo_citation(explanation, decision).is_valid
     assert "soft-warn" not in capsys.readouterr().err
 
 

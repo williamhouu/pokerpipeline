@@ -242,6 +242,74 @@ def validate_option_set_completeness(
     return ValidationResult.ok()
 
 
+# --- Ryan-feedback Fix 4 soft validator (May 2026) --------------------------
+# Detects when answer_explanation discusses villain's range but doesn't name a
+# specific combo or hand class. "Specific" means at least one of: an emoji-card
+# pair (e.g. "K♠️K♣️") OR a hand-class label substring from a known list.
+import re as __re_for_fix4
+_EMOJI_COMBO_RE = __re_for_fix4.compile(
+    r"[2-9TJQKA][♠♣♦❤]")  # rank + spade/club/diamond/heart
+
+
+def validate_villain_combo_citation(
+        generated: "GeneratedExplanation",
+        decision: "DecisionData") -> "ValidationResult":
+    """Soft check: answer_explanation cites at least one specific villain combo
+    or hand class when villain's range is being discussed.
+
+    Per Ryan-feedback Fix 4 (May 2026), prior explanations described villain's
+    range abstractly ("villain has value hands and bluffs"). Layer 6 now has
+    `range_data.villain_top_value_combos` with example_combos in emoji form and
+    voice rule 10 instructs the LLM to cite 2-3 of them. This validator catches
+    regressions where the LLM ignores the data and reverts to abstract phrases.
+
+    Heuristic:
+      * if the explanation references villain at all (mentions "villain", "BB",
+        "BTN", etc.) AND has no emoji-combo pattern AND has no hand-class label
+        substring -> warn (soft, doesn't fail).
+
+    Soft per Ryan's instruction. Will track in the v7.3 verification batch
+    whether to harden to a rejection.
+    """
+    text = generated.answer_explanation
+    if not text:
+        return ValidationResult.ok()
+    # If the text doesn't talk about villain at all, no requirement to cite.
+    text_lc = text.lower()
+    villain_mentioned = any(
+        token in text_lc
+        for token in ("villain", "villain's", "they ", "their ",
+                      "bb ", "btn ", "co ", "hj ", "utg ", "sb ", "lj ")
+    )
+    if not villain_mentioned:
+        return ValidationResult.ok()
+    # Look for either an emoji-combo pattern or a known hand-class label.
+    has_emoji_combo = bool(_EMOJI_COMBO_RE.search(text))
+    # Pull known hand-class label substrings out of the data block so the
+    # validator stays accurate as the hand_class taxonomy evolves.
+    known_classes = set()
+    rd = getattr(decision, "_range_data_for_validation", None)  # unused hook
+    # Fallback: hardcoded common substrings that always indicate hand-class
+    # citation. (The LLM rarely writes "top_pair_no_draws" verbatim; it writes
+    # natural-language equivalents like "top pair" or "two pair".)
+    hand_class_phrases = (
+        "set ", "sets ", "set.", "sets.",
+        "two pair", "top pair", "second pair", "third pair", "bottom pair",
+        "overpair", "trips", "quads", "straight", "flush",
+        "full house", "boat",
+        "pocket pair", "ace-high", "ace high",
+    )
+    has_class_phrase = any(p in text_lc for p in hand_class_phrases)
+    if not has_emoji_combo and not has_class_phrase:
+        import sys
+        print("  [soft-warn validate_villain_combo_citation] explanation "
+              "discusses villain but cites no specific combo (no emoji card "
+              "pair like 'K♠️K♣️') and no hand-class phrase. Voice rule 10 "
+              "requires anchoring abstract villain-range talk to actual "
+              "combos. Not retrying.", file=sys.stderr)
+    return ValidationResult.ok()
+
+
 # --- Ryan-feedback Fix 3 soft validator (May 2026) --------------------------
 # Plain-text suit notation in an answer_explanation indicates the LLM bypassed
 # voice rule 9 (use suit emojis). Regex matches a run of one-or-more rank+suit
@@ -433,6 +501,7 @@ def run_audit_validators(generated: GeneratedExplanation,
             return result
     # Soft validators last: they may print warnings but never fail.
     validate_no_plain_card_notation(generated, decision)
+    validate_villain_combo_citation(generated, decision)
     return ValidationResult.ok()
 
 
@@ -449,4 +518,5 @@ __all__ = [
     "validate_no_standalone_sometimes",
     "validate_option_set",
     "validate_option_set_completeness",
+    "validate_villain_combo_citation",
 ]

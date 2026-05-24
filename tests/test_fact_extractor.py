@@ -148,6 +148,57 @@ def test_compute_range_data_uses_universal_top_combos():
     assert rd.villain_top_5pct_combos == 0
 
 
+# --- Ryan-feedback Fix 4: villain_top_value_combos --------------------------
+def test_villain_top_value_combos_ranks_premium_first():
+    """Premium-bucket classes outrank lower buckets when weight is similar.
+    On 9-7-2: QQ (overpair = strong) vs JT (no-pair air); QQ should win.
+    """
+    board = ["9h", "7c", "2d"]
+    hero_range = {"AhAc": 1.0}
+    villain_range = {"QhQc": 1.0, "JsTs": 1.0, "8h6h": 1.0}
+    ctx = _context(board, hero_range, villain_range)
+    _, per_combo = equity_vs_range(["Ah", "Ac"], villain_range, board)
+    rd = compute_range_data(ctx, "AhAc", per_combo)
+    assert rd.villain_top_value_combos, "field should be populated"
+    # Entries are sorted by total_weight * bucket_score desc.
+    # QhQc is the only "overpair" combo -> strong-bucket entry should rank
+    # ahead of the air/marginal-bucket no_pair entries.
+    top_entry = rd.villain_top_value_combos[0]
+    assert top_entry["bucket"] in ("premium", "strong"), \
+        f"expected premium/strong on top, got {top_entry}"
+
+
+def test_villain_top_value_combos_carries_emoji_examples():
+    """example_combos are formatted in suit-emoji notation, matching the
+    Question column convention (rank + ♠️ / ❤️ / ♦️ / ♣️)."""
+    board = ["9h", "7c", "2d"]
+    hero_range = {"AhAc": 1.0}
+    villain_range = {"QhQc": 1.0, "QsQd": 0.5}
+    ctx = _context(board, hero_range, villain_range)
+    _, per_combo = equity_vs_range(["Ah", "Ac"], villain_range, board)
+    rd = compute_range_data(ctx, "AhAc", per_combo)
+    overpair_entries = [e for e in rd.villain_top_value_combos
+                        if "overpair" in e["hand_class_label"]]
+    assert overpair_entries, (
+        f"expected at least one overpair entry, got "
+        f"{rd.villain_top_value_combos}")
+    examples = overpair_entries[0]["example_combos"]
+    # Every example contains a suit emoji.
+    assert all("♠" in c or "❤" in c or "♦" in c or "♣" in c for c in examples)
+    # The dominant combo (QhQc has full weight 1.0) is in the example set.
+    assert any("Q❤" in c and "Q♣" in c for c in examples)
+
+
+def test_villain_top_value_combos_empty_when_no_range():
+    """Empty villain range -> empty field (no crash, just no entries)."""
+    board = ["As", "Kd", "9h"]
+    hero_range = {"AhAc": 1.0}
+    ctx = _context(board, hero_range, {})
+    _, per_combo = equity_vs_range(["Ah", "Ac"], {}, board)
+    rd = compute_range_data(ctx, "AhAc", per_combo)
+    assert rd.villain_top_value_combos == []
+
+
 # --- extract_facts orchestration ---------------------------------------------
 def test_extract_facts_populates_spotdata():
     board = ["As", "Kd", "9h", "4c", "2s"]

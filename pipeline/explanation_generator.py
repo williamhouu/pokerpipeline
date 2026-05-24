@@ -118,6 +118,17 @@ VOICE_RULES = [
     "column. Hand-class names (\"top pair top kicker\", \"open-ended straight "
     "draw\") stay as plain prose -- the emoji rule only applies when you "
     "actually name specific cards.",
+    # 10. Name specific villain combos (Ryan-feedback Fix 4, May 2026)
+    "When the explanation discusses villain's range (what villain has, what "
+    "villain is continuing with, what villain can show up with), name 2 to 3 "
+    "SPECIFIC hand classes from `range_data.villain_top_value_combos` in the "
+    "SOLVER DATA block, citing each one's `example_combos` directly. Use the "
+    "emoji form already in the data (e.g. 'villain shows up with K♠️K♣️ and "
+    "J♦️J♣️ for sets, plus A♠️K♠️ for the strongest two-pair'). Do not "
+    "describe villain's range abstractly with only generic phrases like "
+    "'value hands' or 'top of range' -- anchor the abstract phrase to actual "
+    "combos from the field. The top entries in that field are villain's "
+    "highest-leverage hands at this node, sorted by weight*strength.",
 ]
 
 

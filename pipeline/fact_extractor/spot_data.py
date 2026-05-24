@@ -325,6 +325,19 @@ class RangeData:
     villain_calling_range_worse_pct: float = 0.0         # thin_value_spot
     villain_calling_range_has_worse_made_hands: bool = False   # merged_value_spot
     villain_calling_range_has_draws: bool = False              # merged_value_spot
+    # Ryan-feedback Fix 4 (May 2026): top hand classes in villain's continuing
+    # range, ranked by total_weight * strength_bucket_score, with 2-3 example
+    # combos per class formatted in the emoji notation Layer 6's prose uses.
+    # Layer 6 reads this to name 2-3 specific villain combos in answer_
+    # explanation instead of describing villain's range abstractly. Each entry:
+    #   {
+    #     "hand_class_label": "set_no_draws",
+    #     "bucket": "premium",
+    #     "total_weight": 3.5,
+    #     "combo_count": 6,
+    #     "example_combos": ["K♠️K♣️", ...],
+    #   }
+    villain_top_value_combos: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.villain_range = [c if isinstance(c, Combo) else Combo.from_dict(c)
