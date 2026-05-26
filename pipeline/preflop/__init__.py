@@ -19,6 +19,12 @@ Architecture (each module is a step):
   * ``fact_extractor``      -- per-action frequencies, range shape, etc.
   * ``question_extractor``  -- worthiness + difficulty filter (frequency
                                 window; no EV-gap filter pre-equity-engine).
+  * ``gold_examples``       -- filters the shared xlsx gold pool down to
+                                preflop-only rows for Layer 6's prompt.
+  * ``explanation_generator`` -- Layer 6 preflop branch: turns a
+                                ``PreflopFacts`` into the six LLM-written
+                                CSV columns. Sibling of
+                                ``pipeline.explanation_generator``.
 
 See docs/ryan_range_pack_index.md for the Ryan pack's filename grammar.
 """
