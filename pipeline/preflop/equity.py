@@ -106,3 +106,75 @@ def preflop_equity_vs_range(
     if total_weight == 0:
         return 0.0
     return weighted_total / total_weight
+
+
+def preflop_range_vs_range_equity(
+    hero_range: dict[str, float],
+    villain_range: dict[str, float],
+    *,
+    max_matchups: int = 200,
+    n_samples_per_matchup: int = 50,
+    rng: random.Random | None = None,
+) -> float:
+    """Hero range vs villain range, preflop (no board).
+
+    Samples ``max_matchups`` (hero, villain) pairs in proportion to combo
+    weights, computes each pair's equity over ``n_samples_per_matchup``
+    random boards, returns the average.
+
+    Carries more noise than the hand-vs-range function (two layers of
+    sampling); 200 matchups × 50 boards is a reasonable speed/accuracy
+    tradeoff for batch generation. Bump both for a tighter estimate.
+
+    Args:
+        hero_range: ``{combo: weight}`` for hero's range at the node
+            (typically the union of all of hero's action ranges).
+        villain_range: same shape, for the villain.
+        max_matchups: how many hero/villain combo pairs to sample.
+        n_samples_per_matchup: how many 5-card boards to sample for each
+            matchup's equity.
+        rng: optional ``random.Random`` for determinism.
+
+    Returns:
+        Hero's range equity vs villain's range, in [0.0, 1.0]. Returns
+        0.0 if either range is empty or all matchups conflict.
+    """
+    if not hero_range or not villain_range:
+        return 0.0
+    rng = rng or random.Random()
+
+    # Filter to non-zero-weight combos (saves work + makes choices() valid).
+    hero_items = [(c, w) for c, w in hero_range.items() if w > 0]
+    villain_items = [(c, w) for c, w in villain_range.items() if w > 0]
+    if not hero_items or not villain_items:
+        return 0.0
+
+    hero_combos, hero_weights = zip(*hero_items, strict=True)
+    villain_combos, villain_weights = zip(*villain_items, strict=True)
+    heroes = rng.choices(
+        list(hero_combos),
+        weights=list(hero_weights),
+        k=max_matchups,
+    )
+    villains = rng.choices(
+        list(villain_combos),
+        weights=list(villain_weights),
+        k=max_matchups,
+    )
+
+    total = 0.0
+    matched = 0
+    for hero, villain in zip(heroes, villains, strict=False):
+        hero_cards = [hero[:2], hero[2:]]
+        villain_cards = [villain[:2], villain[2:]]
+        if set(hero_cards) & set(villain_cards):
+            continue
+        total += preflop_hand_equity(
+            hero_cards,
+            villain_cards,
+            n_samples=n_samples_per_matchup,
+            rng=rng,
+        )
+        matched += 1
+
+    return total / matched if matched else 0.0

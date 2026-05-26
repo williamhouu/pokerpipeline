@@ -11,10 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.fact_extractor import (                              # noqa: E402
     VillainRangeStats,
+    classify_archetype,
+    compute_blockers,
     construct_villain_range_path,
     extract_facts,
     identify_villain,
 )
+from pipeline.preflop.spot_sampler import PreflopSpot                       # noqa: E402, F811
 from pipeline.preflop.grammars.types import (                              # noqa: E402
     ParsedAction,
     PreflopActionType,
@@ -279,3 +282,171 @@ def test_extract_facts_villain_range_stats_sanity():
     assert v.weighted_combo_count == pytest.approx(
         (v.pct_of_dealt_hands / 100.0) * 1326, rel=0.01
     )
+
+
+# --- chunk 2: compute_blockers --------------------------------------------
+def test_compute_blockers_finds_pair_blockers():
+    """Holding AsKh, hero blocks AA combos containing As (3 of 6) and KK
+    combos containing Kh (3 of 6)."""
+    hero_combo = "AsKh"
+    # Simplified villain range: AA (all 6 combos), KK (all 6 combos).
+    villain = {
+        "AsAh": 1.0, "AsAd": 1.0, "AsAc": 1.0,
+        "AhAd": 1.0, "AhAc": 1.0, "AdAc": 1.0,
+        "KsKh": 1.0, "KsKd": 1.0, "KsKc": 1.0,
+        "KhKd": 1.0, "KhKc": 1.0, "KdKc": 1.0,
+    }
+    blockers = compute_blockers(hero_combo, villain)
+    # Hero has As: blocks the 3 AA combos containing As (AsAh, AsAd, AsAc).
+    # Hero has Kh: blocks the 3 KK combos containing Kh (KsKh, KhKd, KhKc).
+    assert blockers == {"AA": 3, "KK": 3}
+
+
+def test_compute_blockers_skips_zero_weight():
+    """Zero-weight combos don't count as blocked."""
+    hero_combo = "AsKh"
+    villain = {"AsAh": 0.0, "AsAd": 1.0}
+    blockers = compute_blockers(hero_combo, villain)
+    assert blockers == {"AA": 1}  # AsAd counted; AsAh skipped
+
+
+def test_compute_blockers_no_overlap_empty():
+    """If hero's cards don't overlap any villain combo, no blockers."""
+    hero_combo = "2c3d"
+    villain = {"AhAs": 1.0, "KhKs": 1.0}
+    blockers = compute_blockers(hero_combo, villain)
+    assert blockers == {}
+
+
+# --- chunk 2: classify_archetype ------------------------------------------
+def _spot_with(
+    dominant_action: str, frequencies: dict[str, float],
+    history: tuple[ParsedAction, ...] = (),
+) -> PreflopSpot:
+    """Build a PreflopSpot with rigged values for archetype testing."""
+    node = PreflopDecisionNode(
+        pack_id="t", actor="BTN", history_before=history, actions=(),
+    )
+    dom_freq = frequencies[dominant_action]
+    return PreflopSpot(
+        node=node, hero_hand_class="AKo", hero_card_combo="AhKc",
+        action_frequencies=frequencies,
+        dominant_action=dominant_action, dominant_frequency=dom_freq,
+    )
+
+
+def test_archetype_unclassified_for_zero_presence():
+    """Hand with ~0% total presence at the node -> unclassified."""
+    spot = _spot_with("Fold", {"Fold": 0.0, "Call": 0.0})
+    assert classify_archetype(spot, villain=None, hero_equity_vs_villain=None) == "unclassified"
+
+
+def test_archetype_open_for_value_no_villain():
+    """No villain + dominant Raise -> open_for_value."""
+    spot = _spot_with("Raise 60%", {"Raise 60%": 1.0, "Fold": 0.0})
+    assert classify_archetype(spot, villain=None, hero_equity_vs_villain=None) == "open_for_value"
+
+
+def test_archetype_3bet_for_value():
+    """Facing one raise, dominant Raise with high equity -> 3bet_for_value."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.FOLD),
+        ParsedAction("CO", PreflopActionType.FOLD),
+    )
+    spot = _spot_with("Raise 77%", {"Raise 77%": 1.0, "Fold": 0.0}, history)
+    villain = history[0]
+    assert classify_archetype(spot, villain, hero_equity_vs_villain=0.62) == "3bet_for_value"
+
+
+def test_archetype_3bet_as_bluff():
+    """Facing one raise, dominant Raise with low equity -> 3bet_as_bluff."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+    )
+    spot = _spot_with("Raise 77%", {"Raise 77%": 1.0, "Fold": 0.0}, history)
+    assert classify_archetype(spot, history[0], hero_equity_vs_villain=0.35) == "3bet_as_bluff"
+
+
+def test_archetype_4bet_for_value():
+    """Facing two raises (open + 3-bet), dominant Raise -> 4bet."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.RAISE, 77.0),
+        ParsedAction("CO", PreflopActionType.FOLD),
+    )
+    spot = _spot_with("Raise 50%", {"Raise 50%": 1.0, "Fold": 0.0}, history)
+    assert classify_archetype(spot, history[1], hero_equity_vs_villain=0.55) == "4bet_for_value"
+
+
+def test_archetype_squeeze_for_value():
+    """Open + caller + hero raises = squeeze."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.CALL),
+        ParsedAction("CO", PreflopActionType.FOLD),
+    )
+    spot = _spot_with("Raise 85%", {"Raise 85%": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.58)
+    assert arch == "squeeze_for_value"
+
+
+def test_archetype_fold_dominated():
+    """Dominant Fold with very low equity -> fold_dominated."""
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
+    spot = _spot_with("Fold", {"Fold": 1.0, "Call": 0.0}, history)
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.25)
+    assert arch == "fold_dominated"
+
+
+def test_archetype_call_for_value():
+    """Dominant Call with positive equity -> call_for_value."""
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
+    spot = _spot_with("Call", {"Call": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.55)
+    assert arch == "call_for_value"
+
+
+def test_archetype_all_in_for_value():
+    """Dominant AllIn with positive equity -> all_in_for_value."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.RAISE, 77.0),
+    )
+    spot = _spot_with("AllIn", {"AllIn": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(spot, history[1], hero_equity_vs_villain=0.56)
+    assert arch == "all_in_for_value"
+
+
+# --- chunk 2: extract_facts populates new fields ---------------------------
+def test_extract_facts_populates_chunk2_fields_real_pack():
+    """End-to-end: hero_range_eq, blockers, archetype all populated."""
+    ranges = REPO_ROOT / "ranges"
+    if not ranges.is_dir():
+        pytest.skip("ranges/ not present locally")
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+    from pipeline.preflop.pack import discover_packs
+    packs = discover_packs(ranges)
+    if not packs:
+        pytest.skip("Ryan pack not present")
+    pack = packs[0]
+    nodes = enumerate_nodes(packs)
+    node = next(
+        n for n in nodes
+        if n.actor == "BTN"
+        and len(n.history_before) == 3
+        and n.history_before[0].action_type is PreflopActionType.RAISE
+        and n.history_before[1].action_type is PreflopActionType.FOLD
+        and n.history_before[2].action_type is PreflopActionType.FOLD
+    )
+    facts = extract_facts(sample_spot(node, "AA"), pack, equity_runouts=30)
+    # range equity present
+    assert facts.hero_range_equity_vs_villain is not None
+    assert 0.0 <= facts.hero_range_equity_vs_villain <= 1.0
+    # blockers: AA hero blocks some AA combos in villain's range
+    assert "AA" in facts.blockers
+    assert facts.blockers["AA"] >= 1
+    # archetype: AA facing UTG open -> 3bet_for_value (assuming dominant is Raise)
+    # OR call_for_value, depending on pack strategy. Just assert it's not empty.
+    assert facts.archetype != ""
+    assert facts.archetype != "unclassified"

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.preflop.equity import (                                       # noqa: E402
     preflop_equity_vs_range,
     preflop_hand_equity,
+    preflop_range_vs_range_equity,
 )
 
 
@@ -117,3 +118,54 @@ def test_weighted_average():
     # KK crushes 52o (~90%) and loses to AA (~20%). Heavy weight on 52o ->
     # near 90%.
     assert eq > 0.80
+
+
+# --- preflop_range_vs_range_equity ----------------------------------------
+def test_range_vs_range_premium_vs_trash():
+    """{AA, KK} vs {72o, 83o} -- premium range crushes trash range."""
+    rng = random.Random(0)
+    eq = preflop_range_vs_range_equity(
+        hero_range={"AhAs": 1.0, "KhKs": 1.0},
+        villain_range={"7c2d": 1.0, "8c3d": 1.0},
+        max_matchups=100, n_samples_per_matchup=30, rng=rng,
+    )
+    assert eq > 0.80, f"premium vs trash should be >80%, got {eq:.2%}"
+
+
+def test_range_vs_range_same_range_is_about_50():
+    """A range vs itself averages to 50% (after card-conflict filtering)."""
+    rng = random.Random(0)
+    rg = {"AhAd": 1.0, "KsKc": 1.0, "QhQd": 1.0, "JsJc": 1.0}
+    eq = preflop_range_vs_range_equity(
+        hero_range=rg, villain_range=rg,
+        max_matchups=200, n_samples_per_matchup=30, rng=rng,
+    )
+    # Allow generous bounds because of sampling noise + card-conflict skips.
+    assert 0.40 < eq < 0.60, f"same range vs itself ~= 50%, got {eq:.2%}"
+
+
+def test_range_vs_range_empty_returns_zero():
+    """Either empty range -> 0.0."""
+    assert preflop_range_vs_range_equity({}, {"AhAd": 1.0}) == 0.0
+    assert preflop_range_vs_range_equity({"AhAd": 1.0}, {}) == 0.0
+
+
+def test_range_vs_range_all_zero_weights_returns_zero():
+    """All-zero weights -> 0.0 (filtered before sampling)."""
+    rg = {"AhAd": 0.0, "KsKc": 0.0}
+    assert preflop_range_vs_range_equity(rg, rg) == 0.0
+
+
+def test_range_vs_range_deterministic_with_seed():
+    """Same RNG seed -> identical equity."""
+    rg_a = {"AhAd": 1.0, "KsKc": 1.0}
+    rg_b = {"7c2d": 1.0, "8c3d": 1.0}
+    rng_a = random.Random(42)
+    rng_b = random.Random(42)
+    eq1 = preflop_range_vs_range_equity(
+        rg_a, rg_b, max_matchups=50, n_samples_per_matchup=20, rng=rng_a,
+    )
+    eq2 = preflop_range_vs_range_equity(
+        rg_a, rg_b, max_matchups=50, n_samples_per_matchup=20, rng=rng_b,
+    )
+    assert eq1 == eq2

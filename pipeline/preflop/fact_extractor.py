@@ -14,19 +14,25 @@ For Phase A this module computes:
   * villain range loading + characterization (combo count, % of hands)
   * hero equity vs villain's range
   * top villain combos (the most-weighted hands in their range)
+  * hero RANGE equity vs villain RANGE (range-vs-range)
+  * blockers (count of villain combos hero blocks, grouped by class)
+  * strategic archetype classifier (3bet_for_value / squeeze_as_bluff / ...)
 
-Phase B will add: hero RANGE vs villain RANGE equity, blocker counts,
-strategic archetype classification, pot odds, SPR.
+Phase B will add: pot odds, SPR, multiway-villain handling, additional
+concept tags.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from pipeline.preflop.equity import preflop_equity_vs_range
+from pipeline.preflop.equity import (
+    preflop_equity_vs_range,
+    preflop_range_vs_range_equity,
+)
 from pipeline.preflop.grammars.types import (
     ParsedAction,
     PreflopActionType,
@@ -38,6 +44,7 @@ from pipeline.preflop_ranges import (
     HAND_COUNT,
     canonical_169_hand_classes,
     combo_label,
+    combo_str_to_hand_class,
     parse_range_file,
 )
 
@@ -107,6 +114,23 @@ class PreflopFacts:
     # DEFAULT_EQUITY_RUNOUTS). Carried so Layer 6 can avoid claiming
     # false precision in prose.
     hero_equity_runouts_used: int = 0
+
+    # Hero's RANGE equity vs villain's range, in [0.0, 1.0]. Distinct
+    # from hero_equity_vs_villain (which is *this hand* vs villain's
+    # range). Layer 6 uses this for "your range has 53% equity here"
+    # framing. None if not computable.
+    hero_range_equity_vs_villain: float | None = None
+
+    # How many villain combos hero's specific cards block, grouped by
+    # hand class. e.g. ``{"AA": 2, "AKs": 3, "AKo": 4}`` means hero's
+    # cards remove 2 AA combos, 3 AKs combos, 4 AKo combos from villain's
+    # range. Empty dict if no villain or no blockers computed.
+    blockers: dict[str, int] = field(default_factory=dict)
+
+    # Strategic archetype label (e.g. "3bet_for_value", "squeeze_as_bluff",
+    # "open_for_value", "fold_dominated"). Empty string if not classified.
+    # See classify_archetype() in this module for the full list.
+    archetype: str = ""
 
 
 # --- villain identification -------------------------------------------------
@@ -315,17 +339,30 @@ def extract_facts(
             villain_path,
             top_n=top_combo_count,
         )
-        combo_weights = _cached_load_combo_weights(str(villain_path))
+        villain_combos = _cached_load_combo_weights(str(villain_path))
         hero_eq = compute_hero_equity_vs_range(
             spot.hero_card_combo,
-            combo_weights,
+            villain_combos,
             max_runouts=equity_runouts,
         )
+        # Chunk 2 facts: range-vs-range equity, blockers, archetype.
+        hero_combos = _hero_range_at_node_cached(spot.node)
+        hero_range_eq = preflop_range_vs_range_equity(
+            hero_range=hero_combos,
+            villain_range=villain_combos,
+            max_matchups=200,
+            n_samples_per_matchup=50,
+        )
+        blockers = compute_blockers(spot.hero_card_combo, villain_combos)
+        archetype = classify_archetype(spot, villain, hero_eq)
         return PreflopFacts(
             spot=spot,
             villain_stats=villain_stats,
             hero_equity_vs_villain=hero_eq,
             hero_equity_runouts_used=equity_runouts,
+            hero_range_equity_vs_villain=hero_range_eq,
+            blockers=blockers,
+            archetype=archetype,
         )
     except (ValueError, OSError) as exc:
         logger.warning(
@@ -334,3 +371,157 @@ def extract_facts(
             exc,
         )
         return PreflopFacts(spot=spot)
+
+
+# --- chunk 2: hero's full range at this node -------------------------------
+def _hero_range_at_node_cached(
+    node: PreflopDecisionNode,
+) -> dict[str, float]:
+    """Sum all of hero's action ranges into one "reaching range" combo dict.
+
+    At any decision node, hero's "current range" = union of every range
+    they take at the node (each action's range file represents one part).
+    Adding them up gives the combo distribution over hands that *reached*
+    the decision point. Used for range-vs-range equity and other
+    range-level facts.
+
+    Cached at the node level since many spots from the same node need
+    the same answer.
+    """
+    return _hero_range_combos_uncached(
+        tuple(str(opt.range_file.path) for opt in node.actions)
+    )
+
+
+@lru_cache(maxsize=2048)
+def _hero_range_combos_uncached(
+    range_file_paths: tuple[str, ...],
+) -> dict[str, float]:
+    """Inner cached function -- tuple of path-strings is hashable."""
+    combined: dict[str, float] = {}
+    for path_str in range_file_paths:
+        combos = _cached_load_combo_weights(path_str)
+        for combo, weight in combos.items():
+            if weight <= 0:
+                continue
+            combined[combo] = combined.get(combo, 0.0) + weight
+    return combined
+
+
+# --- chunk 2: blockers -----------------------------------------------------
+def compute_blockers(
+    hero_combo: str,
+    villain_combos: dict[str, float],
+) -> dict[str, int]:
+    """Count villain combos hero's specific cards block, grouped by hand class.
+
+    A combo is "blocked" if hero's hand shares at least one card with it.
+    For citation prose ("your A♠ blocks 2 AA combos"), the per-class
+    count is what reads naturally.
+
+    Args:
+        hero_combo: 4-char combo like ``'AsKh'``.
+        villain_combos: ``{combo: weight}`` (1326 entries; only the
+            positive-weight ones are inspected).
+
+    Returns:
+        ``{hand_class: count}`` for every class hero blocks at least one
+        combo of. Empty dict if hero blocks nothing in the range.
+    """
+    hero_cards = {hero_combo[:2], hero_combo[2:]}
+    counts: dict[str, int] = {}
+    for combo, weight in villain_combos.items():
+        if weight <= 0:
+            continue
+        cards = {combo[:2], combo[2:]}
+        if not (cards & hero_cards):
+            continue
+        hc = combo_str_to_hand_class(combo)
+        counts[hc] = counts.get(hc, 0) + 1
+    return counts
+
+
+# --- chunk 2: archetype classifier -----------------------------------------
+def classify_archetype(
+    spot: PreflopSpot,
+    villain: ParsedAction | None,
+    hero_equity_vs_villain: float | None,
+) -> str:
+    """Pick a strategic archetype label for the spot.
+
+    Looks at hero's dominant action + the action context (open, facing
+    raise, 3-bet, 4-bet, squeeze, all-in) + hero's equity vs villain to
+    classify as value vs bluff vs fold reason.
+
+    The 14 archetypes returned are listed in the module docstring.
+    Returns a snake_case string. Defaults to ``"unclassified"`` if the
+    pattern doesn't fit or hero's hand has near-zero presence at the node
+    (i.e. hero would have folded earlier in the tree and never reached
+    this decision).
+    """
+    # Defensive: hands that never actually reach the node (total weight
+    # ~0 across all actions) shouldn't get a meaningful archetype --
+    # they're filtered out by question_extractor anyway, but downstream
+    # callers (smoke tests, ad-hoc tooling) might bypass that filter.
+    total_presence = sum(spot.action_frequencies.values())
+    if total_presence < 0.01:
+        return "unclassified"
+
+    dominant = spot.dominant_action
+
+    # Count prior raises in history (excludes hero's own pending action).
+    n_prior_raises = sum(
+        1
+        for a in spot.node.history_before
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    )
+    # Squeeze = there's a prior raise AND at least one caller between
+    # raiser and hero.
+    n_callers_after_raise = 0
+    seen_raise = False
+    for a in spot.node.history_before:
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
+            seen_raise = True
+            n_callers_after_raise = 0  # reset on each new raise
+        elif seen_raise and a.action_type is PreflopActionType.CALL:
+            n_callers_after_raise += 1
+
+    # No villain = hero is first to act with a raising option.
+    if villain is None:
+        if "Raise" in dominant:
+            return "open_for_value"
+        if "AllIn" in dominant:
+            return "open_for_value"  # rare preflop but treat as value
+        if "Fold" in dominant:
+            return "fold_outranged"
+        return "unclassified"
+
+    # Hero is facing a villain action. Classify by hero's dominant action.
+    def value_or_bluff(suffix_v: str, suffix_b: str) -> str:
+        if hero_equity_vs_villain is None:
+            return suffix_v  # default to value when equity unknown
+        return suffix_v if hero_equity_vs_villain >= 0.50 else suffix_b
+
+    if dominant == "Fold":
+        if hero_equity_vs_villain is not None and hero_equity_vs_villain < 0.40:
+            return "fold_dominated"
+        return "fold_pot_odds"  # folding despite some equity = wrong-priced
+
+    if dominant == "Call":
+        return value_or_bluff("call_for_value", "call_for_implied_odds")
+
+    if dominant == "AllIn":
+        return value_or_bluff("all_in_for_value", "all_in_as_bluff")
+
+    if "Raise" in dominant:
+        if n_callers_after_raise > 0 and n_prior_raises == 1:
+            # Open + at least one caller, then hero raises = squeeze.
+            return value_or_bluff("squeeze_for_value", "squeeze_as_bluff")
+        if n_prior_raises == 1:
+            return value_or_bluff("3bet_for_value", "3bet_as_bluff")
+        if n_prior_raises == 2:
+            return value_or_bluff("4bet_for_value", "4bet_as_bluff")
+        if n_prior_raises >= 3:
+            return value_or_bluff("5bet_for_value", "5bet_as_bluff")
+
+    return "unclassified"
