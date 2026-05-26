@@ -195,18 +195,49 @@ def build_options_basic(
     Empty / degenerate strategies fall through to a 1-option set
     containing the canonical dominant action, so the row stays valid.
     """
-    meaningful = _meaningful_canonical_actions(facts)
+    canonical = canonicalize_strategy(facts)
     canonical_correct = _canonical_dominant(facts)
-    if not meaningful:
+    if not canonical:
         return [canonical_correct], canonical_correct
-    options = [label for label, _ in meaningful[:4]]
-    if canonical_correct not in options:
-        # Defensive: dominant somehow not in meaningful set.
-        options = [canonical_correct] + [
-            opt for opt in options if opt != canonical_correct
+
+    # Sort by descending frequency for the cap step.
+    ordered = sorted(canonical.items(), key=lambda kv: -kv[1])
+
+    # Step 2: 4-option cap with Fold-protection rule.
+    if len(ordered) <= 4:
+        kept = {label for label, _ in ordered}
+    else:
+        fold_freq = canonical.get("Fold", 0.0)
+        if fold_freq == 0.0:
+            # Fold played 0% AND there are 5+ alternatives -- drop Fold.
+            kept = {label for label, _ in ordered if label != "Fold"}
+            # Take top 4 of what remains.
+            top_4 = [label for label, _ in ordered if label != "Fold"][:4]
+            kept = set(top_4)
+        else:
+            # Fold protected because Pio actually plays it sometimes.
+            kept_non_fold = [label for label, _ in ordered if label != "Fold"][:3]
+            kept = {"Fold", *kept_non_fold}
+
+    # Step 3: Fold first when present, remaining by descending frequency.
+    if "Fold" in kept:
+        remaining_by_freq = [
+            label for label, _ in ordered if label in kept and label != "Fold"
         ]
-        options = options[:4]
-    return options, canonical_correct
+        ordered_options = ["Fold", *remaining_by_freq]
+    else:
+        ordered_options = [label for label, _ in ordered if label in kept]
+
+    # Defensive: dominant must be in options. The cap rule only drops Fold
+    # or low-frequency actions, never the dominant (which has rank 1 by
+    # frequency), so this is belt-and-suspenders.
+    if canonical_correct not in ordered_options:
+        ordered_options = [
+            canonical_correct,
+            *(opt for opt in ordered_options if opt != canonical_correct),
+        ][:4]
+
+    return ordered_options, canonical_correct
 
 
 def build_options_gto(

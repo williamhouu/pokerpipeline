@@ -22,8 +22,8 @@ from pipeline.preflop.grammars.types import (  # noqa: E402
 )
 from pipeline.preflop.node_enumerator import PreflopDecisionNode  # noqa: E402
 from pipeline.preflop.options import (  # noqa: E402
-    ANSWER_STYLES,
     ANSWER_STYLE_FROM_RADIO_LABEL,
+    ANSWER_STYLES,
     build_options,
     build_options_auto,
     build_options_basic,
@@ -116,9 +116,7 @@ def test_canonicalize_allin_uses_hyphen() -> None:
 def test_canonicalize_strategy_merges_duplicate_raise_sizes() -> None:
     """When a node has two raise sizes (rare in Ryan pack), they collapse
     into a single 'Raise' entry whose frequency is the sum."""
-    facts = _facts_with_strategy(
-        {"Fold": 0.20, "Raise 60%": 0.50, "Raise 100%": 0.30}
-    )
+    facts = _facts_with_strategy({"Fold": 0.20, "Raise 60%": 0.50, "Raise 100%": 0.30})
     canonical = canonicalize_strategy(facts)
     # The two raise sizes merge into a single 'Raise' with summed freq.
     assert canonical == {"Fold": 0.20, "Raise": 0.80}
@@ -139,41 +137,45 @@ def test_canonicalize_strategy_uses_3bet_when_history_has_open() -> None:
 
 # --- build_options_basic ----------------------------------------------------
 def test_basic_two_action_mix() -> None:
-    """Two actions at meaningful frequencies -> 2 options, dominant first.
-    Raise labels are canonicalised: 'Raise 60%' -> 'Raise' (raise_level=1
-    since the BTN fixture has no prior raises in history)."""
+    """Two actions both included; Fold appears first when present."""
     facts = _facts_with_strategy({"Fold": 0.30, "Raise 60%": 0.70})
     options, correct = build_options_basic(facts)
-    assert options == ["Raise", "Fold"]
+    # Fold first, then Raise (the dominant action).
+    assert options == ["Fold", "Raise"]
     assert correct == "Raise"
     assert correct in options
 
 
-def test_basic_drops_tiny_frequencies() -> None:
-    """Actions played at < 5% are filtered out -- noise, not strategic mix."""
+def test_basic_includes_low_freq_actions_when_room() -> None:
+    """No frequency filter -- every Pio-offered canonical action shows
+    up as an option as long as we have room (<=4 total). Even a 0.5%
+    action is a real legal choice the player should be allowed to
+    consider."""
     facts = _facts_with_strategy(
         {"Fold": 0.30, "Raise 60%": 0.65, "Call": 0.005, "AllIn": 0.045}
     )
     options, correct = build_options_basic(facts)
-    assert options == ["Raise", "Fold"]
-    assert "Call" not in options
-    assert "All-in" not in options
+    # All 4 canonical actions present (no frequency filter).
+    assert set(options) == {"Fold", "Raise", "Call", "All-in"}
+    assert options[0] == "Fold"  # Fold first
+    assert options[1] == "Raise"  # then dominant
     assert correct == "Raise"
 
 
-def test_basic_pure_action_one_option() -> None:
-    """Single meaningful action -> 1 option."""
+def test_basic_pure_action_still_shows_alternatives() -> None:
+    """A pure-fold strategy still shows Raise as an option -- the player
+    needs the chance to consider the alternative and learn why it's
+    wrong. Fold remains first, correct = 'Fold'."""
     facts = _facts_with_strategy({"Fold": 1.0, "Raise 60%": 0.0})
     options, correct = build_options_basic(facts)
-    assert options == ["Fold"]
+    assert options == ["Fold", "Raise"]
     assert correct == "Fold"
 
 
-def test_basic_caps_at_four_options() -> None:
-    """When 5+ raw actions are meaningfully played, canonicalisation may
-    collapse multiple raise-size labels into a single 'Raise' entry --
-    so the number of post-canonical options can shrink. Top-frequency
-    canonical action is first."""
+def test_basic_canonicalisation_collapses_then_orders() -> None:
+    """5 raw raise sizes -> 1 canonical 'Raise' (sum of frequencies).
+    Result has Fold first, then Raise (now 60% after collapse), then
+    the remaining actions by descending frequency."""
     facts = _facts_with_strategy(
         {
             "Fold": 0.10,
@@ -183,11 +185,68 @@ def test_basic_caps_at_four_options() -> None:
             "AllIn": 0.15,
         }
     )
-    options, _correct = build_options_basic(facts)
-    # Two raise sizes collapse into one 'Raise' (40% + 20% = 60%).
-    # Result: ['Raise' (60%), 'Call' (15%), 'All-in' (15%), 'Fold' (10%)].
-    assert len(options) <= 4
-    assert options[0] == "Raise"
+    options, correct = build_options_basic(facts)
+    # 4 canonical actions after collapsing the two raise sizes -- all fit.
+    assert set(options) == {"Fold", "Raise", "Call", "All-in"}
+    assert options[0] == "Fold"
+    assert options[1] == "Raise"  # dominant after collapse (60%)
+    # Dominant raw label was "Raise 60%" -> canonical "Raise".
+    assert correct == "Raise"
+
+
+def test_basic_drops_fold_only_when_zero_and_crowded() -> None:
+    """5+ canonical actions and Fold=0%: drop Fold and take top 4.
+
+    5+ canonical actions with Fold non-zero: keep Fold + top 3 non-Fold.
+    """
+    # Case A: Fold = 0%, 5 canonical actions -> drop Fold.
+    # Use distinct verbs to avoid canonicalisation collapse.
+    # Build a custom fixture with raise_level fixed so we can construct
+    # 5 truly distinct canonical labels without the test depending on
+    # how raises collapse.
+    # We'll skip the truly 5+ case here (the Ryan pack doesn't produce
+    # 5+ canonical actions in practice) and just test the rule via the
+    # public canonical-strategy interface.
+    facts = _facts_with_strategy(
+        # 5 distinct canonical actions: Fold, Call, Raise, All-in,
+        # and one extra by using a synthetic "Check" entry that the
+        # canonicaliser passes through unchanged.
+        {
+            "Fold": 0.00,
+            "Call": 0.40,
+            "Raise 60%": 0.30,
+            "AllIn": 0.20,
+            "Check": 0.10,  # passthrough label
+        }
+    )
+    options, correct = build_options_basic(facts)
+    # Fold dropped (0% + crowded).
+    assert "Fold" not in options
+    assert len(options) == 4
+    # Top 4 by frequency.
+    assert set(options) == {"Call", "Raise", "All-in", "Check"}
+    assert correct == "Call"
+
+    # Case B: same 5 actions but Fold at 5% (non-zero) -- Fold protected.
+    facts2 = _facts_with_strategy(
+        {
+            "Fold": 0.05,
+            "Call": 0.40,
+            "Raise 60%": 0.25,
+            "AllIn": 0.20,
+            "Check": 0.10,
+        }
+    )
+    options2, correct2 = build_options_basic(facts2)
+    assert "Fold" in options2
+    assert options2[0] == "Fold"  # Fold-first ordering
+    assert len(options2) == 4
+    # Lowest-frequency non-Fold action gets dropped.
+    # Sorted: Call 40, Raise 25, AllIn 20, Check 10, Fold 5.
+    # Keep Fold + top 3 non-Fold = Fold, Call, Raise, All-in.
+    assert set(options2) == {"Fold", "Call", "Raise", "All-in"}
+    assert "Check" not in options2
+    assert correct2 == "Call"
 
 
 # --- build_options_gto ------------------------------------------------------
@@ -227,9 +286,7 @@ def test_gto_three_action_mix_uses_composite_labels() -> None:
     than standalone 'Sometimes Y' options (which Ryan banned in Apr 2026
     as ambiguous). correct_answer is the composite pairing the dominant
     with the SECOND-most-frequent action. Raise labels canonicalised."""
-    facts = _facts_with_strategy(
-        {"Call": 0.60, "Fold": 0.25, "Raise 308%": 0.15}
-    )
+    facts = _facts_with_strategy({"Call": 0.60, "Fold": 0.25, "Raise 308%": 0.15})
     options, correct = build_options_gto(facts)
     assert options[0] == "Always Call"
     # Composite labels for each secondary action -- raise canonicalised
@@ -323,10 +380,10 @@ def test_answer_styles_constant_matches_radio_labels() -> None:
 def test_correct_answer_always_appears_in_options() -> None:
     """Invariant: for any style, correct_answer is a member of options."""
     strategies = [
-        {"Call": 1.0, "Fold": 0.0},                  # pure
-        {"Call": 0.95, "Fold": 0.05},                # Always boundary
-        {"Call": 0.80, "Fold": 0.20},                # auto boundary
-        {"Call": 0.66, "Fold": 0.34},                # mixed
+        {"Call": 1.0, "Fold": 0.0},  # pure
+        {"Call": 0.95, "Fold": 0.05},  # Always boundary
+        {"Call": 0.80, "Fold": 0.20},  # auto boundary
+        {"Call": 0.66, "Fold": 0.34},  # mixed
         {"Call": 0.50, "Fold": 0.30, "Raise": 0.20},  # 3-way
     ]
     for strategy in strategies:
