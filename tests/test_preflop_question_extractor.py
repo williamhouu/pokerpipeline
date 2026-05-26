@@ -71,22 +71,39 @@ def test_difficulty_at_min_frequency_is_ceiling():
 
 
 def test_difficulty_at_max_frequency_is_floor():
-    """A near-pure 95% spot is the easiest (500)."""
-    spot = _spot({"Raise": 0.95, "Fold": 0.05})
+    """A 100% pure spot is the easiest (500). Post-Ryan-feedback May-2026
+    the linear region extends to 1.00 so 100% IS the floor (previously
+    95% already clamped to 500)."""
+    spot = _spot({"Raise": 1.0, "Fold": 0.0})
     assert difficulty_score(spot) == 500
 
 
 def test_difficulty_mid_range():
-    """75% -- halfway between 55% and 95% -- should be ~1750 (midpoint)."""
+    """75% -- partway between 55% and 100% -- should be ~1889. Linear
+    interp: 3000 - ((0.75 - 0.55) / 0.45) * 2500 = 3000 - 1111 = 1889."""
     spot = _spot({"Raise": 0.75, "Fold": 0.25})
     score = difficulty_score(spot)
-    assert 1700 < score < 1800
+    assert 1850 < score < 1950
 
 
-def test_difficulty_above_max_clamps_to_floor():
-    """A 100% pure spot is even easier than 95% -- clamped to 500."""
-    spot = _spot({"Raise": 1.0, "Fold": 0.0})
-    assert difficulty_score(spot) == 500
+def test_difficulty_95_pct_gradates_above_floor():
+    """At 95% frequency the spot is still easier than 75% but no longer
+    clamps to the floor -- Ryan asked for gradation in 95-100% range so a
+    near-pure 95% spot is ~778 rather than 500."""
+    spot = _spot({"Raise": 0.95, "Fold": 0.05})
+    score = difficulty_score(spot)
+    # Linear interp at 95%: 3000 - ((0.95 - 0.55) / 0.45) * 2500 = 778.
+    assert 750 < score < 800
+
+
+def test_difficulty_98_pct_still_above_floor():
+    """98% gradates between 95% (~778) and 100% (500)."""
+    spot = _spot({"Raise": 0.98, "Fold": 0.02})
+    score = difficulty_score(spot)
+    # Linear interp at 98%: 3000 - ((0.98 - 0.55) / 0.45) * 2500 = 611.
+    assert 580 < score < 640
+    # And it's between the 95% value (778) and the 100% floor (500).
+    assert 500 < score < 778
 
 
 def test_difficulty_below_min_clamps_to_ceiling():

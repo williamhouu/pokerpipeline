@@ -73,6 +73,7 @@ from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopDecisionNode,
     enumerate_nodes_by_actor,
 )
+from pipeline.preflop.options import ANSWER_STYLE_FROM_RADIO_LABEL  # noqa: E402
 from pipeline.preflop.pack import (  # noqa: E402
     PreflopPack,
     discover_packs,
@@ -955,16 +956,21 @@ def _render_generate_page_preflop() -> None:
     st.subheader("5. Answer option style")
     answer_style = st.radio(
         "Style",
-        options=[
-            "Basic (fold/call/raise)",
-            "GTO (always/mostly)",
-            "Sizing (33%/75%/150%) — coming soon",
-            "Auto-pick",
-        ],
+        options=list(ANSWER_STYLE_FROM_RADIO_LABEL.keys()),
         index=0,  # Basic is the natural default for preflop
         key="preflop_answer_style",
+        help=(
+            "**Basic** -- bare action labels (Fold / Call / Raise 60%). "
+            "**GTO** -- Always / Mostly template that surfaces mixed "
+            "strategies. **Sizing** -- not relevant for preflop (raise "
+            "sizes are already in the action labels); falls back to Basic. "
+            "**Auto-pick** -- chooses Basic for dominant-action spots, "
+            "GTO for mixed spots."
+        ),
     )
-    _ = answer_style  # consumed by Layer 6 when wired
+    # Options + correct_answer are now computed deterministically in
+    # pipeline.preflop.options (no LLM involved for the picking).
+    answer_style_canonical = ANSWER_STYLE_FROM_RADIO_LABEL[answer_style]
 
     st.divider()
 
@@ -1078,6 +1084,7 @@ def _render_generate_page_preflop() -> None:
             output_filename=_out_filename,
             model_label=_model,
             dry_run=bool(_dry_run),
+            answer_style=answer_style_canonical,
         )
 
 
@@ -1092,6 +1099,7 @@ def _run_preflop_generation(
     output_filename: str,
     model_label: str,
     dry_run: bool,
+    answer_style: str,
 ) -> None:
     """Execute one preflop batch and render the result UI.
 
@@ -1146,6 +1154,7 @@ def _run_preflop_generation(
             action_contexts=action_contexts,
             min_frequency=freq_min,
             max_frequency=freq_max,
+            answer_style=answer_style,
             model=model_api,
             dry_run=dry_run,
             # Streamlit reruns the script on every interaction -- if

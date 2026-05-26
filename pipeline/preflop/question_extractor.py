@@ -52,13 +52,29 @@ def total_presence(spot: PreflopSpot) -> float:
 def difficulty_score(spot: PreflopSpot) -> int:
     """The spot's difficulty on the brief's 500-3000 scale.
 
-    Brief MVP formula: 3000 - ((freq - 0.55) / 0.40) * 2500, where ``freq``
-    is the top action's frequency. A barely-dominant 55% spot scores 3000
-    (hardest); a near-pure 95% spot scores 500 (easiest). Clamped to the
-    500-3000 range.
+    Linear interpolation from 55% frequency (hardest = 3000) to 100%
+    frequency (easiest = 500), so the 95-100% range has gradation
+    rather than clamping to the floor:
+
+        ``score = 3000 - ((freq - 0.55) / 0.45) * 2500``
+
+    Examples:
+
+      * 55%  -> 3000 (barely dominant; multiple answers are reasonable)
+      * 75%  -> 1889 (mixed strategy, dominant action is meaningful)
+      * 95%  -> 778  (action is almost pure -- still has a small mix-in)
+      * 100% -> 500  (pure action; the easiest possible question)
+
+    Frequencies outside [0.55, 1.00] are clamped to the corresponding
+    end of the range; the worthiness filter normally drops < 0.55 and
+    > 0.95 spots before they reach this function. Pre-Ryan-feedback
+    May-2026 the denominator was 0.40 (clamped at 0.95), which gave the
+    same difficulty for 95% and 100% spots; Ryan asked for gradation in
+    the 95-100% range with 100% being the absolute easiest, so the
+    denominator is now 0.45.
     """
     frequency = top_action_frequency(spot)
-    score = 3000 - ((frequency - 0.55) / 0.40) * 2500
+    score = 3000 - ((frequency - 0.55) / 0.45) * 2500
     return round(max(_DIFFICULTY_FLOOR, min(_DIFFICULTY_CEILING, score)))
 
 

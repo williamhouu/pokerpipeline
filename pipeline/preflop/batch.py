@@ -59,7 +59,9 @@ from pipeline.explanation_generator import (
     DEFAULT_TEMPERATURE,
     GeneratedExplanation,
 )
-from pipeline.preflop.explanation_generator import generate_preflop_explanation
+from pipeline.preflop.explanation_generator import (
+    generate_preflop_answer_explanation,
+)
 from pipeline.preflop.fact_extractor import (
     DEFAULT_EQUITY_RUNOUTS,
     extract_facts,
@@ -70,6 +72,7 @@ from pipeline.preflop.node_enumerator import (
     PreflopDecisionNode,
     enumerate_nodes,
 )
+from pipeline.preflop.options import build_options
 from pipeline.preflop.pack import PreflopPack
 from pipeline.preflop.question_extractor import (
     MAX_TOP_FREQUENCY,
@@ -232,6 +235,7 @@ def generate_preflop_batch(
     action_contexts: Iterable[str] | None = None,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    answer_style: str = "auto",
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
@@ -330,11 +334,15 @@ def generate_preflop_batch(
             )
         try:
             facts = extract_facts(spot, pack, equity_runouts=equity_runouts)
+            # Deterministic option selection -- pure Python, no LLM.
+            options, correct = build_options(facts, style=answer_style)
             if dry_run:
-                explanation = _placeholder_explanation(spot)
+                explanation = _placeholder_explanation(options, correct)
             else:
-                explanation = generate_preflop_explanation(
+                explanation = generate_preflop_answer_explanation(
                     facts,
+                    options,
+                    correct,
                     client=client,
                     model=model,
                     temperature=temperature,
@@ -377,24 +385,24 @@ def generate_preflop_batch(
 
 
 # --- internal helpers -------------------------------------------------------
-def _placeholder_explanation(spot: PreflopSpot) -> GeneratedExplanation:
+def _placeholder_explanation(
+    options: list[str],
+    correct_answer: str,
+) -> GeneratedExplanation:
     """A stub GeneratedExplanation for dry-run mode.
 
-    The option set mirrors Pio's offered actions (so the row is
-    structurally valid for downstream consumers). The answer_explanation
-    is a dry-run marker so reviewers can see at a glance which rows are
-    LLM-generated and which are placeholders.
+    Uses the deterministic option set + correct_answer (so the row is
+    structurally consistent with whatever ``answer_style`` the caller
+    chose). Only the answer_explanation prose is a placeholder; the
+    options + correct answer are real.
     """
-    labels = [
-        label for label in spot.action_frequencies if spot.action_frequencies[label] > 0
-    ]
-    options = (labels + ["", "", "", ""])[:4]
+    padded = (list(options) + ["", "", "", ""])[:4]
     return GeneratedExplanation(
-        option_1=options[0],
-        option_2=options[1],
-        option_3=options[2],
-        option_4=options[3],
-        correct_answer=spot.dominant_action,
+        option_1=padded[0],
+        option_2=padded[1],
+        option_3=padded[2],
+        option_4=padded[3],
+        correct_answer=correct_answer,
         answer_explanation="[dry-run placeholder; rerun without dry-run for real prose]",
     )
 

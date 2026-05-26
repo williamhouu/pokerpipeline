@@ -413,14 +413,13 @@ def test_relative_position_open_is_just_hero() -> None:
 
 # --- question narrative (deterministic, no LLM) -----------------------------
 def test_question_for_open_no_prior_history() -> None:
-    """UTG opens, no prior actions -> 'Action is on you.' The Question
-    narrative does NOT carry context (table size / stakes / stack) --
-    that lives in the Context column. It also does NOT end with
-    'What's your play?' -- the UI implies the question by rendering an
-    answer-options widget."""
+    """UTG opens, no prior actions -> just the hero line, no action history.
+    Cards are concatenated without a space per the brief ('two cards with no
+    space between them'). The Question does NOT carry context (table size /
+    stakes / stack) -- that lives in the Context column. It does NOT end
+    with 'What's your play?' -- the UI implies the question."""
     q = format_preflop_question(_open_facts(), pack=_pack())
-    assert "You're UTG with A❤️ K♣️" in q
-    assert "Action is on you." in q
+    assert "You're UTG with A❤️K♣️" in q
     # Context info must NOT appear in the Question column.
     assert "6-handed" not in q
     assert "cash game" not in q
@@ -431,45 +430,61 @@ def test_question_for_open_no_prior_history() -> None:
 
 
 def test_question_for_facing_open_renders_villain_history() -> None:
+    """Per the brief's Fold Rule: preflop folds are DROPPED from the action
+    history (implied by absence). Only non-fold actions appear; raises
+    render with dollar amounts."""
     q = format_preflop_question(_facing_open_facts(), pack=_pack())
-    assert "You're in the Small Blind with A♠️ Q♠️" in q
-    # All four prior actions show in order.
-    assert "UTG folds" in q
-    assert "The Hijack folds" in q
-    assert "The Cutoff folds" in q
-    assert "The Button opens" in q
+    assert "You're in the Small Blind with A♠️Q♠️" in q
+    # Per the brief: preflop folds are implied by absence, NOT listed.
+    assert "UTG folds" not in q
+    assert "The Hijack folds" not in q
+    assert "The Cutoff folds" not in q
+    # The non-fold action does appear, with its dollar amount.
+    assert "The Button opens to $1.25" in q
 
 
 def test_question_for_facing_3bet_uses_3bet_verb() -> None:
-    """A second raise (after an open) renders as '3-bets'."""
+    """A second raise (after an open) renders as '3-bets'. Hero (BTN in
+    this fixture) opened, so their own action renders with the base verb
+    ('you open') -- only villains get third-person."""
     q = format_preflop_question(_facing_3bet_facts(), pack=_pack())
-    assert "The Button opens" in q
-    assert "The Big Blind 3-bets" in q
+    # Hero opened (BTN is hero in this fixture). Hero verb is "open" not
+    # "opens" (the brief: hero uses base verb, villain uses third-person).
+    assert "You open to $1.25" in q
+    # BB 3-bets (with size from the Ryan-pack lookup: 182% -> 12bb -> $6).
+    assert "The Big Blind 3-bets to $6" in q
 
 
-def test_question_renderer_ignores_stake_kwargs() -> None:
-    """The Question narrative is stake-agnostic (stakes live in Context).
-    Tournament vs cash, dollar amounts, live-vs-online -- none of these
-    change the Question column's output."""
-    cash_q = format_preflop_question(_facing_open_facts(), pack=_pack())
-    tourney_q = format_preflop_question(
-        _facing_open_facts(),
-        pack=_pack(),
-        game_format="tournament",
+def test_question_renderer_scales_amounts_with_stakes() -> None:
+    """Raise amounts in the Question scale with stakes_bb_dollars: at $0.25/
+    $0.50 the open is "$1.25"; at $1/$2 the open is "$5"."""
+    cash_low = format_preflop_question(
+        _facing_open_facts(), pack=_pack(), stakes_bb_dollars=0.50
     )
-    high_stakes_q = format_preflop_question(
-        _facing_open_facts(),
-        pack=_pack(),
-        stakes_bb_dollars=10.0,
+    cash_high = format_preflop_question(
+        _facing_open_facts(), pack=_pack(), stakes_bb_dollars=2.0
     )
-    assert cash_q == tourney_q == high_stakes_q
-    # No dollar signs, no 'bb' stack count, no 'tournament' or 'cash'
-    # keywords leak into the Question column.
-    for q in (cash_q, tourney_q, high_stakes_q):
-        assert "$" not in q
-        assert "tournament" not in q
-        assert "cash game" not in q
-        assert "effective stacks" not in q
+    assert "$1.25" in cash_low
+    assert "$5" in cash_high
+
+
+def test_question_renderer_tournament_uses_bb() -> None:
+    """Tournament-format hands render amounts in bb, not dollars."""
+    tourney = format_preflop_question(
+        _facing_open_facts(), pack=_pack(), game_format="tournament"
+    )
+    assert "2.5bb" in tourney  # 2.5x open in bb
+    assert "$" not in tourney
+
+
+def test_question_renderer_omits_context_info() -> None:
+    """Stakes / table size / stack depth never leak into the Question
+    column -- those go in the Context column."""
+    q = format_preflop_question(_facing_open_facts(), pack=_pack())
+    # No "X-handed", no "cash game" phrase, no "effective stacks" phrase.
+    assert "6-handed" not in q
+    assert "cash game" not in q
+    assert "effective stacks" not in q
 
 
 # --- defaults + kwargs ------------------------------------------------------

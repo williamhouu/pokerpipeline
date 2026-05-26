@@ -712,11 +712,209 @@ def generate_preflop_explanation(
     )
 
 
+# --- new: explanation-only path (Layer 6 with deterministic options) --------
+# Once :mod:`pipeline.preflop.options` computes the option strings + correct
+# answer in pure Python, the LLM's job collapses to writing the explanation
+# prose. The prompt is smaller (no option-style instruction, smaller output
+# schema) and there's no retry-on-mismatch loop -- correct_answer can never
+# disagree with the options when both come from the same deterministic
+# source.
+def _explanation_only_user_prompt(
+    facts: PreflopFacts,
+    gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    options: list[str],
+    correct_answer: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build (system, messages) for the explanation-only path.
+
+    Splits the user prompt into a cached gold-example block and a live
+    block (same cache strategy as the full-generation path).
+    """
+    system = [
+        {
+            "type": "text",
+            "text": build_preflop_system_prompt(),
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    cached_block = (
+        "Read these gold examples to lock in the voice. Imitate the cadence, "
+        "verdict-first structure, and concrete naming. Do not copy phrasing.\n\n"
+        f"{_format_gold_examples(gold_examples)}"
+    )
+    # Format the option set for the LLM: one bullet per option, plus the
+    # correct_answer called out separately so the model knows what to justify.
+    options_block = "\n".join(f"  * {opt}" for opt in options)
+    live_block = (
+        "\n\n=== NEW QUESTION TO WRITE ===\n\n"
+        f"{_question_framing_preflop(facts)}\n\n"
+        "OPTIONS (already chosen by the deterministic option-selection module; "
+        "do not invent or modify):\n"
+        f"{options_block}\n\n"
+        f"CORRECT ANSWER (also pre-chosen, verbatim): {correct_answer!r}\n\n"
+        "SOLVER DATA (every strategic claim in your explanation must trace "
+        "back to a field below; do not invent equity numbers or range "
+        "claims):\n"
+        f"{json.dumps(_trim_facts_for_prompt(facts), indent=2, default=str)}\n\n"
+        "Your job: write ONLY the answer_explanation field justifying why the "
+        "correct answer is correct. Respond with a single JSON object: "
+        '{"answer_explanation": "<your prose>"} -- no other keys, no markdown '
+        "fences, no prose outside the JSON. The explanation must follow "
+        "every voice rule above (2-5 sentences, second person, verdict-first, "
+        "suit emojis for specific cards, no em dashes or semicolons, etc.)."
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": cached_block,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": live_block},
+            ],
+        }
+    ]
+    return system, messages
+
+
+def _parse_explanation_only_response(text: str) -> str:
+    """Pull the answer_explanation string out of a single-field JSON response.
+
+    Tolerates accidental code fences + leading prose, same as
+    :func:`pipeline.explanation_generator.parse_response`.
+    """
+    import re  # noqa: PLC0415
+
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+    if not cleaned.startswith("{"):
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise ExplanationValidationError(
+                f"no JSON object in LLM response: {text!r}"
+            )
+        cleaned = cleaned[start : end + 1]
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ExplanationValidationError(
+            f"LLM response was not valid JSON: {exc}"
+        ) from exc
+    explanation = data.get("answer_explanation")
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise ExplanationValidationError(
+            f"LLM response missing or empty answer_explanation: {data!r}"
+        )
+    return explanation
+
+
+def generate_preflop_answer_explanation(
+    facts: PreflopFacts,
+    options: list[str],
+    correct_answer: str,
+    *,
+    client: Any = None,
+    model: str = DEFAULT_MODEL,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    max_retries: int = 1,
+) -> GeneratedExplanation:
+    """Generate ONLY the answer_explanation prose for a preflop spot.
+
+    The option strings and ``correct_answer`` are computed beforehand by
+    :mod:`pipeline.preflop.options` -- they're inputs to this function,
+    not outputs. The LLM writes only the explanation prose, justifying
+    why the supplied ``correct_answer`` is correct.
+
+    Returns a fully-populated :class:`GeneratedExplanation` with the
+    supplied options padded into the four CSV slots, the supplied
+    correct_answer verbatim, and the LLM's prose in answer_explanation.
+
+    Args:
+        facts: The Layer 5 preflop data block.
+        options: 1-4 option strings, computed by build_options.
+        correct_answer: The correct option string, equal to one of
+            ``options`` exactly.
+        client: Optional Anthropic client (defaults to env-key lazy build).
+        model: Model id (e.g. ``"claude-opus-4-7"``).
+        temperature, max_tokens: Sampling controls.
+        gold_examples: Optional gold-example pool override.
+        max_retries: Retry count on parse failures. Default 1.
+
+    Raises:
+        ValueError: if ``correct_answer`` is not in ``options``.
+        ExplanationValidationError: if every attempt produces invalid
+            JSON / missing explanation field.
+    """
+    if correct_answer not in options:
+        raise ValueError(
+            f"correct_answer {correct_answer!r} not in options {options!r}"
+        )
+    if client is None:
+        from anthropic import Anthropic  # lazy -- runtime dep
+
+        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    if gold_examples is None:
+        gold_examples = list(load_preflop_gold_examples())[:GOLD_EXAMPLE_COUNT]
+
+    system, messages = _explanation_only_user_prompt(
+        facts, gold_examples, options, correct_answer
+    )
+
+    last_error: str | None = None
+    for _ in range(max_retries + 1):
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            messages=messages,
+        )
+        text = _extract_text(response)
+        try:
+            explanation_prose = _parse_explanation_only_response(text)
+            # Pad options to 4 for the CSV row.
+            padded = (list(options) + ["", "", "", ""])[:4]
+            return GeneratedExplanation(
+                option_1=padded[0],
+                option_2=padded[1],
+                option_3=padded[2],
+                option_4=padded[3],
+                correct_answer=correct_answer,
+                answer_explanation=explanation_prose,
+            )
+        except ExplanationValidationError as exc:
+            last_error = str(exc)
+
+        # One retry with a corrective turn.
+        messages = messages + [
+            {"role": "assistant", "content": text},
+            {
+                "role": "user",
+                "content": (
+                    f"That response failed validation: {last_error}. "
+                    "Re-emit the JSON object with exactly one key "
+                    "answer_explanation."
+                ),
+            },
+        ]
+
+    raise ExplanationValidationError(
+        f"Layer 6 (preflop, explanation-only) failed after "
+        f"{max_retries + 1} attempts; last error: {last_error}. "
+        f"Spot routed to human review."
+    )
+
+
 __all__ = [
     "GOLD_EXAMPLE_COUNT",
     "PREFLOP_ARCHETYPE_GUIDANCE",
     "VOICE_RULES_PREFLOP",
     "build_preflop_system_prompt",
     "build_preflop_user_prompt",
+    "generate_preflop_answer_explanation",
     "generate_preflop_explanation",
 ]

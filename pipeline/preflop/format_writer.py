@@ -270,25 +270,13 @@ def _solver_reference(facts: PreflopFacts, pack: PreflopPack) -> str:
 
 
 # --- question-narrative renderer ---------------------------------------------
-def _render_villain_action(action: ParsedAction, level: int) -> str:
-    """One villain action as prose -- "UTG folds", "BTN opens", "BB 3-bets".
-
-    ``level`` is the cumulative raise count BEFORE this action (so an
-    open is level 0, becoming an "opens"; a 3-bet is level 1, becoming
-    a "3-bets"). Limps and folds don't depend on level.
-    """
-    position_phrase = _VILLAIN_REF.get(action.position, action.position)
-    if action.action_type is PreflopActionType.FOLD:
-        return f"{position_phrase} folds"
-    if action.action_type is PreflopActionType.CALL:
-        return f"{position_phrase} calls"
-    if action.action_type is PreflopActionType.ALL_IN:
-        return f"{position_phrase} shoves all-in"
-    # Raise -- pick the verb by cumulative raise count.
-    verb = _RAISE_LEVEL_VERB.get(level + 1, "raises")
-    return f"{position_phrase} {verb}"
-
-
+# Delegates to pipeline.preflop.action_history, which builds the brief-spec
+# `hand` dict and calls pipeline.action_history.format_action_history. This
+# fixes two failure modes in the previous local renderer:
+#   1. Preflop folds were listed verbatim ("UTG folds. The Hijack folds. ...")
+#      instead of being dropped per the brief's Fold Rule.
+#   2. Raises had no dollar amounts ("The Button opens" instead of "The Button
+#      opens to $1.25"), making it hard to size the action from the prose.
 def format_preflop_question(
     facts: PreflopFacts,
     *,
@@ -297,67 +285,43 @@ def format_preflop_question(
     live_or_online: str = "Online",
     game_format: str = "cash",
 ) -> str:
-    """Deterministic narrative for the Question column on a preflop spot.
+    """Deterministic action-history narrative for the Question column.
 
-    Builds: hero line -> villain action history. Pure Python, zero LLM,
-    identical input always yields identical output (the brief's
-    "deterministic action-history block" requirement).
+    Returns the brief-spec ``You're [POS] with [CARDS].\\n[action sequence]``
+    block. Preflop folds are dropped (implied by absence, per the
+    brief's Fold Rule); raises are rendered as ``"<actor> opens to
+    $X"`` / ``"<actor> 3-bets to $Y"`` etc., with hero using the base
+    verb (``"you open to $X"``) and villains using third-person.
 
-    The narrative deliberately does NOT include:
+    The Question deliberately does NOT include:
 
-      * The table size / stakes / stack depth -- those are already in
-        the Context column. Duplicating them in the Question reads as
-        repetitive in the UI.
+      * Stakes / table size / stack depth -- those live in the Context
+        column. Duplicating reads as repetitive in the UI.
       * A trailing "What's your play?" prompt -- the UI implies the
-        question (it's rendering an answer-options widget right under
-        the prose), so the narrative stays as just the situation.
-
-    The ``stakes_bb_dollars``, ``live_or_online``, and ``game_format``
-    kwargs are kept for backward compatibility (callers and tests still
-    pass them) but no longer affect the rendered string. They drive the
-    Context column elsewhere in this module.
+        question by rendering an answer-options widget below the prose.
 
     Args:
-        facts: The PreflopFacts (carries hero, hand class, combo,
-            node + action history).
-        pack: Source PreflopPack. Currently unused by the renderer; kept
-            for API stability so callers that already pass it keep
-            working.
-        stakes_bb_dollars: Unused by the renderer (see above).
-        live_or_online: Unused by the renderer.
-        game_format: Unused by the renderer.
+        facts: The PreflopFacts.
+        pack: Source PreflopPack (for open-size + table-size + sb ratio).
+        stakes_bb_dollars: BB size in dollars. Used for raise-amount
+            dollar conversion in the action history.
+        live_or_online: Cosmetic; cash-only.
+        game_format: "cash" or "tournament".
 
     Returns:
-        Multi-sentence narrative string, ready for the Question column.
+        Multi-line action-history string, ready for the Question column.
     """
-    del pack, stakes_bb_dollars, live_or_online, game_format  # kept for API stability
-    spot = facts.spot
-    node = spot.node
+    from pipeline.preflop.action_history import (
+        format_preflop_action_history,
+    )
 
-    # Hero line: position + cards in suit-emoji form.
-    hero_phrase = _HERO_PHRASE.get(node.actor, node.actor)
-    card_a, card_b = _split_combo(spot.hero_card_combo)
-    cards_str = _format_card(card_a) + " " + _format_card(card_b)
-    hero_line = f"You're {hero_phrase} with {cards_str}."
-
-    # History line: each villain action in order, plus the cumulative raise
-    # count so the verb (opens / 3-bets / 4-bets) reflects context.
-    if node.history_before:
-        history_parts: list[str] = []
-        raise_count = 0
-        for action in node.history_before:
-            history_parts.append(_render_villain_action(action, raise_count))
-            if action.action_type in (
-                PreflopActionType.RAISE,
-                PreflopActionType.ALL_IN,
-            ):
-                raise_count += 1
-        history_line = ". ".join(history_parts) + "."
-    else:
-        # First-to-act spot (UTG in 6-max): no prior history.
-        history_line = "Action is on you."
-
-    return f"{hero_line} {history_line}"
+    return format_preflop_action_history(
+        facts,
+        pack=pack,
+        stakes_bb_dollars=stakes_bb_dollars,
+        live_or_online=live_or_online,
+        game_format=game_format,
+    )
 
 
 def _context_column(
