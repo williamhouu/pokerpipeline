@@ -299,41 +299,40 @@ def format_preflop_question(
 ) -> str:
     """Deterministic narrative for the Question column on a preflop spot.
 
-    Builds: context line -> hero line -> villain action history -> decision
-    prompt. Pure Python, zero LLM, identical input always yields identical
-    output (the brief's "deterministic action-history block" requirement).
+    Builds: hero line -> villain action history. Pure Python, zero LLM,
+    identical input always yields identical output (the brief's
+    "deterministic action-history block" requirement).
+
+    The narrative deliberately does NOT include:
+
+      * The table size / stakes / stack depth -- those are already in
+        the Context column. Duplicating them in the Question reads as
+        repetitive in the UI.
+      * A trailing "What's your play?" prompt -- the UI implies the
+        question (it's rendering an answer-options widget right under
+        the prose), so the narrative stays as just the situation.
+
+    The ``stakes_bb_dollars``, ``live_or_online``, and ``game_format``
+    kwargs are kept for backward compatibility (callers and tests still
+    pass them) but no longer affect the rendered string. They drive the
+    Context column elsewhere in this module.
 
     Args:
         facts: The PreflopFacts (carries hero, hand class, combo,
             node + action history).
-        pack: Source PreflopPack (table size, stack depth, open size).
-        stakes_bb_dollars: BB size in dollars (or chips for tournaments
-            -- the value is just a multiplier on the bb-denominated
-            amounts). Default 0.50 = Tier 1 cash default.
-        live_or_online: "Online" or "Live". Cosmetic, appears in the
-            context line.
-        game_format: "cash" or "tournament". Cosmetic; affects whether
-            stack is rendered in $ or bb.
+        pack: Source PreflopPack. Currently unused by the renderer; kept
+            for API stability so callers that already pass it keep
+            working.
+        stakes_bb_dollars: Unused by the renderer (see above).
+        live_or_online: Unused by the renderer.
+        game_format: Unused by the renderer.
 
     Returns:
         Multi-sentence narrative string, ready for the Question column.
     """
+    del pack, stakes_bb_dollars, live_or_online, game_format  # kept for API stability
     spot = facts.spot
     node = spot.node
-
-    # Context line: format + table size + stakes + stack depth.
-    sb_dollars = round(stakes_bb_dollars * pack.sb_to_bb_ratio, 2)
-    stack_dollars = round(pack.stack_depth_bb * stakes_bb_dollars, 2)
-    if game_format == "cash":
-        stakes_str = f"{_dollars(sb_dollars)}/{_dollars(stakes_bb_dollars)}"
-        stack_str = _dollars(stack_dollars)
-        context = (
-            f"{pack.table_size}-handed {live_or_online.lower()} cash game, "
-            f"{stakes_str}, {stack_str} effective stacks."
-        )
-    else:
-        stack_str = _bb(pack.stack_depth_bb)
-        context = f"{pack.table_size}-handed tournament, {stack_str} effective stacks."
 
     # Hero line: position + cards in suit-emoji form.
     hero_phrase = _HERO_PHRASE.get(node.actor, node.actor)
@@ -358,10 +357,7 @@ def format_preflop_question(
         # First-to-act spot (UTG in 6-max): no prior history.
         history_line = "Action is on you."
 
-    # Decision prompt.
-    prompt = "What's your play?"
-
-    return f"{context} {hero_line} {history_line} {prompt}"
+    return f"{hero_line} {history_line}"
 
 
 def _context_column(

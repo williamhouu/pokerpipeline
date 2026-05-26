@@ -413,14 +413,21 @@ def test_relative_position_open_is_just_hero() -> None:
 
 # --- question narrative (deterministic, no LLM) -----------------------------
 def test_question_for_open_no_prior_history() -> None:
-    """UTG opens, no prior actions -> 'Action is on you.'"""
+    """UTG opens, no prior actions -> 'Action is on you.' The Question
+    narrative does NOT carry context (table size / stakes / stack) --
+    that lives in the Context column. It also does NOT end with
+    'What's your play?' -- the UI implies the question by rendering an
+    answer-options widget."""
     q = format_preflop_question(_open_facts(), pack=_pack())
-    assert "6-handed online cash game" in q
-    assert "$0.25/$0.50" in q
-    assert "$50 effective stacks" in q
     assert "You're UTG with A❤️ K♣️" in q
     assert "Action is on you." in q
-    assert "What's your play?" in q
+    # Context info must NOT appear in the Question column.
+    assert "6-handed" not in q
+    assert "cash game" not in q
+    assert "$0.25/$0.50" not in q
+    assert "effective stacks" not in q
+    # UI implies the question; no trailing prompt.
+    assert "What's your play?" not in q
 
 
 def test_question_for_facing_open_renders_villain_history() -> None:
@@ -440,16 +447,29 @@ def test_question_for_facing_3bet_uses_3bet_verb() -> None:
     assert "The Big Blind 3-bets" in q
 
 
-def test_question_for_tournament_format_uses_bb() -> None:
-    """Tournament mode renders stack in bb, not dollars."""
-    q = format_preflop_question(
+def test_question_renderer_ignores_stake_kwargs() -> None:
+    """The Question narrative is stake-agnostic (stakes live in Context).
+    Tournament vs cash, dollar amounts, live-vs-online -- none of these
+    change the Question column's output."""
+    cash_q = format_preflop_question(_facing_open_facts(), pack=_pack())
+    tourney_q = format_preflop_question(
         _facing_open_facts(),
         pack=_pack(),
         game_format="tournament",
     )
-    assert "tournament" in q
-    assert "100bb effective stacks" in q
-    assert "$" not in q
+    high_stakes_q = format_preflop_question(
+        _facing_open_facts(),
+        pack=_pack(),
+        stakes_bb_dollars=10.0,
+    )
+    assert cash_q == tourney_q == high_stakes_q
+    # No dollar signs, no 'bb' stack count, no 'tournament' or 'cash'
+    # keywords leak into the Question column.
+    for q in (cash_q, tourney_q, high_stakes_q):
+        assert "$" not in q
+        assert "tournament" not in q
+        assert "cash game" not in q
+        assert "effective stacks" not in q
 
 
 # --- defaults + kwargs ------------------------------------------------------
