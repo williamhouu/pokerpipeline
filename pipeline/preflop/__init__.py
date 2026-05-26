@@ -25,6 +25,10 @@ Architecture (each module is a step):
                                 ``PreflopFacts`` into the six LLM-written
                                 CSV columns. Sibling of
                                 ``pipeline.explanation_generator``.
+  * ``format_writer``       -- Layer 8 preflop branch: turns a
+                                ``PreflopFacts`` + ``GeneratedExplanation``
+                                into a 38-column CSV row. Sibling of
+                                ``pipeline.format_writer``.
 
 See docs/ryan_range_pack_index.md for the Ryan pack's filename grammar.
 """
