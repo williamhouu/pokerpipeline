@@ -2,7 +2,9 @@
 #   venv/bin/pip install -r requirements.txt
 #   venv/bin/pip install -r admin_panel/requirements.txt
 #
-# Streamlit serves the web UI; pandas renders generated-question tables.
+# Streamlit serves the web UI; pandas renders generated-question tables;
+# python-dotenv loads ANTHROPIC_API_KEY from .env at the repo root.
 
 streamlit==1.57.0
 pandas==3.0.3
+python-dotenv==1.2.2

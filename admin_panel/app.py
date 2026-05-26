@@ -44,6 +44,20 @@ _REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORTS))
 
+# Load .env from the repo root so ANTHROPIC_API_KEY (and any future
+# secrets) are available to Layer 6 when the user clicks Generate. .env
+# is gitignored. python-dotenv silently no-ops if the file is missing,
+# which is fine -- the admin panel UI still renders without an API key;
+# only the actual generation call would fail later.
+#
+# override=True because some shells / parent processes pre-set
+# ANTHROPIC_API_KEY to an empty string, which load_dotenv treats as
+# "already set" and refuses to overwrite by default. With override the
+# .env value always wins, which is what we want for local dev.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(_REPO_ROOT_FOR_IMPORTS / ".env", override=True)
+
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
