@@ -41,6 +41,18 @@ import streamlit as st
 # don't require a PioSolver binary or API key to import).
 from pipeline.explanation_generator import build_system_prompt
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS
+from pipeline.preflop.grammars.types import PreflopActionType
+from pipeline.preflop.node_enumerator import (
+    PreflopDecisionNode,
+    enumerate_nodes_by_actor,
+)
+from pipeline.preflop.pack import (
+    PreflopPack,
+    discover_packs,
+)
+from pipeline.preflop.pack import (
+    clear_registry as clear_preflop_registry,
+)
 from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS
 
 # --- repo paths -------------------------------------------------------------
@@ -222,6 +234,49 @@ def count_cfrs(scenario_name: str) -> int:
     return len(list(folder.glob("*.cfr")))
 
 
+# --- preflop pack helpers (cached, Streamlit reruns the script on every
+# interaction so without cache we'd re-scan + re-register packs each time) -----
+@st.cache_resource
+def _cached_preflop_packs() -> tuple[PreflopPack, ...]:
+    """Discover and register the preflop packs once per Streamlit session."""
+    clear_preflop_registry()
+    return discover_packs(RANGES_DIR)
+
+
+@st.cache_resource
+def _cached_preflop_nodes_by_actor() -> dict[str, tuple[PreflopDecisionNode, ...]]:
+    """Walk the preflop packs once and group nodes by hero position."""
+    packs = _cached_preflop_packs()
+    if not packs:
+        return {}
+    return enumerate_nodes_by_actor(packs)
+
+
+def _node_action_context(node: PreflopDecisionNode) -> str:
+    """Categorize a preflop decision node by the action hero is facing.
+
+    Returns one of: 'Opening', 'Facing single raise', 'Facing 3-bet',
+    'Facing 4-bet+', 'After call(s)'. Used by the admin panel filter.
+    """
+    n_raises = sum(
+        1
+        for a in node.history_before
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    )
+    n_calls = sum(
+        1 for a in node.history_before if a.action_type is PreflopActionType.CALL
+    )
+    if n_raises == 0:
+        return "Opening"
+    if n_calls > 0:
+        return "After call(s)"
+    if n_raises == 1:
+        return "Facing single raise"
+    if n_raises == 2:
+        return "Facing 3-bet"
+    return "Facing 4-bet+"
+
+
 def ranges_pack_status() -> tuple[bool, dict[str, int]]:
     """Return (is_complete, per_position_counts) for the ranges pack."""
     counts = {}
@@ -343,6 +398,30 @@ def render_files_page() -> None:
 # --- page: Generate --------------------------------------------------------
 def render_generate_page() -> None:
     st.title("Generate questions")
+
+    # --- MODE TOGGLE: Postflop vs Preflop ---
+    # Preflop uses pipeline/preflop/* (no Pio solves needed; reads
+    # ranges/ryan_preflop_tree/ instead). Postflop uses the original
+    # pipeline (needs solves/ which are currently unavailable post-William).
+    mode = st.radio(
+        "Mode",
+        options=["Postflop", "Preflop"],
+        index=1,  # default to Preflop since the backend is ready
+        horizontal=True,
+        help=(
+            "Postflop uses PioSolver .cfr files (currently blocked -- no "
+            "solves available since William left the project). Preflop "
+            "uses Ryan's preflop pack (loaded and tested)."
+        ),
+        key="generate_mode",
+    )
+    st.divider()
+
+    if mode == "Preflop":
+        _render_generate_page_preflop()
+        return
+
+    # --- POSTFLOP PATH (original; unchanged below) ---
     st.caption(
         "Configure a batch run. Filters cascade — pick a format, then "
         "stack, then scenarios. Only options with available solves are "
@@ -725,6 +804,241 @@ def render_generate_page() -> None:
                 "real generation lands once Layer 6 batching is implemented "
                 "(task #10) and solves are present."
             )
+
+
+# --- page: Generate (Preflop mode) ----------------------------------------
+def _render_generate_page_preflop() -> None:
+    """Preflop-mode Generate page.
+
+    Uses pipeline/preflop/ backend. No Pio solves needed -- reads Ryan's
+    preflop pack from ranges/. Filters are different from postflop:
+    hero position (not table seat), action faced (opening / facing-raise
+    / 3-bet / 4-bet / after-calls), hand-class strength buckets. Board
+    texture filter is hidden (no board preflop).
+    """
+    st.caption(
+        "Preflop generation reads from your uploaded preflop pack. "
+        "Filters narrow which decision spots get sampled. The generate "
+        "button activates once Layer 6 wiring lands (~1 day of work)."
+    )
+
+    # --- 1. Pack info ---
+    st.subheader("1. Preflop pack")
+    packs = _cached_preflop_packs()
+    if not packs:
+        st.error(
+            "❌ No preflop pack loaded. Upload a pack on the Files page "
+            "first. (Ryan's PioViewer pack belongs under "
+            "`ranges/ryan_preflop_tree/`.)"
+        )
+        return
+    for p in packs:
+        st.success(
+            f"✅ **{p.pack_id}** · {p.table_size}-max · "
+            f"{p.stack_depth_bb}bb · {p.open_size_bb}x open · "
+            f"{p.description}"
+        )
+
+    nodes_by_actor = _cached_preflop_nodes_by_actor()
+    total_nodes = sum(len(ns) for ns in nodes_by_actor.values())
+    st.caption(
+        f"Walked the pack: **{total_nodes:,} preflop decision nodes** enumerated."
+    )
+
+    st.divider()
+
+    # --- 2. Hero context ---
+    st.subheader("2. Hero context")
+    col1, col2 = st.columns(2)
+    with col1:
+        positions_available = sorted(nodes_by_actor.keys())
+        hero_positions = st.multiselect(
+            "Hero positions",
+            options=positions_available,
+            default=positions_available,
+            help="Which seats hero is in. Empty = include all positions.",
+        )
+    with col2:
+        context_options = [
+            "Opening",
+            "Facing single raise",
+            "Facing 3-bet",
+            "Facing 4-bet+",
+            "After call(s)",
+        ]
+        action_contexts = st.multiselect(
+            "Action faced",
+            options=context_options,
+            default=["Facing single raise", "Facing 3-bet"],
+            help="What hero is responding to. Empty = include all.",
+        )
+
+    # Filter the node catalog by both filters; show a live count.
+    filtered_nodes: list[PreflopDecisionNode] = []
+    for actor in hero_positions:
+        for node in nodes_by_actor.get(actor, ()):
+            ctx = _node_action_context(node)
+            if not action_contexts or ctx in action_contexts:
+                filtered_nodes.append(node)
+    st.caption(
+        f"**{len(filtered_nodes):,}** decision nodes match these filters "
+        f"(of {total_nodes:,} total)."
+    )
+
+    st.divider()
+
+    # --- 3. Content filters (hand class strength only; board texture N/A preflop) ---
+    st.subheader("3. Content filters")
+    st.caption("Optional. Empty = include every hand class that reaches the node.")
+    _hand_classes = st.multiselect(
+        "Hero hand strength buckets",
+        options=list(STRENGTH_BUCKETS),
+        default=[],
+        help=(
+            "premium / strong / medium / vulnerable / marginal / air. "
+            "Sourced from pipeline/fact_extractor/hand_class.py."
+        ),
+    )
+    st.caption("_(Board-texture filter is postflop-only; hidden in preflop mode.)_")
+
+    st.divider()
+
+    # --- 4. Difficulty (reuses the postflop preset+slider) ---
+    st.subheader("4. Difficulty")
+    st.caption(
+        "How dominant the correct answer is in the solver. Same filter as "
+        "postflop -- a 55-95% window is the question-worthy sweet spot."
+    )
+    preset = st.radio(
+        "Preset",
+        options=["Easy", "Medium", "Hard", "Mixed", "Custom"],
+        index=3,  # default Mixed for preflop
+        horizontal=True,
+        key="preflop_difficulty_preset",
+    )
+    presets_map = {
+        "Easy": (85, 95),
+        "Medium": (70, 85),
+        "Hard": (55, 70),
+        "Mixed": (55, 95),
+        "Custom": (65, 75),
+    }
+    default_low, default_high = presets_map[preset]
+    freq_low, freq_high = st.slider(
+        "Solver frequency window (%)",
+        min_value=50,
+        max_value=100,
+        value=(default_low, default_high),
+        disabled=(preset != "Custom"),
+        key="preflop_difficulty_slider",
+    )
+
+    st.divider()
+
+    # --- 5. Answer option style (reuse) ---
+    st.subheader("5. Answer option style")
+    answer_style = st.radio(
+        "Style",
+        options=[
+            "Basic (fold/call/raise)",
+            "GTO (always/mostly)",
+            "Sizing (33%/75%/150%) — coming soon",
+            "Auto-pick",
+        ],
+        index=0,  # Basic is the natural default for preflop
+        key="preflop_answer_style",
+    )
+    _ = answer_style  # consumed by Layer 6 when wired
+
+    st.divider()
+
+    # --- 6. Batch size ---
+    st.subheader("6. How many questions")
+    total = st.number_input(
+        "Total questions in this batch",
+        min_value=1,
+        max_value=10_000,
+        value=20,
+        step=5,
+        key="preflop_total",
+        help=(
+            "Will be spread evenly across the matching scenarios + hand "
+            "classes, with diversity-stratified sampling."
+        ),
+    )
+
+    st.divider()
+
+    # --- 7. Output options ---
+    st.subheader("7. Output")
+    col1, col2 = st.columns(2)
+    with col1:
+        _currency = st.radio(
+            "Display amounts as",
+            options=["Dollars ($1.25)", "Big blinds (2.5 bb)"],
+            index=1,  # bb is more common for preflop discussion
+            horizontal=True,
+            key="preflop_currency",
+        )
+    with col2:
+        _out_filename = st.text_input(
+            "Output filename",
+            value="preflop_batch.csv",
+            key="preflop_out_filename",
+        )
+
+    st.divider()
+
+    # --- 8. Model + API ---
+    st.subheader("8. Model + API settings")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        _model = st.radio(
+            "Model",
+            options=[
+                "Opus 4.7 (highest fidelity)",
+                "Sonnet 4.6 (5× cheaper, faster)",
+            ],
+            index=0,
+            key="preflop_model",
+        )
+    with col2:
+        _batch_size = st.selectbox(
+            "Questions per API call",
+            options=[1, 5, 10, 25],
+            index=1,
+            key="preflop_batch_size",
+        )
+    with col3:
+        _dry_run = st.toggle(
+            "Dry run (no API calls)",
+            key="preflop_dry_run",
+        )
+
+    # Cost estimate
+    cost_per_q = 0.40 if "Opus" in _model else 0.08
+    est_cost = total * cost_per_q
+    st.info(
+        f"**Estimated**: {total} questions · ~${est_cost:.2f} · "
+        f"freq {freq_low}-{freq_high}% · {len(filtered_nodes):,} nodes available"
+    )
+
+    st.divider()
+
+    # --- 9. Generate button (disabled in this scaffold) ---
+    st.button(
+        "⏳ GENERATE BATCH  (preflop Layer 6 wiring pending)",
+        disabled=True,
+        type="primary",
+        use_container_width=True,
+    )
+    st.caption(
+        "Backend is complete -- pack discovery, node enumeration, spot "
+        "sampling, fact extraction, frequency-window worthiness filter all "
+        "tested and working. What's left: Layer 6 prompt update for preflop "
+        "(~1 day) + Layer 8 CSV update (~0.5 day) before this button can "
+        "actually generate."
+    )
 
 
 # --- page: Browse ----------------------------------------------------------
