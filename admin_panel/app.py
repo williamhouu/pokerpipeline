@@ -31,29 +31,39 @@ Known limitations of this v1 preview:
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import pandas as pd
-import streamlit as st
+# Add the repo root to sys.path so `from pipeline...` imports work when
+# Streamlit invokes this script directly. Streamlit's default sys.path
+# only includes the script's parent dir (admin_panel/), not the cwd or
+# repo root -- pipeline/ lives one level up. Mirrors the same trick
+# used in scripts/* and tests/*.
+_REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORTS))
+
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
 
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
-from pipeline.explanation_generator import build_system_prompt
-from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS
-from pipeline.preflop.grammars.types import PreflopActionType
-from pipeline.preflop.node_enumerator import (
+from pipeline.explanation_generator import build_system_prompt  # noqa: E402
+from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS  # noqa: E402
+from pipeline.preflop.grammars.types import PreflopActionType  # noqa: E402
+from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopDecisionNode,
     enumerate_nodes_by_actor,
 )
-from pipeline.preflop.pack import (
+from pipeline.preflop.pack import (  # noqa: E402
     PreflopPack,
     discover_packs,
 )
-from pipeline.preflop.pack import (
+from pipeline.preflop.pack import (  # noqa: E402
     clear_registry as clear_preflop_registry,
 )
-from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS
+from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E402
 
 # --- repo paths -------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
