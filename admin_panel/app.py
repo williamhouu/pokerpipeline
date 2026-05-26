@@ -65,7 +65,10 @@ import streamlit as st  # noqa: E402
 # don't require a PioSolver binary or API key to import).
 from pipeline.explanation_generator import build_system_prompt  # noqa: E402
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS  # noqa: E402
-from pipeline.preflop.grammars.types import PreflopActionType  # noqa: E402
+from pipeline.preflop.batch import (  # noqa: E402
+    generate_preflop_batch,
+    node_action_context,
+)
 from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopDecisionNode,
     enumerate_nodes_by_actor,
@@ -78,6 +81,20 @@ from pipeline.preflop.pack import (  # noqa: E402
     clear_registry as clear_preflop_registry,
 )
 from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E402
+
+# Map admin-panel model-radio labels to Anthropic API model identifiers.
+# Display strings stay human-readable; the API call needs the ID string.
+_MODEL_LABEL_TO_API: dict[str, str] = {
+    "Opus 4.7 (highest fidelity)": "claude-opus-4-7",
+    "Sonnet 4.6 (5× cheaper, faster)": "claude-sonnet-4-6",
+}
+
+# Where preflop generation writes its CSV output. Sibling of test_output/
+# tier1_consolidated.csv but kept in its own subdir so the Browse page's
+# existing data isn't accidentally shadowed.
+PREFLOP_OUTPUT_DIR = (
+    Path(__file__).resolve().parent.parent / "test_output" / "preflop_batches"
+)
 
 # --- repo paths -------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -274,31 +291,6 @@ def _cached_preflop_nodes_by_actor() -> dict[str, tuple[PreflopDecisionNode, ...
     if not packs:
         return {}
     return enumerate_nodes_by_actor(packs)
-
-
-def _node_action_context(node: PreflopDecisionNode) -> str:
-    """Categorize a preflop decision node by the action hero is facing.
-
-    Returns one of: 'Opening', 'Facing single raise', 'Facing 3-bet',
-    'Facing 4-bet+', 'After call(s)'. Used by the admin panel filter.
-    """
-    n_raises = sum(
-        1
-        for a in node.history_before
-        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
-    )
-    n_calls = sum(
-        1 for a in node.history_before if a.action_type is PreflopActionType.CALL
-    )
-    if n_raises == 0:
-        return "Opening"
-    if n_calls > 0:
-        return "After call(s)"
-    if n_raises == 1:
-        return "Facing single raise"
-    if n_raises == 2:
-        return "Facing 3-bet"
-    return "Facing 4-bet+"
 
 
 def ranges_pack_status() -> tuple[bool, dict[str, int]]:
@@ -901,7 +893,7 @@ def _render_generate_page_preflop() -> None:
     filtered_nodes: list[PreflopDecisionNode] = []
     for actor in hero_positions:
         for node in nodes_by_actor.get(actor, ()):
-            ctx = _node_action_context(node)
+            ctx = node_action_context(node)
             if not action_contexts or ctx in action_contexts:
                 filtered_nodes.append(node)
     st.caption(
@@ -1049,20 +1041,176 @@ def _render_generate_page_preflop() -> None:
 
     st.divider()
 
-    # --- 9. Generate button (disabled in this scaffold) ---
-    st.button(
-        "⏳ GENERATE BATCH  (preflop Layer 6 wiring pending)",
-        disabled=True,
+    # --- 9. Generate button (active -- runs the full preflop pipeline) ---
+    # Inputs ready when: at least one position selected AND at least one
+    # action context AND filtered_nodes non-empty AND total > 0.
+    can_generate = (
+        bool(hero_positions)
+        and bool(action_contexts)
+        and len(filtered_nodes) > 0
+        and total > 0
+    )
+    if not can_generate:
+        st.button(
+            "GENERATE BATCH",
+            disabled=True,
+            type="primary",
+            use_container_width=True,
+        )
+        st.caption(
+            "Pick at least one hero position, one action context, "
+            "and set a target above. The button activates once filters "
+            "match at least one node."
+        )
+    elif st.button(
+        "GENERATE BATCH",
         type="primary",
         use_container_width=True,
-    )
-    st.caption(
-        "Backend is complete -- pack discovery, node enumeration, spot "
-        "sampling, fact extraction, frequency-window worthiness filter all "
-        "tested and working. What's left: Layer 6 prompt update for preflop "
-        "(~1 day) + Layer 8 CSV update (~0.5 day) before this button can "
-        "actually generate."
-    )
+        key="preflop_generate_btn",
+    ):
+        _run_preflop_generation(
+            pack=packs[0],
+            hero_positions=list(hero_positions),
+            action_contexts=list(action_contexts),
+            freq_min=freq_low / 100.0,
+            freq_max=freq_high / 100.0,
+            total_questions=int(total),
+            output_filename=_out_filename,
+            model_label=_model,
+            dry_run=bool(_dry_run),
+        )
+
+
+def _run_preflop_generation(
+    *,
+    pack: PreflopPack,
+    hero_positions: list[str],
+    action_contexts: list[str],
+    freq_min: float,
+    freq_max: float,
+    total_questions: int,
+    output_filename: str,
+    model_label: str,
+    dry_run: bool,
+) -> None:
+    """Execute one preflop batch and render the result UI.
+
+    Split out of ``_render_generate_page_preflop`` so the button-click
+    branch is short + easy to read. Lives in this file (not the
+    orchestrator module) because everything here is Streamlit-specific
+    -- progress bars, expanders, dataframes, download buttons.
+    """
+    import os  # noqa: PLC0415
+
+    # Fail loudly + early if dry-run is off but no API key is loaded.
+    # Layer 6's lazy Anthropic() constructor would surface the same
+    # error mid-batch, but catching it here saves the user from a
+    # half-attempted run.
+    if not dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
+        st.error(
+            "❌ ANTHROPIC_API_KEY is not set. Add it to `.env` at the "
+            "repo root (the admin panel auto-loads .env), or enable "
+            "**Dry run** above to test the pipeline without API calls."
+        )
+        return
+
+    PREFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # If the user didn't end the filename in .csv, fix it silently.
+    if not output_filename.endswith(".csv"):
+        output_filename = output_filename + ".csv"
+    output_path = PREFLOP_OUTPUT_DIR / output_filename
+
+    model_api = _MODEL_LABEL_TO_API.get(model_label, model_label)
+
+    # Streamlit progress + status UI. The orchestrator's progress
+    # callback fires before each LLM call; we update both the bar and
+    # the inline text.
+    progress_bar = st.progress(0.0)
+    status_line = st.empty()
+
+    def _on_progress(msg: str, current: int, total: int) -> None:
+        if total > 0:
+            progress_bar.progress(min(1.0, (current + 1) / total))
+        status_line.text(msg)
+
+    status_line.text("Starting batch...")
+    with st.spinner(
+        f"Generating {total_questions} preflop questions"
+        + (" (dry-run, no API)" if dry_run else f" with {model_label}")
+    ):
+        result = generate_preflop_batch(
+            pack=pack,
+            output_path=output_path,
+            total_questions=total_questions,
+            hero_positions=hero_positions,
+            action_contexts=action_contexts,
+            min_frequency=freq_min,
+            max_frequency=freq_max,
+            model=model_api,
+            dry_run=dry_run,
+            # Streamlit reruns the script on every interaction -- if
+            # the user clicks Generate again, give them a fresh sample.
+            random_seed=None,
+            progress_callback=_on_progress,
+        )
+
+    progress_bar.progress(1.0)
+    status_line.empty()
+
+    # Summary.
+    if result.questions_written == 0:
+        st.warning(
+            f"No questions produced. "
+            f"Nodes after filter: **{result.nodes_after_filter}**, "
+            f"worthy spots available: **{result.worthy_spots_available}**, "
+            f"failures: **{len(result.failures)}**. "
+            "Try a wider frequency window or different filters."
+        )
+    else:
+        st.success(
+            f"✅ Wrote **{result.questions_written}** questions to "
+            f"`{result.output_path}` "
+            f"(attempted {result.questions_attempted}, "
+            f"{result.worthy_spots_available} worthy spots available)."
+        )
+
+    if result.failures:
+        with st.expander(f"⚠️ {len(result.failures)} per-spot failures"):
+            for failure in result.failures:
+                st.text(failure)
+
+    if result.output_path is not None and result.output_path.is_file():
+        # Download button: read the bytes (utf-8-sig, BOM intact) so Excel
+        # picks up the encoding right. mime=text/csv is the standard MIME.
+        csv_bytes = result.output_path.read_bytes()
+        st.download_button(
+            label=f"📥 Download {result.output_path.name}",
+            data=csv_bytes,
+            file_name=result.output_path.name,
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        # In-place preview: first ~20 rows of the most useful columns.
+        df = pd.read_csv(result.output_path, encoding="utf-8-sig")
+        preview_cols = [
+            "No",
+            "User Seat",
+            "User Cards",
+            "Hand Stage",
+            "option 1",
+            "option 2",
+            "option 3",
+            "option 4",
+            "Correct Answer",
+            "Answer Explanation",
+            "Difficulty Rating",
+            "action_frequencies",
+        ]
+        present_cols = [c for c in preview_cols if c in df.columns]
+        st.dataframe(
+            df[present_cols].head(20), hide_index=True, use_container_width=True
+        )
 
 
 # --- page: Browse ----------------------------------------------------------
