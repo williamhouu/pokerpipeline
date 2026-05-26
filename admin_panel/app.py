@@ -1201,12 +1201,16 @@ def _run_preflop_generation(
         )
 
         # In-place preview: first ~20 rows of the most useful columns.
+        # Context + Question are shown so reviewers can read the actual
+        # generated question text without downloading the CSV.
         df = pd.read_csv(result.output_path, encoding="utf-8-sig")
         preview_cols = [
             "No",
             "User Seat",
             "User Cards",
             "Hand Stage",
+            "Context",
+            "Question",
             "option 1",
             "option 2",
             "option 3",

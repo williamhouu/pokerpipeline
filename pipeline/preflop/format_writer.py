@@ -59,6 +59,7 @@ from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import PreflopPack
 
 # --- position-prose vocabulary -----------------------------------------------
@@ -452,7 +453,13 @@ def build_preflop_row(
         # EVs. Phase B will add an equity-driven EV engine.
         "ev_gap_bb": "",
         "validation_status": "auto_approved",
-        "action_frequencies": _format_action_frequencies(spot.action_frequencies),
+        # Use canonical labels here too so the QA column reads as
+        # "Raise: 70%, Fold: 30%" not "Raise 60%: 70%, Fold: 30%"
+        # (the % token from Pio's internal labels would be misread as
+        # an additional frequency).
+        "action_frequencies": _format_action_frequencies(
+            canonicalize_strategy(facts),
+        ),
         # ip_range / oop_range: 169-class snapshots at the preflop node.
         # Computing them requires summing hero's per-action ranges and
         # parsing villain's range file into a 169-class dict; the

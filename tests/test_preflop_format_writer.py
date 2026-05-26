@@ -359,6 +359,9 @@ def test_difficulty_rating_passes_through() -> None:
 
 
 def test_action_frequencies_descending_percentages() -> None:
+    """action_frequencies uses canonical labels ('3-bet', not 'Raise 308%')
+    so the column doesn't read like 'Raise 308%: 40%' which players /
+    reviewers parse as two different percent values."""
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -366,11 +369,12 @@ def test_action_frequencies_descending_percentages() -> None:
         difficulty_score=1500,
         number=1,
     )
-    # Call 60%, Raise 40%, Fold 0% (dropped from the column? actually
-    # postflop helper renders all entries. Let's verify: postflop helper
-    # renders descending including zeros).
+    # Fixture is SB facing a BTN open -- hero's raise is the 2nd of the
+    # hand, so 'Raise 308%' canonicalises to '3-bet'.
     assert row["action_frequencies"].startswith("Call: 60%")
-    assert "Raise 308%: 40%" in row["action_frequencies"]
+    assert "3-bet: 40%" in row["action_frequencies"]
+    # Raw Pio token must NOT leak into the column.
+    assert "Raise 308%" not in row["action_frequencies"]
 
 
 # --- pot type, participant, relative position --------------------------------

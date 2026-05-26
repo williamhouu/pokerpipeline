@@ -44,11 +44,30 @@ from __future__ import annotations
 
 from pipeline.explanation_generator import frequency_to_verb_prefix
 from pipeline.preflop.fact_extractor import PreflopFacts
+from pipeline.preflop.grammars.types import PreflopActionType
 
 # Frequency threshold above which a non-played action is dropped from the
 # option set. Below 5% the action is essentially noise (Pio occasionally
 # mixes in 0.1% raise frequencies that aren't strategic content).
 _MIN_MEANINGFUL_FREQ = 0.05
+
+# Raise-level verb table for canonicalising Pio action labels. The Ryan
+# pack labels raises as "Raise 60%" / "Raise 182%" / etc -- the % is the
+# pack's internal "percent of pot" sizing token, NOT a player-facing
+# frequency. Options shown to players should use the brief's preflop
+# verb conventions: 1st raise = "Open" (or "Raise" depending on house
+# style), 2nd = "3-bet", 3rd = "4-bet", 4th = "5-bet", 5+ = "Raise".
+#
+# We use "Raise" for raise_level=1 in OPTION columns rather than "Open"
+# because "Open" reads weirdly in a multiple-choice context ("Open" vs
+# "Fold"). The Question column's prose still uses "opens to $X" per
+# the brief's verb table for that block.
+_RAISE_LEVEL_OPTION_VERB: dict[int, str] = {
+    1: "Raise",
+    2: "3-bet",
+    3: "4-bet",
+    4: "5-bet",
+}
 
 # Frequency threshold above which the spot's dominant action is treated as
 # "clearly best" for auto-pick: GTO framing below, basic above. Mirrors the
@@ -82,31 +101,112 @@ def _meaningful_actions(facts: PreflopFacts) -> list[tuple[str, float]]:
     return [(label, freq) for label, freq in ranked if freq >= _MIN_MEANINGFUL_FREQ]
 
 
+def _hero_raise_level(facts: PreflopFacts) -> int:
+    """How many raises hero's prospective raise would be the (1+N)-th of.
+
+    Counts raises + all-ins in ``history_before``. Hero's raise would
+    cap that count; the verb for hero's option is keyed by the result.
+    """
+    return 1 + sum(
+        1
+        for a in facts.spot.node.history_before
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    )
+
+
+def canonicalize_action_label(label: str, *, raise_level: int) -> str:
+    """Convert a Pio action label into a player-facing option string.
+
+    The Ryan pack labels actions as ``"Fold"``, ``"Call"``, ``"AllIn"``,
+    and ``"Raise <pct>%"`` where ``<pct>`` is the internal sizing token.
+    Players seeing ``"Raise 182%"`` read it as a frequency, not a
+    sizing token -- so we map raises to the brief's preflop verb
+    table based on ``raise_level``.
+
+    Args:
+        label: The Pio action label.
+        raise_level: How many raises hero's option would be the (n)-th
+            of (1 = open, 2 = 3-bet, 3 = 4-bet, 4 = 5-bet).
+
+    Returns:
+        ``"Fold"`` / ``"Call"`` / ``"All-in"`` / verb-by-level for raises.
+    """
+    if label.startswith("Raise"):
+        return _RAISE_LEVEL_OPTION_VERB.get(raise_level, "Raise")
+    if label == "AllIn":
+        return "All-in"
+    return label  # Fold / Call / Check
+
+
+def canonicalize_strategy(
+    facts: PreflopFacts,
+) -> dict[str, float]:
+    """Return ``{canonical_label: freq}`` summing duplicate keys.
+
+    When hero's tree has multiple raise sizes at the same node (rare in
+    the Ryan pack but possible), the canonicalisation collapses them
+    into a single ``"Raise"``/``"3-bet"``/etc entry whose frequency is
+    the sum of the originals. For single-raise-size spots (the common
+    case) this is a 1:1 relabeling.
+    """
+    raise_level = _hero_raise_level(facts)
+    out: dict[str, float] = {}
+    for raw_label, freq in facts.spot.action_frequencies.items():
+        canon = canonicalize_action_label(raw_label, raise_level=raise_level)
+        out[canon] = out.get(canon, 0.0) + freq
+    return out
+
+
+def _canonical_dominant(facts: PreflopFacts) -> str:
+    """The canonical label for ``facts.spot.dominant_action``."""
+    return canonicalize_action_label(
+        facts.spot.dominant_action,
+        raise_level=_hero_raise_level(facts),
+    )
+
+
 # --- the three builders ------------------------------------------------------
+def _meaningful_canonical_actions(
+    facts: PreflopFacts,
+) -> list[tuple[str, float]]:
+    """``_meaningful_actions`` plus label canonicalisation.
+
+    Returns canonical-labeled ``(label, freq)`` pairs ordered by
+    descending frequency, filtered to >= :data:`_MIN_MEANINGFUL_FREQ`.
+    Multiple raw raise labels (rare; the Ryan pack uses one per node)
+    collapse into a single canonical entry whose frequency is the sum.
+    """
+    canonical_strategy = canonicalize_strategy(facts)
+    ranked = sorted(canonical_strategy.items(), key=lambda kv: -kv[1])
+    return [(label, freq) for label, freq in ranked if freq >= _MIN_MEANINGFUL_FREQ]
+
+
 def build_options_basic(
     facts: PreflopFacts,
 ) -> tuple[list[str], str]:
     """Bare action labels, one option per meaningfully-played action.
 
-    Returns up to 4 options ordered by descending frequency. The
-    ``correct_answer`` is the dominant action's label (verbatim).
+    Returns up to 4 options ordered by descending frequency. Labels are
+    canonicalised: ``"Raise 60%"`` -> ``"Raise"`` (or ``"3-bet"`` /
+    ``"4-bet"`` / ``"5-bet"`` depending on prior-raise count); ``"AllIn"``
+    -> ``"All-in"``. The ``correct_answer`` is the canonical label of
+    the dominant action.
 
     Empty / degenerate strategies fall through to a 1-option set
-    containing the recorded dominant action, so the row stays valid.
+    containing the canonical dominant action, so the row stays valid.
     """
-    meaningful = _meaningful_actions(facts)
+    meaningful = _meaningful_canonical_actions(facts)
+    canonical_correct = _canonical_dominant(facts)
     if not meaningful:
-        # Pio recorded a dominant action but no frequencies >= 5%.
-        # Defensive fallback so we still produce a valid row.
-        return [facts.spot.dominant_action], facts.spot.dominant_action
+        return [canonical_correct], canonical_correct
     options = [label for label, _ in meaningful[:4]]
-    correct = facts.spot.dominant_action
-    if correct not in options:
-        # Defensive: dominant action somehow not in the meaningful set.
-        # Promote it to the front so the row is consistent.
-        options = [correct] + [opt for opt in options if opt != correct]
+    if canonical_correct not in options:
+        # Defensive: dominant somehow not in meaningful set.
+        options = [canonical_correct] + [
+            opt for opt in options if opt != canonical_correct
+        ]
         options = options[:4]
-    return options, correct
+    return options, canonical_correct
 
 
 def build_options_gto(
@@ -130,7 +230,7 @@ def build_options_gto(
     deterministic mapping the LLM was being instructed to follow
     in the previous Layer-6-picks-options architecture.
     """
-    meaningful = _meaningful_actions(facts)
+    meaningful = _meaningful_canonical_actions(facts)
     if not meaningful:
         return build_options_basic(facts)
 
@@ -230,4 +330,6 @@ __all__ = [
     "build_options_auto",
     "build_options_basic",
     "build_options_gto",
+    "canonicalize_action_label",
+    "canonicalize_strategy",
 ]
