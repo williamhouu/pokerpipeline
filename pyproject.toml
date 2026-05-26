@@ -8,17 +8,34 @@
 [tool.ruff]
 line-length = 88
 target-version = "py313"
-# Grandfather William's existing pipeline + scripts + tests. They work, they're
-# tested, and bulk-reformatting them would wipe git blame and create a giant
-# diff. New code (admin_panel/, future modules) is enforced strictly.
-# When we organically touch a pipeline file, we can opt into ruff --fix on it.
+# Grandfather William's existing pipeline files + subpackages. They work,
+# they're tested, and bulk-reformatting them would wipe git blame and create
+# a giant diff. New code (admin_panel/, pipeline/preflop/, future modules)
+# is enforced strictly. To grandfather a new file, add it here explicitly.
+# To enforce a previously-grandfathered file, remove it and ruff --fix.
 extend-exclude = [
     "venv",
     "test_output",
     "test_solves",
     "solves",
     "ranges",
-    "pipeline",
+    # legacy pipeline files (top-level)
+    "pipeline/__init__.py",
+    "pipeline/action_history.py",
+    "pipeline/batch_solver.py",
+    "pipeline/cards.py",
+    "pipeline/explanation_generator.py",
+    "pipeline/flop_sets.py",
+    "pipeline/format_writer.py",
+    "pipeline/path_sampler.py",
+    "pipeline/piosolver.py",
+    "pipeline/preflop_ranges.py",
+    "pipeline/question_extractor.py",
+    "pipeline/scenario_config.py",
+    "pipeline/scenario_spec.py",
+    "pipeline/validators.py",
+    # legacy subpackage
+    "pipeline/fact_extractor",
     "scripts",
     "tests",
 ]
@@ -45,9 +62,29 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 ignore_missing_imports = true
-# Same grandfather pattern as ruff: existing pipeline + scripts aren't typed;
-# don't block on them. New code in admin_panel/ is strict (see override).
-exclude = ["pipeline/", "scripts/", "tests/", "venv/"]
+# Same grandfather pattern as ruff: existing pipeline files + the fact_extractor
+# subpackage aren't typed; don't block on them. New pipeline/preflop/ and
+# admin_panel/ are strict (see overrides below).
+exclude = [
+    "pipeline/__init__.py",
+    "pipeline/action_history.py",
+    "pipeline/batch_solver.py",
+    "pipeline/cards.py",
+    "pipeline/explanation_generator.py",
+    "pipeline/flop_sets.py",
+    "pipeline/format_writer.py",
+    "pipeline/path_sampler.py",
+    "pipeline/piosolver.py",
+    "pipeline/preflop_ranges.py",
+    "pipeline/question_extractor.py",
+    "pipeline/scenario_config.py",
+    "pipeline/scenario_spec.py",
+    "pipeline/validators.py",
+    "pipeline/fact_extractor/",
+    "scripts/",
+    "tests/",
+    "venv/",
+]
 
 # When admin_panel imports from pipeline.* (which we do for build_system_prompt
 # and the hand-class / board-texture constants), mypy by default follows the
