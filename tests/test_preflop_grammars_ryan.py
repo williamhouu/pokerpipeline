@@ -9,12 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.grammars.ryan_pack import parse                     # noqa: E402
-from pipeline.preflop.grammars.types import (                             # noqa: E402
+from pipeline.preflop.grammars.ryan_pack import parse  # noqa: E402
+from pipeline.preflop.grammars.types import (  # noqa: E402
     ParsedAction,
     PreflopActionType,
 )
-from pipeline.preflop.pack import PreflopPack                             # noqa: E402
+from pipeline.preflop.pack import PreflopPack  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -22,9 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def _pack(table_size: int = 6) -> PreflopPack:
     """Build a fake pack object for the parser to tag results with."""
     return PreflopPack(
-        pack_id="ryan_test", root_path=Path("/tmp/fake"),
-        grammar_name="ryan_pack", table_size=table_size,
-        stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="ryan_test",
+        root_path=Path("/tmp/fake"),
+        grammar_name="ryan_pack",
+        table_size=table_size,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
 
 
@@ -113,7 +116,8 @@ def test_parse_multi_round():
     assert bb_squeeze.raise_size_pct == 198.0
     # SB's all-in in round 2.
     sb_ai = next(
-        a for a in r.action_history
+        a
+        for a in r.action_history
         if a.position == "SB" and a.action_type == PreflopActionType.ALL_IN
     )
     assert sb_ai.raise_size_pct is None
@@ -121,7 +125,9 @@ def test_parse_multi_round():
 
 def test_parse_decimal_raise_size():
     """Sizing tokens with decimals (e.g. 76.5%) are accepted."""
-    p = Path("/x/PioViewer - NLH 6max 100bb 2.5x Open/SB/UTG_Fold_HJ_Fold_CO_Fold_BTN_Fold_SB_76.5%.txt")
+    p = Path(
+        "/x/PioViewer - NLH 6max 100bb 2.5x Open/SB/UTG_Fold_HJ_Fold_CO_Fold_BTN_Fold_SB_76.5%.txt"
+    )
     r = parse(p, _pack())
     sb = r.action_history[-1]
     assert sb.action_type == PreflopActionType.RAISE
@@ -165,7 +171,9 @@ def test_parse_rejects_parent_folder_mismatch():
 # --- metadata propagation ---------------------------------------------------
 def test_parse_tags_pack_id():
     """The returned ParsedRangeFile carries the source pack's id."""
-    p = Path("/x/PioViewer - NLH 6max 100bb 2.5x Open/SB/UTG_Fold_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold.txt")
+    p = Path(
+        "/x/PioViewer - NLH 6max 100bb 2.5x Open/SB/UTG_Fold_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold.txt"
+    )
     r = parse(p, _pack())
     assert r.pack_id == "ryan_test"
 
@@ -183,10 +191,12 @@ def test_parse_accepts_9max_position_tokens():
 # --- ParsedAction equality helper ------------------------------------------
 def test_parsed_action_equality():
     """Two ParsedActions with the same fields compare equal (frozen dataclass)."""
-    a = ParsedAction(position="BTN", action_type=PreflopActionType.RAISE,
-                     raise_size_pct=60.0)
-    b = ParsedAction(position="BTN", action_type=PreflopActionType.RAISE,
-                     raise_size_pct=60.0)
+    a = ParsedAction(
+        position="BTN", action_type=PreflopActionType.RAISE, raise_size_pct=60.0
+    )
+    b = ParsedAction(
+        position="BTN", action_type=PreflopActionType.RAISE, raise_size_pct=60.0
+    )
     assert a == b
     c = ParsedAction(position="BTN", action_type=PreflopActionType.CALL)
     assert a != c

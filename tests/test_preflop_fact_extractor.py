@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.fact_extractor import (                              # noqa: E402
+from pipeline.preflop.fact_extractor import (  # noqa: E402
     VillainRangeStats,
     classify_archetype,
     compute_blockers,
@@ -17,17 +17,17 @@ from pipeline.preflop.fact_extractor import (                              # noq
     extract_facts,
     identify_villain,
 )
-from pipeline.preflop.spot_sampler import PreflopSpot                       # noqa: E402, F811
-from pipeline.preflop.grammars.types import (                              # noqa: E402
+from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402, F811
+from pipeline.preflop.grammars.types import (  # noqa: E402
     ParsedAction,
     PreflopActionType,
 )
-from pipeline.preflop.node_enumerator import (                              # noqa: E402
+from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopActionOption,
     PreflopDecisionNode,
 )
-from pipeline.preflop.pack import PreflopPack, clear_registry              # noqa: E402
-from pipeline.preflop.spot_sampler import sample_spot                       # noqa: E402
+from pipeline.preflop.pack import PreflopPack, clear_registry  # noqa: E402
+from pipeline.preflop.spot_sampler import sample_spot  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,10 +36,10 @@ def _write_full_range(path: Path, weights: dict[str, float]) -> None:
     """Write a range file with all 169 entries, defaulting unlisted classes
     to 0.0. parse_range_file enforces 169-entry presence."""
     from pipeline.preflop_ranges import canonical_169_hand_classes
+
     path.parent.mkdir(parents=True, exist_ok=True)
     line = ",".join(
-        f"{cls}:{weights.get(cls, 0.0)}"
-        for cls in canonical_169_hand_classes()
+        f"{cls}:{weights.get(cls, 0.0)}" for cls in canonical_169_hand_classes()
     )
     path.write_text(line)
 
@@ -55,7 +55,10 @@ def _clean_registry():
 def _node(history: tuple[ParsedAction, ...]) -> PreflopDecisionNode:
     """Minimal node fixture; actions list is empty (irrelevant for villain id)."""
     return PreflopDecisionNode(
-        pack_id="test", actor="BTN", history_before=history, actions=(),
+        pack_id="test",
+        actor="BTN",
+        history_before=history,
+        actions=(),
     )
 
 
@@ -105,8 +108,12 @@ def test_identify_villain_none_for_empty_history():
 def test_construct_villain_path_simple_open(tmp_path):
     """UTG opens, hero (BTN) decides. Villain range path = UTG/UTG_60%.txt."""
     pack = PreflopPack(
-        pack_id="t", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="t",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
     history = (
         ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
@@ -121,8 +128,12 @@ def test_construct_villain_path_simple_open(tmp_path):
 def test_construct_villain_path_3bet_pot(tmp_path):
     """UTG opens, BB 3-bets. Villain (BB) range path includes UTG's open."""
     pack = PreflopPack(
-        pack_id="t", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="t",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
     history = (
         ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
@@ -135,15 +146,18 @@ def test_construct_villain_path_3bet_pot(tmp_path):
     villain = ParsedAction("BB", PreflopActionType.RAISE, 155.0)
     path = construct_villain_range_path(_node(history), villain, pack)
     assert path == (
-        tmp_path / "BB" /
-        "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold_BB_155%.txt"
+        tmp_path / "BB" / "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold_SB_Fold_BB_155%.txt"
     )
 
 
 def test_construct_villain_path_all_in(tmp_path):
     pack = PreflopPack(
-        pack_id="t", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="t",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
     history = (
         ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
@@ -158,8 +172,12 @@ def test_construct_villain_path_villain_not_in_history(tmp_path):
     """Defensive: a villain that's not actually in the history triggers
     ValueError rather than silently producing a wrong path."""
     pack = PreflopPack(
-        pack_id="t", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="t",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
     history = (ParsedAction("UTG", PreflopActionType.FOLD),)
     fake_villain = ParsedAction("BB", PreflopActionType.RAISE, 100.0)
@@ -171,13 +189,18 @@ def test_construct_villain_path_villain_not_in_history(tmp_path):
 def test_extract_facts_no_villain_returns_empty_villain(tmp_path):
     """Hero first-to-act (no prior raises) -> villain_stats is None."""
     pack = PreflopPack(
-        pack_id="t", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="t",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
     # Build a synthetic spot at a UTG-first-to-act node.
     _write_full_range(tmp_path / "UTG" / "UTG_60%.txt", {"AA": 1.0, "AKs": 1.0})
     _write_full_range(tmp_path / "UTG" / "UTG_Fold.txt", {})
     from pipeline.preflop.node_enumerator import enumerate_nodes
+
     nodes = enumerate_nodes([pack])
     spot = sample_spot(nodes[0], "AA")
     facts = extract_facts(spot, pack)
@@ -189,21 +212,28 @@ def test_extract_facts_no_villain_returns_empty_villain(tmp_path):
 def test_extract_facts_missing_villain_file_returns_empty(tmp_path, caplog):
     """If we'd compute a villain path but the file doesn't exist, warn + skip."""
     pack = PreflopPack(
-        pack_id="t", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="t",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
     # Synth pack with BTN options but NO UTG file present.
     _write_full_range(
-        tmp_path / "BTN" / "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold.txt", {},
+        tmp_path / "BTN" / "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold.txt",
+        {},
     )
     _write_full_range(
         tmp_path / "BTN" / "UTG_60%_HJ_Fold_CO_Fold_BTN_Call.txt",
         {"AA": 1.0},
     )
     from pipeline.preflop.node_enumerator import enumerate_nodes
+
     nodes = enumerate_nodes([pack])
     spot = sample_spot(nodes[0], "AA")
     import logging
+
     with caplog.at_level(logging.WARNING, logger="pipeline.preflop.fact_extractor"):
         facts = extract_facts(spot, pack)
     assert facts.villain_stats is None
@@ -220,6 +250,7 @@ def test_extract_facts_against_real_pack():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.node_enumerator import enumerate_nodes
     from pipeline.preflop.pack import discover_packs
+
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present")
@@ -227,7 +258,8 @@ def test_extract_facts_against_real_pack():
     nodes = enumerate_nodes(packs)
     # Pick BTN facing exactly UTG open (no 3-bet).
     node = next(
-        n for n in nodes
+        n
+        for n in nodes
         if n.actor == "BTN"
         and len(n.history_before) == 3
         and n.history_before[0].position == "UTG"
@@ -243,7 +275,9 @@ def test_extract_facts_against_real_pack():
     assert facts_aa.hero_equity_vs_villain > 0.75
     # T9s equity vs UTG open range: weak (under 45%).
     facts_t9s = extract_facts(
-        sample_spot(node, "T9s"), pack, equity_runouts=100,
+        sample_spot(node, "T9s"),
+        pack,
+        equity_runouts=100,
     )
     assert facts_t9s.hero_equity_vs_villain is not None
     assert facts_t9s.hero_equity_vs_villain < 0.50
@@ -259,13 +293,15 @@ def test_extract_facts_villain_range_stats_sanity():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.node_enumerator import enumerate_nodes
     from pipeline.preflop.pack import discover_packs
+
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present")
     pack = packs[0]
     nodes = enumerate_nodes(packs)
     node = next(
-        n for n in nodes
+        n
+        for n in nodes
         if n.actor == "BTN"
         and len(n.history_before) == 3
         and n.history_before[0].action_type is PreflopActionType.RAISE
@@ -291,10 +327,18 @@ def test_compute_blockers_finds_pair_blockers():
     hero_combo = "AsKh"
     # Simplified villain range: AA (all 6 combos), KK (all 6 combos).
     villain = {
-        "AsAh": 1.0, "AsAd": 1.0, "AsAc": 1.0,
-        "AhAd": 1.0, "AhAc": 1.0, "AdAc": 1.0,
-        "KsKh": 1.0, "KsKd": 1.0, "KsKc": 1.0,
-        "KhKd": 1.0, "KhKc": 1.0, "KdKc": 1.0,
+        "AsAh": 1.0,
+        "AsAd": 1.0,
+        "AsAc": 1.0,
+        "AhAd": 1.0,
+        "AhAc": 1.0,
+        "AdAc": 1.0,
+        "KsKh": 1.0,
+        "KsKd": 1.0,
+        "KsKc": 1.0,
+        "KhKd": 1.0,
+        "KhKc": 1.0,
+        "KdKc": 1.0,
     }
     blockers = compute_blockers(hero_combo, villain)
     # Hero has As: blocks the 3 AA combos containing As (AsAh, AsAd, AsAc).
@@ -320,31 +364,44 @@ def test_compute_blockers_no_overlap_empty():
 
 # --- chunk 2: classify_archetype ------------------------------------------
 def _spot_with(
-    dominant_action: str, frequencies: dict[str, float],
+    dominant_action: str,
+    frequencies: dict[str, float],
     history: tuple[ParsedAction, ...] = (),
 ) -> PreflopSpot:
     """Build a PreflopSpot with rigged values for archetype testing."""
     node = PreflopDecisionNode(
-        pack_id="t", actor="BTN", history_before=history, actions=(),
+        pack_id="t",
+        actor="BTN",
+        history_before=history,
+        actions=(),
     )
     dom_freq = frequencies[dominant_action]
     return PreflopSpot(
-        node=node, hero_hand_class="AKo", hero_card_combo="AhKc",
+        node=node,
+        hero_hand_class="AKo",
+        hero_card_combo="AhKc",
         action_frequencies=frequencies,
-        dominant_action=dominant_action, dominant_frequency=dom_freq,
+        dominant_action=dominant_action,
+        dominant_frequency=dom_freq,
     )
 
 
 def test_archetype_unclassified_for_zero_presence():
     """Hand with ~0% total presence at the node -> unclassified."""
     spot = _spot_with("Fold", {"Fold": 0.0, "Call": 0.0})
-    assert classify_archetype(spot, villain=None, hero_equity_vs_villain=None) == "unclassified"
+    assert (
+        classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
+        == "unclassified"
+    )
 
 
 def test_archetype_open_for_value_no_villain():
     """No villain + dominant Raise -> open_for_value."""
     spot = _spot_with("Raise 60%", {"Raise 60%": 1.0, "Fold": 0.0})
-    assert classify_archetype(spot, villain=None, hero_equity_vs_villain=None) == "open_for_value"
+    assert (
+        classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
+        == "open_for_value"
+    )
 
 
 def test_archetype_3bet_for_value():
@@ -356,16 +413,20 @@ def test_archetype_3bet_for_value():
     )
     spot = _spot_with("Raise 77%", {"Raise 77%": 1.0, "Fold": 0.0}, history)
     villain = history[0]
-    assert classify_archetype(spot, villain, hero_equity_vs_villain=0.62) == "3bet_for_value"
+    assert (
+        classify_archetype(spot, villain, hero_equity_vs_villain=0.62)
+        == "3bet_for_value"
+    )
 
 
 def test_archetype_3bet_as_bluff():
     """Facing one raise, dominant Raise with low equity -> 3bet_as_bluff."""
-    history = (
-        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
-    )
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
     spot = _spot_with("Raise 77%", {"Raise 77%": 1.0, "Fold": 0.0}, history)
-    assert classify_archetype(spot, history[0], hero_equity_vs_villain=0.35) == "3bet_as_bluff"
+    assert (
+        classify_archetype(spot, history[0], hero_equity_vs_villain=0.35)
+        == "3bet_as_bluff"
+    )
 
 
 def test_archetype_4bet_for_value():
@@ -376,7 +437,10 @@ def test_archetype_4bet_for_value():
         ParsedAction("CO", PreflopActionType.FOLD),
     )
     spot = _spot_with("Raise 50%", {"Raise 50%": 1.0, "Fold": 0.0}, history)
-    assert classify_archetype(spot, history[1], hero_equity_vs_villain=0.55) == "4bet_for_value"
+    assert (
+        classify_archetype(spot, history[1], hero_equity_vs_villain=0.55)
+        == "4bet_for_value"
+    )
 
 
 def test_archetype_squeeze_for_value():
@@ -426,13 +490,15 @@ def test_extract_facts_populates_chunk2_fields_real_pack():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.node_enumerator import enumerate_nodes
     from pipeline.preflop.pack import discover_packs
+
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present")
     pack = packs[0]
     nodes = enumerate_nodes(packs)
     node = next(
-        n for n in nodes
+        n
+        for n in nodes
         if n.actor == "BTN"
         and len(n.history_before) == 3
         and n.history_before[0].action_type is PreflopActionType.RAISE

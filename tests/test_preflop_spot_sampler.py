@@ -10,12 +10,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.grammars.types import PreflopActionType              # noqa: E402
-from pipeline.preflop.node_enumerator import (                              # noqa: E402
+from pipeline.preflop.grammars.types import PreflopActionType  # noqa: E402
+from pipeline.preflop.node_enumerator import (  # noqa: E402
     enumerate_nodes,
 )
-from pipeline.preflop.pack import PreflopPack, clear_registry               # noqa: E402
-from pipeline.preflop.spot_sampler import (                                  # noqa: E402
+from pipeline.preflop.pack import PreflopPack, clear_registry  # noqa: E402
+from pipeline.preflop.spot_sampler import (  # noqa: E402
     enumerate_spots_for_node,
     random_combo_for_class,
     representative_combo_for_class,
@@ -93,17 +93,21 @@ def _make_node_pack(tmp_path: Path) -> PreflopPack:
     btn.mkdir(parents=True)
     # BTN Call range: AA = 100%, AKo = 100%, 72o = 0%
     (btn / "UTG_60%_HJ_Fold_CO_Fold_BTN_Call.txt").write_text(
-        ",".join(f"{cls}:1.0" if cls in ("AA", "AKo") else f"{cls}:0.0"
-                 for cls in _all_169())
+        ",".join(
+            f"{cls}:1.0" if cls in ("AA", "AKo") else f"{cls}:0.0" for cls in _all_169()
+        )
     )
     # BTN Fold range: AA = 0%, AKo = 0%, 72o = 100%
     (btn / "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold.txt").write_text(
-        ",".join(f"{cls}:1.0" if cls == "72o" else f"{cls}:0.0"
-                 for cls in _all_169())
+        ",".join(f"{cls}:1.0" if cls == "72o" else f"{cls}:0.0" for cls in _all_169())
     )
     return PreflopPack(
-        pack_id="synth", root_path=tmp_path, grammar_name="ryan_pack",
-        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        pack_id="synth",
+        root_path=tmp_path,
+        grammar_name="ryan_pack",
+        table_size=6,
+        stack_depth_bb=100,
+        open_size_bb=2.5,
     )
 
 
@@ -111,6 +115,7 @@ def _all_169() -> list[str]:
     """The canonical 169 classes -- exported here so tests don't have to
     import the pipeline helper repeatedly."""
     from pipeline.preflop_ranges import canonical_169_hand_classes
+
     return canonical_169_hand_classes()
 
 
@@ -194,6 +199,7 @@ def test_sample_spot_against_real_pack():
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.pack import discover_packs
+
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present under ranges/")
@@ -201,7 +207,8 @@ def test_sample_spot_against_real_pack():
     # Pick a clear node: BTN facing UTG fold, HJ open 60%, CO fold (so BTN
     # is acting after a single open from HJ).
     node = next(
-        n for n in nodes
+        n
+        for n in nodes
         if n.actor == "BTN"
         and len(n.history_before) == 3
         and n.history_before[0].position == "UTG"
@@ -214,9 +221,7 @@ def test_sample_spot_against_real_pack():
     # NEVER folding. Folding AA preflop in cash never happens.
     aa = sample_spot(node, "AA")
     fold_freq = aa.action_frequencies.get("Fold", 0.0)
-    assert fold_freq < 0.05, (
-        f"AA should almost never fold preflop, got {fold_freq:.2%}"
-    )
+    assert fold_freq < 0.05, f"AA should almost never fold preflop, got {fold_freq:.2%}"
     # 72o should be dominantly folding facing an open.
     trash = sample_spot(node, "72o")
     assert trash.dominant_action == "Fold"
@@ -229,16 +234,16 @@ def test_real_pack_question_worthy_count():
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.pack import discover_packs
+
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present under ranges/")
     nodes = enumerate_nodes(packs)
     # Mid-game node where we'd expect some genuinely mixed strategies.
     node = next(
-        n for n in nodes
-        if n.actor == "BTN"
-        and len(n.actions) == 4
-        and len(n.history_before) >= 2
+        n
+        for n in nodes
+        if n.actor == "BTN" and len(n.actions) == 4 and len(n.history_before) >= 2
     )
     spots = list(enumerate_spots_for_node(node))
     worthy = [s for s in spots if 0.55 <= s.dominant_frequency <= 0.95]

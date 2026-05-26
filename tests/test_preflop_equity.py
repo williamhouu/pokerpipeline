@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.equity import (                                       # noqa: E402
+from pipeline.preflop.equity import (  # noqa: E402
     preflop_equity_vs_range,
     preflop_hand_equity,
     preflop_range_vs_range_equity,
@@ -23,7 +23,10 @@ def test_AA_dominates_72o():
     estimate should be within ~3% of that figure."""
     rng = random.Random(0)
     eq = preflop_hand_equity(
-        ("As", "Ac"), ("7h", "2d"), n_samples=500, rng=rng,
+        ("As", "Ac"),
+        ("7h", "2d"),
+        n_samples=500,
+        rng=rng,
     )
     assert 0.80 < eq < 0.90, f"AA vs 72o expected ~85%, got {eq:.2%}"
 
@@ -32,7 +35,10 @@ def test_AKs_vs_QQ_approximately_coinflip():
     """AKs vs QQ is the canonical "race." Expected ~46% for AKs."""
     rng = random.Random(0)
     eq = preflop_hand_equity(
-        ("As", "Ks"), ("Qh", "Qd"), n_samples=500, rng=rng,
+        ("As", "Ks"),
+        ("Qh", "Qd"),
+        n_samples=500,
+        rng=rng,
     )
     assert 0.42 < eq < 0.50, f"AKs vs QQ expected ~46%, got {eq:.2%}"
 
@@ -59,7 +65,8 @@ def test_AA_vs_tight_range():
     eq = preflop_equity_vs_range(
         hero=("As", "Ac"),
         villain_range={"KsKd": 1.0, "QhQs": 1.0},
-        n_samples=300, rng=rng,
+        n_samples=300,
+        rng=rng,
     )
     assert eq > 0.75
 
@@ -70,7 +77,8 @@ def test_72o_vs_premium_range():
     eq = preflop_equity_vs_range(
         hero=("7c", "2d"),
         villain_range={"AhAs": 1.0, "KhKs": 1.0, "QhQs": 1.0},
-        n_samples=300, rng=rng,
+        n_samples=300,
+        rng=rng,
     )
     assert eq < 0.20
 
@@ -83,7 +91,8 @@ def test_skips_card_conflict_combos():
     eq = preflop_equity_vs_range(
         hero=("As", "Kh"),
         villain_range={"AhAd": 1.0, "AsAc": 1.0},
-        n_samples=200, rng=rng,
+        n_samples=200,
+        rng=rng,
     )
     # AK off vs AA = ~7% equity (dominated)
     assert eq < 0.15
@@ -113,7 +122,8 @@ def test_weighted_average():
     eq = preflop_equity_vs_range(
         hero=("Ks", "Kc"),
         villain_range={"AhAs": 0.01, "5h2d": 1.0},  # ~99% trash, ~1% AA
-        n_samples=300, rng=rng,
+        n_samples=300,
+        rng=rng,
     )
     # KK crushes 52o (~90%) and loses to AA (~20%). Heavy weight on 52o ->
     # near 90%.
@@ -127,7 +137,9 @@ def test_range_vs_range_premium_vs_trash():
     eq = preflop_range_vs_range_equity(
         hero_range={"AhAs": 1.0, "KhKs": 1.0},
         villain_range={"7c2d": 1.0, "8c3d": 1.0},
-        max_matchups=100, n_samples_per_matchup=30, rng=rng,
+        max_matchups=100,
+        n_samples_per_matchup=30,
+        rng=rng,
     )
     assert eq > 0.80, f"premium vs trash should be >80%, got {eq:.2%}"
 
@@ -137,8 +149,11 @@ def test_range_vs_range_same_range_is_about_50():
     rng = random.Random(0)
     rg = {"AhAd": 1.0, "KsKc": 1.0, "QhQd": 1.0, "JsJc": 1.0}
     eq = preflop_range_vs_range_equity(
-        hero_range=rg, villain_range=rg,
-        max_matchups=200, n_samples_per_matchup=30, rng=rng,
+        hero_range=rg,
+        villain_range=rg,
+        max_matchups=200,
+        n_samples_per_matchup=30,
+        rng=rng,
     )
     # Allow generous bounds because of sampling noise + card-conflict skips.
     assert 0.40 < eq < 0.60, f"same range vs itself ~= 50%, got {eq:.2%}"
@@ -163,9 +178,17 @@ def test_range_vs_range_deterministic_with_seed():
     rng_a = random.Random(42)
     rng_b = random.Random(42)
     eq1 = preflop_range_vs_range_equity(
-        rg_a, rg_b, max_matchups=50, n_samples_per_matchup=20, rng=rng_a,
+        rg_a,
+        rg_b,
+        max_matchups=50,
+        n_samples_per_matchup=20,
+        rng=rng_a,
     )
     eq2 = preflop_range_vs_range_equity(
-        rg_a, rg_b, max_matchups=50, n_samples_per_matchup=20, rng=rng_b,
+        rg_a,
+        rg_b,
+        max_matchups=50,
+        n_samples_per_matchup=20,
+        rng=rng_b,
     )
     assert eq1 == eq2

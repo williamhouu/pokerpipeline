@@ -15,14 +15,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.grammars.types import PreflopActionType              # noqa: E402
-from pipeline.preflop.node_enumerator import (                              # noqa: E402
+from pipeline.preflop.grammars.types import PreflopActionType  # noqa: E402
+from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopActionOption,
     PreflopDecisionNode,
     enumerate_nodes,
     enumerate_nodes_by_actor,
 )
-from pipeline.preflop.pack import (                                          # noqa: E402
+from pipeline.preflop.pack import (  # noqa: E402
     PreflopPack,
     clear_registry,
 )
@@ -102,7 +102,9 @@ def test_three_files_for_btn_become_one_three_action_node(tmp_path):
         PreflopActionType.CALL,
         PreflopActionType.RAISE,
     }
-    raise_opt = next(o for o in node.actions if o.action_type is PreflopActionType.RAISE)
+    raise_opt = next(
+        o for o in node.actions if o.action_type is PreflopActionType.RAISE
+    )
     assert raise_opt.raise_size_pct == 77.0
 
 
@@ -119,8 +121,8 @@ def test_different_actors_become_different_nodes(tmp_path):
 def test_different_histories_become_different_nodes(tmp_path):
     """Same actor, different histories -> different nodes."""
     btn_dir = tmp_path / "BTN"
-    _write(btn_dir / "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold.txt")     # facing UTG open
-    _write(btn_dir / "UTG_Fold_HJ_60%_CO_Fold_BTN_Fold.txt")     # facing HJ open
+    _write(btn_dir / "UTG_60%_HJ_Fold_CO_Fold_BTN_Fold.txt")  # facing UTG open
+    _write(btn_dir / "UTG_Fold_HJ_60%_CO_Fold_BTN_Fold.txt")  # facing HJ open
     nodes = enumerate_nodes([_make_pack(tmp_path)])
     assert len(nodes) == 2
     assert all(n.actor == "BTN" for n in nodes)
@@ -128,8 +130,7 @@ def test_different_histories_become_different_nodes(tmp_path):
     # one is a 60% open, the other is a fold.
     opener_position = {
         next(
-            a for a in n.history_before
-            if a.action_type is PreflopActionType.RAISE
+            a for a in n.history_before if a.action_type is PreflopActionType.RAISE
         ).position
         for n in nodes
     }
@@ -236,6 +237,7 @@ def test_enumerate_against_real_pack():
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.pack import discover_packs
+
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present under ranges/")

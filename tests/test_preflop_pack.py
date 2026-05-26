@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.pack import (                                       # noqa: E402
+from pipeline.preflop.pack import (  # noqa: E402
     KNOWN_PACK_SIGNATURES,
     PreflopPack,
     PreflopPackSignature,
@@ -51,24 +51,36 @@ def _sample_pack(pack_id: str = "test_pack", table_size: int = 6) -> PreflopPack
 def test_preflop_pack_rejects_invalid_table_size():
     with pytest.raises(ValueError, match="table_size"):
         PreflopPack(
-            pack_id="x", root_path=Path("/tmp"), grammar_name="ryan_pack",
-            table_size=15, stack_depth_bb=100, open_size_bb=2.5,
+            pack_id="x",
+            root_path=Path("/tmp"),
+            grammar_name="ryan_pack",
+            table_size=15,
+            stack_depth_bb=100,
+            open_size_bb=2.5,
         )
 
 
 def test_preflop_pack_rejects_zero_stack():
     with pytest.raises(ValueError, match="stack_depth_bb"):
         PreflopPack(
-            pack_id="x", root_path=Path("/tmp"), grammar_name="ryan_pack",
-            table_size=6, stack_depth_bb=0, open_size_bb=2.5,
+            pack_id="x",
+            root_path=Path("/tmp"),
+            grammar_name="ryan_pack",
+            table_size=6,
+            stack_depth_bb=0,
+            open_size_bb=2.5,
         )
 
 
 def test_preflop_pack_rejects_bad_sb_ratio():
     with pytest.raises(ValueError, match="sb_to_bb_ratio"):
         PreflopPack(
-            pack_id="x", root_path=Path("/tmp"), grammar_name="ryan_pack",
-            table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+            pack_id="x",
+            root_path=Path("/tmp"),
+            grammar_name="ryan_pack",
+            table_size=6,
+            stack_depth_bb=100,
+            open_size_bb=2.5,
             sb_to_bb_ratio=1.5,
         )
 
@@ -117,7 +129,9 @@ def test_discover_packs_finds_nothing_in_empty_dir(tmp_path):
 
 def test_discover_packs_finds_a_pack(tmp_path):
     """Create a fake pack layout and verify discovery picks it up."""
-    fake_pack_root = tmp_path / "ryan_preflop_tree" / "PioViewer - NLH 6max 100bb 2.5x Open"
+    fake_pack_root = (
+        tmp_path / "ryan_preflop_tree" / "PioViewer - NLH 6max 100bb 2.5x Open"
+    )
     fake_pack_root.mkdir(parents=True)
     found = discover_packs(tmp_path)
     assert len(found) == 1
@@ -153,8 +167,9 @@ def test_discover_packs_against_real_ranges_dir():
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
     found = discover_packs(ranges)
-    assert any(p.pack_id == "ryan_preflop_tree_6max_100bb" for p in found), \
+    assert any(p.pack_id == "ryan_preflop_tree_6max_100bb" for p in found), (
         f"expected Ryan 6max pack in {[p.pack_id for p in found]}"
+    )
 
 
 # --- KNOWN_PACK_SIGNATURES sanity check ------------------------------------
@@ -166,6 +181,7 @@ def test_known_pack_signatures_have_unique_ids():
 def test_known_pack_signatures_have_known_grammars():
     """Every signature references a grammar that exists in the registry."""
     from pipeline.preflop.grammars import _REGISTRY
+
     for sig in KNOWN_PACK_SIGNATURES:
         assert sig.grammar_name in _REGISTRY, (
             f"signature {sig.pack_id!r} references unknown grammar "
