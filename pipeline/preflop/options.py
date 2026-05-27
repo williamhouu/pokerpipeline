@@ -165,6 +165,35 @@ def _canonical_dominant(facts: PreflopFacts) -> str:
     )
 
 
+def _pick_gto_secondary(
+    facts: PreflopFacts,
+    dominant_label: str,
+) -> str | None:
+    """Pick the ``B`` action for the 2-action GTO template.
+
+    Rule:
+      1. Among non-dominant canonical actions, pick the highest-frequency.
+      2. If multiple are tied at the highest frequency, prefer ``"Fold"``
+         (so a "Call 100% / Fold 0% / Raise 0%" spot picks Fold as the
+         most pedagogically-useful "wrong answer" alternative).
+      3. If no non-dominant actions exist (Pio's tree only has one action
+         at this node -- shouldn't happen for spots passing the
+         worthiness filter), return None and the caller falls back to
+         the Basic style.
+    """
+    canonical = canonicalize_strategy(facts)
+    candidates = {
+        label: freq for label, freq in canonical.items() if label != dominant_label
+    }
+    if not candidates:
+        return None
+    max_freq = max(candidates.values())
+    tied_at_max = [label for label, freq in candidates.items() if freq == max_freq]
+    if len(tied_at_max) > 1 and "Fold" in tied_at_max:
+        return "Fold"
+    return tied_at_max[0]
+
+
 # --- the three builders ------------------------------------------------------
 def _meaningful_canonical_actions(
     facts: PreflopFacts,
@@ -272,40 +301,58 @@ def build_options_gto(
         return build_options_basic(facts)
     correct = f"{prefix} {dominant_label}"
 
-    if len(meaningful) == 1:
-        # Single meaningful action -- use one Always-X option.
-        return [f"Always {dominant_label}"], correct
+    # --- 3+ meaningful actions: composite-label template ---------------------
+    # The dominant action MUST be the primary verb in composite labels
+    # ("Mostly Call, sometimes Fold" only reads correctly when Call is in
+    # fact dominant), so Fold-first reordering doesn't apply here -- the
+    # template's structure already pins the option order.
+    if len(meaningful) >= 3:
+        secondary_labels = [label for label, _ in meaningful[1:]]
+        options: list[str] = [f"Always {dominant_label}"]
+        for sec in secondary_labels:
+            options.append(f"Mostly {dominant_label}, sometimes {sec}")
+        options = options[:4]
+        composite_correct = f"Mostly {dominant_label}, sometimes {secondary_labels[0]}"
+        if composite_correct in options:
+            return options, composite_correct
+        # Defensive: top-2 composite truncated by the 4-cap. Fall back so
+        # correct_answer remains in options.
+        if f"Mostly {dominant_label}" not in options:
+            options[-1] = f"Mostly {dominant_label}"
+        return options, f"Mostly {dominant_label}"
 
-    if len(meaningful) == 2:
-        # Classic two-action mix.
-        secondary_label = meaningful[1][0]
+    # --- 1 or 2 meaningful actions: 4-option 2-action template --------------
+    # For 1-meaningful (near-pure spot), Pio plays one action almost
+    # entirely; we still emit the full 4-option template so the player
+    # gets real choices to rule out. The B action is picked from Pio's
+    # other tree-offered actions (no frequency filter).
+    secondary_label = _pick_gto_secondary(facts, dominant_label)
+    if secondary_label is None:
+        # Pio's tree only offers one action at this node. Degenerate
+        # (the worthiness filter normally excludes such spots) -- fall
+        # back to basic rather than emit a 1-option set.
+        return build_options_basic(facts)
+
+    options = [
+        f"Always {dominant_label}",
+        f"Mostly {dominant_label}",
+        f"Mostly {secondary_label}",
+        f"Always {secondary_label}",
+    ]
+
+    # Fold-first reorder: when the standalone Always/Mostly Fold options
+    # exist (i.e., the secondary is Fold AND the dominant isn't), they
+    # come first. When the dominant IS Fold, the template is already
+    # Fold-first naturally.
+    if secondary_label == "Fold" and dominant_label != "Fold":
         options = [
-            f"Always {dominant_label}",
+            "Always Fold",
+            "Mostly Fold",
             f"Mostly {dominant_label}",
-            f"Mostly {secondary_label}",
-            f"Always {secondary_label}",
+            f"Always {dominant_label}",
         ]
-        return options, correct
 
-    # 3+ action mix: composite labels (one per secondary action). The
-    # correct_answer is the composite that pairs the dominant action with
-    # the SECOND-most-frequent action -- since that's the most strategically
-    # important mix-in. A plain "Mostly <dominant>" option would not be in
-    # the option set under the composite-label convention, so the
-    # composite-form correct_answer keeps the in-options invariant.
-    secondary_labels = [label for label, _ in meaningful[1:]]
-    options: list[str] = [f"Always {dominant_label}"]
-    for sec in secondary_labels:
-        options.append(f"Mostly {dominant_label}, sometimes {sec}")
-    options = options[:4]
-    composite_correct = f"Mostly {dominant_label}, sometimes {secondary_labels[0]}"
-    if composite_correct in options:
-        return options, composite_correct
-    # Defensive: the top-2 composite somehow got truncated by the 4-cap.
-    # Fall back to a plain Mostly label so correct_answer remains in options.
-    if f"Mostly {dominant_label}" not in options:
-        options[-1] = f"Mostly {dominant_label}"
-    return options, f"Mostly {dominant_label}"
+    return options, correct
 
 
 def build_options_auto(

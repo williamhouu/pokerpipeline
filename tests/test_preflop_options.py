@@ -252,17 +252,49 @@ def test_basic_drops_fold_only_when_zero_and_crowded() -> None:
 # --- build_options_gto ------------------------------------------------------
 def test_gto_two_action_mix_uses_full_template() -> None:
     """Classic 2-action mix -> 4 options in Always/Mostly template,
-    correct_answer uses the Mostly prefix (freq < 95%)."""
+    correct_answer uses the Mostly prefix (freq < 95%). With B = Fold
+    and A != Fold, the standalone Always Fold / Mostly Fold options
+    come first (Fold-first reordering)."""
     facts = _facts_with_strategy({"Call": 0.66, "Fold": 0.34})
+    options, correct = build_options_gto(facts)
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Call",
+        "Always Call",
+    ]
+    assert correct == "Mostly Call"
+    assert correct in options
+
+
+def test_gto_two_action_mix_no_fold_keeps_dominant_first() -> None:
+    """When the secondary is not Fold, no Fold-first reordering -- the
+    template stays Always-dominant / Mostly-dominant / Mostly-secondary /
+    Always-secondary."""
+    # Call dominant, Raise as secondary, no Fold in the mix.
+    facts = _facts_with_strategy({"Call": 0.60, "Raise 60%": 0.40})
     options, correct = build_options_gto(facts)
     assert options == [
         "Always Call",
         "Mostly Call",
-        "Mostly Fold",
-        "Always Fold",
+        "Mostly Raise",
+        "Always Raise",
     ]
     assert correct == "Mostly Call"
-    assert correct in options
+
+
+def test_gto_fold_dominant_naturally_fold_first() -> None:
+    """When Fold IS the dominant action, the template is already Fold-first
+    naturally -- no reordering applied (A == Fold, not B)."""
+    facts = _facts_with_strategy({"Fold": 0.60, "Call": 0.40})
+    options, correct = build_options_gto(facts)
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Call",
+        "Always Call",
+    ]
+    assert correct == "Mostly Fold"
 
 
 def test_gto_uses_always_prefix_at_95_pct() -> None:
@@ -303,13 +335,70 @@ def test_gto_three_action_mix_uses_composite_labels() -> None:
         assert not option.startswith("Rarely")
 
 
-def test_gto_single_action_one_option() -> None:
-    """If only one action is meaningfully played, GTO returns a single
-    'Always X' option."""
+def test_gto_near_pure_spot_still_emits_full_template() -> None:
+    """If only one action is meaningfully played (Fold=100%, Raise=0%),
+    GTO still emits the 4-option template using a B picked from the
+    non-dominant Pio actions. The player can rule out the wrong
+    alternatives rather than be handed a one-option non-question."""
     facts = _facts_with_strategy({"Fold": 1.0, "Raise 60%": 0.0})
     options, correct = build_options_gto(facts)
-    assert options == ["Always Fold"]
+    # Fold dominant -> template Fold-first naturally; B = Raise (the
+    # other Pio action at 0%).
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Raise",
+        "Always Raise",
+    ]
     assert correct == "Always Fold"
+    assert correct in options
+
+
+def test_gto_near_pure_with_fold_mixin_uses_fold_first() -> None:
+    """Call 96% / Fold 4%: only Call is meaningful (>=5%), but Pio plays
+    Fold 4%, so Fold becomes B. Standalone Fold-prefixed options come
+    first (Fold-first rule)."""
+    facts = _facts_with_strategy({"Call": 0.96, "Fold": 0.04})
+    options, correct = build_options_gto(facts)
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Call",
+        "Always Call",
+    ]
+    # 96% >= 95% -> Always prefix.
+    assert correct == "Always Call"
+    assert correct in options
+
+
+def test_gto_pick_secondary_prefers_fold_on_tie() -> None:
+    """When multiple non-dominant actions are tied at the same (lowest)
+    frequency, Fold is preferred as the secondary. Pure Call (100%) with
+    Fold and Raise both at 0% -> B = Fold."""
+    facts = _facts_with_strategy({"Call": 1.0, "Fold": 0.0, "Raise 60%": 0.0})
+    options, correct = build_options_gto(facts)
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Call",
+        "Always Call",
+    ]
+    assert correct == "Always Call"
+
+
+def test_gto_pick_secondary_takes_higher_freq_over_fold() -> None:
+    """A non-tied higher-frequency non-dominant action wins over Fold.
+    Call 60% / Raise 40% / Fold 0%: B = Raise (40% > 0%, not a tie)."""
+    facts = _facts_with_strategy({"Call": 0.60, "Raise 60%": 0.40, "Fold": 0.0})
+    options, correct = build_options_gto(facts)
+    # B = Raise; no Fold-first reorder since B != Fold.
+    assert options == [
+        "Always Call",
+        "Mostly Call",
+        "Mostly Raise",
+        "Always Raise",
+    ]
+    assert correct == "Mostly Call"
 
 
 # --- build_options_auto -----------------------------------------------------
