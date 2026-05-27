@@ -292,10 +292,11 @@ def test_board_texture_is_empty_preflop() -> None:
     assert row["board_texture"] == ""
 
 
-def test_ev_gap_and_concept_tags_and_range_columns_empty_for_phase_a() -> None:
-    """ev_gap_bb, concept_tags, ip_range, oop_range are deferred to Phase B
-    (per the module docstring) and must render as empty strings rather than
-    placeholders in step 8 v1."""
+def test_phase_b_deferred_columns_still_empty() -> None:
+    """ev_gap_bb, ip_range, oop_range are still deferred to later Phase B
+    work; they render as empty strings.  concept_tags went live in the
+    concept-tagger commit and is now populated -- this test ensures it
+    actually contains tag names."""
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -304,9 +305,16 @@ def test_ev_gap_and_concept_tags_and_range_columns_empty_for_phase_a() -> None:
         number=1,
     )
     assert row["ev_gap_bb"] == ""
-    assert row["concept_tags"] == ""
     assert row["ip_range"] == ""
     assert row["oop_range"] == ""
+    # concept_tags is now populated -- the fixture is SB facing a BTN open
+    # with AQs, so at least "small_blind", "facing_single_raise", and
+    # "ace_blocker" should fire.
+    assert row["concept_tags"]
+    tag_list = [t.strip() for t in row["concept_tags"].split(",")]
+    assert "small_blind" in tag_list
+    assert "facing_single_raise" in tag_list
+    assert "ace_blocker" in tag_list
 
 
 def test_solver_reference_is_pack_relative_path() -> None:

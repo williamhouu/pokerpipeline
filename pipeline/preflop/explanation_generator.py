@@ -427,6 +427,14 @@ def _question_framing_preflop(facts: PreflopFacts) -> str:
     return framing
 
 
+def _compute_concept_tags_for_prompt(facts: PreflopFacts) -> list[str]:
+    """The firing concept tags for this spot. Imported lazily so the
+    concept-tag module isn't required for postflop test fixtures."""
+    from pipeline.preflop.concept_tags import compute_concept_tags  # noqa: PLC0415
+
+    return compute_concept_tags(facts)
+
+
 def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
     """A compact JSON-ready view of PreflopFacts for the user prompt.
 
@@ -456,6 +464,11 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         "dominant_action": spot.dominant_action,
         "dominant_frequency": round(spot.dominant_frequency, 4),
         "archetype": facts.archetype,
+        # Concept tags from pipeline.preflop.concept_tags -- the firing
+        # tags for this spot. Layer 6 uses them to anchor the explanation
+        # in specific strategic concepts (e.g. "ace_blocker" makes
+        # 3-bet bluff prose more concrete).
+        "concept_tags": _compute_concept_tags_for_prompt(facts),
     }
     if facts.villain_stats is not None:
         v = facts.villain_stats
