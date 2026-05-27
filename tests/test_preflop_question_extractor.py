@@ -54,13 +54,39 @@ def test_top_action_frequency_returns_dominant():
 
 
 def test_total_presence_sums_all():
+    """For test fixtures that don't set presence explicitly, the sentinel
+    default + __post_init__ in PreflopSpot auto-computes presence from
+    action_frequencies sum. Frequencies summing to 1.0 -> presence 1.0."""
     spot = _spot({"Raise": 0.7, "Call": 0.2, "Fold": 0.1})
     assert total_presence(spot) == pytest.approx(1.0)
 
 
 def test_total_presence_zero_for_no_show():
+    """All-zero frequencies (hand never reaches node) -> presence 0."""
     spot = _spot({"Raise": 0.0, "Call": 0.0, "Fold": 0.0}, dominant_action="Fold")
     assert total_presence(spot) == 0.0
+
+
+def test_total_presence_reads_explicit_presence_field():
+    """total_presence reads spot.presence directly -- it's the
+    UN-NORMALISED 'how often does hand reach node' signal. When the
+    fixture sets action_frequencies to the CONDITIONAL strategy (sums
+    to 1.0) but presence to a different value, total_presence returns
+    that explicit value, not the sum."""
+    spot = PreflopSpot(
+        node=PreflopDecisionNode(
+            pack_id="t", actor="BTN", history_before=(), actions=()
+        ),
+        hero_hand_class="AKo",
+        hero_card_combo="AhKc",
+        action_frequencies={"Call": 0.75, "Fold": 0.25},  # conditional, sums to 1
+        dominant_action="Call",
+        dominant_frequency=0.75,
+        presence=0.40,  # un-normalised
+    )
+    assert total_presence(spot) == pytest.approx(0.40)
+    # Sanity: action_frequencies still sum to ~1.0 (conditional strategy).
+    assert sum(spot.action_frequencies.values()) == pytest.approx(1.0)
 
 
 # --- difficulty_score ------------------------------------------------------
@@ -160,12 +186,10 @@ def test_custom_frequency_window():
 
 def test_min_presence_override():
     """Tight presence threshold filters out marginal hands."""
-    spot = _spot({"Raise": 0.50, "Call": 0.04, "Fold": 0.01}, dominant_action="Raise")
-    # default 0.55 floor on frequency -> not worthy anyway
-    spot2 = _spot({"Raise": 0.60, "Call": 0.05, "Fold": 0.0})
+    spot = _spot({"Raise": 0.60, "Call": 0.05, "Fold": 0.0})
     # Presence is 0.65; with min_presence=0.7 it'd be excluded.
-    assert is_question_worthy(spot2, min_presence=0.7) is False
-    assert is_question_worthy(spot2, min_presence=0.5) is True
+    assert is_question_worthy(spot, min_presence=0.7) is False
+    assert is_question_worthy(spot, min_presence=0.5) is True
 
 
 # --- evaluate_spot ---------------------------------------------------------

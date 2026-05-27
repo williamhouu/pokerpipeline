@@ -43,10 +43,16 @@ def top_action_frequency(spot: PreflopSpot) -> float:
 
 
 def total_presence(spot: PreflopSpot) -> float:
-    """Sum of all action frequencies -- a proxy for "does hero ever reach
-    this decision with this hand?". Zero or near-zero = hand folded
-    earlier in the tree and the spot is bogus."""
-    return sum(spot.action_frequencies.values())
+    """How often hero reaches this decision with this hand, in [0.0, 1.0].
+
+    Reads ``spot.presence`` directly (the sum of Pio's raw presence-
+    weighted action weights before normalisation). Summing
+    ``action_frequencies`` would not work here: those values are
+    CONDITIONAL on reaching the node, so they sum to ~1.0 for any
+    present hand and to 0 for absent ones -- losing the gradient
+    between "barely reaches" and "always reaches".
+    """
+    return spot.presence
 
 
 def difficulty_score(spot: PreflopSpot) -> int:

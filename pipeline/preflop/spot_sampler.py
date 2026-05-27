@@ -51,11 +51,38 @@ class PreflopSpot:
         hero_card_combo: A specific 4-char combo (``'AhKc'``) chosen as
             the visible representative for the hand class. Used by Layer
             8's ``User Cards`` column.
-        action_frequencies: Mapping from action ``label`` to hero's
-            weight for that action. e.g. ``{"Fold": 0.0, "Call": 0.18,
-            "Raise 60%": 0.82}``.
-        dominant_action: The action label with the highest frequency.
-        dominant_frequency: That highest frequency, in [0.0, 1.0].
+        action_frequencies: CONDITIONAL strategy at this decision -- the
+            mapping from action ``label`` to hero's frequency given the
+            hand reaches the node. e.g. ``{"Fold": 0.0, "Call": 0.18,
+            "Raise 60%": 0.82}``. The values sum to 1.0 (modulo rounding)
+            when ``presence > 0``, or all zeros when ``presence == 0``.
+        dominant_action: The action label with the highest conditional
+            frequency.
+        dominant_frequency: That highest conditional frequency, in
+            [0.0, 1.0]. Used by the worthiness filter and difficulty
+            rating -- both want "given the hand is here, how dominant
+            is the best action".
+        presence: How often this hand reaches the node, in [0.0, 1.0].
+            Equal to the sum of the RAW (presence-weighted) Pio weights
+            before normalisation. Used by the worthiness filter's
+            "does the hand actually reach this decision" check (a hand
+            with presence < 0.01 was almost always folded earlier in
+            the tree and isn't a real spot).
+
+    Normalisation note: Pio's range files give us raw weights that are
+    the JOINT probability (hand reaches node AND takes action). For
+    question writing we want the CONDITIONAL strategy at this decision,
+    so :func:`sample_spot` divides each raw weight by their sum (the
+    presence) to get the normalised dict stored here. Without that
+    step, a hand that reaches the node only 62% of the time but folds
+    100% of the time it does would show as ``Fold: 62%`` -- looking
+    like a mixed strategy when it's actually pure-fold.
+
+    The default ``presence = -1.0`` is a sentinel for "auto-compute from
+    action_frequencies on init", so test fixtures that construct
+    ``PreflopSpot`` directly with already-normalised data don't need
+    to track this field explicitly. :func:`sample_spot` always passes
+    an explicit value.
     """
 
     node: PreflopDecisionNode
@@ -64,6 +91,16 @@ class PreflopSpot:
     action_frequencies: dict[str, float] = field(default_factory=dict)
     dominant_action: str = ""
     dominant_frequency: float = 0.0
+    presence: float = -1.0
+
+    def __post_init__(self) -> None:
+        if self.presence < 0:
+            # Auto-compute from action_frequencies. For real spots
+            # (built by sample_spot) presence is always passed explicitly;
+            # this branch is just for test-fixture convenience.
+            object.__setattr__(
+                self, "presence", float(sum(self.action_frequencies.values()))
+            )
 
 
 # --- range-file caching -----------------------------------------------------
@@ -189,17 +226,34 @@ def sample_spot(
             f"(expected one of the 169 canonical classes)"
         )
     chosen_combo = combo or representative_combo_for_class(hero_hand_class)
-    freqs = _frequencies_for_hand_class(node.actions, hero_hand_class)
+
+    # Pio's range files give us PRESENCE-WEIGHTED weights (joint
+    # probability of reaching this node AND taking the action). Sum
+    # them to get presence (how often the hand reaches here), then
+    # divide each by presence to get the CONDITIONAL strategy at this
+    # decision -- which is what the worthiness filter, difficulty
+    # rating, options selection, and the CSV display all want.
+    raw_freqs = _frequencies_for_hand_class(node.actions, hero_hand_class)
+    presence = sum(raw_freqs.values())
+    if presence > 0:
+        action_freqs = {label: weight / presence for label, weight in raw_freqs.items()}
+    else:
+        # Hand never reaches this node. Keep zeros so action_frequencies
+        # structurally matches the action set; downstream worthiness
+        # checks will drop the spot via the presence filter.
+        action_freqs = dict(raw_freqs)
+
     dominant_label, dominant_freq = (
-        max(freqs.items(), key=lambda kv: kv[1]) if freqs else ("", 0.0)
+        max(action_freqs.items(), key=lambda kv: kv[1]) if action_freqs else ("", 0.0)
     )
     return PreflopSpot(
         node=node,
         hero_hand_class=hero_hand_class,
         hero_card_combo=chosen_combo,
-        action_frequencies=freqs,
+        action_frequencies=action_freqs,
         dominant_action=dominant_label,
         dominant_frequency=dominant_freq,
+        presence=presence,
     )
 
 
@@ -212,19 +266,22 @@ def enumerate_spots_for_node(
 
     Args:
         node: The node to sample.
-        min_total_weight: Skip classes whose total weight across all
-            actions is below this threshold. Default 0 = include every
-            class (even hands the actor never has in this spot, which
-            have all-zero weights). 0.01 is a sensible minimum for
-            "this hand actually shows up at the node."
+        min_total_weight: Skip hand classes whose ``presence`` (how often
+            the hand reaches this node) is below this threshold.
+            Default 0 = include every class (even hands the actor never
+            has). 0.01 is a sensible minimum for "this hand actually
+            shows up here".
 
     Yields:
         One PreflopSpot per non-filtered hand class.
     """
     for hand_class in canonical_169_hand_classes():
         spot = sample_spot(node, hand_class)
-        total = sum(spot.action_frequencies.values())
-        if total < min_total_weight:
+        # presence is the un-normalised sum -- the right signal for
+        # "does this hand reach the node at all". Summing
+        # action_frequencies (now conditional) would always give ~1.0
+        # for present hands and 0 for absent ones, losing resolution.
+        if spot.presence < min_total_weight:
             continue
         yield spot
 
