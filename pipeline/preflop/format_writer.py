@@ -163,16 +163,49 @@ def _stack_depth_bucket(effective_stack_bb: float) -> str:
 def _format_action_frequencies(strategy: dict[str, float]) -> str:
     """The action_frequencies CSV column value.
 
-    Renders the dominant ``{action_label: freq}`` strategy as a comma-
-    separated list of ``<label>: <integer>%`` entries, ordered by
-    descending frequency. Mirrors the postflop helper.
+    Renders the strategy as a comma-separated list of
+    ``<label>: <integer>%`` entries, ordered by descending frequency.
 
-    Empty strategy -> empty string (the column is best-effort).
+    Integer percentages are rounded using the **largest-remainder
+    method** (Hare-Niemeyer) so they sum to exactly 100. Naive
+    per-entry rounding produces visible totals like
+    ``"Fold: 94%, 4-bet: 5%"`` (sums to 99) or
+    ``"Call: 60%, Fold: 25%, 4-bet: 16%"`` (sums to 101). The
+    largest-remainder method floors each entry then distributes the
+    deficit by handing +1 to the entries with the largest fractional
+    parts -- mathematically fair (no single column absorbs all the
+    rounding error) and the standard fix for this class of bug.
+
+    Empty strategy -> empty string. All-zero strategy (hand doesn't
+    reach the node) -> empty string too, since 0% × N doesn't sum to
+    100 and showing "Fold: 0%, Call: 0%" is misleading.
     """
     if not strategy:
         return ""
+    total = sum(strategy.values())
+    if total <= 0:
+        # All-zero strategy. Nothing to render -- the column is
+        # best-effort and a "0%" row carries no information.
+        return ""
     by_freq_desc = sorted(strategy.items(), key=lambda kv: -kv[1])
-    parts = [f"{label}: {round(100 * freq)}%" for label, freq in by_freq_desc]
+    # Largest-remainder rounding.
+    raw = [(label, freq * 100.0) for label, freq in by_freq_desc]
+    floors = [(label, int(value), value - int(value)) for label, value in raw]
+    deficit = 100 - sum(floor for _, floor, _ in floors)
+    if deficit != 0:
+        # Top `deficit` entries by remainder get +1. (For negative deficit
+        # -- impossible with non-negative inputs that sum to <=1 -- the
+        # bottom |deficit| entries would get -1; not exercised.)
+        ranked_by_remainder = sorted(enumerate(floors), key=lambda kv: -kv[1][2])[
+            : max(deficit, 0)
+        ]
+        bumps = {idx for idx, _ in ranked_by_remainder}
+    else:
+        bumps = set()
+    parts = [
+        f"{label}: {floor + (1 if i in bumps else 0)}%"
+        for i, (label, floor, _) in enumerate(floors)
+    ]
     return ", ".join(parts)
 
 

@@ -358,6 +358,75 @@ def test_difficulty_rating_passes_through() -> None:
     assert row["Difficulty Rating"] == "2300"
 
 
+def _sum_pcts(action_frequencies_str: str) -> int:
+    """Pull the integer percentages out of an action_frequencies cell and
+    return their sum. Helper for the rounding tests."""
+    if not action_frequencies_str:
+        return 0
+    total = 0
+    for chunk in action_frequencies_str.split(","):
+        if ":" in chunk:
+            _, pct = chunk.split(":")
+            total += int(pct.strip().rstrip("%"))
+    return total
+
+
+def test_action_frequencies_sums_to_100_with_naive_rounding_case() -> None:
+    """Cases that would round to 99% or 101% under naive per-entry
+    rounding now sum to exactly 100% via the largest-remainder method.
+    """
+    from pipeline.preflop.format_writer import _format_action_frequencies
+
+    # Case 1: would round to 99% naively (94 + 5 = 99, plus 0s).
+    out1 = _format_action_frequencies({"Fold": 0.941, "4-bet": 0.054, "Call": 0.005})
+    assert _sum_pcts(out1) == 100
+
+    # Case 2: would round to 101% naively (60 + 25 + 16 = 101, plus 0).
+    out2 = _format_action_frequencies({"Call": 0.604, "Fold": 0.247, "4-bet": 0.149})
+    assert _sum_pcts(out2) == 100
+
+    # Case 3: every freq has a .5 fractional remainder -- worst case for
+    # naive rounding.
+    out3 = _format_action_frequencies({"Call": 0.335, "Fold": 0.335, "Raise": 0.330})
+    assert _sum_pcts(out3) == 100
+
+
+def test_action_frequencies_order_preserved_after_rounding() -> None:
+    """The rounding fix must not change the descending-frequency order."""
+    from pipeline.preflop.format_writer import _format_action_frequencies
+
+    out = _format_action_frequencies({"Fold": 0.604, "Call": 0.247, "Raise": 0.149})
+    # The first label is the dominant action; the order matches descending
+    # frequency.
+    labels = [chunk.split(":")[0].strip() for chunk in out.split(",")]
+    assert labels == ["Fold", "Call", "Raise"]
+
+
+def test_action_frequencies_pure_strategy_sums_to_100() -> None:
+    """A pure strategy ({Call: 1.0}) renders as "Call: 100%" and sums to 100."""
+    from pipeline.preflop.format_writer import _format_action_frequencies
+
+    out = _format_action_frequencies({"Call": 1.0, "Fold": 0.0, "Raise": 0.0})
+    assert _sum_pcts(out) == 100
+    assert out.startswith("Call: 100%")
+
+
+def test_action_frequencies_empty_strategy_empty_string() -> None:
+    """Empty strategy dict -> empty string column."""
+    from pipeline.preflop.format_writer import _format_action_frequencies
+
+    assert _format_action_frequencies({}) == ""
+
+
+def test_action_frequencies_all_zero_strategy_empty_string() -> None:
+    """All-zero strategy (hand never reaches node) -> empty string. A
+    '0%' row carries no information and showing 'Fold: 0%, Call: 0%' as
+    the action_frequencies cell would be confusing."""
+    from pipeline.preflop.format_writer import _format_action_frequencies
+
+    assert _format_action_frequencies({"Fold": 0.0, "Call": 0.0}) == ""
+
+
 def test_action_frequencies_descending_percentages() -> None:
     """action_frequencies uses canonical labels ('3-bet', not 'Raise 308%')
     so the column doesn't read like 'Raise 308%: 40%' which players /
