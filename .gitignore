@@ -30,6 +30,12 @@ dist/
 .env
 .env.*
 
+# Prompt-editor overrides -- written by the admin panel's Prompt page when
+# you save an edited prompt. These are local experiments by design; commit
+# changes via VOICE_RULES_PREFLOP / PREFLOP_ARCHETYPE_GUIDANCE in the
+# pipeline source when you want them part of the team default.
+admin_panel/prompts/
+
 # Editors
 .idea/
 .vscode/

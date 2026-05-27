@@ -35,6 +35,7 @@ from pipeline.explanation_generator import (  # noqa: E402
     GeneratedExplanation,
 )
 from pipeline.preflop.explanation_generator import (  # noqa: E402
+    _PROMPT_OVERRIDE_PATH,
     PREFLOP_ARCHETYPE_GUIDANCE,
     VOICE_RULES_PREFLOP,
     _detect_option_style_preflop,
@@ -47,6 +48,7 @@ from pipeline.preflop.explanation_generator import (  # noqa: E402
     build_preflop_system_prompt,
     build_preflop_user_prompt,
     generate_preflop_explanation,
+    load_preflop_system_prompt,
 )
 from pipeline.preflop.fact_extractor import (  # noqa: E402
     PreflopFacts,
@@ -539,6 +541,98 @@ def test_extract_text_raises_on_missing_content() -> None:
     obj = SimpleNamespace(content=None)
     with pytest.raises(ExplanationValidationError):
         _extract_text(obj)
+
+
+# --- load_preflop_system_prompt: override file mechanism --------------------
+def test_load_prompt_falls_back_to_built_in_when_no_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the override file doesn't exist, the built-in default is used."""
+    override = tmp_path / "preflop_system.txt"
+    monkeypatch.setattr(
+        "pipeline.preflop.explanation_generator._PROMPT_OVERRIDE_PATH",
+        override,
+    )
+    assert not override.exists()
+    result = load_preflop_system_prompt()
+    # Same as the built-in default.
+    assert result == build_preflop_system_prompt()
+
+
+def test_load_prompt_reads_override_when_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the override file exists, its content is returned verbatim --
+    no merging with the built-in default."""
+    override = tmp_path / "preflop_system.txt"
+    custom = "CUSTOM PROMPT for testing -- replaces the default entirely."
+    override.write_text(custom, encoding="utf-8")
+    monkeypatch.setattr(
+        "pipeline.preflop.explanation_generator._PROMPT_OVERRIDE_PATH",
+        override,
+    )
+    assert load_preflop_system_prompt() == custom
+    # And it really is different from the default.
+    assert load_preflop_system_prompt() != build_preflop_system_prompt()
+
+
+def test_load_prompt_reads_file_each_call_not_cached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No caching -- edits to the override file take effect on the next
+    call. Critical for the admin panel's edit-test-iterate workflow."""
+    override = tmp_path / "preflop_system.txt"
+    monkeypatch.setattr(
+        "pipeline.preflop.explanation_generator._PROMPT_OVERRIDE_PATH",
+        override,
+    )
+    override.write_text("version 1", encoding="utf-8")
+    assert load_preflop_system_prompt() == "version 1"
+    # Edit the file -- the next call should reflect the change.
+    override.write_text("version 2", encoding="utf-8")
+    assert load_preflop_system_prompt() == "version 2"
+    # Delete the file -- back to default.
+    override.unlink()
+    assert load_preflop_system_prompt() == build_preflop_system_prompt()
+
+
+def test_override_path_points_at_admin_panel_prompts_dir() -> None:
+    """Sanity: the override path is the expected location under
+    admin_panel/prompts/. Catches a future accidental move of the file."""
+    assert _PROMPT_OVERRIDE_PATH.name == "preflop_system.txt"
+    assert _PROMPT_OVERRIDE_PATH.parent.name == "prompts"
+    assert _PROMPT_OVERRIDE_PATH.parent.parent.name == "admin_panel"
+
+
+def test_generate_preflop_answer_explanation_uses_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: an override file changes the system prompt the LLM
+    actually receives."""
+    from pipeline.preflop.explanation_generator import (
+        generate_preflop_answer_explanation,
+    )
+
+    override = tmp_path / "preflop_system.txt"
+    custom = "OVERRIDDEN SYSTEM PROMPT FOR TEST"
+    override.write_text(custom, encoding="utf-8")
+    monkeypatch.setattr(
+        "pipeline.preflop.explanation_generator._PROMPT_OVERRIDE_PATH",
+        override,
+    )
+
+    good = '{"answer_explanation": "This is a clear fold."}'
+    client = _mock_client([good])
+    generate_preflop_answer_explanation(
+        _frequency_facts(),
+        options=["Fold", "Call"],
+        correct_answer="Call",
+        client=client,
+        gold_examples=_GOLD_STUB,
+    )
+    # The system block sent to the API contains the override content.
+    sent_system = client._calls[0]["system"]
+    assert sent_system[0]["text"] == custom
 
 
 if __name__ == "__main__":

@@ -97,6 +97,16 @@ PREFLOP_OUTPUT_DIR = (
     Path(__file__).resolve().parent.parent / "test_output" / "preflop_batches"
 )
 
+# Where the prompt-editor page writes Layer 6 system-prompt overrides. The
+# pipeline checks for this file on every generation call -- a saved edit
+# takes effect on the next batch without an admin-panel restart. Mirror
+# of pipeline.preflop.explanation_generator._PROMPT_OVERRIDE_PATH; kept in
+# sync so the editor and the loader agree on the path. Gitignored so
+# experimental prompts don't leak into commits.
+PREFLOP_PROMPT_OVERRIDE_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "preflop_system.txt"
+)
+
 # --- repo paths -------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOLVES_DIR = REPO_ROOT / "solves"
@@ -1327,104 +1337,169 @@ def render_browse_page() -> None:
 
 # --- page: Prompt -----------------------------------------------------------
 def render_prompt_page() -> None:
+    """The system prompt editor.
+
+    Right now only the **preflop** prompt is editable -- preflop is the only
+    path that actually generates questions (postflop is blocked on Pio
+    solves; its prompt is shown read-only for reference).
+
+    Edits to the preflop prompt save to ``admin_panel/prompts/preflop_system.txt``.
+    :func:`pipeline.preflop.explanation_generator.load_preflop_system_prompt`
+    checks for that file at every call -- so edits take effect on the
+    NEXT batch you start (no admin-panel restart needed). Reset deletes
+    the file, reverting to the built-in default.
+    """
     st.title("System prompt editor")
     st.caption(
-        "Edit the system prompt Layer 6 sends to Claude for explanation "
-        "generation. Version everything; test on one spot before "
-        "committing to a batch."
+        "Edit the system prompt Layer 6 sends to Claude. Edits save to a "
+        "file under `admin_panel/prompts/` and take effect on the next batch "
+        "you start -- no restart needed."
     )
 
-    # In v1 preview the only "version" is the current default built in code.
-    # When the prompt-versioning backend lands, this dropdown lists saved
-    # versions from admin_panel/prompts/*.txt (or a DB table).
-    versions = ["v1-default (built-in)"]
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        active_version = st.selectbox(
-            "Active version",
-            options=versions,
-            index=0,
-            help=(
-                "Versioning UI is wired here, but saved versions need "
-                "the backend store. Right now only v1-default exists."
-            ),
-        )
-    with col2:
-        st.write("")  # spacer for vertical alignment
-        st.button(
-            "+ New version",
-            disabled=True,
-            help="Backend prompt-version store not implemented yet.",
-        )
+    mode = st.radio(
+        "Pipeline path",
+        options=["Preflop (editable)", "Postflop (read-only -- blocked on solves)"],
+        index=0,
+        horizontal=True,
+        key="prompt_mode",
+    )
 
-    # Pull the actual current default prompt from the pipeline so what
-    # you see here is exactly what generation would send.
-    try:
-        prompt_text = build_system_prompt()
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Could not load default prompt: {exc}")
+    if mode.startswith("Postflop"):
+        try:
+            prompt_text = build_system_prompt()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load postflop default prompt: {exc}")
+            return
+        st.info(
+            "Postflop generation is currently blocked (no Pio solves on "
+            "Mac). Its system prompt is shown here for reference -- "
+            "editing it would have no effect until postflop generation "
+            "is unblocked. Use Preflop mode above for live edits."
+        )
+        st.caption(
+            f"Built-in postflop default · {len(prompt_text):,} chars · "
+            f"~{len(prompt_text) // 4:,} tokens"
+        )
+        st.text_area(
+            "Postflop prompt (read-only reference)",
+            value=prompt_text,
+            height=600,
+            disabled=True,
+        )
         return
 
-    st.caption(
-        f"Active: **{active_version}** · "
-        f"{len(prompt_text):,} chars · "
-        f"~{len(prompt_text) // 4:,} tokens (rough estimate)"
+    # --- Preflop mode: editable with override file ---
+    from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+        build_preflop_system_prompt,
+        load_preflop_system_prompt,
     )
+
+    override_path = PREFLOP_PROMPT_OVERRIDE_PATH
+    default_prompt = build_preflop_system_prompt()
+    active_prompt = load_preflop_system_prompt()
+    using_override = override_path.is_file()
+
+    # Status banner.
+    if using_override:
+        st.warning(
+            f"🟡 **Override active.** Edits are loaded from "
+            f"`{override_path.relative_to(REPO_ROOT)}`. Click "
+            "**Reset to default** below to revert."
+        )
+    else:
+        st.success(
+            "🟢 **Using built-in default prompt.** Save your first edit "
+            "to switch to override mode."
+        )
+
+    st.caption(
+        f"Active: **{'override' if using_override else 'built-in default'}** · "
+        f"{len(active_prompt):,} chars · "
+        f"~{len(active_prompt) // 4:,} tokens (rough estimate)"
+    )
+
     edited = st.text_area(
-        "Prompt content (edit live)",
-        value=prompt_text,
+        "Preflop system prompt (edit live)",
+        value=active_prompt,
         height=600,
+        key="preflop_prompt_textarea",
         help=(
-            "Currently displays the built-in default from "
-            "pipeline.explanation_generator.build_system_prompt(). Edits "
-            "to this box are local to your browser session until the "
-            "version-store backend lands."
+            "Edits to this box are session-local until you click Save. "
+            "Save writes to admin_panel/prompts/preflop_system.txt and "
+            "takes effect on the next batch."
         ),
     )
 
-    # Show edit indicator
-    if edited != prompt_text:
-        st.warning(
-            f"Edits not yet saved. Diff: {len(edited) - len(prompt_text):+,} "
-            "chars from default."
+    # Edit-diff indicator.
+    if edited != active_prompt:
+        diff_chars = len(edited) - len(active_prompt)
+        st.caption(
+            f"🔵 Unsaved edits ({diff_chars:+,} chars vs. currently active prompt). "
+            "Click Save to persist."
         )
 
     st.divider()
 
     # --- Action buttons ---
-    st.subheader("Actions")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.button(
-            "💾  Save as new version",
-            disabled=True,
+        save_clicked = st.button(
+            "💾  Save",
+            type="primary",
             use_container_width=True,
-            help="Saves to admin_panel/prompts/<name>.txt (backend pending).",
+            disabled=(edited == active_prompt),
+            help=(
+                "Writes the textarea content to "
+                "admin_panel/prompts/preflop_system.txt. Next batch picks "
+                "it up automatically."
+            ),
         )
     with col2:
-        st.button(
-            "🧪  Test on 1 spot",
-            disabled=True,
+        reset_clicked = st.button(
+            "↺  Reset to default",
             use_container_width=True,
+            disabled=not using_override,
             help=(
-                "Generates a single question with this prompt so you can "
-                "verify output format before running a batch. Needs ANTHROPIC_API_KEY + a sample spot."
+                "Deletes the override file. Next batch uses the built-in "
+                "default from build_preflop_system_prompt()."
             ),
         )
     with col3:
-        st.button(
-            "↺  Reset to default",
-            disabled=True,
+        show_default_clicked = st.button(
+            "👁  Show built-in default",
             use_container_width=True,
+            disabled=not using_override,
+            help="Diff the current override against the built-in default.",
         )
-    with col4:
-        st.button(
-            "✅  Set as default",
-            disabled=True,
-            type="primary",
-            use_container_width=True,
-            help="Future batches use this version unless overridden.",
+
+    if save_clicked:
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        override_path.write_text(edited, encoding="utf-8")
+        st.success(
+            f"✅ Saved to `{override_path.relative_to(REPO_ROOT)}`. "
+            "Next batch will use these edits."
         )
+        st.rerun()
+
+    if reset_clicked:
+        override_path.unlink()
+        st.success("✅ Override deleted. Next batch will use the built-in default.")
+        st.rerun()
+
+    if show_default_clicked:
+        with st.expander("Built-in default prompt (read-only)", expanded=True):
+            st.text_area(
+                "Default",
+                value=default_prompt,
+                height=400,
+                disabled=True,
+                key="default_prompt_readonly",
+            )
+            st.caption(
+                f"Default: {len(default_prompt):,} chars  ·  "
+                f"Override: {len(active_prompt):,} chars  ·  "
+                f"Diff: {len(active_prompt) - len(default_prompt):+,} chars"
+            )
 
     st.divider()
 
@@ -1432,18 +1507,17 @@ def render_prompt_page() -> None:
     st.subheader("⚠️  Editing the prompt — what to know")
     st.markdown(
         """
-- **Test on 1 spot before any batch** — a typo in the prompt can break
-  the JSON output format and waste a batch's API spend.
-- **Versions are tracked.** Every generated question records which prompt
-  version produced it. If a batch comes out badly, you can trace which
-  prompt is responsible.
-- **The default prompt encodes hard-won lessons** (9 voice rules, banned
-  phrases, archetype framing, the May 2026 Ryan-feedback fixes). Treat
-  rewrites as research, not editing — keep the original around as
-  `v1-default` and ship from named alternatives.
+- **Test with a dry-run first.** A typo in the prompt can break the
+  JSON output format and waste a batch's API spend. Dry-run is free,
+  so verify shape before any real generation.
+- **The default prompt encodes hard-won lessons** -- 10 voice rules,
+  banned phrases, archetype framing, the May 2026 Ryan-feedback fixes.
+  Treat rewrites as research, not casual editing.
 - **Big prompt changes change Claude's behavior in non-obvious ways.**
-  When experimenting, use Sonnet 4.6 first (cheap) and only validate the
-  winners with Opus 4.7.
+  When experimenting, switch to Sonnet 4.6 on the Generate page first
+  (~5× cheaper) and only validate the winners with Opus 4.7.
+- **The override file is gitignored by default** -- copy your edits
+  somewhere safe if you need them across machines.
         """
     )
 

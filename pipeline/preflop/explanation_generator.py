@@ -52,6 +52,7 @@ import json
 import logging
 import os
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from pipeline.explanation_generator import (
@@ -712,6 +713,39 @@ def generate_preflop_explanation(
     )
 
 
+# --- system-prompt override loader -------------------------------------------
+# The admin panel's prompt editor saves edited prompts to a file under
+# admin_panel/prompts/. If that file exists, it overrides the built-in
+# :func:`build_preflop_system_prompt` output -- so prompt iteration doesn't
+# require code changes. Reset = delete the file.
+_PROMPT_OVERRIDE_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "admin_panel"
+    / "prompts"
+    / "preflop_system.txt"
+)
+
+
+def load_preflop_system_prompt() -> str:
+    """The active preflop system prompt -- override file if present, built-in
+    default otherwise.
+
+    The override mechanism lets the admin panel save edited prompts to
+    ``admin_panel/prompts/preflop_system.txt``; this function checks for
+    that file at every call. Reset to default = delete the override.
+
+    Cached at module level would defeat the prompt-editor workflow (the
+    user expects edits to take effect on the next generation), so this
+    is intentionally NOT cached -- the file read happens per call.
+    For batch runs the cost is negligible (one stat + maybe one read
+    per batch start; the Anthropic prompt cache still applies to the
+    resulting string since the content is identical across spots).
+    """
+    if _PROMPT_OVERRIDE_PATH.is_file():
+        return _PROMPT_OVERRIDE_PATH.read_text(encoding="utf-8")
+    return build_preflop_system_prompt()
+
+
 # --- new: explanation-only path (Layer 6 with deterministic options) --------
 # Once :mod:`pipeline.preflop.options` computes the option strings + correct
 # answer in pure Python, the LLM's job collapses to writing the explanation
@@ -733,7 +767,7 @@ def _explanation_only_user_prompt(
     system = [
         {
             "type": "text",
-            "text": build_preflop_system_prompt(),
+            "text": load_preflop_system_prompt(),
             "cache_control": {"type": "ephemeral"},
         }
     ]
@@ -917,4 +951,5 @@ __all__ = [
     "build_preflop_user_prompt",
     "generate_preflop_answer_explanation",
     "generate_preflop_explanation",
+    "load_preflop_system_prompt",
 ]
