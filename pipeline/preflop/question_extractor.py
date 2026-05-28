@@ -18,8 +18,12 @@ Mirrors ``pipeline.question_extractor`` for postflop, with two differences:
     that's just whichever zero-weight entry max() picked first. The
     ``min_presence`` filter excludes those.
 
-Difficulty uses the brief's MVP formula: harder spots = top action's
-frequency closer to the 55% floor; easier spots = closer to 95% ceiling.
+Difficulty (May 2026 update): combines BOTH the dominant-action frequency
+AND the EV gap between top-2 actions, when EV gap is available. The
+EV gap is computed downstream in the batch loop (needs facts/equity),
+then re-fed into :func:`difficulty_score` for a refined rating. When
+EV gap isn't available (raise-involved spots in v1), the score falls
+back to freq-only.
 """
 
 from __future__ import annotations
@@ -33,8 +37,18 @@ MIN_TOP_FREQUENCY = 0.55  # below: no clear best answer to teach
 MAX_TOP_FREQUENCY = 0.95  # above: the answer is too obvious
 MIN_PRESENCE = 0.01  # below: hand doesn't actually reach the node
 
+# Difficulty-blend constants. The "easy" scalar is a weighted average of
+# a frequency component and an EV-gap component, then linearly mapped to
+# the 500-3000 score range. Tuned against the first review batch; expect
+# further adjustment as more batches land.
 _DIFFICULTY_CEILING = 3000  # hardest
 _DIFFICULTY_FLOOR = 500  # easiest
+_FREQ_WEIGHT = 0.6  # primary signal: how obvious is the correct answer
+_EV_GAP_WEIGHT = 0.4  # secondary: how crisp is the right-vs-wrong distinction
+# EV gap above this is "fully easy" on the EV axis. 3bb covers the
+# realistic preflop call/fold EV-gap range (a 2.5bb-open BB-defend spot
+# with terrible equity tops out around ~2bb; deeper trees can hit 3bb).
+_EV_GAP_FULL_CREDIT_BB = 3.0
 
 
 def top_action_frequency(spot: PreflopSpot) -> float:
@@ -55,32 +69,52 @@ def total_presence(spot: PreflopSpot) -> float:
     return spot.presence
 
 
-def difficulty_score(spot: PreflopSpot) -> int:
+def difficulty_score(
+    spot: PreflopSpot,
+    ev_gap_bb: float | None = None,
+) -> int:
     """The spot's difficulty on the brief's 500-3000 scale.
 
-    Linear interpolation from 55% frequency (hardest = 3000) to 100%
-    frequency (easiest = 500), so the 95-100% range has gradation
-    rather than clamping to the floor:
+    Two signals when both are available:
 
-        ``score = 3000 - ((freq - 0.55) / 0.45) * 2500``
+      * **Frequency component**  -- ``(freq - 0.55) / 0.45``, clipped to
+        [0, 1]. 0 at the 55% worthiness floor (most ambiguous), 1 at
+        100% pure (most obvious).
+      * **EV-gap component**     -- ``min(ev_gap_bb / 3.0, 1)``,
+        clipped. 0 at 0 bb (close decision), 1 at 3 bb (clearly costly
+        mistake). 3 bb is the "fully easy" ceiling; above that adds
+        no further easiness credit.
 
-    Examples:
+    Blended ``easy = 0.6 * freq + 0.4 * ev_gap`` (freq weighted higher
+    because it's the more direct signal of "obvious correct answer";
+    EV gap is the modifier for "how costly is the wrong call").
+    Mapped to the 500-3000 score range with ``3000 - easy * 2500``.
 
-      * 55%  -> 3000 (barely dominant; multiple answers are reasonable)
-      * 75%  -> 1889 (mixed strategy, dominant action is meaningful)
-      * 95%  -> 778  (action is almost pure -- still has a small mix-in)
-      * 100% -> 500  (pure action; the easiest possible question)
+    When ``ev_gap_bb`` is ``None`` (e.g. raise-involved spots -- the v1
+    EV engine only handles call/fold), falls back to the freq-only
+    formula. Old behavior preserved.
 
-    Frequencies outside [0.55, 1.00] are clamped to the corresponding
-    end of the range; the worthiness filter normally drops < 0.55 and
-    > 0.95 spots before they reach this function. Pre-Ryan-feedback
-    May-2026 the denominator was 0.40 (clamped at 0.95), which gave the
-    same difficulty for 95% and 100% spots; Ryan asked for gradation in
-    the 95-100% range with 100% being the absolute easiest, so the
-    denominator is now 0.45.
+    Examples (freq, ev_gap_bb -> score):
+
+      * 55%, None       -> 3000  (hardest, no EV signal)
+      * 100%, None      -> 500   (easiest, no EV signal)
+      * 95%, None       -> 778   (very easy, no EV signal)
+      * 66%, 1.37       -> 2175  (3♣3♦ vs 3-bet: meaningful both ways)
+      * 81%, 1.38       -> 1672  (A♠8♠ vs 3-bet: high freq + modest gap)
+      * 95%, 3.0        -> 666   (very easy + clearly costly mistake)
+      * 55%, 3.0        -> 2000  (mixed strategy but big gap → still hard
+                                  to identify the right answer)
     """
     frequency = top_action_frequency(spot)
-    score = 3000 - ((frequency - 0.55) / 0.45) * 2500
+    freq_easy = max(0.0, min(1.0, (frequency - 0.55) / 0.45))
+
+    if ev_gap_bb is None:
+        easy = freq_easy
+    else:
+        ev_easy = max(0.0, min(1.0, ev_gap_bb / _EV_GAP_FULL_CREDIT_BB))
+        easy = _FREQ_WEIGHT * freq_easy + _EV_GAP_WEIGHT * ev_easy
+
+    score = 3000 - easy * 2500
     return round(max(_DIFFICULTY_FLOOR, min(_DIFFICULTY_CEILING, score)))
 
 

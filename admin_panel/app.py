@@ -947,6 +947,8 @@ def _render_generate_page_preflop() -> None:
         "How dominant the correct answer is in the solver. Same filter as "
         "postflop -- a 55-95% window is the question-worthy sweet spot."
     )
+    with st.popover("ℹ️  How is the Difficulty Rating calculated?"):
+        _render_difficulty_explainer()
     preset = st.radio(
         "Preset",
         options=["Easy", "Medium", "Hard", "Mixed", "Custom"],
@@ -1197,6 +1199,107 @@ def _start_preflop_job(
 
     # Re-run immediately so the job panel takes over the next render.
     st.rerun()
+
+
+def _render_difficulty_explainer() -> None:
+    """Popover content for "How is Difficulty calculated?".
+
+    Mirrors the docstring of
+    :func:`pipeline.preflop.question_extractor.difficulty_score`.
+    Edit both together so the UI text doesn't drift from the formula.
+    """
+    st.markdown(
+        """
+**Difficulty Rating** runs **500 (easiest) → 3000 (hardest)** per the
+brief's MVP scale. It blends two signals:
+
+**1. Top action frequency** &nbsp;·&nbsp; weight **60%**
+&nbsp;&nbsp;&nbsp;The dominant signal — how obvious the correct answer is.
+- 55% freq = barely dominant → hardest end
+- 100% freq = pure strategy → easiest end
+
+**2. EV gap** (bb between top 2 actions) &nbsp;·&nbsp; weight **40%**
+&nbsp;&nbsp;&nbsp;The modifier — how costly the wrong answer is.
+- 0 bb gap = solver noise / coin-flip → harder
+- 3+ bb gap = clearly costly mistake → easier _(capped at 3 bb)_
+
+**Blend**
+```
+freq_easy = (freq − 0.55) / 0.45               # clip to [0, 1]
+ev_easy   = min(ev_gap_bb / 3.0, 1.0)          # clip to [0, 1]
+easy      = 0.6 × freq_easy + 0.4 × ev_easy
+difficulty = round(3000 − easy × 2500)         # clamp to [500, 3000]
+```
+"""
+    )
+    st.markdown("**Examples**")
+    examples_df = pd.DataFrame(
+        [
+            {
+                "Freq": "55%",
+                "EV gap": "—",
+                "Difficulty": 3000,
+                "Reading": "Hardest possible (no EV signal)",
+            },
+            {
+                "Freq": "66%",
+                "EV gap": "1.4 bb",
+                "Difficulty": 2175,
+                "Reading": "Mixed strategy, meaningful both ways",
+            },
+            {
+                "Freq": "55%",
+                "EV gap": "3.0 bb",
+                "Difficulty": 2000,
+                "Reading": "Big gap but freq says still hard",
+            },
+            {
+                "Freq": "81%",
+                "EV gap": "1.4 bb",
+                "Difficulty": 1672,
+                "Reading": "High freq + modest gap",
+            },
+            {
+                "Freq": "95%",
+                "EV gap": "0 bb",
+                "Difficulty": 1667,
+                "Reading": "Near-pure but mistake costs nothing",
+            },
+            {
+                "Freq": "95%",
+                "EV gap": "—",
+                "Difficulty": 778,
+                "Reading": "Very easy (no EV signal)",
+            },
+            {
+                "Freq": "95%",
+                "EV gap": "3.0 bb",
+                "Difficulty": 666,
+                "Reading": "Very easy + costly mistake",
+            },
+            {
+                "Freq": "100%",
+                "EV gap": "—",
+                "Difficulty": 500,
+                "Reading": "Easiest possible",
+            },
+        ]
+    )
+    st.dataframe(examples_df, hide_index=True, use_container_width=True)
+    st.markdown(
+        """
+**When EV gap is unavailable** the formula falls back to **freq-only**.
+This happens when a Raise (3-bet / 4-bet / All-in) is in the top-2
+actions — the v1 EV engine only handles call/fold spots. Extending
+to raises needs postflop solves we don't have yet.
+
+**Why the filter slider below still says "frequency"** — the slider
+filters spots BEFORE we compute equity (which the EV gap needs).
+Running equity on every candidate would 5–10× the batch sampling time.
+The slider stays freq-based for performance; the EV gap refines the
+*displayed* Difficulty Rating after the filter has run.
+"""
+    )
 
 
 @st.fragment(run_every=1.0)

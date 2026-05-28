@@ -139,6 +139,85 @@ def test_difficulty_below_min_clamps_to_ceiling():
     assert difficulty_score(spot) == 3000
 
 
+# --- difficulty_score with EV-gap blend ------------------------------------
+# May-2026: difficulty_score now accepts an optional ev_gap_bb. When None
+# (raise-involved spots in v1) the formula falls back to freq-only --
+# tested by the freq-only cases above. The cases below cover the blend.
+
+
+def test_difficulty_with_ev_gap_at_high_freq_easy_spot():
+    """95% freq + 3bb gap = very easy spot. easy = 0.6*0.889 + 0.4*1.0
+    = 0.933 -> score = 3000 - 0.933*2500 = 666."""
+    spot = _spot({"Raise": 0.95, "Fold": 0.05})
+    score = difficulty_score(spot, ev_gap_bb=3.0)
+    assert 650 < score < 700
+
+
+def test_difficulty_with_zero_ev_gap_drops_score():
+    """High freq (95%) but EV gap of 0 = pure-ish action but mistake
+    is costless. Blend pulls "easy" down: easy = 0.6*0.889 + 0.4*0 =
+    0.533 -> score = 3000 - 1333 = 1667. Significantly harder than
+    the freq-only 778."""
+    spot = _spot({"Raise": 0.95, "Fold": 0.05})
+    score = difficulty_score(spot, ev_gap_bb=0.0)
+    assert 1640 < score < 1700
+
+
+def test_difficulty_with_big_gap_at_low_freq_still_hard():
+    """55% freq + 3bb gap. Freq says "hard"; gap says "easy". The
+    weighted blend lands around 2000 -- still on the hard half because
+    the dominant signal (freq) is at the floor."""
+    spot = _spot({"Raise": 0.55, "Fold": 0.45})
+    score = difficulty_score(spot, ev_gap_bb=3.0)
+    # easy = 0.6 * 0 + 0.4 * 1 = 0.4 -> score = 3000 - 1000 = 2000.
+    assert 1950 < score < 2050
+
+
+def test_difficulty_at_users_real_spot_3():
+    """User's batch No.3: BTN 3c3d facing BB 3-bet. freq=0.66, gap=1.37.
+    easy = 0.6*0.244 + 0.4*0.457 = 0.330 -> score ~2175.
+    This was 2389 freq-only; EV gap pulled it ~210 points easier."""
+    spot = _spot({"Fold": 0.66, "Call": 0.34})
+    score = difficulty_score(spot, ev_gap_bb=1.37)
+    assert 2150 < score < 2200
+
+
+def test_difficulty_at_users_real_spot_5():
+    """User's batch No.5: HJ As8s facing CO 3-bet. freq=0.81, gap=1.38.
+    easy = 0.6*0.578 + 0.4*0.46 = 0.531 -> score ~1672.
+    This was 1556 freq-only; EV gap pulled it ~115 points HARDER --
+    high freq alone overstated easiness given the modest gap."""
+    spot = _spot({"Fold": 0.81, "Call": 0.11, "4-bet": 0.08})
+    score = difficulty_score(spot, ev_gap_bb=1.38)
+    assert 1640 < score < 1700
+
+
+def test_difficulty_ev_gap_capped_at_3bb():
+    """EV gap of 10bb gives the SAME contribution as 3bb (the cap).
+    Stops a rare blown-out spot from pushing difficulty below the floor."""
+    spot = _spot({"Raise": 0.95, "Fold": 0.05})
+    score_at_cap = difficulty_score(spot, ev_gap_bb=3.0)
+    score_well_above = difficulty_score(spot, ev_gap_bb=10.0)
+    assert score_at_cap == score_well_above
+
+
+def test_difficulty_negative_ev_gap_clamped_to_zero():
+    """Defensive: a negative gap shouldn't break the formula. Clamps
+    to 0bb contribution."""
+    spot = _spot({"Raise": 0.75, "Fold": 0.25})
+    score_zero = difficulty_score(spot, ev_gap_bb=0.0)
+    score_negative = difficulty_score(spot, ev_gap_bb=-1.0)
+    assert score_zero == score_negative
+
+
+def test_difficulty_none_ev_gap_matches_freq_only():
+    """Backward compat: difficulty_score(spot) == difficulty_score(spot,
+    ev_gap_bb=None). Old callers (and raise-involved spots in v1) get
+    the freq-only score."""
+    spot = _spot({"Raise": 0.75, "Fold": 0.25})
+    assert difficulty_score(spot) == difficulty_score(spot, ev_gap_bb=None)
+
+
 # --- is_question_worthy ----------------------------------------------------
 def test_worthy_spot_passes_all_gates():
     spot = _spot({"Raise": 0.7, "Fold": 0.3})

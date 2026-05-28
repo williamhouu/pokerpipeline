@@ -59,6 +59,7 @@ from pipeline.explanation_generator import (
     DEFAULT_TEMPERATURE,
     GeneratedExplanation,
 )
+from pipeline.preflop.ev_engine import compute_ev_gap_bb
 from pipeline.preflop.explanation_generator import (
     generate_preflop_answer_explanation,
 )
@@ -79,6 +80,7 @@ from pipeline.preflop.question_extractor import (
     MIN_PRESENCE,
     MIN_TOP_FREQUENCY,
     PreflopQuestionEvaluation,
+    difficulty_score,
     evaluate_spot,
 )
 from pipeline.preflop.spot_sampler import (
@@ -324,7 +326,11 @@ def generate_preflop_batch(
     # 5. Per-spot: extract facts, generate explanation, collect row triples.
     rows: list[tuple] = []
     failures: list[str] = []
-    for index, (spot, evaluation) in enumerate(sampled):
+    # ``_evaluation`` carried the pre-facts freq-only difficulty; we
+    # discard it now and recompute below with EV gap once facts are
+    # available. Kept in the tuple so collect_worthy_spots's return
+    # shape stays stable.
+    for index, (spot, _evaluation) in enumerate(sampled):
         if progress_callback is not None:
             progress_callback(
                 f"Generating question {index + 1}/{sample_size} "
@@ -348,7 +354,15 @@ def generate_preflop_batch(
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-            rows.append((facts, explanation, evaluation.difficulty_score))
+            # Re-score difficulty with the EV gap now that facts are
+            # available. evaluation.difficulty_score from the cheap
+            # pre-facts filter was freq-only; this refines it.
+            # compute_ev_gap_bb returns None when raises are in the
+            # top-2 (v1 limitation) -- difficulty_score handles that
+            # fallback to freq-only internally.
+            ev_gap = compute_ev_gap_bb(facts, pack)
+            enriched_difficulty = difficulty_score(spot, ev_gap_bb=ev_gap)
+            rows.append((facts, explanation, enriched_difficulty))
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
             failures.append(f"{spot.node.node_id} / {spot.hero_hand_class}: {exc}")
