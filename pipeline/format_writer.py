@@ -70,6 +70,13 @@ CSV_COLUMNS = [
     # Defense / etc." features. Distinct from `concept_tags` (which is
     # the raw computational tags); `skills` is the user-facing mapping.
     "skills",
+    # Strategic archetype label from pipeline.preflop.fact_extractor
+    # (preflop only -- postflop has no archetype layer). One of the
+    # 16 preflop archetypes: open_for_value, 3bet_for_value /
+    # 3bet_as_bluff, squeeze_for_value, fold_dominated, etc. Empty for
+    # postflop rows. Used by the LLM as the strategic frame; surfaced
+    # in the CSV for analytics / reviewer QA. (May 2026 ask.)
+    "archetype",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -292,6 +299,9 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # docstring). Once it works, this populates with user-facing
         # skill labels like "C-Betting, Range Polarization".
         "skills": _compute_postflop_skills(spot_data),
+        # archetype is a preflop-only classifier (postflop has no
+        # equivalent layer); always empty here.
+        "archetype": "",
     }
 
 

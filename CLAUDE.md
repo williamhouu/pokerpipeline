@@ -253,7 +253,7 @@ explanations before the tagger goes to production.
 Source of truth is **Google Sheets**. The existing **29 columns stay unchanged**; the
 pipeline writes to them via a formatter and adds **8 new columns** (5 from the
 brief + 1 from Apr-2026 Ryan-feedback Fix 3 + 2 from May-2026 Ryan ask
-+ 1 from May-2026 Phase 3 skill tagging):
++ 1 from May-2026 Phase 3 skill tagging + 1 from May-2026 archetype-QA ask):
 
 | Col | Name | Purpose |
 |-----|------|---------|
@@ -267,6 +267,7 @@ brief + 1 from Apr-2026 Ryan-feedback Fix 3 + 2 from May-2026 Ryan ask
 | 37 | `ip_range` | 169-entry preflop-pack-format snapshot of the IP player's range at this node (`AA:1.0,A2s:0.621,...`). Enables future UI range-grid rendering per question. (Ryan ask, May 2026.) |
 | 38 | `oop_range` | same as `ip_range`, for the OOP player |
 | 39 | `skills` | comma-separated user-facing skill labels from `pipeline/skill_tagger.py` — the 42-skill catalog the app uses for "study X" features. Distinct from `concept_tags` (computational atoms) — `skills` is the mapped user-readable layer. Strict tagging: 2–5 skills/question typical. (Phase 3, May 2026.) |
+| 40 | `archetype` | preflop strategic frame: one of the 16 labels from `pipeline.preflop.fact_extractor.classify_archetype` (`open_for_value`, `3bet_for_value`, `squeeze_as_bluff`, `fold_dominated`, etc.) or `unclassified`. Empty for postflop rows (postflop has no archetype layer). The LLM already gets this in its SOLVER DATA block as the strategic frame; the CSV column is for analytics + reviewer QA. (May 2026.) |
 
 Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 
@@ -280,9 +281,11 @@ A real sample of the team's output, and the **authoritative format spec**. Two s
   (`concept_tags`, `hand_class`, `board_texture`, `solver_reference`,
   `ev_gap_bb`), then `validation_status`. So the brief's "29 existing" = `No` +
   the 28 named template columns. Layer 8 (`format_writer.py`) emits this layout
-  plus four additional columns added post-baseline: `action_frequencies` (Fix
-  3, Apr 2026), `ip_range` + `oop_range` (Ryan ask, May 2026), and `skills`
-  (Phase 3 user-facing skill tagger, May 2026) — current total 39 columns.
+  plus five additional columns added post-baseline: `action_frequencies` (Fix
+  3, Apr 2026), `ip_range` + `oop_range` (Ryan ask, May 2026), `skills`
+  (Phase 3 user-facing skill tagger, May 2026), and `archetype`
+  (preflop strategic frame surfaced for QA, May 2026) — current total
+  40 columns.
 - **Sheet 2 "Golden explanation examples - I"** — ~10 sample `Answer Explanation`s
   showing the coaching voice Layer 6's LLM prompt must reproduce.
 

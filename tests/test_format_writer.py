@@ -41,25 +41,30 @@ def _spot(effective_stack_bb: float = 98.0,
     )
 
 
-def test_thirty_nine_column_structure():
+def test_forty_column_structure():
     """Column-count history:
       * 35 baseline (.xlsx Sheet 1)
       * 36 = +action_frequencies (Apr 2026 Ryan-feedback Fix 3)
       * 38 = +ip_range +oop_range (May 2026 Ryan ask: UI range-grid columns)
       * 39 = +skills (May 2026 Phase 3: user-facing skill labels)
+      * 40 = +archetype (May 2026: surface preflop strategic frame for QA)
     """
-    assert len(CSV_COLUMNS) == 39
+    assert len(CSV_COLUMNS) == 40
     assert CSV_COLUMNS[0] == "No"
-    assert CSV_COLUMNS[-5] == "validation_status"
-    assert CSV_COLUMNS[-4] == "action_frequencies"
-    assert CSV_COLUMNS[-3] == "ip_range"
-    assert CSV_COLUMNS[-2] == "oop_range"
-    assert CSV_COLUMNS[-1] == "skills"                       # new tail (May 2026)
+    assert CSV_COLUMNS[-6] == "validation_status"
+    assert CSV_COLUMNS[-5] == "action_frequencies"
+    assert CSV_COLUMNS[-4] == "ip_range"
+    assert CSV_COLUMNS[-3] == "oop_range"
+    assert CSV_COLUMNS[-2] == "skills"
+    assert CSV_COLUMNS[-1] == "archetype"                    # new tail (May 2026)
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 39
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 40
+    # Postflop rows always have empty archetype (the column is only
+    # populated by the preflop writer).
+    assert row["archetype"] == ""
 
 
 def test_no_and_validation_status():

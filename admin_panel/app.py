@@ -2065,6 +2065,133 @@ def render_prompt_page() -> None:
     )
 
 
+# --- page: Concept Tags ----------------------------------------------------
+# Hand-grouped section mapping for the 38 preflop concept tag functions
+# in pipeline.preflop.concept_tags. Mirrors the module's section headers
+# (the "# --- Position context (5) ---" style comments). Manually
+# maintained so the order is reviewer-friendly; adding a new tag
+# requires adding it to one of these lists.
+_PREFLOP_TAG_SECTIONS: dict[str, tuple[str, ...]] = {
+    "Position context (5)": (
+        "early_position", "middle_position", "late_position",
+        "small_blind", "big_blind",
+    ),
+    "Decision context (7)": (
+        "open_decision", "facing_single_raise", "facing_3bet",
+        "facing_4bet_plus", "squeeze_opportunity", "bvb_spot",
+        "multiway_pot",
+    ),
+    "Stack depth (3)": (
+        "short_stack", "standard_stack", "deep_stack",
+    ),
+    "Hand strength (8)": (
+        "premium_pair", "medium_pair", "small_pair",
+        "premium_unpaired", "suited_broadway", "suited_connector",
+        "suited_ace", "unconnected_offsuit",
+    ),
+    "Strategy shape (5)": (
+        "mixed_strategy", "near_pure_strategy", "dominant_is_aggressive",
+        "dominant_is_passive", "dominant_is_fold",
+    ),
+    "Equity context (4)": (
+        "equity_dominant", "equity_favorite", "coinflip", "dominated",
+    ),
+    "Blockers (3)": (
+        "ace_blocker", "king_blocker", "blocks_villain_top_value",
+    ),
+    "Range dynamics (3)": (
+        "hero_range_advantage", "villain_range_advantage",
+        "roughly_equal_ranges",
+    ),
+}
+
+
+def render_concept_tags_page() -> None:
+    """Reference catalog for the 38 preflop concept tags.
+
+    For each tag, shows: section, plain-English trigger (the function's
+    docstring), and the rule source code (via ``inspect.getsource``).
+    Distinct from the Skills page -- concept tags are the COMPUTATIONAL
+    atoms (read by the LLM in the SOLVER DATA block and by the skill
+    tagger as building blocks); skills are the user-facing labels.
+
+    Postflop tag library (42 tags in
+    ``pipeline.fact_extractor.concept_tags``) is intentionally not
+    rendered here: this page focuses on what fires on preflop output,
+    which is what we generate today. When postflop comes online, a
+    sibling page or a path-toggle here is the natural next step.
+    """
+    import inspect  # noqa: PLC0415
+
+    from pipeline.preflop import concept_tags  # noqa: PLC0415
+
+    st.title("Concept tags — preflop catalog")
+    st.caption(
+        "38 deterministic Python predicates over `PreflopFacts`. Each "
+        "fires a tag the LLM sees in the SOLVER DATA block and the "
+        "skill tagger reads as a building block. Adding a new tag "
+        "= adding a function in `pipeline/preflop/concept_tags.py` "
+        "and listing it in `_TAG_REGISTRY` (the aggregator picks it "
+        "up automatically)."
+    )
+
+    # Validate that every advertised section name maps to real tags
+    # exposed on the module. Catches drift if a tag is renamed without
+    # updating this page.
+    all_listed = {
+        name for tags in _PREFLOP_TAG_SECTIONS.values() for name in tags
+    }
+    missing_on_module = [
+        n for n in all_listed if not hasattr(concept_tags, n)
+    ]
+    if missing_on_module:
+        st.warning(
+            "Section mapping is stale -- these tag names don't exist on "
+            f"`pipeline.preflop.concept_tags`: {missing_on_module}. "
+            "Update `_PREFLOP_TAG_SECTIONS` in this file."
+        )
+
+    # Summary metric.
+    st.metric(
+        "Preflop tags",
+        len(all_listed),
+        help="Each tag is a pure Python function -- no LLM, no "
+        "judgement, fully deterministic from facts.",
+    )
+
+    st.divider()
+
+    # Section filter.
+    sections = list(_PREFLOP_TAG_SECTIONS.keys())
+    section_filter = st.multiselect(
+        "Filter by section",
+        options=sections,
+        default=[],
+        placeholder="All sections",
+    )
+    visible_sections = (
+        [s for s in sections if s in section_filter]
+        if section_filter
+        else sections
+    )
+
+    for section in visible_sections:
+        st.subheader(section)
+        for tag_name in _PREFLOP_TAG_SECTIONS[section]:
+            fn = getattr(concept_tags, tag_name, None)
+            if fn is None:
+                continue
+            docstring = (fn.__doc__ or "").strip() or "(no description)"
+            with st.expander(f"`{tag_name}`  ·  _{docstring[:80]}_"):
+                st.markdown(f"**Trigger.** {docstring}")
+                try:
+                    src = inspect.getsource(fn).strip()
+                    st.markdown("**Rule source.**")
+                    st.code(src, language="python")
+                except (OSError, TypeError):
+                    st.caption("(source not available)")
+
+
 # --- page: Skills ----------------------------------------------------------
 def render_skills_page() -> None:
     """Reference catalog for the 42 user-facing skills.
@@ -2194,7 +2321,8 @@ def main() -> None:
     st.sidebar.caption("Preflop pipeline · Phase 3 (skill tagging)")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "History", "Browse", "Prompt", "Skills"],
+        options=["Files", "Generate", "History", "Browse", "Prompt",
+                 "Skills", "Concept Tags"],
         index=0,
     )
 
@@ -2265,6 +2393,8 @@ def main() -> None:
         render_prompt_page()
     elif page == "Skills":
         render_skills_page()
+    elif page == "Concept Tags":
+        render_concept_tags_page()
 
 
 @st.fragment(run_every=1.0)

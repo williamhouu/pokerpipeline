@@ -107,10 +107,12 @@ def late_position(facts: PreflopFacts) -> bool:
 
 
 def small_blind(facts: PreflopFacts) -> bool:
+    """Hero is in the Small Blind."""
     return facts.spot.node.actor == "SB"
 
 
 def big_blind(facts: PreflopFacts) -> bool:
+    """Hero is in the Big Blind."""
     return facts.spot.node.actor == "BB"
 
 
@@ -194,14 +196,18 @@ _SUITED_BROADWAY = frozenset({"KQs", "KJs", "KTs", "QJs", "QTs", "JTs"})
 
 
 def premium_pair(facts: PreflopFacts) -> bool:
+    """Hero holds AA, KK, or QQ -- top-tier pocket pairs."""
     return _hand_class(facts) in _PREMIUM_PAIRS
 
 
 def medium_pair(facts: PreflopFacts) -> bool:
+    """Hero holds JJ, TT, or 99 -- pairs that play very differently
+    against value (raise) vs. capped (call/set-mine) ranges."""
     return _hand_class(facts) in _MEDIUM_PAIRS
 
 
 def small_pair(facts: PreflopFacts) -> bool:
+    """Hero holds 88-22 -- set-mining range, rarely overpair preflop."""
     return _hand_class(facts) in _SMALL_PAIRS
 
 

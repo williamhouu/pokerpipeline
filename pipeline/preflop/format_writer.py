@@ -753,6 +753,12 @@ def build_preflop_row(
         "skills": _compute_preflop_skills(
             facts, game_format=game_format, stack_depth_bb=pack.stack_depth_bb
         ),
+        # Strategic archetype label (one of 16) from
+        # pipeline.preflop.fact_extractor.classify_archetype. The LLM
+        # gets this in its SOLVER DATA block as the strategic frame;
+        # surfacing it in the CSV makes "show me all 3bet_as_bluff
+        # spots" and similar analytics trivial.
+        "archetype": facts.archetype,
     }
 
 
