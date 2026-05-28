@@ -137,6 +137,20 @@ class BatchResult:
     # Sanity-check companion to worthy_spots_available.
     nodes_after_filter: int = 0
 
+    # Token-usage totals across every Anthropic call in the batch.
+    # Populated only when the LLM is actually invoked (dry-run leaves
+    # these at 0). The admin panel multiplies these by per-model
+    # rates to produce a $ cost; the pipeline itself doesn't know
+    # about pricing.
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    # Model id the batch ran on, e.g. "claude-opus-4-7". Empty for
+    # dry-runs or when no LLM calls happened. Stored here (rather
+    # than computed per-call) because the whole batch uses one model.
+    model_used: str = ""
+
 
 # --- node filtering ---------------------------------------------------------
 def node_action_context(node: PreflopDecisionNode) -> str:
@@ -326,6 +340,22 @@ def generate_preflop_batch(
     # 5. Per-spot: extract facts, generate explanation, collect row triples.
     rows: list[tuple] = []
     failures: list[str] = []
+    # Token totals -- summed by ``_record_usage`` which Layer 6 calls
+    # once per successful API request (including retries).
+    usage_totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
+
+    def _record_usage(
+        _model_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation: int,
+        cache_read: int,
+    ) -> None:
+        usage_totals["input"] += input_tokens
+        usage_totals["output"] += output_tokens
+        usage_totals["cache_creation"] += cache_creation
+        usage_totals["cache_read"] += cache_read
+
     # ``_evaluation`` carried the pre-facts freq-only difficulty; we
     # discard it now and recompute below with EV gap once facts are
     # available. Kept in the tuple so collect_worthy_spots's return
@@ -353,6 +383,7 @@ def generate_preflop_batch(
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    usage_callback=_record_usage,
                 )
             # Re-score difficulty with the EV gap now that facts are
             # available. evaluation.difficulty_score from the cheap
@@ -395,6 +426,13 @@ def generate_preflop_batch(
         failures=failures,
         worthy_spots_available=len(worthy),
         nodes_after_filter=len(filtered_nodes),
+        total_input_tokens=usage_totals["input"],
+        total_output_tokens=usage_totals["output"],
+        total_cache_creation_tokens=usage_totals["cache_creation"],
+        total_cache_read_tokens=usage_totals["cache_read"],
+        # Only record the model id when we actually called it. Dry-run
+        # leaves usage at 0 -- model_used "" signals "no LLM ran".
+        model_used=model if not dry_run else "",
     )
 
 

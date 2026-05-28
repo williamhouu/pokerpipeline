@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,33 @@ from pipeline.preflop.gold_examples import load_preflop_gold_examples
 from pipeline.preflop.grammars.types import PreflopActionType
 
 logger = logging.getLogger(__name__)
+
+# Callback signature for token-usage reporting. Fires once per
+# successful client.messages.create() call with:
+#   (model, input_tokens, output_tokens,
+#    cache_creation_input_tokens, cache_read_input_tokens)
+# The cache token counts are 0 when the SDK response doesn't expose
+# them (older versions / mocks / when caching wasn't used).
+UsageCallback = Callable[[str, int, int, int, int], None]
+
+
+def _extract_usage(response: Any) -> tuple[int, int, int, int]:
+    """Pull (input, output, cache_creation, cache_read) tokens off a response.
+
+    Defensive: the SDK's response.usage may not exist on test doubles,
+    and the cache_* fields are recent additions that may be missing
+    on older SDK versions. Anything missing comes back as 0 so the
+    caller can sum totals without nil-checks.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return (0, 0, 0, 0)
+    return (
+        int(getattr(usage, "input_tokens", 0) or 0),
+        int(getattr(usage, "output_tokens", 0) or 0),
+        int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+        int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+    )
 
 # How many preflop gold examples to ship in the cached prompt block. Matches
 # the postflop count (8). The preflop subset of the xlsx is smaller than the
@@ -868,6 +896,7 @@ def generate_preflop_answer_explanation(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     max_retries: int = 1,
+    usage_callback: UsageCallback | None = None,
 ) -> GeneratedExplanation:
     """Generate ONLY the answer_explanation prose for a preflop spot.
 
@@ -890,6 +919,12 @@ def generate_preflop_answer_explanation(
         temperature, max_tokens: Sampling controls.
         gold_examples: Optional gold-example pool override.
         max_retries: Retry count on parse failures. Default 1.
+        usage_callback: Optional reporter fired once per API call with
+            ``(model, input_tokens, output_tokens,
+            cache_creation_input_tokens, cache_read_input_tokens)``.
+            Used by the batch layer to accumulate cost. Fires on
+            EVERY call including retries, so callers should treat
+            failed-then-retried calls as having spent their tokens.
 
     Raises:
         ValueError: if ``correct_answer`` is not in ``options``.
@@ -920,6 +955,9 @@ def generate_preflop_answer_explanation(
             system=system,
             messages=messages,
         )
+        if usage_callback is not None:
+            in_t, out_t, cache_c, cache_r = _extract_usage(response)
+            usage_callback(model, in_t, out_t, cache_c, cache_r)
         text = _extract_text(response)
         try:
             explanation_prose = _parse_explanation_only_response(text)
@@ -960,6 +998,7 @@ __all__ = [
     "GOLD_EXAMPLE_COUNT",
     "PREFLOP_ARCHETYPE_GUIDANCE",
     "VOICE_RULES_PREFLOP",
+    "UsageCallback",
     "build_preflop_system_prompt",
     "build_preflop_user_prompt",
     "generate_preflop_answer_explanation",

@@ -62,10 +62,11 @@ load_dotenv(_REPO_ROOT_FOR_IMPORTS / ".env", override=True)
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-# Background job registry. Runs long batch generations on a thread so
-# Streamlit reruns (sidebar clicks, button presses, even tab switches)
-# don't kill them mid-flight.
-from admin_panel import jobs  # noqa: E402
+# Background job registry runs long batches on a thread so Streamlit
+# reruns (sidebar clicks, tab switches) don't kill them mid-flight.
+# Usage helper computes per-batch $ cost from token totals and appends
+# a JSONL log so a lifetime spend total survives admin-panel restarts.
+from admin_panel import jobs, usage  # noqa: E402
 
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
@@ -103,6 +104,19 @@ _MODEL_LABEL_TO_API: dict[str, str] = {
 PREFLOP_OUTPUT_DIR = (
     Path(__file__).resolve().parent.parent / "test_output" / "preflop_batches"
 )
+
+# JSONL log of every completed real-API batch. Sibling of the CSVs
+# the History tab manages. Gitignored. The sidebar's "Lifetime spend"
+# widget + the History page's totals read from this file.
+USAGE_LOG_PATH = (
+    Path(__file__).resolve().parent.parent / "test_output" / "usage_log.jsonl"
+)
+
+# Dedup set: job IDs we've already appended to the usage log. Module-
+# level (not session_state) because the same job can be observed by
+# multiple browser tabs and the fragment polls re-render every second;
+# we want at-most-once-per-process logging without racing the worker.
+_LOGGED_JOB_IDS: set[str] = set()
 
 # Where the prompt-editor page writes Layer 6 system-prompt overrides. The
 # pipeline checks for this file on every generation call -- a saved edit
@@ -1350,6 +1364,9 @@ def _render_preflop_job_panel() -> None:
         elif job.status is jobs.JobStatus.COMPLETED:
             st.markdown(f"**✅ Last batch:** {job.label}")
             if isinstance(job.result, BatchResult):
+                # Append to the usage log exactly once -- module-level
+                # dedupe across browser sessions + fragment reruns.
+                _maybe_log_completed_job(job, job.result)
                 _render_preflop_result_ui(job.result)
             else:
                 st.warning("Job finished but returned no BatchResult.")
@@ -1371,14 +1388,70 @@ def _render_preflop_job_panel() -> None:
     st.divider()
 
 
+def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) -> None:
+    """Append this job's usage to the JSONL log -- exactly once per process.
+
+    Idempotent: tracks logged job ids in a module-level set so the
+    fragment's per-second re-render doesn't duplicate the entry.
+    Dry-runs (``model_used == ""``) are dropped by
+    :func:`usage.append_log_entry`.
+    """
+    if job.id in _LOGGED_JOB_IDS:
+        return
+    _LOGGED_JOB_IDS.add(job.id)
+    if not result.model_used:
+        return
+    cost = usage.compute_cost_usd(
+        model=result.model_used,
+        input_tokens=result.total_input_tokens,
+        output_tokens=result.total_output_tokens,
+        cache_creation_tokens=result.total_cache_creation_tokens,
+        cache_read_tokens=result.total_cache_read_tokens,
+    )
+    usage.append_log_entry(
+        USAGE_LOG_PATH,
+        model=result.model_used,
+        input_tokens=result.total_input_tokens,
+        output_tokens=result.total_output_tokens,
+        cache_creation_tokens=result.total_cache_creation_tokens,
+        cache_read_tokens=result.total_cache_read_tokens,
+        cost_usd=cost,
+        questions_written=result.questions_written,
+        output_filename=result.output_path.name if result.output_path else "",
+    )
+
+
 def _render_preflop_result_ui(result: BatchResult) -> None:
-    """Render the per-batch result UI: summary, failures, download, preview.
+    """Render the per-batch result UI: cost, summary, failures, download, preview.
 
     Extracted from the old synchronous ``_run_preflop_generation`` so
     both the job-panel and any future "browse a prior batch" entry can
     share the same view. Pure render -- no side effects beyond Streamlit
     output and reading the CSV from disk.
     """
+    # Cost ticker first so it sits next to the success banner. Dry-runs
+    # have ``model_used=""`` and skip this block (no API was called).
+    if result.model_used:
+        cost = usage.compute_cost_usd(
+            model=result.model_used,
+            input_tokens=result.total_input_tokens,
+            output_tokens=result.total_output_tokens,
+            cache_creation_tokens=result.total_cache_creation_tokens,
+            cache_read_tokens=result.total_cache_read_tokens,
+        )
+        cache_note = ""
+        if result.total_cache_read_tokens or result.total_cache_creation_tokens:
+            cache_note = (
+                f" · cache {result.total_cache_read_tokens:,} read / "
+                f"{result.total_cache_creation_tokens:,} write"
+            )
+        st.markdown(
+            f"💰 **This batch:** {usage.format_cost(cost)} · "
+            f"{result.total_input_tokens:,} input / "
+            f"{result.total_output_tokens:,} output tokens"
+            f"{cache_note} · `{result.model_used}`"
+        )
+
     if result.questions_written == 0:
         st.warning(
             f"No questions produced. "
@@ -2010,6 +2083,33 @@ def main() -> None:
         st.sidebar.text(f"Solves: ✅ {total_cfrs}/{expected_cfrs}")
     else:
         st.sidebar.text(f"Solves: ⚠️  {total_cfrs}/{expected_cfrs}")
+
+    # Lifetime API spend, summed from usage_log.jsonl. Survives admin-
+    # panel restarts since the log is on disk. Renders nothing when
+    # the log is empty (fresh install / dry-runs only).
+    st.sidebar.divider()
+    st.sidebar.subheader("API spend")
+    stats = usage.compute_lifetime_stats(USAGE_LOG_PATH)
+    if stats.total_batches == 0:
+        st.sidebar.caption(
+            "No real-API batches logged yet. Run a batch with "
+            "dry-run off to start tracking."
+        )
+    else:
+        st.sidebar.metric(
+            "Lifetime",
+            usage.format_cost(stats.total_cost_usd),
+            delta=(
+                f"{stats.total_batches} batches · "
+                f"{stats.total_questions:,} questions"
+            ),
+            delta_color="off",
+            help=(
+                f"Summed across every real-API batch in "
+                f"`{USAGE_LOG_PATH.relative_to(REPO_ROOT)}`. Models "
+                f"so far: {', '.join(stats.models_used) or 'none'}."
+            ),
+        )
 
     st.sidebar.divider()
     st.sidebar.caption(
