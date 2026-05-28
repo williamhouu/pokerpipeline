@@ -1027,9 +1027,14 @@ def _render_generate_page_preflop() -> None:
         )
     with col2:
         _out_filename = st.text_input(
-            "Output filename",
-            value="preflop_batch.csv",
+            "Output filename (prefix)",
+            value="preflop_batch",
             key="preflop_out_filename",
+            help=(
+                "A timestamp (`_YYYYMMDD_HHMMSS.csv`) is appended at "
+                "write time so every batch lands in its own file -- "
+                "the History tab keeps them all."
+            ),
         )
 
     st.divider()
@@ -1161,10 +1166,14 @@ def _start_preflop_job(
         return
 
     PREFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    # If the user didn't end the filename in .csv, fix it silently.
-    if not output_filename.endswith(".csv"):
-        output_filename = output_filename + ".csv"
-    output_path = PREFLOP_OUTPUT_DIR / output_filename
+    # Always append a timestamp suffix so each batch lands in its own
+    # file -- prevents the History tab from showing only the latest
+    # batch because every run overwrote `preflop_batch.csv`. The user
+    # input becomes a prefix; trailing `.csv` is stripped first so we
+    # don't end up with `name.csv_20260527_2310.csv`.
+    stem = output_filename.removesuffix(".csv").strip() or "preflop_batch"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = PREFLOP_OUTPUT_DIR / f"{stem}_{timestamp}.csv"
 
     model_api = _MODEL_LABEL_TO_API.get(model_label, model_label)
 
