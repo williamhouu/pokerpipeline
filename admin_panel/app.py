@@ -2046,6 +2046,123 @@ def render_prompt_page() -> None:
     )
 
 
+# --- page: Skills ----------------------------------------------------------
+def render_skills_page() -> None:
+    """Reference catalog for the 42 user-facing skills.
+
+    For each skill, shows: section, current firing status, plain-English
+    trigger description, and the actual rule source code. Lets a
+    reviewer reading a tagged question understand WHY each skill fired
+    and what the rule looks like in code.
+    """
+    import inspect  # noqa: PLC0415
+
+    from pipeline import skill_tagger  # noqa: PLC0415
+
+    st.title("Skills — user-facing tag catalog")
+    st.caption(
+        "The 42-skill catalog `pipeline.skill_tagger.SKILL_CATALOG` maps "
+        "the pipeline's computational outputs (archetype + concept tags + "
+        "scenario metadata) onto the labels the app surfaces to users. "
+        "Use this page to understand exactly why a skill fires on a "
+        "given spot."
+    )
+
+    catalog = skill_tagger.SKILL_CATALOG
+    meta = skill_tagger.SKILL_META
+
+    # --- summary metrics ---
+    status_counts: dict[str, int] = {"preflop_fires": 0, "postflop_fires": 0, "todo": 0}
+    for m in meta.values():
+        status_counts[m.status] = status_counts.get(m.status, 0) + 1
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total skills", len(catalog))
+    col2.metric(
+        "Fires today",
+        status_counts["preflop_fires"],
+        help="Rules that tag real spots on preflop output (which is "
+        "what's generated today).",
+    )
+    col3.metric(
+        "Awaits Pio solves",
+        status_counts["postflop_fires"],
+        help="Rules wired and tested but won't fire until postflop "
+        "generation lands.",
+    )
+    col4.metric(
+        "TODO Phase 4",
+        status_counts["todo"],
+        help="Predicates hard-coded to False -- need new computational "
+        "signals or scenario metadata to fire.",
+    )
+
+    st.divider()
+
+    # --- filter + grouping ---
+    sections = sorted({m.section for m in meta.values()})
+    col_filter1, col_filter2 = st.columns([2, 3])
+    with col_filter1:
+        section_filter = st.multiselect(
+            "Filter by section",
+            options=sections,
+            default=[],
+            placeholder="All sections",
+        )
+    with col_filter2:
+        status_filter = st.multiselect(
+            "Filter by status",
+            options=["Fires today (preflop)", "Awaits Pio solves (postflop)",
+                     "TODO Phase 4"],
+            default=[],
+            placeholder="All statuses",
+        )
+
+    _STATUS_LABEL = {
+        "preflop_fires": "Fires today (preflop)",
+        "postflop_fires": "Awaits Pio solves (postflop)",
+        "todo": "TODO Phase 4",
+    }
+    _STATUS_EMOJI = {
+        "preflop_fires": "✅",
+        "postflop_fires": "⏳",
+        "todo": "🚧",
+    }
+
+    def _matches(name: str) -> bool:
+        m = meta[name]
+        if section_filter and m.section not in section_filter:
+            return False
+        if status_filter and _STATUS_LABEL[m.status] not in status_filter:
+            return False
+        return True
+
+    visible = [name for name in catalog if _matches(name)]
+    st.caption(f"Showing **{len(visible)}** of {len(catalog)} skills.")
+
+    # --- render: group by section, one expander per skill ---
+    current_section = ""
+    for name in visible:
+        m = meta[name]
+        if m.section != current_section:
+            st.subheader(m.section)
+            current_section = m.section
+
+        emoji = _STATUS_EMOJI[m.status]
+        label = f"{emoji}  **{name}**  ·  _{_STATUS_LABEL[m.status]}_"
+        with st.expander(label):
+            st.markdown(f"**Trigger.** {m.description}")
+            try:
+                src = inspect.getsource(catalog[name]).strip()
+                # Strip trailing comma if it's an inline-dict lambda entry.
+                src = src.rstrip(",")
+                st.markdown("**Rule source.**")
+                st.code(src, language="python")
+            except (OSError, TypeError):
+                # Fallback for stripped or built-in callables.
+                st.caption("(source not available)")
+
+
 # --- main router ------------------------------------------------------------
 def main() -> None:
     st.set_page_config(
@@ -2058,7 +2175,7 @@ def main() -> None:
     st.sidebar.caption("Admin panel · v1 preview")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "History", "Browse", "Prompt"],
+        options=["Files", "Generate", "History", "Browse", "Prompt", "Skills"],
         index=0,
     )
 
@@ -2127,6 +2244,8 @@ def main() -> None:
         render_browse_page()
     elif page == "Prompt":
         render_prompt_page()
+    elif page == "Skills":
+        render_skills_page()
 
 
 @st.fragment(run_every=1.0)

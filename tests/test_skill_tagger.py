@@ -517,6 +517,39 @@ def test_catalog_has_42_skills() -> None:
     assert len(SKILL_CATALOG) == 42
 
 
+def test_meta_covers_every_catalog_entry() -> None:
+    """SKILL_META and SKILL_CATALOG must agree on the set of skills --
+    every catalog rule needs a description + status + section."""
+    from pipeline.skill_tagger import SKILL_META
+
+    assert set(SKILL_META.keys()) == set(SKILL_CATALOG.keys()), (
+        f"meta vs catalog mismatch: "
+        f"only-in-meta={set(SKILL_META) - set(SKILL_CATALOG)}, "
+        f"only-in-catalog={set(SKILL_CATALOG) - set(SKILL_META)}"
+    )
+
+
+def test_meta_status_values_are_valid() -> None:
+    """Every meta status is one of the three known buckets."""
+    from pipeline.skill_tagger import SKILL_META
+
+    valid = {"preflop_fires", "postflop_fires", "todo"}
+    for name, meta in SKILL_META.items():
+        assert meta.status in valid, (
+            f"{name}: invalid status {meta.status!r}; expected one of {valid}"
+        )
+
+
+def test_meta_descriptions_are_meaningful() -> None:
+    """No empty / placeholder descriptions."""
+    from pipeline.skill_tagger import SKILL_META
+
+    for name, meta in SKILL_META.items():
+        assert len(meta.description) > 40, (
+            f"{name}: description too short ({len(meta.description)} chars)"
+        )
+
+
 @pytest.mark.parametrize("skill", list(SKILL_CATALOG.keys()))
 def test_every_skill_predicate_callable(skill: str) -> None:
     """Sanity: every rule executes without raising on a default context."""

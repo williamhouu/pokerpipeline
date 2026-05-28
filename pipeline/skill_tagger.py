@@ -411,10 +411,299 @@ class SkillCoverageReport:
     postflop_fireable: tuple[str, ...] = field(default_factory=tuple)
 
 
+# --- user-facing explainer metadata ------------------------------------------
+# Per-skill (section, status, human-readable description) -- powers the
+# admin panel's Skills page and any future skill-catalog docs. Keep in
+# lockstep with SKILL_CATALOG: tests below assert key parity. When a
+# TODO Phase 4 rule starts firing for real, flip the status here and
+# update the description.
+#
+#   section: human-readable section name from the user's source doc
+#   status:  one of "preflop_fires", "postflop_fires", "todo"
+#     preflop_fires  = will tag real spots today on preflop output
+#     postflop_fires = rule written but waits for postflop generation
+#                      (Pio solves blocked)
+#     todo           = predicate is `lambda _c: False`; needs more work
+#   description: one short paragraph for the admin-panel "why this fired"
+#                view. Concrete enough that a reviewer reading a tagged
+#                spot can understand why it matched.
+
+_PREFLOP = "preflop_fires"
+_POSTFLOP = "postflop_fires"
+_TODO = "todo"
+
+
+@dataclass(frozen=True)
+class SkillMeta:
+    """UI-side metadata for one entry in SKILL_CATALOG."""
+
+    section: str
+    status: str  # _PREFLOP / _POSTFLOP / _TODO
+    description: str
+
+
+SKILL_META: dict[str, SkillMeta] = {
+    # --- Section 1: Preflop ---
+    "Preflop Hand Selection": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires on opening (RFI) decisions -- the spot's archetype is "
+        "`open_for_value` or `fold_outranged`. Tests the foundational "
+        "'what hands play from this position?' question. Other preflop "
+        "spots are covered by 3-Betting / Facing a 3-Bet / etc., so "
+        "this skill is strict to the open-fold decision only.",
+    ),
+    "3-Betting": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires when hero's strategic frame is a 3-bet "
+        "(archetype `3bet_for_value` or `3bet_as_bluff`). Tests "
+        "value vs. bluff selection and 3-bet sizing.",
+    ),
+    "Facing a 3-Bet": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires when the spot has the `facing_3bet` tag AND there were "
+        "no callers between the open and the 3-bet (otherwise it's a "
+        "squeeze response, which has its own skill). Tests fold / call "
+        "/ 4-bet decisions vs. a tight re-raise.",
+    ),
+    "4-Betting": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires when hero's strategic frame is a 4-bet "
+        "(archetype `4bet_for_value` or `4bet_as_bluff`). Tests "
+        "value vs. bluff selection at a 4-bet pot.",
+    ),
+    "Facing a 4-Bet": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires on the `facing_4bet_plus` tag (3 or more prior raises "
+        "in history). Tests stack-committed fold / call / jam "
+        "decisions with significant chips already in.",
+    ),
+    "Squeezing": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires when hero's strategic frame is a squeeze "
+        "(archetype `squeeze_for_value` or `squeeze_as_bluff`). "
+        "Tests leveraging dead money from prior callers.",
+    ),
+    "Facing a Squeeze": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires when there were >=2 prior raises AND at least one "
+        "call between them -- i.e. raise -> call -> 3-bet (the squeeze). "
+        "Hero is the original raiser or the caller now responding.",
+    ),
+    "Blind Defense": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires when hero is in SB or BB AND facing a single raise / "
+        "3-bet / 4-bet+. Excluded for blind-vs-blind spots (which "
+        "have their own skill).",
+    ),
+    "Blind vs. Blind Play": SkillMeta(
+        "Preflop", _PREFLOP,
+        "Fires on the `bvb_spot` concept tag -- the hand is contested "
+        "only between SB and BB. Ranges widen dramatically vs. a "
+        "standard raised pot.",
+    ),
+    # --- Section 2: Betting & Aggression ---
+    "C-Betting": SkillMeta(
+        "Betting & Aggression", _TODO,
+        "Currently OFF. Will fire when hero is the preflop aggressor "
+        "and is betting on the flop. Needs the postflop adapter to "
+        "wire `is_preflop_aggressor` and `dominant_is_aggressive` "
+        "from postflop facts (Phase 4 work).",
+    ),
+    "Facing a C-Bet": SkillMeta(
+        "Betting & Aggression", _TODO,
+        "Currently OFF. Will fire when hero is the defender facing "
+        "a flop c-bet. Same Phase 4 dependency as C-Betting.",
+    ),
+    "Check-Raising": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `check_raise_spot` tag -- hero checks "
+        "with intent to raise after villain bets.",
+    ),
+    "Facing a Check-Raise": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `facing_check_raise_spot` tag -- hero "
+        "bet and villain check-raised.",
+    ),
+    "Donk Betting": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `donk_bet_spot` tag -- hero leads "
+        "into the preflop raiser from out of position.",
+    ),
+    "Facing a Donk Bet": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `facing_donk_spot` tag -- villain "
+        "donked into hero on the flop.",
+    ),
+    "Probe Betting": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `probe_bet_spot` tag -- hero bets into "
+        "a villain who declined to c-bet on the previous street.",
+    ),
+    "Facing a Probe Bet": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `facing_probe_spot` tag -- villain "
+        "probed into hero after hero checked back the previous street.",
+    ),
+    "Overbetting": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `overbet_spot` tag -- hero is betting "
+        "more than the size of the pot.",
+    ),
+    "Facing an Overbet": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the postflop `facing_overbet_spot` tag -- hero "
+        "faces a bet larger than pot.",
+    ),
+    "Bet Sizing": SkillMeta(
+        "Betting & Aggression", _TODO,
+        "Currently OFF. Needs a sizing-axis signal (a 'this spot has "
+        "multiple meaningful sizing choices' indicator) before firing -- "
+        "otherwise it would tag every postflop bet/raise. Phase 4 work.",
+    ),
+    "Value Betting": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on `thin_value_spot` or `merged_value_spot` -- hero is "
+        "betting a range that's ahead of villain's calling range.",
+    ),
+    "Bluffing": SkillMeta(
+        "Betting & Aggression", _POSTFLOP,
+        "Fires on the `bluff_spot` tag -- hero is betting / raising "
+        "with a hand that's not currently best.",
+    ),
+    # --- Section 3: Defense & Response ---
+    "Bluff Catching": SkillMeta(
+        "Defense & Response", _POSTFLOP,
+        "Fires on the `bluffcatch_spot` tag -- hero's hand can only "
+        "beat bluffs, so the decision turns on villain's bluff "
+        "frequency vs. pot odds.",
+    ),
+    "Floating": SkillMeta(
+        "Defense & Response", _POSTFLOP,
+        "Fires on the `float_call_spot` tag -- hero calls a bet with "
+        "intent to take the pot away on a later street.",
+    ),
+    "Pot Control": SkillMeta(
+        "Defense & Response", _POSTFLOP,
+        "Fires on the `pot_control_spot` tag -- hero deliberately "
+        "keeps the pot small with a medium-strength hand.",
+    ),
+    # --- Section 4: Math & Theory ---
+    "Pot Odds": SkillMeta(
+        "Math & Theory", _PREFLOP,
+        "Fires on call/fold archetypes preflop "
+        "(`call_for_value`, `call_for_implied_odds`, `fold_pot_odds`, "
+        "`fold_dominated`) or on `facing_donk_spot` / "
+        "`facing_overbet_spot` postflop. The defining 'is this call "
+        "mathematically profitable?' question.",
+    ),
+    "Implied Odds": SkillMeta(
+        "Math & Theory", _PREFLOP,
+        "Fires on the `call_for_implied_odds` archetype (preflop) or "
+        "the `implied_odds_call` tag (postflop). Hero calls without "
+        "direct pot odds, expecting future-street value when hitting.",
+    ),
+    "Reverse Implied Odds": SkillMeta(
+        "Math & Theory", _POSTFLOP,
+        "Fires on the postflop `reverse_implied_odds_call` tag -- "
+        "hero's hand might lose more when it 'hits' than it gains "
+        "(dominated draws etc.).",
+    ),
+    "Minimum Defense Frequency (MDF)": SkillMeta(
+        "Math & Theory", _POSTFLOP,
+        "Fires on the postflop `mdf_defense_threshold` tag -- the "
+        "central concept is hero's required defense frequency to "
+        "prevent villain from profitably bluffing.",
+    ),
+    "Combinatorics": SkillMeta(
+        "Math & Theory", _TODO,
+        "Currently OFF. Counting villain combos is involved in nearly "
+        "every poker decision; needs a narrower 'this spot's right "
+        "answer requires combo counting' signal before firing. Phase 4.",
+    ),
+    "Equity Realization": SkillMeta(
+        "Math & Theory", _POSTFLOP,
+        "Fires on the postflop `equity_under_realized` or "
+        "`equity_over_realized` tags -- how much of hero's raw equity "
+        "actually gets captured given position / playability / etc.",
+    ),
+    "Stack-to-Pot Ratio (SPR)": SkillMeta(
+        "Math & Theory", _TODO,
+        "Currently OFF. Needs stack-to-pot ratio computation in the "
+        "SkillContext (no current field). Phase 4 work.",
+    ),
+    # --- Section 5: Hand Analysis ---
+    "Hand Reading": SkillMeta(
+        "Hand Analysis & Decision Making", _TODO,
+        "Currently OFF. Hand reading is universal in poker -- firing "
+        "it on every question would be noise. Needs a specific 'narrow "
+        "range read required' signal before firing. Phase 4.",
+    ),
+    "Blockers & Card Removal": SkillMeta(
+        "Hand Analysis & Decision Making", _PREFLOP,
+        "Fires on `ace_blocker` or `king_blocker` (preflop -- hero "
+        "holds an A or K, the high-impact preflop blockers) or on "
+        "`blocks_value_unblocks_bluffs` / `blocks_bluffs_unblocks_value` "
+        "(postflop directional blocker tags). The generic "
+        "`blocks_villain_top_value` is intentionally excluded -- it "
+        "fires on too many hands without teaching a blocker lesson.",
+    ),
+    "Range Polarization": SkillMeta(
+        "Hand Analysis & Decision Making", _POSTFLOP,
+        "Fires on the postflop `villain_polarized` tag -- villain's "
+        "range is strong hands + bluffs with nothing in between, "
+        "which drives later-street decisions.",
+    ),
+    # --- Section 6: Positional & Situational ---
+    "In Position Play": SkillMeta(
+        "Positional & Situational", _PREFLOP,
+        "Fires when hero is in CO or BTN AND there is at least one "
+        "prior raise -- there's positional advantage to exploit.",
+    ),
+    "Out of Position Play": SkillMeta(
+        "Positional & Situational", _PREFLOP,
+        "Fires when hero is in SB or BB AND there is at least one "
+        "prior raise -- playing OOP requires tighter ranges and "
+        "more check-raising.",
+    ),
+    "Multiway Pot Strategy": SkillMeta(
+        "Positional & Situational", _PREFLOP,
+        "Fires on the `multiway_pot` tag -- three or more players "
+        "are still in the pot when hero decides. Ranges tighten "
+        "and bluffing decreases.",
+    ),
+    "Drawing Hand Strategy": SkillMeta(
+        "Positional & Situational", _POSTFLOP,
+        "Postflop only. Fires when hand_class label contains 'draw' "
+        "(flush_draw, straight_draw, combo_draw, etc.). Preflop has "
+        "no draw concept.",
+    ),
+    # --- Section 7: Tournament ---
+    "Short Stack Tournament Strategy": SkillMeta(
+        "Tournament", _PREFLOP,
+        "Fires when game_format is 'tournament' AND the spot has a "
+        "short_stack tag (or postflop `short_stack_tournament`). "
+        "Push/fold dynamics dominate.",
+    ),
+    "Tournament Blind vs. Blind": SkillMeta(
+        "Tournament", _PREFLOP,
+        "Fires on `bvb_spot` AND game_format == 'tournament'. "
+        "Distinct from cash BvB because ICM changes the math.",
+    ),
+    "ICM & Tournament Pressure": SkillMeta(
+        "Tournament", _TODO,
+        "Currently OFF. Needs tournament-structure metadata "
+        "(payouts, blinds remaining, stack distribution) that the "
+        "scenario configs don't carry yet. Phase 4.",
+    ),
+}
+
+
 __all__ = [
     "SKILL_CATALOG",
+    "SKILL_META",
     "SkillContext",
     "SkillCoverageReport",
+    "SkillMeta",
     "SkillRule",
     "compute_skills",
     "from_postflop_spot_data",
