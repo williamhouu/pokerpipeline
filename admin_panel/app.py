@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 # Add the repo root to sys.path so `from pipeline...` imports work when
@@ -61,11 +62,17 @@ load_dotenv(_REPO_ROOT_FOR_IMPORTS / ".env", override=True)
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
+# Background job registry. Runs long batch generations on a thread so
+# Streamlit reruns (sidebar clicks, button presses, even tab switches)
+# don't kill them mid-flight.
+from admin_panel import jobs  # noqa: E402
+
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
 from pipeline.explanation_generator import build_system_prompt  # noqa: E402
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
+    BatchResult,
     generate_preflop_batch,
     node_action_context,
 )
@@ -849,6 +856,10 @@ def _render_generate_page_preflop() -> None:
         "button activates once Layer 6 wiring lands (~1 day of work)."
     )
 
+    # Active/last background job panel. Persists across tab switches
+    # since the job runs on its own thread.
+    _render_preflop_job_panel()
+
     # --- 1. Pack info ---
     st.subheader("1. Preflop pack")
     packs = _cached_preflop_packs()
@@ -1057,21 +1068,34 @@ def _render_generate_page_preflop() -> None:
 
     st.divider()
 
-    # --- 9. Generate button (active -- runs the full preflop pipeline) ---
+    # --- 9. Generate button (kicks off a BACKGROUND job) ---
     # Inputs ready when: at least one position selected AND at least one
     # action context AND filtered_nodes non-empty AND total > 0.
+    # Disabled while another job is in flight -- the active-job panel
+    # rendered above shows that one.
     can_generate = (
         bool(hero_positions)
         and bool(action_contexts)
         and len(filtered_nodes) > 0
         and total > 0
     )
-    if not can_generate:
+    job_active = jobs.has_active_job()
+
+    if job_active:
+        st.button(
+            "GENERATE BATCH  (a job is already running -- see panel above)",
+            disabled=True,
+            type="primary",
+            use_container_width=True,
+            key="preflop_generate_btn_busy",
+        )
+    elif not can_generate:
         st.button(
             "GENERATE BATCH",
             disabled=True,
             type="primary",
             use_container_width=True,
+            key="preflop_generate_btn_disabled",
         )
         st.caption(
             "Pick at least one hero position, one action context, "
@@ -1084,7 +1108,7 @@ def _render_generate_page_preflop() -> None:
         use_container_width=True,
         key="preflop_generate_btn",
     ):
-        _run_preflop_generation(
+        _start_preflop_job(
             pack=packs[0],
             hero_positions=list(hero_positions),
             action_contexts=list(action_contexts),
@@ -1098,7 +1122,7 @@ def _render_generate_page_preflop() -> None:
         )
 
 
-def _run_preflop_generation(
+def _start_preflop_job(
     *,
     pack: PreflopPack,
     hero_positions: list[str],
@@ -1111,12 +1135,14 @@ def _run_preflop_generation(
     dry_run: bool,
     answer_style: str,
 ) -> None:
-    """Execute one preflop batch and render the result UI.
+    """Kick off a preflop batch on a background thread and rerun.
 
-    Split out of ``_render_generate_page_preflop`` so the button-click
-    branch is short + easy to read. Lives in this file (not the
-    orchestrator module) because everything here is Streamlit-specific
-    -- progress bars, expanders, dataframes, download buttons.
+    Before this refactor the batch ran inline in the Streamlit script
+    thread, so any rerun (sidebar click, tab switch, button press)
+    abandoned the in-flight work. Now we spawn the batch via
+    :mod:`admin_panel.jobs`; progress + result are rendered by
+    :func:`_render_preflop_job_panel`, which the page calls at its top
+    and which polls the job state every second.
     """
     import os  # noqa: PLC0415
 
@@ -1140,23 +1166,16 @@ def _run_preflop_generation(
 
     model_api = _MODEL_LABEL_TO_API.get(model_label, model_label)
 
-    # Streamlit progress + status UI. The orchestrator's progress
-    # callback fires before each LLM call; we update both the bar and
-    # the inline text.
-    progress_bar = st.progress(0.0)
-    status_line = st.empty()
+    label = (
+        f"{total_questions} preflop questions"
+        + (" (dry-run)" if dry_run else f" · {model_label.split()[0]}")
+        + f" → {output_path.name}"
+    )
 
-    def _on_progress(msg: str, current: int, total: int) -> None:
-        if total > 0:
-            progress_bar.progress(min(1.0, (current + 1) / total))
-        status_line.text(msg)
-
-    status_line.text("Starting batch...")
-    with st.spinner(
-        f"Generating {total_questions} preflop questions"
-        + (" (dry-run, no API)" if dry_run else f" with {model_label}")
-    ):
-        result = generate_preflop_batch(
+    try:
+        jobs.start_job(
+            generate_preflop_batch,
+            label=label,
             pack=pack,
             output_path=output_path,
             total_questions=total_questions,
@@ -1167,16 +1186,87 @@ def _run_preflop_generation(
             answer_style=answer_style,
             model=model_api,
             dry_run=dry_run,
-            # Streamlit reruns the script on every interaction -- if
-            # the user clicks Generate again, give them a fresh sample.
             random_seed=None,
-            progress_callback=_on_progress,
         )
+    except RuntimeError as exc:
+        # Another job is already running. The button-disable check
+        # normally prevents this, but races are possible if two browser
+        # tabs hit Generate at the same time.
+        st.error(f"⚠️ Could not start batch: {exc}")
+        return
 
-    progress_bar.progress(1.0)
-    status_line.empty()
+    # Re-run immediately so the job panel takes over the next render.
+    st.rerun()
 
-    # Summary.
+
+@st.fragment(run_every=1.0)
+def _render_preflop_job_panel() -> None:
+    """Top-of-page panel showing the current (or last) background job.
+
+    Wrapped in ``@st.fragment(run_every=1.0)`` so it auto-refreshes
+    once a second without rerunning the whole filter form -- the user
+    can keep configuring the NEXT batch while the current one runs.
+
+    Three visual states:
+
+    * **Active** (PENDING / RUNNING)  -- progress bar + status line.
+    * **Completed** -- success + download + preview (same UI the
+      synchronous version rendered, now reusable).
+    * **Failed** -- error + traceback in an expander.
+
+    A "Clear" button hides a done/failed job from the panel; this is
+    UX-only (the registry slot is freed so the next batch can start
+    without an extra step).
+    """
+    job = jobs.get_current_job()
+    if job is None:
+        return
+
+    with st.container(border=True):
+        if job.is_active:
+            st.markdown(f"**🔄 Running:** {job.label}")
+            progress = job.progress
+            if progress.total > 0:
+                pct = min(1.0, (progress.current + 1) / progress.total)
+                st.progress(pct, text=progress.message or "Starting…")
+            else:
+                st.text(progress.message or "Starting…")
+            st.caption(
+                f"job id `{job.id}` · elapsed {job.elapsed_seconds:.0f}s · "
+                "this keeps running if you switch tabs."
+            )
+        elif job.status is jobs.JobStatus.COMPLETED:
+            st.markdown(f"**✅ Last batch:** {job.label}")
+            if isinstance(job.result, BatchResult):
+                _render_preflop_result_ui(job.result)
+            else:
+                st.warning("Job finished but returned no BatchResult.")
+            st.caption(
+                f"Finished in {job.elapsed_seconds:.0f}s. "
+                "Configure and click GENERATE BATCH below to run another."
+            )
+            if st.button("Hide last result", key=f"clear_job_{job.id}"):
+                jobs.clear_current_job()
+                st.rerun()
+        else:  # FAILED
+            st.error(f"**❌ Job failed:** {job.label}")
+            with st.expander("Traceback"):
+                st.code(job.error or "(no traceback captured)")
+            if st.button("Dismiss failure", key=f"dismiss_job_{job.id}"):
+                jobs.clear_current_job()
+                st.rerun()
+
+    st.divider()
+
+
+def _render_preflop_result_ui(result: BatchResult) -> None:
+    """Render the per-batch result UI: summary, failures, download, preview.
+
+    Extracted from the old synchronous ``_run_preflop_generation`` so
+    both the job-panel and any future "browse a prior batch" entry can
+    share the same view. Pure render -- no side effects beyond Streamlit
+    output and reading the CSV from disk.
+    """
     if result.questions_written == 0:
         st.warning(
             f"No questions produced. "
@@ -1187,7 +1277,7 @@ def _run_preflop_generation(
         )
     else:
         st.success(
-            f"✅ Wrote **{result.questions_written}** questions to "
+            f"Wrote **{result.questions_written}** questions to "
             f"`{result.output_path}` "
             f"(attempted {result.questions_attempted}, "
             f"{result.worthy_spots_available} worthy spots available)."
@@ -1198,39 +1288,259 @@ def _run_preflop_generation(
             for failure in result.failures:
                 st.text(failure)
 
-    if result.output_path is not None and result.output_path.is_file():
-        # Download button: read the bytes (utf-8-sig, BOM intact) so Excel
-        # picks up the encoding right. mime=text/csv is the standard MIME.
-        csv_bytes = result.output_path.read_bytes()
-        # Streamlit caches widget instances by (label, key, type). Two
-        # successive batches with the same filename produce the same
-        # label/key -- and we've seen reports of stale bytes being served.
-        # Including the file size + question count in the key forces a
-        # fresh widget per batch, so the download always matches the
-        # batch the user just ran.
-        download_key = (
-            f"download_{result.output_path.name}_"
-            f"{result.questions_written}_{len(csv_bytes)}"
-        )
-        st.download_button(
-            label=f"📥 Download {result.output_path.name}",
-            data=csv_bytes,
-            file_name=result.output_path.name,
-            mime="text/csv",
-            use_container_width=True,
-            key=download_key,
-        )
-        st.caption(
-            f"File: {result.output_path.name} · "
-            f"{len(csv_bytes):,} bytes · {result.questions_written} questions · "
-            f"38 columns (the in-page preview below shows only 14 of them; "
-            f"download for the full CSV)."
+    if result.output_path is None or not result.output_path.is_file():
+        return
+
+    # Download button: utf-8-sig keeps the BOM intact so Excel picks
+    # up the encoding right. The key includes (filename, count, size)
+    # to force a fresh widget per batch -- without that, two batches
+    # with the same filename could collide.
+    csv_bytes = result.output_path.read_bytes()
+    download_key = (
+        f"download_{result.output_path.name}_"
+        f"{result.questions_written}_{len(csv_bytes)}"
+    )
+    st.download_button(
+        label=f"📥 Download {result.output_path.name}",
+        data=csv_bytes,
+        file_name=result.output_path.name,
+        mime="text/csv",
+        use_container_width=True,
+        key=download_key,
+    )
+    st.caption(
+        f"File: {result.output_path.name} · "
+        f"{len(csv_bytes):,} bytes · {result.questions_written} questions · "
+        f"38 columns (the in-page preview below shows only 14 of them; "
+        f"download for the full CSV)."
+    )
+
+    # In-place preview: first ~20 rows of the most useful columns.
+    df = pd.read_csv(result.output_path, encoding="utf-8-sig")
+    preview_cols = [
+        "No",
+        "User Seat",
+        "User Cards",
+        "Hand Stage",
+        "Context",
+        "Question",
+        "option 1",
+        "option 2",
+        "option 3",
+        "option 4",
+        "Correct Answer",
+        "Answer Explanation",
+        "Difficulty Rating",
+        "action_frequencies",
+    ]
+    present_cols = [c for c in preview_cols if c in df.columns]
+    st.dataframe(
+        df[present_cols].head(20), hide_index=True, use_container_width=True
+    )
+
+
+# --- page: History ---------------------------------------------------------
+def _scan_preflop_outputs() -> pd.DataFrame:
+    """Return a one-row-per-CSV table for the History page.
+
+    Columns:
+      * ``filename`` -- the file name (no path).
+      * ``modified`` -- mtime as ``YYYY-MM-DD HH:MM`` (sortable + readable).
+      * ``size_kb`` -- size in KB, rounded.
+      * ``questions`` -- row count (newlines minus 1 for the header).
+      * ``_path``    -- absolute path; prefixed with ``_`` so the UI table
+                        can drop it from display while we still use it
+                        for deletes + downloads.
+
+    Empty (no CSVs) returns an empty DataFrame with the right columns.
+    Newest-modified first -- the most useful default.
+    """
+    if not PREFLOP_OUTPUT_DIR.is_dir():
+        return pd.DataFrame(
+            columns=["filename", "modified", "size_kb", "questions", "_path"]
         )
 
-        # In-place preview: first ~20 rows of the most useful columns.
-        # Context + Question are shown so reviewers can read the actual
-        # generated question text without downloading the CSV.
-        df = pd.read_csv(result.output_path, encoding="utf-8-sig")
+    rows: list[dict[str, object]] = []
+    for path in PREFLOP_OUTPUT_DIR.glob("*.csv"):
+        stat = path.stat()
+        try:
+            # Quick row count: newlines - 1 for the header row. Cheap
+            # even on multi-MB files since we just count bytes.
+            with path.open("rb") as fh:
+                row_count = max(0, sum(1 for _ in fh) - 1)
+        except OSError:
+            row_count = 0
+        rows.append(
+            {
+                "filename": path.name,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime(
+                    "%Y-%m-%d %H:%M"
+                ),
+                "size_kb": round(stat.st_size / 1024, 1),
+                "questions": row_count,
+                "_path": str(path),
+                # Sort key kept as a float so we sort properly even
+                # within the same minute display.
+                "_mtime": stat.st_mtime,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["filename", "modified", "size_kb", "questions", "_path"]
+        )
+
+    df = pd.DataFrame(rows).sort_values("_mtime", ascending=False)
+    return df.drop(columns=["_mtime"]).reset_index(drop=True)
+
+
+def render_history_page() -> None:
+    """List past preflop CSVs, with multi-select bulk delete + per-file preview.
+
+    Where everything ships to: ``test_output/preflop_batches/``. The
+    Generate page writes there; this page is the catalog + cleanup tool.
+    Delete is hard-delete (no trash); a confirmation step prevents
+    one-click accidents.
+    """
+    st.title("History — past preflop CSVs")
+    st.caption(
+        f"All CSVs in `{PREFLOP_OUTPUT_DIR.relative_to(REPO_ROOT)}/`. "
+        "Newest first. Select rows to preview, download, or delete."
+    )
+
+    df = _scan_preflop_outputs()
+    if df.empty:
+        st.info(
+            "No CSVs here yet. Run a batch from the Generate page and "
+            "it will land in this folder."
+        )
+        return
+
+    st.caption(
+        f"**{len(df)}** file"
+        + ("s" if len(df) != 1 else "")
+        + f" · total {df['size_kb'].sum():.1f} KB · "
+        f"{int(df['questions'].sum()):,} questions across all files."
+    )
+
+    # selection_mode="multi-row" lets the user shift+click / cmd+click
+    # rows. on_select="rerun" makes the click trigger a script rerun so
+    # we can read event.selection.rows below.
+    event = st.dataframe(
+        df.drop(columns=["_path"]),
+        hide_index=True,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        column_config={
+            "filename": st.column_config.TextColumn("File"),
+            "modified": st.column_config.TextColumn("Modified"),
+            "size_kb": st.column_config.NumberColumn(
+                "Size (KB)", format="%.1f"
+            ),
+            "questions": st.column_config.NumberColumn("Questions"),
+        },
+        key="history_table",
+    )
+
+    # The streamlit stub types this as DataframeState which is missing
+    # the .selection attribute, but at runtime it's an AttrDict with
+    # selection.rows = list[int] of the highlighted row indices.
+    selected_indices: list[int] = list(event.selection.rows)  # type: ignore[attr-defined]
+    selected_paths: list[Path] = [
+        Path(str(df.iloc[i]["_path"])) for i in selected_indices
+    ]
+    n_selected = len(selected_paths)
+
+    st.divider()
+
+    # --- Action bar ---
+    col_del, col_meta = st.columns([1, 3])
+
+    # Two-step delete: first click flips a session-state flag, second
+    # click (the confirm) actually unlinks. Cancel button clears the
+    # flag. Stops a misclick from wiping the catalog.
+    confirming = bool(st.session_state.get("history_confirming_delete", False))
+
+    with col_del:
+        if confirming and n_selected > 0:
+            st.error(f"⚠️ Permanently delete **{n_selected}** file(s)?")
+            conf_col1, conf_col2 = st.columns(2)
+            with conf_col1:
+                if st.button(
+                    f"Yes, delete {n_selected}",
+                    type="primary",
+                    use_container_width=True,
+                    key="history_delete_confirm",
+                ):
+                    deleted = 0
+                    for p in selected_paths:
+                        try:
+                            p.unlink(missing_ok=True)
+                            deleted += 1
+                        except OSError as exc:
+                            st.warning(f"Couldn't delete `{p.name}`: {exc}")
+                    st.session_state["history_confirming_delete"] = False
+                    # Clear the table selection so a stale "X selected"
+                    # banner doesn't show after the rerun.
+                    if "history_table" in st.session_state:
+                        del st.session_state["history_table"]
+                    st.success(f"Deleted {deleted} file(s).")
+                    st.rerun()
+            with conf_col2:
+                if st.button(
+                    "Cancel",
+                    use_container_width=True,
+                    key="history_delete_cancel",
+                ):
+                    st.session_state["history_confirming_delete"] = False
+                    st.rerun()
+        else:
+            if st.button(
+                f"🗑 Delete {n_selected} selected"
+                if n_selected
+                else "🗑 Delete selected",
+                disabled=(n_selected == 0),
+                use_container_width=True,
+                key="history_delete_btn",
+            ):
+                st.session_state["history_confirming_delete"] = True
+                st.rerun()
+
+    with col_meta:
+        if n_selected == 0:
+            st.caption(
+                "_Tip: click a row to select it. Shift-click or "
+                "cmd-click to multi-select._"
+            )
+        else:
+            names = ", ".join(p.name for p in selected_paths[:5])
+            if n_selected > 5:
+                names += f", … (+{n_selected - 5} more)"
+            st.caption(f"**Selected:** {names}")
+
+    # --- Per-file actions (only when exactly one file is selected) ---
+    if n_selected == 1:
+        only = selected_paths[0]
+        st.divider()
+        st.subheader(f"Preview: {only.name}")
+
+        try:
+            csv_bytes = only.read_bytes()
+            preview_df = pd.read_csv(only, encoding="utf-8-sig")
+        except (OSError, pd.errors.ParserError) as exc:
+            st.error(f"Couldn't read `{only.name}`: {exc}")
+            return
+
+        st.download_button(
+            label=f"📥 Download {only.name}",
+            data=csv_bytes,
+            file_name=only.name,
+            mime="text/csv",
+            use_container_width=True,
+            key=f"history_dl_{only.name}_{len(csv_bytes)}",
+        )
+
         preview_cols = [
             "No",
             "User Seat",
@@ -1247,9 +1557,21 @@ def _run_preflop_generation(
             "Difficulty Rating",
             "action_frequencies",
         ]
-        present_cols = [c for c in preview_cols if c in df.columns]
+        present_cols = [c for c in preview_cols if c in preview_df.columns]
         st.dataframe(
-            df[present_cols].head(20), hide_index=True, use_container_width=True
+            preview_df[present_cols].head(20),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption(
+            f"Showing first 20 of {len(preview_df):,} rows · "
+            f"{len(preview_df.columns)} columns total · "
+            "download for the full file."
+        )
+    elif n_selected > 1:
+        st.caption(
+            "_Select exactly one row to preview/download. With multiple "
+            "rows selected, only bulk delete is available._"
         )
 
 
@@ -1551,9 +1873,14 @@ def main() -> None:
     st.sidebar.caption("Admin panel · v1 preview")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "Browse", "Prompt"],
+        options=["Files", "Generate", "History", "Browse", "Prompt"],
         index=0,
     )
+
+    # Live job indicator -- visible from any page, auto-refreshes once
+    # a second via the fragment so progress ticks up while the user is
+    # on (say) the History tab.
+    _render_sidebar_job_indicator()
 
     # Sidebar status indicators
     st.sidebar.divider()
@@ -1579,10 +1906,40 @@ def main() -> None:
         render_files_page()
     elif page == "Generate":
         render_generate_page()
+    elif page == "History":
+        render_history_page()
     elif page == "Browse":
         render_browse_page()
     elif page == "Prompt":
         render_prompt_page()
+
+
+@st.fragment(run_every=1.0)
+def _render_sidebar_job_indicator() -> None:
+    """Tiny sidebar widget that shows current job status.
+
+    Self-refreshing fragment so "running 12/30" ticks up even when the
+    user is on a different page. Renders nothing when there's no job.
+    """
+    job = jobs.get_current_job()
+    if job is None:
+        return
+    if job.is_active:
+        p = job.progress
+        if p.total > 0:
+            pct = ((p.current + 1) / p.total) * 100
+            st.sidebar.info(
+                f"🔄 Job: {p.current + 1}/{p.total}  ({pct:.0f}%) · "
+                f"{job.elapsed_seconds:.0f}s"
+            )
+        else:
+            st.sidebar.info(f"🔄 Job: starting · {job.elapsed_seconds:.0f}s")
+    elif job.status is jobs.JobStatus.COMPLETED:
+        st.sidebar.success(
+            f"✅ Job done · {job.elapsed_seconds:.0f}s"
+        )
+    elif job.status is jobs.JobStatus.FAILED:
+        st.sidebar.error("❌ Job failed (see Generate tab)")
 
 
 if __name__ == "__main__":
