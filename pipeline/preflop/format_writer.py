@@ -309,6 +309,18 @@ def _render_pot(
     return _bb(pot_bb)
 
 
+def _render_ev_gap(facts: PreflopFacts, pack: PreflopPack) -> str:
+    """The ev_gap_bb column value. Two decimals when computed; empty
+    string when the v1 EV engine can't compute reliably (raise actions
+    in the top-2, no equity data, etc -- see ev_engine module docstring)."""
+    from pipeline.preflop.ev_engine import compute_ev_gap_bb  # noqa: PLC0415
+
+    gap = compute_ev_gap_bb(facts, pack)
+    if gap is None:
+        return ""
+    return f"{gap:.2f}"
+
+
 # --- raise-count math --------------------------------------------------------
 def _count_prior_raises(history: tuple[ParsedAction, ...]) -> int:
     """How many raise/all-in actions appear in this prior-action history.
@@ -684,9 +696,12 @@ def build_preflop_row(
         # board_texture: empty (no board preflop).
         "board_texture": "",
         "solver_reference": _solver_reference(facts, pack),
-        # ev_gap_bb: empty -- preflop range files don't carry per-action
-        # EVs. Phase B will add an equity-driven EV engine.
-        "ev_gap_bb": "",
+        # ev_gap_bb: gap between dominant and 2nd-most-frequent action,
+        # in bb. Computed by pipeline.preflop.ev_engine for call/fold
+        # spots; empty for spots where the top-2 actions involve a
+        # raise (the v1 engine doesn't model raise EVs -- see the
+        # engine module docstring for the scope rationale).
+        "ev_gap_bb": _render_ev_gap(facts, pack),
         "validation_status": "auto_approved",
         # Use canonical labels here too so the QA column reads as
         # "Raise: 70%, Fold: 30%" not "Raise 60%: 70%, Fold: 30%"

@@ -421,10 +421,11 @@ def test_range_snapshots_empty_for_open_spot() -> None:
     assert row["oop_range"] == ""
 
 
-def test_phase_b_deferred_columns_still_empty() -> None:
-    """ev_gap_bb is the last remaining Phase B deferral. concept_tags,
-    ip_range, oop_range are now all populated by Phase B steps 1 and 2.
-    """
+def test_phase_b_columns_populated_when_data_available() -> None:
+    """All Phase B columns now populate from their respective engines.
+    Empty values only when the upstream data is missing (e.g. no villain
+    -> ev_gap_bb can't compute; synthetic pack without villain range
+    file -> ip_range/oop_range empty)."""
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -432,20 +433,24 @@ def test_phase_b_deferred_columns_still_empty() -> None:
         difficulty_score=1500,
         number=1,
     )
-    # Still deferred: ev_gap_bb (Phase B step 4 -- EV engine).
-    assert row["ev_gap_bb"] == ""
-    # concept_tags from Phase B step 1.
+    # concept_tags from Phase B step 1 -- populated when there are
+    # firing tags (always at least position).
     assert row["concept_tags"]
     tag_list = [t.strip() for t in row["concept_tags"].split(",")]
     assert "small_blind" in tag_list
     assert "facing_single_raise" in tag_list
     assert "ace_blocker" in tag_list
-    # ip_range / oop_range from Phase B step 2. The synthetic fixture has
-    # villain_stats but the synthetic pack lacks the villain's range file
-    # on disk, so the snapshot helper returns empty -- defensive fallback.
-    # See test_range_snapshots_empty_for_open_spot for the open-spot path.
-    # When the helper does find the file (smoke test on real Ryan pack
-    # below) both columns populate with 169-entry Ryan-pack-format strings.
+    # ip_range / oop_range from Phase B step 2. The synthetic fixture
+    # has villain_stats but the synthetic pack lacks the villain's
+    # range file on disk, so the snapshot helper returns empty --
+    # defensive fallback. The real-pack smoke test covers the populated
+    # path.
+    # ev_gap_bb from Phase B step 4. The fixture is BB facing BTN open
+    # with action_frequencies {Call: 0.60, Raise 308%: 0.40, Fold: 0.0}.
+    # Top-2 canonical actions are Call and 3-bet -- the engine returns
+    # None because raises in the top-2 aren't computable in v1 EV. So
+    # ev_gap_bb is empty for this specific fixture.
+    assert row["ev_gap_bb"] == ""
 
 
 def test_solver_reference_is_pack_relative_path() -> None:
