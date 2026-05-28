@@ -1202,12 +1202,29 @@ def _run_preflop_generation(
         # Download button: read the bytes (utf-8-sig, BOM intact) so Excel
         # picks up the encoding right. mime=text/csv is the standard MIME.
         csv_bytes = result.output_path.read_bytes()
+        # Streamlit caches widget instances by (label, key, type). Two
+        # successive batches with the same filename produce the same
+        # label/key -- and we've seen reports of stale bytes being served.
+        # Including the file size + question count in the key forces a
+        # fresh widget per batch, so the download always matches the
+        # batch the user just ran.
+        download_key = (
+            f"download_{result.output_path.name}_"
+            f"{result.questions_written}_{len(csv_bytes)}"
+        )
         st.download_button(
             label=f"📥 Download {result.output_path.name}",
             data=csv_bytes,
             file_name=result.output_path.name,
             mime="text/csv",
             use_container_width=True,
+            key=download_key,
+        )
+        st.caption(
+            f"File: {result.output_path.name} · "
+            f"{len(csv_bytes):,} bytes · {result.questions_written} questions · "
+            f"38 columns (the in-page preview below shows only 14 of them; "
+            f"download for the full CSV)."
         )
 
         # In-place preview: first ~20 rows of the most useful columns.
