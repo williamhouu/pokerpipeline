@@ -948,6 +948,15 @@ def generate_preflop_answer_explanation(
         facts, gold_examples, options, correct_answer
     )
 
+    # Layer 7 audit validators (pipeline.preflop.validators) -- imported
+    # lazily so the postflop side of this module can still load when the
+    # preflop validators module is reworked. The retry loop calls these
+    # after the structural parse / pad steps, and uses the returned
+    # error_message as the corrective LLM feedback on retry.
+    from pipeline.preflop.validators import (  # noqa: PLC0415
+        run_preflop_audit_validators,
+    )
+
     last_error: str | None = None
     for _ in range(max_retries + 1):
         response = call_messages_create(
@@ -966,7 +975,7 @@ def generate_preflop_answer_explanation(
             explanation_prose = _parse_explanation_only_response(text)
             # Pad options to 4 for the CSV row.
             padded = (list(options) + ["", "", "", ""])[:4]
-            return GeneratedExplanation(
+            candidate = GeneratedExplanation(
                 option_1=padded[0],
                 option_2=padded[1],
                 option_3=padded[2],
@@ -974,6 +983,12 @@ def generate_preflop_answer_explanation(
                 correct_answer=correct_answer,
                 answer_explanation=explanation_prose,
             )
+            # Structural check passed; now Layer 7 audit. On failure,
+            # the validator's error message becomes the retry prompt.
+            audit_result = run_preflop_audit_validators(candidate, facts)
+            if audit_result.is_valid:
+                return candidate
+            last_error = audit_result.error_message
         except ExplanationValidationError as exc:
             last_error = str(exc)
 

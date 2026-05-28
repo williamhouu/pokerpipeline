@@ -1,0 +1,298 @@
+"""Tests for pipeline.preflop.validators.
+
+Per-validator positive (returns ok) and negative (returns fail with a
+useful error message) cases for each of the v1 hard validators, plus a
+runner test that confirms first-failure short-circuiting.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline.explanation_generator import (  # noqa: E402
+    GeneratedExplanation,
+)
+from pipeline.preflop.fact_extractor import (  # noqa: E402
+    PreflopFacts,
+    VillainRangeStats,
+)
+from pipeline.preflop.grammars.types import (  # noqa: E402
+    ParsedAction,
+    PreflopActionType,
+)
+from pipeline.preflop.node_enumerator import PreflopDecisionNode  # noqa: E402
+from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402
+from pipeline.preflop.validators import (  # noqa: E402
+    PreflopValidationResult,
+    run_preflop_audit_validators,
+    validate_banned_phrases,
+    validate_composite_label_frequencies,
+    validate_no_postflop_talk,
+    validate_no_standalone_sometimes,
+    validate_option_set,
+)
+
+
+# --- fixtures -------------------------------------------------------------
+def _facts(
+    *,
+    action_frequencies: dict[str, float] | None = None,
+    dominant_action: str = "Call",
+    dominant_frequency: float = 0.66,
+    actor: str = "BB",
+) -> PreflopFacts:
+    """Minimal PreflopFacts. Default: BB facing a BTN open, 66/34 call/fold."""
+    if action_frequencies is None:
+        action_frequencies = {"Call": 0.66, "Fold": 0.34}
+    spot = PreflopSpot(
+        node=PreflopDecisionNode(
+            pack_id="t", actor=actor,
+            history_before=(
+                ParsedAction("UTG", PreflopActionType.FOLD),
+                ParsedAction("HJ", PreflopActionType.FOLD),
+                ParsedAction("CO", PreflopActionType.FOLD),
+                ParsedAction("BTN", PreflopActionType.RAISE, 60.0),
+                ParsedAction("SB", PreflopActionType.FOLD),
+            ),
+            actions=(),
+        ),
+        hero_hand_class="AKo",
+        hero_card_combo="AhKc",
+        action_frequencies=action_frequencies,
+        dominant_action=dominant_action,
+        dominant_frequency=dominant_frequency,
+    )
+    return PreflopFacts(
+        spot=spot,
+        villain_stats=VillainRangeStats(
+            position="BTN", action_label="Raise 60%",
+            weighted_combo_count=600.0, pct_of_dealt_hands=45.0,
+            top_combos=(),
+        ),
+        hero_equity_vs_villain=0.55,
+        archetype="call_for_value",
+    )
+
+
+def _gen(
+    *,
+    options: tuple[str, str, str, str] = ("Fold", "Call", "", ""),
+    correct: str = "Call",
+    prose: str = "We have enough equity for the price.",
+) -> GeneratedExplanation:
+    return GeneratedExplanation(
+        option_1=options[0],
+        option_2=options[1],
+        option_3=options[2],
+        option_4=options[3],
+        correct_answer=correct,
+        answer_explanation=prose,
+    )
+
+
+# --- validate_option_set --------------------------------------------------
+def test_option_set_ok_on_call_fold() -> None:
+    result = validate_option_set(_gen(), _facts())
+    assert result.is_valid, result.error_message
+
+
+def test_option_set_fails_on_invented_raise() -> None:
+    """LLM proposes a Raise option on a pure call/fold spot."""
+    generated = _gen(options=("Fold", "Call", "Raise 3x", ""), correct="Call")
+    result = validate_option_set(generated, _facts())
+    assert not result.is_valid
+    assert "raise" in result.error_message.lower()
+
+
+def test_option_set_skips_when_no_strategy() -> None:
+    """Spots with empty action_frequencies (defensive) -> pass."""
+    facts = _facts(action_frequencies={})
+    result = validate_option_set(_gen(), facts)
+    assert result.is_valid
+
+
+def test_option_set_ok_with_frequency_prefix() -> None:
+    generated = _gen(options=("Always fold", "", "", ""), correct="Always fold")
+    facts = _facts(action_frequencies={"Fold": 1.0}, dominant_action="Fold",
+                   dominant_frequency=1.0)
+    result = validate_option_set(generated, facts)
+    assert result.is_valid, result.error_message
+
+
+# --- validate_no_standalone_sometimes -------------------------------------
+def test_standalone_sometimes_fails() -> None:
+    generated = _gen(options=("Sometimes call", "Sometimes fold", "", ""),
+                     correct="Sometimes call")
+    result = validate_no_standalone_sometimes(generated, _facts())
+    assert not result.is_valid
+    assert "sometimes" in result.error_message.lower()
+
+
+def test_standalone_rarely_fails() -> None:
+    generated = _gen(options=("Rarely raise", "Mostly call", "", ""),
+                     correct="Mostly call")
+    result = validate_no_standalone_sometimes(generated, _facts())
+    assert not result.is_valid
+
+
+def test_composite_label_passes_standalone_check() -> None:
+    """'Mostly call, sometimes raise' has Mostly as the LEADING word --
+    the standalone check should pass it."""
+    generated = _gen(
+        options=("Mostly call, sometimes raise", "Fold", "", ""),
+        correct="Mostly call, sometimes raise",
+    )
+    result = validate_no_standalone_sometimes(generated, _facts())
+    assert result.is_valid, result.error_message
+
+
+# --- validate_composite_label_frequencies --------------------------------
+def test_composite_frequencies_ok_when_mix_real() -> None:
+    """75% call / 20% raise -> 'Mostly call, sometimes raise' is honest."""
+    facts = _facts(
+        action_frequencies={"Call": 0.75, "Raise 3x": 0.20, "Fold": 0.05},
+        dominant_action="Call", dominant_frequency=0.75,
+    )
+    generated = _gen(
+        options=("Fold", "Mostly call, sometimes raise", "", ""),
+        correct="Mostly call, sometimes raise",
+    )
+    result = validate_composite_label_frequencies(generated, facts)
+    assert result.is_valid, result.error_message
+
+
+def test_composite_frequencies_fails_when_secondary_is_noise() -> None:
+    """98% call / 2% raise -> labelling it 'Mostly call, sometimes raise'
+    promotes a 2% mix-in to a teaching point. Fail."""
+    facts = _facts(
+        action_frequencies={"Call": 0.98, "Raise 3x": 0.02},
+        dominant_action="Call", dominant_frequency=0.98,
+    )
+    generated = _gen(
+        options=("Fold", "Mostly call, sometimes raise", "", ""),
+        correct="Mostly call, sometimes raise",
+    )
+    result = validate_composite_label_frequencies(generated, facts)
+    assert not result.is_valid
+    assert "secondary verb" in result.error_message.lower() \
+        or "raise" in result.error_message.lower()
+
+
+def test_composite_frequencies_fails_when_primary_smaller() -> None:
+    """Primary verb should have HIGHER freq than secondary."""
+    facts = _facts(
+        action_frequencies={"Call": 0.3, "Raise 3x": 0.6, "Fold": 0.1},
+        dominant_action="Raise 3x", dominant_frequency=0.6,
+    )
+    generated = _gen(
+        options=("Fold", "Mostly call, sometimes raise", "", ""),
+        correct="Mostly call, sometimes raise",
+    )
+    result = validate_composite_label_frequencies(generated, facts)
+    assert not result.is_valid
+
+
+# --- validate_no_postflop_talk --------------------------------------------
+def test_postflop_talk_fails_on_flop_reference() -> None:
+    generated = _gen(prose="On the flop, we want to bet small for value.")
+    result = validate_no_postflop_talk(generated, _facts())
+    assert not result.is_valid
+    assert "flop" in result.error_message.lower()
+
+
+def test_postflop_talk_fails_on_board_reference() -> None:
+    generated = _gen(prose="The board favors hero's range, so we c-bet.")
+    result = validate_no_postflop_talk(generated, _facts())
+    assert not result.is_valid
+
+
+def test_postflop_talk_passes_on_pure_preflop_prose() -> None:
+    generated = _gen(
+        prose="With AKo and pot odds of 25%, we have plenty of equity to call.",
+    )
+    result = validate_no_postflop_talk(generated, _facts())
+    assert result.is_valid, result.error_message
+
+
+def test_postflop_talk_exempts_word_preflop() -> None:
+    """'preflop' contains 'flop' as a substring -- shouldn't fire."""
+    generated = _gen(prose="This is a standard preflop decision.")
+    result = validate_no_postflop_talk(generated, _facts())
+    assert result.is_valid, result.error_message
+
+
+# --- validate_banned_phrases ----------------------------------------------
+def test_banned_phrases_fails_on_em_dash() -> None:
+    generated = _gen(prose="We have a decent hand — call here.")
+    result = validate_banned_phrases(generated, _facts())
+    assert not result.is_valid
+    assert "em dash" in result.error_message.lower() \
+        or "punctuation" in result.error_message.lower()
+
+
+def test_banned_phrases_fails_on_semicolon() -> None:
+    generated = _gen(prose="AK is dominant; we 3-bet for value.")
+    result = validate_banned_phrases(generated, _facts())
+    assert not result.is_valid
+
+
+def test_banned_phrases_passes_clean_prose() -> None:
+    generated = _gen(
+        prose="AKo plays well as a 3-bet here. We have card removal "
+              "blockers and dominate villain's weaker calls.",
+    )
+    result = validate_banned_phrases(generated, _facts())
+    assert result.is_valid, result.error_message
+
+
+# --- run_preflop_audit_validators ----------------------------------------
+def test_runner_returns_ok_when_all_pass() -> None:
+    """A clean explanation passes the full stack."""
+    generated = _gen(
+        options=("Fold", "Call", "", ""),
+        correct="Call",
+        prose="We have enough equity to defend with this suited connector.",
+    )
+    result = run_preflop_audit_validators(generated, _facts())
+    assert result.is_valid, result.error_message
+
+
+def test_runner_short_circuits_on_first_failure() -> None:
+    """Order matters: option_set is first, so an invented option
+    fails BEFORE any banned-phrase check would catch the em dash too."""
+    generated = _gen(
+        options=("Fold", "Call", "Raise 5x", ""),  # invented
+        correct="Call",
+        prose="Plenty of equity — we call.",  # also em dash
+    )
+    result = run_preflop_audit_validators(generated, _facts())
+    assert not result.is_valid
+    # The option-set message wins (first in the chain).
+    assert "raise" in result.error_message.lower() or "doesn't offer" in result.error_message.lower()
+
+
+def test_runner_catches_postflop_leak_when_options_clean() -> None:
+    generated = _gen(
+        options=("Fold", "Call", "", ""),
+        correct="Call",
+        prose="With AK we have great equity on most flops.",
+    )
+    result = run_preflop_audit_validators(generated, _facts())
+    assert not result.is_valid
+    assert "postflop" in result.error_message.lower() or "flop" in result.error_message.lower()
+
+
+# --- ValidationResult sanity ---------------------------------------------
+def test_validation_result_ok_factory() -> None:
+    result = PreflopValidationResult.ok()
+    assert result.is_valid
+    assert result.error_message == ""
+
+
+def test_validation_result_fail_factory() -> None:
+    result = PreflopValidationResult.fail("oops")
+    assert not result.is_valid
+    assert result.error_message == "oops"
