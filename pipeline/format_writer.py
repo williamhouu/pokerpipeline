@@ -62,8 +62,14 @@ CSV_COLUMNS = [
     # Ryan ask (May 2026): 169-class range snapshots in canonical Ryan-pack
     # ordering ('AA:0.0,A2s:1.0,...'). Enables future UI range-grid rendering
     # alongside each question. SOLVER_FACT category (deterministic from solver
-    # output, not LLM-generated). Last two columns of the schema.
+    # output, not LLM-generated).
     "ip_range", "oop_range",
+    # Phase 3 (May 2026): user-facing skill labels from
+    # pipeline.skill_tagger -- comma-separated, up to ~5 skills per spot
+    # under strict tagging. Drives the app's "study Squeezing / Blind
+    # Defense / etc." features. Distinct from `concept_tags` (which is
+    # the raw computational tags); `skills` is the user-facing mapping.
+    "skills",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -152,6 +158,26 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
     by_freq_desc = sorted(strategy.items(), key=lambda kv: -kv[1])
     parts = [f"{verb}: {round(100 * freq)}%" for verb, freq in by_freq_desc]
     return ", ".join(parts)
+
+
+def _compute_postflop_skills(spot_data) -> str:
+    """Comma-separated user-facing skills from pipeline.skill_tagger.
+
+    Defensive: the postflop SkillContext adapter is a stub (see
+    skill_tagger module docstring), so several skills won't fire until
+    Phase 4 wires the remaining fields. Returns an empty string on any
+    error so a tagging miss doesn't crash a batch.
+    """
+    try:
+        from pipeline.skill_tagger import (  # noqa: PLC0415
+            compute_skills,
+            from_postflop_spot_data,
+        )
+
+        ctx = from_postflop_spot_data(spot_data)
+        return ", ".join(compute_skills(ctx))
+    except Exception:  # noqa: BLE001 - tagging never blocks a batch
+        return ""
 
 
 def _villain_seat(meta, scenario: ScenarioConfig) -> str:
@@ -260,6 +286,12 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
                      if spot_data.ip_range_snapshot else ""),
         "oop_range": (format_hand_class_range(spot_data.oop_range_snapshot)
                       if spot_data.oop_range_snapshot else ""),
+        # Phase 3 skill tagging. Empty string when skill_tagger can't
+        # build a postflop SkillContext (the postflop adapter is a stub
+        # awaiting verified output -- see pipeline.skill_tagger module
+        # docstring). Once it works, this populates with user-facing
+        # skill labels like "C-Betting, Range Polarization".
+        "skills": _compute_postflop_skills(spot_data),
     }
 
 

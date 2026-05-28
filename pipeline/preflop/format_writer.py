@@ -309,6 +309,34 @@ def _render_pot(
     return _bb(pot_bb)
 
 
+def _compute_preflop_skills(
+    facts: PreflopFacts,
+    *,
+    game_format: str = "cash",
+    stack_depth_bb: int = 100,
+) -> str:
+    """Comma-separated user-facing skills from pipeline.skill_tagger.
+
+    Defensive: if the tagger import or computation fails, returns ''
+    rather than crashing the batch. The skill column is metadata for
+    the app -- a tagging failure shouldn't drop the whole question.
+    """
+    try:
+        from pipeline.skill_tagger import (  # noqa: PLC0415
+            compute_skills,
+            from_preflop_facts,
+        )
+
+        ctx = from_preflop_facts(
+            facts,
+            game_format=game_format,
+            stack_depth_bb=stack_depth_bb,
+        )
+        return ", ".join(compute_skills(ctx))
+    except Exception:  # noqa: BLE001 - tagging never blocks a batch
+        return ""
+
+
 def _render_ev_gap(facts: PreflopFacts, pack: PreflopPack) -> str:
     """The ev_gap_bb column value. Two decimals when computed; empty
     string when the v1 EV engine can't compute reliably (raise actions
@@ -717,6 +745,14 @@ def build_preflop_row(
         # the snapshot round-trips cleanly into a range-grid UI later.
         "ip_range": _ip_range_value,
         "oop_range": _oop_range_value,
+        # Phase 3: user-facing skill labels for the app's "study X"
+        # features. Distinct from concept_tags (which carries the
+        # computational atoms) -- skills is the user-readable mapping
+        # over the 42-skill catalog defined in pipeline.skill_tagger.
+        # Strict tagging: typically 2-4 skills per preflop spot.
+        "skills": _compute_preflop_skills(
+            facts, game_format=game_format, stack_depth_bb=pack.stack_depth_bb
+        ),
     }
 
 

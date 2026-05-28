@@ -208,9 +208,13 @@ def _explanation() -> GeneratedExplanation:
     )
 
 
-# --- 38-column structure ----------------------------------------------------
-def test_thirty_eight_column_structure() -> None:
-    """Every preflop row covers all 38 CSV_COLUMNS."""
+# --- 39-column structure (post-Phase-3 skills column) ----------------------
+def test_thirty_nine_column_structure() -> None:
+    """Every preflop row covers all 39 CSV_COLUMNS.
+
+    Bumped from 38 -> 39 when the May 2026 Phase 3 ``skills`` column
+    was added (user-facing skill labels from pipeline.skill_tagger).
+    """
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -219,7 +223,7 @@ def test_thirty_eight_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 38
+    assert len(row) == 39
 
 
 def test_no_column_auto_increments() -> None:
