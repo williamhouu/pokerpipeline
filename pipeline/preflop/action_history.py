@@ -85,9 +85,10 @@ def _raise_size_bb(
         ``(pct_token, level)`` pair is registered; otherwise falls back
         to a multiplicative heuristic so unknown tokens don't crash.
     """
-    if raise_level == 1:
-        # Open: use the pack's documented open size, ignore the pct token.
-        return pack.open_size_bb
+    # Try the pack-specific token lookup first -- this is where
+    # position-dependent open sizes (e.g. SB BvB opens 3bb vs EP 2.5bb)
+    # are registered. The level-1 table entries override the pack's
+    # generic open_size_bb when a specific token matches.
     key = (
         (parsed.raise_size_pct, raise_level)
         if parsed.raise_size_pct is not None
@@ -95,6 +96,13 @@ def _raise_size_bb(
     )
     if key is not None and key in _RYAN_PACK_RAISE_SIZES_BB:
         return _RYAN_PACK_RAISE_SIZES_BB[key]
+
+    if raise_level == 1:
+        # Open with no specific table entry: fall back to the pack's
+        # documented open size. Covers the majority of EP/MP/LP opens
+        # the table already has registered at this value too.
+        return pack.open_size_bb
+
     # Fallback heuristic: 3-bet ≈ 3× open, 4-bet ≈ 2× 3-bet, 5-bet ≈ 2× 4-bet.
     # Used when the pack-specific lookup misses a token.
     fallback = pack.open_size_bb
