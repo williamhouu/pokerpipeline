@@ -1879,8 +1879,11 @@ def main() -> None:
 
     # Live job indicator -- visible from any page, auto-refreshes once
     # a second via the fragment so progress ticks up while the user is
-    # on (say) the History tab.
-    _render_sidebar_job_indicator()
+    # on (say) the History tab. Streamlit requires fragments that write
+    # to the sidebar to be CALLED inside a `with st.sidebar:` block --
+    # the fragment itself just uses bare `st.info(...)` etc.
+    with st.sidebar:
+        _render_sidebar_job_indicator()
 
     # Sidebar status indicators
     st.sidebar.divider()
@@ -1920,6 +1923,12 @@ def _render_sidebar_job_indicator() -> None:
 
     Self-refreshing fragment so "running 12/30" ticks up even when the
     user is on a different page. Renders nothing when there's no job.
+
+    IMPORTANT: This fragment writes via bare ``st.info`` / ``st.success``
+    / ``st.error`` (NOT ``st.sidebar.X``). Streamlit forbids fragments
+    from calling ``st.sidebar`` directly; the caller wraps the
+    invocation in ``with st.sidebar:`` instead, and inside that
+    context bare ``st.X`` lands in the sidebar.
     """
     job = jobs.get_current_job()
     if job is None:
@@ -1928,18 +1937,16 @@ def _render_sidebar_job_indicator() -> None:
         p = job.progress
         if p.total > 0:
             pct = ((p.current + 1) / p.total) * 100
-            st.sidebar.info(
+            st.info(
                 f"🔄 Job: {p.current + 1}/{p.total}  ({pct:.0f}%) · "
                 f"{job.elapsed_seconds:.0f}s"
             )
         else:
-            st.sidebar.info(f"🔄 Job: starting · {job.elapsed_seconds:.0f}s")
+            st.info(f"🔄 Job: starting · {job.elapsed_seconds:.0f}s")
     elif job.status is jobs.JobStatus.COMPLETED:
-        st.sidebar.success(
-            f"✅ Job done · {job.elapsed_seconds:.0f}s"
-        )
+        st.success(f"✅ Job done · {job.elapsed_seconds:.0f}s")
     elif job.status is jobs.JobStatus.FAILED:
-        st.sidebar.error("❌ Job failed (see Generate tab)")
+        st.error("❌ Job failed (see Generate tab)")
 
 
 if __name__ == "__main__":
