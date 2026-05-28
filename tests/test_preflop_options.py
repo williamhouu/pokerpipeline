@@ -313,37 +313,35 @@ def test_gto_uses_mostly_prefix_at_94_pct() -> None:
     assert correct == "Mostly Raise"
 
 
-def test_gto_three_action_mix_uses_composite_labels() -> None:
-    """A 3-action mix uses 'Mostly X, sometimes Y' composite labels rather
-    than standalone 'Sometimes Y' options (which Ryan banned in Apr 2026
-    as ambiguous). correct_answer is the composite pairing the dominant
-    with the SECOND-most-frequent action. Raise labels canonicalised.
+def test_gto_three_action_mix_uses_unified_spectrum() -> None:
+    """May 2026: 3+ action spots now use the SAME 4-option spectrum
+    template as 2-action spots. The third+ actions don't get their
+    own option slots -- they fold into the LLM's explanation prose
+    via the SOLVER DATA block. The OPTIONS only test 'which direction
+    dominates and is it pure or mixed?'.
 
-    May 2026 update: 'Always {dominant}' (the old slot-0 option) was
-    dropped for mixed spots because it's dead air against the composite
-    alternatives. Replaced with an anti-strategy distractor -- when
-    Fold is already a secondary, the distractor is the overfold
-    composite 'Mostly Fold, sometimes {dominant}'.
+    Replaces the older composite template ('Mostly X, sometimes Y')
+    which was hard to evaluate without a meta-elimination shortcut.
     """
+    # Call 60% (dominant), Fold 25% (most-frequent secondary), Raise 15%
+    # -> the spectrum picks Call + Fold as top 2. Raise drops out of
+    # the options but stays in the SOLVER DATA for the LLM's prose.
     facts = _facts_with_strategy({"Call": 0.60, "Fold": 0.25, "Raise 308%": 0.15})
     options, correct = build_options_gto(facts)
-    # The lead option is the overfold distractor (Fold is in the mix,
-    # so "Always Fold" would clash with the dominant-anchored Fold
-    # composite -- the mirror "Mostly Fold, sometimes Call" wins).
-    assert options[0] == "Mostly Fold, sometimes Call"
-    # Composite labels for each secondary action -- raise canonicalised
-    # to "Raise" since the BTN fixture has empty history (raise_level=1).
-    assert "Mostly Call, sometimes Fold" in options
-    assert "Mostly Call, sometimes Raise" in options
-    # correct_answer pairs dominant with the second-most-frequent action
-    # (Fold here, since Fold > Raise in this mix).
-    assert correct == "Mostly Call, sometimes Fold"
+    # Aggression order: Fold (less aggressive) first.
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Call",
+        "Always Call",
+    ]
+    # dominant freq 60% -> "Mostly" prefix
+    assert correct == "Mostly Call"
     assert correct in options
-    # No "Always {dominant}" anywhere -- the user's chief complaint
-    # about the old design (dead-air option since dominant < 95%).
-    assert "Always Call" not in options
-    # No standalone "Sometimes X" labels.
+    # No composite labels anywhere -- the unified template uses only
+    # "Always X" and "Mostly X" forms.
     for option in options:
+        assert ", sometimes " not in option
         assert not option.startswith("Sometimes")
         assert not option.startswith("Rarely")
 

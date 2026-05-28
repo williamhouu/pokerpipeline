@@ -307,34 +307,41 @@ def build_options_basic(
 def build_options_gto(
     facts: PreflopFacts,
 ) -> tuple[list[str], str]:
-    """Always/Mostly template per the brief's GTO framing.
+    """Always/Mostly 4-option spectrum -- unified for all preflop spots.
 
-    Two-action mix (the common case):
-      ``"Always <L>", "Mostly <L>", "Mostly <M>", "Always <M>"``
-      where L is the LESS aggressive action and M is the more
-      aggressive one -- regardless of which is dominant. Reads as a
-      spectrum from most-conservative to most-committed. (Generalises
-      the old Fold-first special case: Fold is just the least
-      aggressive action, so it falls out naturally.)
+    Picks Pio's top 2 actions by frequency, sorts them by aggression
+    (less-aggressive first), and emits the 4-option spectrum::
 
-    Three-action+ mix:
-      ``[Always Fold OR Mostly Fold, sometimes <dominant>]`` first
-      (an anti-strategy distractor), then ``"Mostly <dominant>,
-      sometimes <secondary>"`` labels covering each non-dominant
-      action played at >= 5%, ordered by aggression of the secondary.
-      The leading ``"Always <dominant>"`` (the old design) is dropped
-      because for mixed spots (dominant freq < 95%) it's dead air
-      against the composites -- any halfway-thoughtful player
-      eliminates it instantly.
+        Always <less>, Mostly <less>, Mostly <more>, Always <more>
 
-    Single-action (one action played at 100%):
-      Falls back to the 2-action template against a secondary picked
-      from Pio's tree (so the player gets real choices to rule out).
+    Reads as a spectrum from "most conservative" (pure less-aggressive)
+    to "most committed" (pure more-aggressive). The two middle
+    "Mostly" rungs represent mixed strategies leaning each direction.
 
-    The correct_answer is ``"<prefix> <A>"`` where prefix is
-    ``frequency_to_verb_prefix(dominant_freq)`` -- the same
-    deterministic mapping the LLM was being instructed to follow
-    in the previous Layer-6-picks-options architecture.
+    The correct_answer is ``"<prefix> <dominant>"`` where prefix is
+    ``frequency_to_verb_prefix(dominant_freq)``:
+
+      * dominant freq >= 95% -> ``"Always {dominant}"``
+      * 5% <= dominant freq < 95% -> ``"Mostly {dominant}"``
+
+    Both correct-answer forms are always present in the spectrum, so
+    the player picks between the pure-or-mixed framing in each
+    direction.
+
+    For 3+ action mixes (e.g. Call 70%, 4-bet 15%, All-in 15%) the
+    third+ actions are NOT surfaced as separate options. The lower-
+    frequency secondaries get folded into the LLM's explanation prose
+    via the SOLVER DATA block; the option set only tests "which
+    direction dominates, and is it pure or mixed?". This dropped the
+    old composite-label template (``"Mostly X, sometimes Y"``) -- it
+    was hard to evaluate without a meta-elimination shortcut, and
+    composite labels overloaded both the player and the validators
+    with frequency-precision questions that weren't the lesson.
+
+    Single-action edge case (one action played at 100%): falls back
+    to the 2-action template against a secondary picked from Pio's
+    tree (no frequency filter) so the player still gets real choices
+    to rule out.
     """
     meaningful = _meaningful_canonical_actions(facts)
     if not meaningful:
@@ -347,28 +354,23 @@ def build_options_gto(
         return build_options_basic(facts)
     correct = f"{prefix} {dominant_label}"
 
-    # --- 3+ meaningful actions: composite-label template ---------------------
-    if len(meaningful) >= 3:
-        return _build_options_gto_composite(
-            dominant_label, dominant_freq,
-            secondary_labels=[label for label, _ in meaningful[1:]],
-            correct=correct,
-        )
+    # Pick the secondary action. When 2+ actions are >= 5%, take the
+    # most-frequent non-dominant. When only one action is meaningful
+    # (a near-pure spot, e.g. Fold 100%), reach into Pio's tree-
+    # offered actions for a non-frequency-filtered alternative.
+    if len(meaningful) >= 2:
+        secondary_label = meaningful[1][0]
+    else:
+        picked = _pick_gto_secondary(facts, dominant_label)
+        if picked is None:
+            # Pio's tree only offers one action -- worthiness filter
+            # would normally drop this, but fall back to basic just
+            # in case it slips through.
+            return build_options_basic(facts)
+        secondary_label = picked
 
-    # --- 1 or 2 meaningful actions: 4-option 2-action template --------------
-    # For 1-meaningful (near-pure spot), Pio plays one action almost
-    # entirely; we still emit the full 4-option template so the player
-    # gets real choices to rule out. The B action is picked from Pio's
-    # other tree-offered actions (no frequency filter).
-    secondary_label = _pick_gto_secondary(facts, dominant_label)
-    if secondary_label is None:
-        # Pio's tree only offers one action at this node. Degenerate
-        # (the worthiness filter normally excludes such spots) -- fall
-        # back to basic rather than emit a 1-option set.
-        return build_options_basic(facts)
-
-    # Order by action aggression: less-aggressive first. This makes the
-    # 4-option block read as a spectrum (Fold-leaning -> commit-leaning).
+    # Order by action aggression: less-aggressive first. The 4-option
+    # block reads as a spectrum (Fold-leaning -> commit-leaning).
     less, more = sorted(
         [dominant_label, secondary_label], key=_action_aggression
     )
@@ -378,119 +380,6 @@ def build_options_gto(
         f"Mostly {more}",
         f"Always {more}",
     ]
-    return options, correct
-
-
-def _build_options_gto_composite(
-    dominant_label: str,
-    dominant_freq: float,
-    *,
-    secondary_labels: list[str],
-    correct: str,
-) -> tuple[list[str], str]:
-    """3+ action template: drop "Always {dominant}", use anti-strategy distractor.
-
-    Layout (in order):
-      [0] Anti-strategy distractor -- "Always Fold" if Fold isn't a
-          secondary, else "Mostly Fold, sometimes {dominant}".
-          (Skipped if the dominant action IS Fold, since both forms
-          would clash with the dominant-anchored composites below.)
-      [1] "Mostly {dominant}, sometimes {secondary[0]}"   <- correct
-      [2] "Mostly {dominant}, sometimes {secondary[1]}"
-      [3] "Mostly {dominant}, sometimes {secondary[2]}" (if exists)
-
-    Secondaries are sorted by aggression (lesser-action first) so the
-    composite alternatives also read as a spectrum.
-
-    When dominant freq >= 95%, the spot is essentially pure; correct
-    will be "Always {dominant}" rather than a composite. In that case
-    the dominant-anchored composites are wrong anyway, so this template
-    still works -- the user can pick "Always {dominant}" from one of
-    the slots... wait, it's not there. So for the rare pure-with-tiny-
-    mix-in case, this template hides the correct answer. Fall back.
-    """
-    correct_uses_always = correct.startswith("Always ")
-    if correct_uses_always:
-        # Rare: dominant >= 95% with 2+ other actions >= 5%. The
-        # composite template can't represent "Always {dominant}".
-        # Fall back to the basic builder so the correct answer is
-        # in the option set.
-        return build_options_basic_for_correct(
-            dominant_label, secondary_labels, correct
-        )
-
-    # Sort secondaries by aggression so composites read in a spectrum.
-    sorted_secondaries = sorted(secondary_labels, key=_action_aggression)
-    composites = [
-        f"Mostly {dominant_label}, sometimes {sec}"
-        for sec in sorted_secondaries
-    ]
-    correct_composite = f"Mostly {dominant_label}, sometimes {secondary_labels[0]}"
-    if correct_composite not in composites:
-        # Defensive: should not happen since secondaries is the source
-        # of sorted_secondaries. Fall through to basic.
-        return build_options_basic_for_correct(
-            dominant_label, secondary_labels, correct
-        )
-
-    # Pick an anti-strategy distractor. The lead option of the option
-    # set -- the "you're being too tight" alternative the player
-    # weighs against the dominant-anchored composites.
-    distractor: str | None
-    if dominant_label == "Fold":
-        # Dominant is already Fold -- a Fold-flavored distractor would
-        # clash. Skip the distractor; 3-option set is fine.
-        distractor = None
-    elif "Fold" not in secondary_labels:
-        # Fold isn't in the strategy at all -> "Always Fold" is a clean
-        # anti-strategy distractor: extreme conservative play.
-        distractor = "Always Fold"
-    else:
-        # Fold is already a secondary (one of the composites is
-        # "Mostly {dominant}, sometimes Fold"). Pick the overfold
-        # composite as the distractor: "Mostly Fold, sometimes {dom}".
-        distractor = f"Mostly Fold, sometimes {dominant_label}"
-        # Remove the existing "Mostly {dominant}, sometimes Fold" since
-        # the overfold version is its mirror image and we don't need both.
-        composites = [c for c in composites if c != f"Mostly {dominant_label}, sometimes Fold"]
-        # Re-include the dominant-anchored Fold composite if dropping
-        # it would lose the correct answer.
-        if correct_composite not in composites:
-            composites.insert(0, correct_composite)
-
-    options: list[str] = []
-    if distractor is not None:
-        options.append(distractor)
-    options.extend(composites)
-    options = options[:4]
-
-    if correct_composite not in options:
-        # Defensive: padding overflow. Swap last for correct.
-        options[-1] = correct_composite
-
-    return options, correct_composite
-
-
-def build_options_basic_for_correct(
-    dominant_label: str,
-    secondary_labels: list[str],
-    correct: str,
-) -> tuple[list[str], str]:
-    """Fallback used by GTO composite when 'Always {dominant}' is correct.
-
-    Builds a Fold/Call/Raise-style option set that includes the
-    correct "Always {dominant}" answer alongside basic action labels
-    for the other secondaries. Rare branch -- only fires when the
-    dominant action is at >= 95% but the spot still has >= 3 actions
-    above the 5% threshold. The basic builder would also fit here,
-    but its correct_answer is just the bare action label whereas this
-    one preserves the "Always" prefix.
-    """
-    options: list[str] = [correct]  # "Always {dominant}"
-    for label in [dominant_label, *secondary_labels]:
-        if label not in options:
-            options.append(label)
-    options = options[:4]
     return options, correct
 
 
