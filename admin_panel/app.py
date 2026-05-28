@@ -3,30 +3,42 @@
 Run from repo root:
     venv/bin/streamlit run admin_panel/app.py
 
-Four pages selected via the sidebar:
+Six pages selected via the sidebar:
 
   * Files     -- live disk scan of solves/ and ranges/; per-scenario status
-                 indicators. Upload widgets are visual-only in this preview.
-  * Generate  -- full UI for configuring a batch: cascading filters (format
-                 → stack → table → scenarios), content filters (hand class /
-                 board texture), difficulty (presets + custom slider),
-                 answer style, sampling targets, model + batch size, stake
-                 scaling (real -- backed by pipeline.scenario_config.
-                 scale_scenario), currency toggle, dry run. The Generate
-                 button is disabled until solves are present on disk.
-  * Browse    -- table view of test_output/tier1_consolidated.csv to
-                 demonstrate what generated-question browsing will look
-                 like when batches start producing output.
-  * Prompt    -- system-prompt editor; shows the actual default from
-                 build_system_prompt(). Save/Test/Reset/Set-default buttons
-                 are disabled pending the version-store backend.
+                 indicators. (Upload widgets are visual placeholders --
+                 packs / solves are managed on disk for now.)
+  * Generate  -- batch configurator for the preflop and postflop paths.
+                 Preflop is fully wired: pack -> filters -> deterministic
+                 options -> Layer 6 (Anthropic) -> Layer 8 (CSV writer).
+                 Runs on a background thread (see admin_panel.jobs) so
+                 sidebar / tab switches don't abandon in-flight batches.
+                 Postflop path button is disabled until Pio solves land.
+  * History   -- table of every CSV under test_output/preflop_batches/,
+                 multi-row select with confirmed bulk delete, per-file
+                 preview + download. Each batch lands in its own
+                 timestamped file so history persists across sessions.
+  * Browse    -- read-only view of test_output/tier1_consolidated.csv
+                 (the legacy 70-question demo dataset, for reference).
+  * Prompt    -- live editor for the preflop Layer 6 system prompt.
+                 Saves to admin_panel/prompts/preflop_system.txt;
+                 :func:`pipeline.preflop.explanation_generator.load_preflop_system_prompt`
+                 reads it on every batch.
+  * Skills    -- catalog browser for the 42 user-facing skill rules
+                 from pipeline.skill_tagger. Per-skill status (fires
+                 today / awaits postflop / TODO) + trigger description
+                 + source code.
 
-Known limitations of this v1 preview:
-  * No backend wiring for the Generate button -- this is a UI scaffold to
-    validate the design before we hook up the real pipeline.
-  * No file-upload handling -- the widgets are visual placeholders.
-  * Prompt versioning store not implemented; only the built-in default
-    appears in the version dropdown.
+Sidebar carries: a live "Job: X/Y" indicator that auto-refreshes
+while a batch runs, a "Lifetime API spend" metric summed from
+test_output/usage_log.jsonl, and disk-status indicators for ranges
+and solves.
+
+Cost tracking: every real-API batch's token usage is captured from
+the Anthropic SDK response (see :mod:`admin_panel.usage`), priced
+against MODELS_WITHOUT_TEMPERATURE-aware rate cards, and appended to
+the JSONL log. The Generate result UI and the sidebar widget both
+read from that data.
 """
 
 from __future__ import annotations
@@ -114,8 +126,11 @@ USAGE_LOG_PATH = (
 
 # Dedup set: job IDs we've already appended to the usage log. Module-
 # level (not session_state) because the same job can be observed by
-# multiple browser tabs and the fragment polls re-render every second;
+# multiple browser tabs and the fragment re-renders once a second;
 # we want at-most-once-per-process logging without racing the worker.
+# Memory: one short uuid per completed real-API batch, so even at 1000
+# batches/day this is < 50 KB. No eviction policy needed for the
+# admin-panel's typical multi-hour process lifetime.
 _LOGGED_JOB_IDS: set[str] = set()
 
 # Where the prompt-editor page writes Layer 6 system-prompt overrides. The
@@ -834,8 +849,10 @@ def render_generate_page() -> None:
             use_container_width=True,
         )
         st.caption(
-            "The Generate button activates as soon as solves are uploaded "
-            "to `solves/`. Tracking via task #4."
+            "The postflop Generate button activates once Pio solves land "
+            "in `solves/<scenario_name>/<flop_stem>.cfr`. The preflop "
+            "path is fully wired and does not need solves -- switch the "
+            "Mode toggle above."
         )
     elif not can_generate:
         st.button(
@@ -848,9 +865,11 @@ def render_generate_page() -> None:
     else:
         if st.button("GENERATE BATCH", type="primary", use_container_width=True):
             st.warning(
-                "Backend not wired yet. This preview shows the UI design; "
-                "real generation lands once Layer 6 batching is implemented "
-                "(task #10) and solves are present."
+                "Postflop batch orchestrator is not implemented yet. The "
+                "preflop equivalent (`pipeline.preflop.batch`) is the "
+                "template -- a sibling needs to be written for postflop "
+                "once Pio `.cfr` solves are available. Switch the Mode "
+                "toggle to **Preflop** above to generate questions today."
             )
 
 
@@ -2172,7 +2191,7 @@ def main() -> None:
     )
 
     st.sidebar.title("🎰 Poker Pipeline")
-    st.sidebar.caption("Admin panel · v1 preview")
+    st.sidebar.caption("Preflop pipeline · Phase 3 (skill tagging)")
     page = st.sidebar.radio(
         "Page",
         options=["Files", "Generate", "History", "Browse", "Prompt", "Skills"],
@@ -2230,8 +2249,8 @@ def main() -> None:
 
     st.sidebar.divider()
     st.sidebar.caption(
-        "This is a preview build. Generate is wired to the UI but not "
-        "to the backend yet — see task #10/#11 for full integration."
+        "Preflop generation runs end-to-end. Postflop path is wired "
+        "but waits for PioSolver `.cfr` solves in `solves/`."
     )
 
     if page == "Files":

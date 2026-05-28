@@ -3,14 +3,18 @@
 Decides whether a ``PreflopSpot`` is worth turning into a training question,
 and rates how hard it is on the brief's 500-3000 difficulty scale.
 
-Mirrors ``pipeline.question_extractor`` for postflop, with two differences:
+Mirrors ``pipeline.question_extractor`` for postflop, with two
+preflop-specific differences:
 
-  * **No EV-gap filter (Phase A).** Pio's per-action EV values are baked
-    into a postflop ``.cfr``; preflop only carries frequencies in the
-    range files. Pulling equivalent EV estimates needs an equity-driven
-    EV engine -- worth ~1 day of work, deferred to Phase B. The
-    frequency-window filter alone is enough to drop "trivial" and
-    "coin-flip" spots; review will tell us whether we miss the EV gap.
+  * **EV-gap filter is NOT applied at the worthiness gate.** Postflop's
+    worthiness filter requires ``ev_gap_bb >= 0.5`` as a third gate
+    alongside the frequency window. Preflop intentionally drops this
+    gate from sampling because computing the EV gap needs equity (~1.5s
+    per spot), which would 5-10x the cost of the cheap candidate filter
+    that runs over thousands of spots. EV gap IS still consumed -- the
+    batch loop computes it after sampling and feeds it into
+    :func:`difficulty_score` to refine the displayed Difficulty Rating
+    on every kept spot.
 
   * **Presence filter (new).** A hand that never reaches the decision
     node (zero or near-zero weight across all actions) shouldn't be a
@@ -18,12 +22,14 @@ Mirrors ``pipeline.question_extractor`` for postflop, with two differences:
     that's just whichever zero-weight entry max() picked first. The
     ``min_presence`` filter excludes those.
 
-Difficulty (May 2026 update): combines BOTH the dominant-action frequency
-AND the EV gap between top-2 actions, when EV gap is available. The
-EV gap is computed downstream in the batch loop (needs facts/equity),
-then re-fed into :func:`difficulty_score` for a refined rating. When
-EV gap isn't available (raise-involved spots in v1), the score falls
-back to freq-only.
+Difficulty scoring uses :func:`difficulty_score`, which combines the
+dominant-action frequency (weight 0.6) and the EV gap (weight 0.4,
+capped at 3 bb of credit) when both are available. When ev_gap_bb is
+None (raise-involved spots that the v1 EV engine doesn't model) the
+score falls back to freq-only. The score is computed twice per spot:
+once during worthy-spot collection with ev_gap_bb=None (cheap), then
+again in the batch loop after facts compute (refined). The refined
+score is what reaches the CSV.
 """
 
 from __future__ import annotations

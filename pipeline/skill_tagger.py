@@ -34,7 +34,7 @@ ships in column 39 of the output CSV ("skills", comma-separated).
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -116,28 +116,21 @@ def from_preflop_facts(
         if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
     )
 
-    # Count CALLs that happened AFTER the first raise but BEFORE any
-    # subsequent raise. Non-zero => the most recent raise was preceded
-    # by at least one caller => hero might be facing a squeeze (when
-    # n_prior_raises >= 2) or have a squeeze opportunity (when
-    # n_prior_raises == 1 and we're the last to act).
+    # Count CALLs between the first and the second raise (i.e. "callers
+    # of the open before a 3-bet hit"). Non-zero AND n_prior_raises >= 2
+    # => hero is facing a squeeze; non-zero AND n_prior_raises == 1 AND
+    # hero is the last seat to act => hero has a squeeze opportunity.
+    # Counting stops at the second raise -- any later calls would be of
+    # the 3-bet, not the open, and aren't relevant to either rule.
     n_calls_after_open = 0
     seen_first_raise = False
-    seen_second_raise = False
     for a in history:
         if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
-            if not seen_first_raise:
-                seen_first_raise = True
-            else:
-                seen_second_raise = True
-                break
+            if seen_first_raise:
+                break  # second raise reached -- stop counting
+            seen_first_raise = True
         elif seen_first_raise and a.action_type is PreflopActionType.CALL:
             n_calls_after_open += 1
-    # If we never saw a second raise, n_calls_after_open is "calls after
-    # the open" (used for squeeze_opportunity detection); if we did, it's
-    # "calls between open and 3-bet" (used for facing-squeeze detection).
-    # The semantics are identical for both rules so a single field works.
-    del seen_second_raise  # used implicitly via the loop break
 
     return SkillContext(
         path="preflop",
@@ -398,17 +391,6 @@ def compute_skills(ctx: SkillContext) -> list[str]:
     numbered list) so the CSV stays diff-friendly across batches.
     """
     return [name for name, rule in SKILL_CATALOG.items() if rule(ctx)]
-
-
-# --- coverage introspection (used by the smoke test) -----------------------
-@dataclass(frozen=True)
-class SkillCoverageReport:
-    """Summary of which skills the catalog can/can't fire today."""
-
-    always_off: tuple[str, ...] = field(default_factory=tuple)
-    # Skills hard-coded to return False (TODO markers).
-    preflop_fireable: tuple[str, ...] = field(default_factory=tuple)
-    postflop_fireable: tuple[str, ...] = field(default_factory=tuple)
 
 
 # --- user-facing explainer metadata ------------------------------------------
@@ -702,7 +684,6 @@ __all__ = [
     "SKILL_CATALOG",
     "SKILL_META",
     "SkillContext",
-    "SkillCoverageReport",
     "SkillMeta",
     "SkillRule",
     "compute_skills",
