@@ -317,10 +317,20 @@ def test_gto_three_action_mix_uses_composite_labels() -> None:
     """A 3-action mix uses 'Mostly X, sometimes Y' composite labels rather
     than standalone 'Sometimes Y' options (which Ryan banned in Apr 2026
     as ambiguous). correct_answer is the composite pairing the dominant
-    with the SECOND-most-frequent action. Raise labels canonicalised."""
+    with the SECOND-most-frequent action. Raise labels canonicalised.
+
+    May 2026 update: 'Always {dominant}' (the old slot-0 option) was
+    dropped for mixed spots because it's dead air against the composite
+    alternatives. Replaced with an anti-strategy distractor -- when
+    Fold is already a secondary, the distractor is the overfold
+    composite 'Mostly Fold, sometimes {dominant}'.
+    """
     facts = _facts_with_strategy({"Call": 0.60, "Fold": 0.25, "Raise 308%": 0.15})
     options, correct = build_options_gto(facts)
-    assert options[0] == "Always Call"
+    # The lead option is the overfold distractor (Fold is in the mix,
+    # so "Always Fold" would clash with the dominant-anchored Fold
+    # composite -- the mirror "Mostly Fold, sometimes Call" wins).
+    assert options[0] == "Mostly Fold, sometimes Call"
     # Composite labels for each secondary action -- raise canonicalised
     # to "Raise" since the BTN fixture has empty history (raise_level=1).
     assert "Mostly Call, sometimes Fold" in options
@@ -329,6 +339,9 @@ def test_gto_three_action_mix_uses_composite_labels() -> None:
     # (Fold here, since Fold > Raise in this mix).
     assert correct == "Mostly Call, sometimes Fold"
     assert correct in options
+    # No "Always {dominant}" anywhere -- the user's chief complaint
+    # about the old design (dead-air option since dominant < 95%).
+    assert "Always Call" not in options
     # No standalone "Sometimes X" labels.
     for option in options:
         assert not option.startswith("Sometimes")
@@ -357,7 +370,7 @@ def test_gto_near_pure_spot_still_emits_full_template() -> None:
 def test_gto_near_pure_with_fold_mixin_uses_fold_first() -> None:
     """Call 96% / Fold 4%: only Call is meaningful (>=5%), but Pio plays
     Fold 4%, so Fold becomes B. Standalone Fold-prefixed options come
-    first (Fold-first rule)."""
+    first (Fold is least aggressive)."""
     facts = _facts_with_strategy({"Call": 0.96, "Fold": 0.04})
     options, correct = build_options_gto(facts)
     assert options == [
@@ -368,6 +381,41 @@ def test_gto_near_pure_with_fold_mixin_uses_fold_first() -> None:
     ]
     # 96% >= 95% -> Always prefix.
     assert correct == "Always Call"
+    assert correct in options
+
+
+def test_gto_2_action_template_orders_by_aggression() -> None:
+    """Regression: when secondary is a smaller action than dominant
+    (e.g. dominant=Raise/4-bet, secondary=Call), the lesser action
+    (Call) comes FIRST -- generalises the Fold-first special case to
+    'least-aggressive-first'. Otherwise the 4-option block reads as
+    'most committed -> most conservative', which doesn't match how
+    poker decisions are usually scanned.
+
+    Uses a hero=BB-facing-3bet history (2 prior raises -> raise_level=3)
+    so 'Raise X%' canonicalises to '4-bet'.
+    """
+    history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
+        ParsedAction("CO", PreflopActionType.FOLD),
+        ParsedAction("BTN", PreflopActionType.RAISE, 77.0),
+        ParsedAction("SB", PreflopActionType.FOLD),
+    )
+    facts = _facts_with_strategy(
+        {"Raise 50%": 0.76, "Call": 0.24},
+        actor="BB",
+        history=history,
+    )
+    options, correct = build_options_gto(facts)
+    # Call (less aggressive) FIRST, 4-bet (more aggressive) LAST.
+    assert options == [
+        "Always Call",
+        "Mostly Call",
+        "Mostly 4-bet",
+        "Always 4-bet",
+    ]
+    assert correct == "Mostly 4-bet"
     assert correct in options
 
 
