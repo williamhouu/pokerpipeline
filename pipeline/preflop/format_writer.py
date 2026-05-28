@@ -58,10 +58,20 @@ from typing import Any
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
 from pipeline.preflop.concept_tags import compute_concept_tags
-from pipeline.preflop.fact_extractor import PreflopFacts
+from pipeline.preflop.fact_extractor import (
+    PreflopFacts,
+    construct_villain_range_path,
+    identify_villain,
+)
 from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+from pipeline.preflop.node_enumerator import PreflopDecisionNode
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import PreflopPack
+from pipeline.preflop_ranges import (
+    canonical_169_hand_classes,
+    format_hand_class_range,
+    parse_range_file,
+)
 
 # --- position-prose vocabulary -----------------------------------------------
 # Mirrors ``pipeline.action_history``'s mappings but redefined locally so the
@@ -304,6 +314,117 @@ def _solver_reference(facts: PreflopFacts, pack: PreflopPack) -> str:
     return f"{pack.pack_id}/{facts.spot.node.actor}/{facts.spot.node.node_id}"
 
 
+# --- IP / OOP range snapshots ------------------------------------------------
+# Postflop action order: SB → BB → UTG → UTG+1 → UTG+2 → LJ → HJ → CO → BTN.
+# Lower rank acts first postflop → that's the OOP player. Higher rank acts
+# last → IP. The heads-up BvB case (only SB and BB) is the standard
+# exception: SB acts LAST postflop in HU, so SB is IP and BB is OOP.
+_POSTFLOP_RANK: dict[str, int] = {
+    "SB": 0,
+    "BB": 1,
+    "UTG": 2,
+    "UTG+1": 3,
+    "UTG+2": 4,
+    "LJ": 5,
+    "HJ": 6,
+    "CO": 7,
+    "BTN": 8,
+}
+
+
+def _ip_oop_positions(hero_pos: str, villain_pos: str) -> tuple[str, str]:
+    """Return ``(ip_position, oop_position)`` for a 2-way preflop spot.
+
+    Heads-up BvB (only SB + BB): SB is the dealer and acts last
+    postflop, so SB is IP. Otherwise the player whose postflop rank is
+    higher (acts later) is IP.
+    """
+    if {hero_pos, villain_pos} == {"SB", "BB"}:
+        return ("SB", "BB")
+    hero_rank = _POSTFLOP_RANK.get(hero_pos, -1)
+    villain_rank = _POSTFLOP_RANK.get(villain_pos, -1)
+    if hero_rank > villain_rank:
+        return (hero_pos, villain_pos)
+    return (villain_pos, hero_pos)
+
+
+def _compute_hero_range_snapshot(
+    node: PreflopDecisionNode,
+) -> dict[str, float]:
+    """Hero's 169-class range at the decision node.
+
+    Sums the per-hand-class weights across all of hero's action range
+    files. Each cell is the hand class's PRESENCE at this node (how
+    often it reaches here from the parent decisions) -- which is what
+    a range-grid UI shows. Range cells in [0, 1]; cells with zero
+    weight (hand class never reaches the node) stay at 0.
+
+    Returns a complete 169-entry dict so the renderer downstream can
+    rely on canonical-order iteration.
+    """
+    out: dict[str, float] = {cls: 0.0 for cls in canonical_169_hand_classes()}
+    for opt in node.actions:
+        weights = parse_range_file(opt.range_file.path)
+        for cls in canonical_169_hand_classes():
+            out[cls] += weights.get(cls, 0.0)
+    return out
+
+
+def _compute_villain_range_snapshot(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+) -> dict[str, float] | None:
+    """Villain's 169-class range at their last raise/all-in node.
+
+    Returns None when:
+      - there's no villain (e.g. hero is first to act -- open spot)
+      - the villain's range file isn't on disk (defensive: missing pack
+        data shouldn't crash the row builder)
+    """
+    villain = identify_villain(facts.spot.node)
+    if villain is None:
+        return None
+    try:
+        path = construct_villain_range_path(facts.spot.node, villain, pack)
+    except (ValueError, KeyError):
+        return None
+    if not path.is_file():
+        return None
+    return parse_range_file(path)
+
+
+def _render_range_snapshots(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+) -> tuple[str, str]:
+    """Return ``(ip_range_str, oop_range_str)`` -- the CSV column values.
+
+    Both empty strings for open spots (no villain to anchor IP/OOP
+    against). When there's a villain, both columns are populated with
+    169-entry Ryan-pack-format snapshots (the same format
+    :func:`pipeline.preflop_ranges.parse_range_file` consumes, so the
+    column round-trips cleanly).
+    """
+    if facts.villain_stats is None:
+        return ("", "")
+    hero_pos = facts.spot.node.actor
+    villain_pos = facts.villain_stats.position
+    ip_pos, _oop_pos = _ip_oop_positions(hero_pos, villain_pos)
+    hero_range = _compute_hero_range_snapshot(facts.spot.node)
+    villain_range = _compute_villain_range_snapshot(facts, pack)
+    if villain_range is None:
+        return ("", "")
+    if hero_pos == ip_pos:
+        return (
+            format_hand_class_range(hero_range),
+            format_hand_class_range(villain_range),
+        )
+    return (
+        format_hand_class_range(villain_range),
+        format_hand_class_range(hero_range),
+    )
+
+
 # --- question-narrative renderer ---------------------------------------------
 # Delegates to pipeline.preflop.action_history, which builds the brief-spec
 # `hand` dict and calls pipeline.action_history.format_action_history. This
@@ -425,6 +546,11 @@ def build_preflop_row(
     else:
         default_stack = _bb(pack.stack_depth_bb)
 
+    # IP / OOP range snapshots. Single call -- the helper reads two range
+    # files (hero's per-action ranges + villain's range file) so we don't
+    # want to do it twice.
+    _ip_range_value, _oop_range_value = _render_range_snapshots(facts, pack)
+
     return {
         "No": str(number),
         # UI rendering. Cards on Table is empty for preflop (no board).
@@ -496,14 +622,13 @@ def build_preflop_row(
         "action_frequencies": _format_action_frequencies(
             canonicalize_strategy(facts),
         ),
-        # ip_range / oop_range: 169-class snapshots at the preflop node.
-        # Computing them requires summing hero's per-action ranges and
-        # parsing villain's range file into a 169-class dict; the
-        # building blocks exist in pipeline.preflop.fact_extractor but
-        # the snapshotting helper isn't wired yet. Deferred to a
-        # follow-up turn; empty for now so the CSV stays valid.
-        "ip_range": "",
-        "oop_range": "",
+        # ip_range / oop_range: 169-class Ryan-pack-format snapshots at
+        # the preflop node. Both populated when there's a villain;
+        # both empty for open spots (no villain to anchor IP/OOP
+        # against). Format matches what parse_range_file consumes, so
+        # the snapshot round-trips cleanly into a range-grid UI later.
+        "ip_range": _ip_range_value,
+        "oop_range": _oop_range_value,
     }
 
 

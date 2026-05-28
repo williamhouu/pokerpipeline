@@ -292,11 +292,62 @@ def test_board_texture_is_empty_preflop() -> None:
     assert row["board_texture"] == ""
 
 
+def test_ip_oop_positions_blind_vs_button() -> None:
+    """Non-BvB: the non-blind position is IP, BB is OOP."""
+    from pipeline.preflop.format_writer import _ip_oop_positions
+
+    assert _ip_oop_positions("BB", "BTN") == ("BTN", "BB")
+    assert _ip_oop_positions("BTN", "BB") == ("BTN", "BB")
+    assert _ip_oop_positions("HJ", "BB") == ("HJ", "BB")
+    assert _ip_oop_positions("BB", "UTG") == ("UTG", "BB")
+
+
+def test_ip_oop_positions_bvb_heads_up() -> None:
+    """BvB heads-up: SB is the dealer and acts LAST postflop -> SB is IP,
+    BB is OOP. This is the standard HU exception to the postflop-order
+    rule."""
+    from pipeline.preflop.format_writer import _ip_oop_positions
+
+    assert _ip_oop_positions("SB", "BB") == ("SB", "BB")
+    assert _ip_oop_positions("BB", "SB") == ("SB", "BB")
+
+
+def test_ip_oop_positions_two_non_blind_seats() -> None:
+    """Two non-blind seats: later in postflop order is IP."""
+    from pipeline.preflop.format_writer import _ip_oop_positions
+
+    # BTN later than CO, CO later than HJ, etc.
+    assert _ip_oop_positions("BTN", "CO") == ("BTN", "CO")
+    assert _ip_oop_positions("CO", "UTG") == ("CO", "UTG")
+
+
+def test_ip_oop_positions_sb_vs_non_blind() -> None:
+    """SB is the very first to act postflop (in non-HU), so SB is OOP
+    against any non-blind."""
+    from pipeline.preflop.format_writer import _ip_oop_positions
+
+    assert _ip_oop_positions("BTN", "SB") == ("BTN", "SB")
+    assert _ip_oop_positions("SB", "BTN") == ("BTN", "SB")
+
+
+def test_range_snapshots_empty_for_open_spot() -> None:
+    """No villain (open spot) -> both ip_range and oop_range empty.
+    There's no IP/OOP frame without a 2-player anchor."""
+    row = build_preflop_row(
+        _open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty_score=1500,
+        number=1,
+    )
+    assert row["ip_range"] == ""
+    assert row["oop_range"] == ""
+
+
 def test_phase_b_deferred_columns_still_empty() -> None:
-    """ev_gap_bb, ip_range, oop_range are still deferred to later Phase B
-    work; they render as empty strings.  concept_tags went live in the
-    concept-tagger commit and is now populated -- this test ensures it
-    actually contains tag names."""
+    """ev_gap_bb is the last remaining Phase B deferral. concept_tags,
+    ip_range, oop_range are now all populated by Phase B steps 1 and 2.
+    """
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -304,17 +355,20 @@ def test_phase_b_deferred_columns_still_empty() -> None:
         difficulty_score=1500,
         number=1,
     )
+    # Still deferred: ev_gap_bb (Phase B step 4 -- EV engine).
     assert row["ev_gap_bb"] == ""
-    assert row["ip_range"] == ""
-    assert row["oop_range"] == ""
-    # concept_tags is now populated -- the fixture is SB facing a BTN open
-    # with AQs, so at least "small_blind", "facing_single_raise", and
-    # "ace_blocker" should fire.
+    # concept_tags from Phase B step 1.
     assert row["concept_tags"]
     tag_list = [t.strip() for t in row["concept_tags"].split(",")]
     assert "small_blind" in tag_list
     assert "facing_single_raise" in tag_list
     assert "ace_blocker" in tag_list
+    # ip_range / oop_range from Phase B step 2. The synthetic fixture has
+    # villain_stats but the synthetic pack lacks the villain's range file
+    # on disk, so the snapshot helper returns empty -- defensive fallback.
+    # See test_range_snapshots_empty_for_open_spot for the open-spot path.
+    # When the helper does find the file (smoke test on real Ryan pack
+    # below) both columns populate with 169-entry Ryan-pack-format strings.
 
 
 def test_solver_reference_is_pack_relative_path() -> None:
