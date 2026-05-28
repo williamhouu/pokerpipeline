@@ -63,6 +63,7 @@ from pipeline.explanation_generator import (
     DEFAULT_TEMPERATURE,
     ExplanationValidationError,
     GeneratedExplanation,
+    call_messages_create,
     frequency_to_verb_prefix,
     parse_response,
 )
@@ -719,7 +720,8 @@ def generate_preflop_explanation(
 
     last_error: str | None = None
     for _ in range(max_retries + 1):
-        response = client.messages.create(
+        response = call_messages_create(
+            client,
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -948,7 +950,8 @@ def generate_preflop_answer_explanation(
 
     last_error: str | None = None
     for _ in range(max_retries + 1):
-        response = client.messages.create(
+        response = call_messages_create(
+            client,
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,

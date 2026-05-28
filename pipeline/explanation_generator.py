@@ -57,6 +57,42 @@ DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
 DEFAULT_MAX_TOKENS = 1500                  # 4 short options + a 2-5 sentence explanation
 GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"
+
+# Models that have deprecated the `temperature` parameter. The Anthropic
+# API returns 400 invalid_request_error ('`temperature` is deprecated
+# for this model') if you include `temperature` when calling any of
+# these. We drop the param at call time and let the model use its
+# default sampling temperature. Add new entries as deprecations land.
+MODELS_WITHOUT_TEMPERATURE: frozenset[str] = frozenset({
+    "claude-opus-4-7",
+    "claude-opus-4-5",
+})
+
+
+def call_messages_create(client, *, model, max_tokens, temperature, system, messages):
+    """Wrapper around ``client.messages.create`` that handles per-model
+    parameter compatibility.
+
+    Today's only quirk: Claude Opus 4.x deprecated ``temperature``.
+    Calling those models with ``temperature=`` set crashes the whole
+    batch with a 400 error. This wrapper drops the parameter for
+    models in :data:`MODELS_WITHOUT_TEMPERATURE` (and otherwise passes
+    it through unchanged for Sonnet etc.).
+
+    Lives here (not in batch.py or per-call site) so every Layer 6
+    entry point -- postflop, preflop full, preflop answer-only --
+    routes through one place. Adding a new compatibility quirk is a
+    one-line update.
+    """
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+    }
+    if model not in MODELS_WITHOUT_TEMPERATURE:
+        kwargs["temperature"] = temperature
+    return client.messages.create(**kwargs)
 GOLD_XLSX = (Path(__file__).resolve().parent.parent
              / "docs" / "output_format_examples.xlsx")
 
@@ -787,7 +823,8 @@ def generate_explanation(spot_data: SpotData, *,
 
     last_error: str | None = None
     for attempt in range(max_retries + 1):
-        response = client.messages.create(
+        response = call_messages_create(
+            client,
             model=model, max_tokens=max_tokens, temperature=temperature,
             system=system, messages=messages,
         )

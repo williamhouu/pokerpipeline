@@ -198,11 +198,14 @@ def _mock_client(responses: list[str]) -> SimpleNamespace:
         *,
         model: str,
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,  # Opus 4.x dropped this kwarg
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
     ) -> SimpleNamespace:
-        calls.append({"model": model, "system": system, "messages": messages})
+        calls.append(
+            {"model": model, "system": system, "messages": messages,
+             "temperature": temperature}
+        )
         text = queue.pop(0)
         return SimpleNamespace(content=[SimpleNamespace(text=text)])
 

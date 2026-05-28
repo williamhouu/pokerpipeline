@@ -97,8 +97,12 @@ def _mock_client(responses):
     calls = []
     queue = list(responses)
 
-    def create(*, model, max_tokens, temperature, system, messages):
-        calls.append({"model": model, "system": system, "messages": messages})
+    def create(*, model, max_tokens, system, messages, temperature=None):
+        # temperature kwarg is conditionally omitted by call_messages_create
+        # when the model is in MODELS_WITHOUT_TEMPERATURE (Opus 4.x); the
+        # default of None lets the mock accept either call shape.
+        calls.append({"model": model, "system": system, "messages": messages,
+                      "temperature": temperature})
         text = queue.pop(0)
         return SimpleNamespace(content=[SimpleNamespace(text=text)])
 
