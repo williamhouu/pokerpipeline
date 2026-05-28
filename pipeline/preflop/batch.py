@@ -60,6 +60,9 @@ from pipeline.explanation_generator import (
     ExplanationValidationError,
     GeneratedExplanation,
 )
+from pipeline.preflop.difficulty import (
+    compute_difficulty,
+)
 from pipeline.preflop.ev_engine import compute_ev_gap_bb
 from pipeline.preflop.explanation_generator import (
     generate_preflop_answer_explanation,
@@ -84,7 +87,6 @@ from pipeline.preflop.question_extractor import (
     MIN_PRESENCE,
     MIN_TOP_FREQUENCY,
     PreflopQuestionEvaluation,
-    difficulty_score,
     evaluate_spot,
 )
 from pipeline.preflop.spot_sampler import (
@@ -436,15 +438,16 @@ def generate_preflop_batch(
                     max_tokens=max_tokens,
                     usage_callback=_record_usage,
                 )
-            # Re-score difficulty with the EV gap now that facts are
-            # available. evaluation.difficulty_score from the cheap
-            # pre-facts filter was freq-only; this refines it.
-            # compute_ev_gap_bb returns None when raises are in the
-            # top-2 (v1 limitation) -- difficulty_score handles that
-            # fallback to freq-only internally.
+            # Compute the full 4-axis difficulty rating. The pre-facts
+            # evaluation.difficulty_score was a freq-only estimate used
+            # only for the worthiness gate; the canonical rating comes
+            # from compute_difficulty which blends freq + EV gap +
+            # archetype/concept + hand class (with EV-weight
+            # redistribution when the EV engine couldn't score the
+            # spot, typical for raise-involved spots).
             ev_gap = compute_ev_gap_bb(facts, pack)
-            enriched_difficulty = difficulty_score(spot, ev_gap_bb=ev_gap)
-            rows.append((facts, explanation, enriched_difficulty))
+            difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap)
+            rows.append((facts, explanation, difficulty))
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
             failures.append(

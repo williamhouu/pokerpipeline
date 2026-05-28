@@ -77,6 +77,19 @@ CSV_COLUMNS = [
     # postflop rows. Used by the LLM as the strategic frame; surfaced
     # in the CSV for analytics / reviewer QA. (May 2026 ask.)
     "archetype",
+    # Difficulty algorithm diagnostic columns (May 2026 redesign). The
+    # `Difficulty Rating` column is a weighted blend of these four
+    # axes plus optional bump rules; surfacing them lets reviewers
+    # see WHY a spot got a particular rating without re-running the
+    # algorithm. Each axis is a [0, 1] value where 1 = "easy on this
+    # dimension". `easy_ev` is empty when the EV engine couldn't
+    # score the spot (raise-involved spots in v1).
+    # `difficulty_bumps` names any rules from
+    # pipeline.preflop.difficulty.BUMP_RULES that fired for this spot
+    # (empty when no bumps are active in the table -- currently the
+    # default state).
+    "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+    "difficulty_bumps",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -302,6 +315,14 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # archetype is a preflop-only classifier (postflop has no
         # equivalent layer); always empty here.
         "archetype": "",
+        # Difficulty diagnostic columns (May 2026) -- the 4-axis
+        # algorithm is preflop-only at the moment. Postflop still
+        # uses the legacy freq-only difficulty_score (above); the
+        # per-axis breakdown columns are empty for postflop rows.
+        # When postflop generation is re-architected to use the
+        # 4-axis algorithm, this row builder will populate these.
+        "easy_freq": "", "easy_ev": "", "easy_concept": "", "easy_hand": "",
+        "difficulty_bumps": "",
     }
 
 

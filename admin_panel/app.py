@@ -1246,102 +1246,328 @@ def _start_preflop_job(
 def _render_difficulty_explainer() -> None:
     """Popover content for "How is Difficulty calculated?".
 
-    Mirrors the docstring of
-    :func:`pipeline.preflop.question_extractor.difficulty_score`.
-    Edit both together so the UI text doesn't drift from the formula.
+    Reads constants directly from :mod:`pipeline.preflop.difficulty`
+    so the popover never drifts from the actual formula -- the
+    weight / table / bump-rule values you see here ARE the values
+    the algorithm uses. Edit ``pipeline/preflop/difficulty.py`` to
+    tune; this popover updates automatically.
     """
+    # Lazy imports: read live values from the difficulty module so the
+    # popover never lies about what the algorithm is doing.
+    from pipeline.preflop.difficulty import (  # noqa: PLC0415
+        ARCHETYPE_BASE_EASE,
+        BUMP_RULES,
+        CONCEPT_TAG_MODIFIERS,
+        HAND_CLASS_EASE,
+        W_CONCEPT,
+        W_EV,
+        W_FREQ,
+        W_HAND,
+    )
+
+    # --- overview ---
+    st.markdown(
+        f"""
+**Difficulty Rating** runs roughly **500 (easiest) → 3000 (hardest)**
+on the brief's MVP Elo-style scale. Soft bounds at **[400, 3200]**
+absorb rare outliers without losing information.
+
+The score blends **four independent axes**, each a number in [0, 1]
+where 1 = "easy on this dimension" and 0 = "hard". The four are
+combined as a weighted average and (optionally) adjusted by **bump
+rules**:
+
+```text
+easy = ({W_FREQ:.2f} × easy_freq)
+     + ({W_EV:.2f} × easy_ev)         [redistributed when ev unavailable]
+     + ({W_CONCEPT:.2f} × easy_concept)
+     + ({W_HAND:.2f} × easy_hand)
+
+easy += sum(bump.easy_delta for bump in BUMP_RULES if bump matches)
+
+difficulty = round(clip(3000 − easy × 2500, 400, 3200))
+```
+
+Result: an integer in roughly [500, 3000] (with rare ±100-200 outliers
+in [400, 3200]). The four per-axis values + any bump names that fired
+are surfaced as diagnostic columns in the output CSV
+(`easy_freq`, `easy_ev`, `easy_concept`, `easy_hand`, `difficulty_bumps`)
+so reviewers can see exactly why a spot got its score.
+"""
+    )
+
+    # --- axis 1: freq ---
+    st.markdown(
+        f"""
+### Axis 1 — Top action frequency &nbsp;·&nbsp; weight **{W_FREQ:.0%}**
+
+How dominant the correct answer is in Pio's strategy. Lower freq =
+more genuinely mixed = harder to identify the "right" answer.
+
+```text
+easy_freq = clip((dominant_freq − 0.55) / 0.45, 0, 1)
+```
+
+| dominant_freq | easy_freq | contribution to difficulty |
+|---|---|---|
+| 55% (worthiness floor) | 0.00 | +1000 (hardest end) |
+| 66% | 0.244 | +756 |
+| 75% | 0.444 | +556 |
+| 85% | 0.667 | +333 |
+| 95% (Always threshold) | 0.889 | +111 |
+| 100% (pure strategy) | 1.00 | +0 (easiest end) |
+"""
+    )
+
+    # --- axis 2: ev ---
+    st.markdown(
+        f"""
+### Axis 2 — EV gap &nbsp;·&nbsp; weight **{W_EV:.0%}**
+
+The chip cost (in bb) of picking the second-best action over the
+correct one. Bigger gap = clearer "right answer" = easier spot.
+
+```text
+easy_ev = clip(ev_gap_bb / 3.0, 0, 1)
+```
+
+3 bb is the "fully easy" cap -- beyond that the spot is already
+trivial. When the EV engine can't compute the gap (raise-involved
+spots in v1, since we need postflop solves to score raise EVs), the
+EV weight (**{W_EV:.0%}**) is **redistributed proportionally** across
+the other three axes rather than being treated as a neutral 0.5.
+This stops raise spots from being artificially pulled toward
+mid-difficulty.
+
+| ev_gap_bb | easy_ev | contribution |
+|---|---|---|
+| 0.0 (coin-flip) | 0.00 | +750 (hardest) |
+| 0.5 | 0.167 | +625 |
+| 1.5 | 0.500 | +375 |
+| 3.0+ (capped) | 1.00 | +0 (easiest) |
+| unavailable | — | weight redistributes |
+"""
+    )
+
+    # --- axis 3: concept ---
+    st.markdown(
+        f"""
+### Axis 3 — Concept &nbsp;·&nbsp; weight **{W_CONCEPT:.0%}**
+
+How strategically complex the spot's CONTEXT is. Built from two
+pieces: the spot's `archetype` (one of 16 from
+`pipeline.preflop.fact_extractor.classify_archetype`) gives a base
+value, then `concept_tag` modifiers add or subtract.
+
+```text
+easy_concept = ARCHETYPE_BASE_EASE[archetype]
+             + sum(CONCEPT_TAG_MODIFIERS[tag] for each firing tag)
+             clipped to [0.05, 1.0]
+```
+
+**Archetype base-ease table (live values):**
+"""
+    )
+    arch_df = pd.DataFrame(
+        sorted(
+            ARCHETYPE_BASE_EASE.items(), key=lambda kv: -kv[1]
+        ),
+        columns=["Archetype", "easy_concept base"],
+    )
+    st.dataframe(arch_df, hide_index=True, use_container_width=True)
+
+    st.markdown("**Concept-tag modifiers (live values):**")
+    mod_df = pd.DataFrame(
+        [
+            {
+                "Concept tag (must fire)": tag,
+                "easy_concept delta": f"{delta:+.2f}",
+                "Why": _CONCEPT_MOD_RATIONALE.get(tag, ""),
+            }
+            for tag, delta in CONCEPT_TAG_MODIFIERS.items()
+        ],
+        columns=["Concept tag (must fire)", "easy_concept delta", "Why"],
+    )
+    st.dataframe(mod_df, hide_index=True, use_container_width=True)
+
+    # --- axis 4: hand ---
+    st.markdown(
+        f"""
+### Axis 4 — Hand class &nbsp;·&nbsp; weight **{W_HAND:.0%}**
+
+The hero's hand class shapes how obvious the right action is.
+**U-shaped**: extreme hands (premium pairs OR clear trash) are easy;
+marginal hands (small pairs, suited connectors, suited aces) are
+hard because the right action requires real strategic reasoning.
+
+```text
+easy_hand = HAND_CLASS_EASE[matched_tag]  # first match wins
+            default 0.55 when no tag matches
+```
+
+**Hand class ease table (live values):**
+"""
+    )
+    hand_df = pd.DataFrame(
+        [
+            {
+                "Hand class tag": tag,
+                "easy_hand": f"{ease:.2f}",
+                "Examples": _HAND_TAG_EXAMPLES.get(tag, ""),
+            }
+            for tag, ease in HAND_CLASS_EASE.items()
+        ],
+        columns=["Hand class tag", "easy_hand", "Examples"],
+    )
+    st.dataframe(hand_df, hide_index=True, use_container_width=True)
+    st.caption(
+        "_Hands that don't match any of these tags (e.g. KQo -- broadway "
+        "offsuit but not premium_unpaired or unconnected_offsuit) fall "
+        "back to **0.55**._"
+    )
+
+    # --- bump rules ---
     st.markdown(
         """
-**Difficulty Rating** runs **500 (easiest) → 3000 (hardest)** per the
-brief's MVP scale. It blends two signals:
+### Bump rules
 
-**1. Top action frequency** &nbsp;·&nbsp; weight **60%**
-&nbsp;&nbsp;&nbsp;The dominant signal — how obvious the correct answer is.
-- 55% freq = barely dominant → hardest end
-- 100% freq = pure strategy → easiest end
+Signed additive deltas applied AFTER the weighted axis sum. Each rule
+captures a known spot pattern the linear axis blend mis-scores --
+typically synergies between axes (e.g. mixed strategy AND advanced
+concept). Each bump's `easy_delta` is small (±0.05) so the axes
+remain the dominant signal.
 
-**2. EV gap** (bb between top 2 actions) &nbsp;·&nbsp; weight **40%**
-&nbsp;&nbsp;&nbsp;The modifier — how costly the wrong answer is.
-- 0 bb gap = solver noise / coin-flip → harder
-- 3+ bb gap = clearly costly mistake → easier _(capped at 3 bb)_
-
-**Blend**
-```
-freq_easy = (freq − 0.55) / 0.45               # clip to [0, 1]
-ev_easy   = min(ev_gap_bb / 3.0, 1.0)          # clip to [0, 1]
-easy      = 0.6 × freq_easy + 0.4 × ev_easy
-difficulty = round(3000 − easy × 2500)         # clamp to [500, 3000]
+```text
+easy += sum(rule.easy_delta for rule in BUMP_RULES if rule.predicate(facts, ev))
 ```
 """
     )
-    st.markdown("**Examples**")
+    if not BUMP_RULES:
+        st.info(
+            "**Currently no bump rules are active.** The table is "
+            "intentionally empty at v1 ship -- bumps get added in "
+            "`pipeline/preflop/difficulty.py:BUMP_RULES` as observed "
+            "batches show specific spots the axis blend mis-scores."
+        )
+    else:
+        bumps_df = pd.DataFrame(
+            [
+                {
+                    "Name": rule.name,
+                    "Delta": f"{rule.easy_delta:+.2f}",
+                    "Trigger": rule.description,
+                }
+                for rule in BUMP_RULES
+            ],
+            columns=["Name", "Delta", "Trigger"],
+        )
+        st.dataframe(bumps_df, hide_index=True, use_container_width=True)
+
+    # --- worked examples ---
+    st.markdown(
+        """
+### Worked examples (real spots from user batches)
+
+These show how the four axes combine on representative spots.
+"""
+    )
     examples_df = pd.DataFrame(
         [
             {
-                "Freq": "55%",
-                "EV gap": "—",
-                "Difficulty": 3000,
-                "Reading": "Hardest possible (no EV signal)",
+                "Spot": "BTN open AA",
+                "easy_freq": 1.00, "easy_ev": 1.00,
+                "easy_concept": 1.00, "easy_hand": 1.00,
+                "easy_blend": 1.00, "difficulty": 500,
+                "Reading": "Pure value open with the nuts. Easiest.",
             },
             {
-                "Freq": "66%",
-                "EV gap": "1.4 bb",
-                "Difficulty": 2175,
-                "Reading": "Mixed strategy, meaningful both ways",
+                "Spot": "BB defend KQs vs BTN open",
+                "easy_freq": 0.78, "easy_ev": 0.50,
+                "easy_concept": 0.60, "easy_hand": 0.65,
+                "easy_blend": 0.612, "difficulty": 1470,
+                "Reading": "Standard defending spot, easy hand class.",
             },
             {
-                "Freq": "55%",
-                "EV gap": "3.0 bb",
-                "Difficulty": 2000,
-                "Reading": "Big gap but freq says still hard",
+                "Spot": "BTN 33 vs BB 3-bet (user's spot #3)",
+                "easy_freq": 0.24, "easy_ev": 0.46,
+                "easy_concept": 0.70, "easy_hand": 0.45,
+                "easy_blend": 0.420, "difficulty": 1950,
+                "Reading": "Small pair facing 3-bet -- marginal hand, costly mistake.",
             },
             {
-                "Freq": "81%",
-                "EV gap": "1.4 bb",
-                "Difficulty": 1672,
-                "Reading": "High freq + modest gap",
+                "Spot": "Mixed 3-bet bluff with A5s, low EV gap",
+                "easy_freq": 0.00, "easy_ev": 0.10,
+                "easy_concept": 0.45, "easy_hand": 0.40,
+                "easy_blend": 0.165, "difficulty": 2588,
+                "Reading": "Close decision, complex archetype, marginal hand. Hard.",
             },
             {
-                "Freq": "95%",
-                "EV gap": "0 bb",
-                "Difficulty": 1667,
-                "Reading": "Near-pure but mistake costs nothing",
-            },
-            {
-                "Freq": "95%",
-                "EV gap": "—",
-                "Difficulty": 778,
-                "Reading": "Very easy (no EV signal)",
-            },
-            {
-                "Freq": "95%",
-                "EV gap": "3.0 bb",
-                "Difficulty": 666,
-                "Reading": "Very easy + costly mistake",
-            },
-            {
-                "Freq": "100%",
-                "EV gap": "—",
-                "Difficulty": 500,
-                "Reading": "Easiest possible",
+                "Spot": "5-bet pot small pair, near-coinflip",
+                "easy_freq": 0.05, "easy_ev": 0.00,
+                "easy_concept": 0.10, "easy_hand": 0.45,
+                "easy_blend": 0.085, "difficulty": 2788,
+                "Reading": "Hardest tier: 5-bet pot + marginal hand + mixed strategy.",
             },
         ]
     )
     st.dataframe(examples_df, hide_index=True, use_container_width=True)
+
+    # --- design notes ---
     st.markdown(
         """
-**When EV gap is unavailable** the formula falls back to **freq-only**.
-This happens when a Raise (3-bet / 4-bet / All-in) is in the top-2
-actions — the v1 EV engine only handles call/fold spots. Extending
-to raises needs postflop solves we don't have yet.
+### Notes
 
-**Why the filter slider below still says "frequency"** — the slider
-filters spots BEFORE we compute equity (which the EV gap needs).
-Running equity on every candidate would 5–10× the batch sampling time.
-The slider stays freq-based for performance; the EV gap refines the
-*displayed* Difficulty Rating after the filter has run.
+- **Pure spots can now reach high difficulty.** Pre-redesign, an
+  "Always X" spot was capped at ~1668 difficulty regardless of context.
+  Now a pure spot with a hard concept (5-bet pot) and marginal hand
+  can score 1900+ -- the concept and hand axes lift it.
+- **Mixed spots can reach low difficulty.** Conversely, a mixed-strategy
+  spot with a premium hand and routine concept can score in the
+  Easy tier when warranted.
+- **The filter slider above is freq-only.** Per-spot equity (needed
+  for EV gap) is expensive; the slider filters BEFORE we compute
+  facts. The Difficulty Rating in the CSV uses all four axes.
+- **To tune**, edit `pipeline/preflop/difficulty.py`:
+  - Weights: `W_FREQ`, `W_EV`, `W_CONCEPT`, `W_HAND` (must sum to 1.0)
+  - Concept: `ARCHETYPE_BASE_EASE`, `CONCEPT_TAG_MODIFIERS`
+  - Hand: `HAND_CLASS_EASE`
+  - Bumps: `BUMP_RULES` (add `BumpRule(name=..., easy_delta=..., predicate=...)`)
+  - Bounds: `_LINEAR_FLOOR`, `_LINEAR_CEILING`, `_HARD_FLOOR`, `_HARD_CEILING`
+
+  After editing, run a new batch from the Generate page -- changes
+  take effect immediately (the values shown above are read live from
+  the module).
 """
     )
+
+
+# Rationale strings shown alongside concept-tag modifiers in the
+# popover's table. Hand-curated; update if a modifier is added /
+# changed in CONCEPT_TAG_MODIFIERS.
+_CONCEPT_MOD_RATIONALE: dict[str, str] = {
+    "multiway_pot": (
+        "3+ players still in the pot -- more variables, harder to read"
+    ),
+    "short_stack": (
+        "ICM + push/fold dynamics on top of the base archetype"
+    ),
+    "deep_stack": (
+        "100bb cash is the standard simpler case (positive bump)"
+    ),
+}
+
+# Example hand classes per hand-tag, shown alongside HAND_CLASS_EASE
+# in the popover. Hand-curated; update if a tag is added / renamed.
+_HAND_TAG_EXAMPLES: dict[str, str] = {
+    "premium_pair":         "AA, KK, QQ",
+    "premium_unpaired":     "AK, AQ (suited or off)",
+    "unconnected_offsuit":  "73o, 84o, K3o (clear folds)",
+    "suited_broadway":      "KQs, KJs, KTs, QJs, QTs, JTs",
+    "medium_pair":          "JJ, TT, 99",
+    "small_pair":           "88-22",
+    "suited_ace":           "A2s-AJs (non-premium Axs)",
+    "suited_connector":     "98s, 87s, 76s, 65s, 54s",
+}
 
 
 @st.fragment(run_every=1.0)

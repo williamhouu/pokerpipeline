@@ -251,9 +251,10 @@ explanations before the tagger goes to production.
 ## Output format
 
 Source of truth is **Google Sheets**. The existing **29 columns stay unchanged**; the
-pipeline writes to them via a formatter and adds **8 new columns** (5 from the
+pipeline writes to them via a formatter and adds **16 new columns** (5 from the
 brief + 1 from Apr-2026 Ryan-feedback Fix 3 + 2 from May-2026 Ryan ask
-+ 1 from May-2026 Phase 3 skill tagging + 1 from May-2026 archetype-QA ask):
++ 1 from May-2026 Phase 3 skill tagging + 1 from May-2026 archetype-QA ask
++ 5 from May-2026 difficulty-algorithm redesign):
 
 | Col | Name | Purpose |
 |-----|------|---------|
@@ -268,6 +269,19 @@ brief + 1 from Apr-2026 Ryan-feedback Fix 3 + 2 from May-2026 Ryan ask
 | 38 | `oop_range` | same as `ip_range`, for the OOP player |
 | 39 | `skills` | comma-separated user-facing skill labels from `pipeline/skill_tagger.py` — the 42-skill catalog the app uses for "study X" features. Distinct from `concept_tags` (computational atoms) — `skills` is the mapped user-readable layer. Strict tagging: 2–5 skills/question typical. (Phase 3, May 2026.) |
 | 40 | `archetype` | preflop strategic frame: one of the 16 labels from `pipeline.preflop.fact_extractor.classify_archetype` (`open_for_value`, `3bet_for_value`, `squeeze_as_bluff`, `fold_dominated`, etc.) or `unclassified`. Empty for postflop rows (postflop has no archetype layer). The LLM already gets this in its SOLVER DATA block as the strategic frame; the CSV column is for analytics + reviewer QA. (May 2026.) |
+| 41 | `easy_freq` | Difficulty-algorithm diagnostic. Per-spot ease score on the frequency axis in [0, 1] -- 0 = max-hard (55% dominant), 1 = max-easy (100% pure). See `pipeline/preflop/difficulty.py` for the formula. Preflop only; empty for postflop rows. |
+| 42 | `easy_ev` | Per-spot ease on the EV-gap axis in [0, 1] -- 0 = max-hard (0bb gap), 1 = max-easy (3bb+ gap). Empty when the EV engine couldn't score the spot (raise-involved spots). Preflop only. |
+| 43 | `easy_concept` | Per-spot ease on the archetype-and-concept-tag axis. Lookup table in `pipeline/preflop/difficulty.py:ARCHETYPE_BASE_EASE` plus `CONCEPT_TAG_MODIFIERS`. Preflop only. |
+| 44 | `easy_hand` | Per-spot ease on the hand-class axis. U-shaped: premium hands AND clear trash are easy; marginal hands are hard. Preflop only. |
+| 45 | `difficulty_bumps` | Comma-separated names of any `BUMP_RULES` from `pipeline/preflop/difficulty.py` that fired for this spot. Empty when no bumps fired (current default: the table is empty pending observed mis-scored patterns). |
+
+The difficulty algorithm (cols 41-45 are its diagnostics) is a weighted
+sum: `easy = 0.40 * easy_freq + 0.30 * easy_ev + 0.20 * easy_concept +
+0.10 * easy_hand`, then `difficulty = round(clip(3000 - easy * 2500,
+400, 3200))`. EV-weight redistributes across the other three when
+unavailable. Full details in `pipeline/preflop/difficulty.py` and the
+Generate page's "How is Difficulty calculated?" popover (which reads
+the constants live).
 
 Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 
@@ -281,11 +295,12 @@ A real sample of the team's output, and the **authoritative format spec**. Two s
   (`concept_tags`, `hand_class`, `board_texture`, `solver_reference`,
   `ev_gap_bb`), then `validation_status`. So the brief's "29 existing" = `No` +
   the 28 named template columns. Layer 8 (`format_writer.py`) emits this layout
-  plus five additional columns added post-baseline: `action_frequencies` (Fix
+  plus ten additional columns added post-baseline: `action_frequencies` (Fix
   3, Apr 2026), `ip_range` + `oop_range` (Ryan ask, May 2026), `skills`
-  (Phase 3 user-facing skill tagger, May 2026), and `archetype`
-  (preflop strategic frame surfaced for QA, May 2026) — current total
-  40 columns.
+  (Phase 3 user-facing skill tagger, May 2026), `archetype` (preflop
+  strategic frame surfaced for QA, May 2026), and `easy_freq` + `easy_ev`
+  + `easy_concept` + `easy_hand` + `difficulty_bumps` (difficulty-algorithm
+  diagnostics, May 2026) — current total 45 columns.
 - **Sheet 2 "Golden explanation examples - I"** — ~10 sample `Answer Explanation`s
   showing the coaching voice Layer 6's LLM prompt must reproduce.
 

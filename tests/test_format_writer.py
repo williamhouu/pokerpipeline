@@ -41,27 +41,38 @@ def _spot(effective_stack_bb: float = 98.0,
     )
 
 
-def test_forty_column_structure():
+def test_forty_five_column_structure():
     """Column-count history:
       * 35 baseline (.xlsx Sheet 1)
       * 36 = +action_frequencies (Apr 2026 Ryan-feedback Fix 3)
       * 38 = +ip_range +oop_range (May 2026 Ryan ask: UI range-grid columns)
       * 39 = +skills (May 2026 Phase 3: user-facing skill labels)
       * 40 = +archetype (May 2026: surface preflop strategic frame for QA)
+      * 45 = +easy_freq +easy_ev +easy_concept +easy_hand
+             +difficulty_bumps (May 2026: 4-axis difficulty diagnostic
+             columns -- the per-axis breakdown of the Difficulty Rating
+             so reviewers can see WHY a spot got its score).
     """
-    assert len(CSV_COLUMNS) == 40
+    assert len(CSV_COLUMNS) == 45
     assert CSV_COLUMNS[0] == "No"
-    assert CSV_COLUMNS[-6] == "validation_status"
-    assert CSV_COLUMNS[-5] == "action_frequencies"
-    assert CSV_COLUMNS[-4] == "ip_range"
-    assert CSV_COLUMNS[-3] == "oop_range"
-    assert CSV_COLUMNS[-2] == "skills"
-    assert CSV_COLUMNS[-1] == "archetype"                    # new tail (May 2026)
+    # Pre-diagnostic tail (positions 33..38 from the end).
+    assert CSV_COLUMNS[-11] == "validation_status"
+    assert CSV_COLUMNS[-10] == "action_frequencies"
+    assert CSV_COLUMNS[-9] == "ip_range"
+    assert CSV_COLUMNS[-8] == "oop_range"
+    assert CSV_COLUMNS[-7] == "skills"
+    assert CSV_COLUMNS[-6] == "archetype"
+    # New difficulty-diagnostic tail.
+    assert CSV_COLUMNS[-5] == "easy_freq"
+    assert CSV_COLUMNS[-4] == "easy_ev"
+    assert CSV_COLUMNS[-3] == "easy_concept"
+    assert CSV_COLUMNS[-2] == "easy_hand"
+    assert CSV_COLUMNS[-1] == "difficulty_bumps"
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 40
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 45
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""

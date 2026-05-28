@@ -43,18 +43,14 @@ MIN_TOP_FREQUENCY = 0.55  # below: no clear best answer to teach
 MAX_TOP_FREQUENCY = 0.95  # above: the answer is too obvious
 MIN_PRESENCE = 0.01  # below: hand doesn't actually reach the node
 
-# Difficulty-blend constants. The "easy" scalar is a weighted average of
-# a frequency component and an EV-gap component, then linearly mapped to
-# the 500-3000 score range. Tuned against the first review batch; expect
-# further adjustment as more batches land.
-_DIFFICULTY_CEILING = 3000  # hardest
-_DIFFICULTY_FLOOR = 500  # easiest
-_FREQ_WEIGHT = 0.6  # primary signal: how obvious is the correct answer
-_EV_GAP_WEIGHT = 0.4  # secondary: how crisp is the right-vs-wrong distinction
-# EV gap above this is "fully easy" on the EV axis. 3bb covers the
-# realistic preflop call/fold EV-gap range (a 2.5bb-open BB-defend spot
-# with terrible equity tops out around ~2bb; deeper trees can hit 3bb).
-_EV_GAP_FULL_CREDIT_BB = 3.0
+# Difficulty-bounds + freq-axis constants. Kept here so the pre-facts
+# freq-only ESTIMATE in :class:`PreflopQuestionEvaluation` doesn't
+# depend on the full pipeline.preflop.difficulty module (which needs
+# PreflopFacts -- not yet built at the worthiness-gate stage).
+# The canonical CSV-bound score is computed downstream in batch.py
+# via pipeline.preflop.difficulty.compute_difficulty().
+_DIFFICULTY_CEILING = 3000
+_DIFFICULTY_FLOOR = 500
 
 
 def top_action_frequency(spot: PreflopSpot) -> float:
@@ -75,52 +71,26 @@ def total_presence(spot: PreflopSpot) -> float:
     return spot.presence
 
 
-def difficulty_score(
-    spot: PreflopSpot,
-    ev_gap_bb: float | None = None,
-) -> int:
-    """The spot's difficulty on the brief's 500-3000 scale.
+def difficulty_score(spot: PreflopSpot) -> int:
+    """Cheap pre-facts difficulty ESTIMATE using only the freq axis.
 
-    Two signals when both are available:
+    This is the value stored on :class:`PreflopQuestionEvaluation` for
+    the worthiness-gate evaluation, which runs BEFORE facts are
+    extracted (the canonical full-axis rating needs PreflopFacts).
 
-      * **Frequency component**  -- ``(freq - 0.55) / 0.45``, clipped to
-        [0, 1]. 0 at the 55% worthiness floor (most ambiguous), 1 at
-        100% pure (most obvious).
-      * **EV-gap component**     -- ``min(ev_gap_bb / 3.0, 1)``,
-        clipped. 0 at 0 bb (close decision), 1 at 3 bb (clearly costly
-        mistake). 3 bb is the "fully easy" ceiling; above that adds
-        no further easiness credit.
+    Formula: linear interpolation from 55% (hardest = 3000) to 100%
+    (easiest = 500). Matches the freq axis used in the canonical
+    algorithm (:func:`pipeline.preflop.difficulty.compute_difficulty`)
+    so the estimate isn't wildly different.
 
-    Blended ``easy = 0.6 * freq + 0.4 * ev_gap`` (freq weighted higher
-    because it's the more direct signal of "obvious correct answer";
-    EV gap is the modifier for "how costly is the wrong call").
-    Mapped to the 500-3000 score range with ``3000 - easy * 2500``.
-
-    When ``ev_gap_bb`` is ``None`` (e.g. raise-involved spots -- the v1
-    EV engine only handles call/fold), falls back to the freq-only
-    formula. Old behavior preserved.
-
-    Examples (freq, ev_gap_bb -> score):
-
-      * 55%, None       -> 3000  (hardest, no EV signal)
-      * 100%, None      -> 500   (easiest, no EV signal)
-      * 95%, None       -> 778   (very easy, no EV signal)
-      * 66%, 1.37       -> 2175  (3♣3♦ vs 3-bet: meaningful both ways)
-      * 81%, 1.38       -> 1672  (A♠8♠ vs 3-bet: high freq + modest gap)
-      * 95%, 3.0        -> 666   (very easy + clearly costly mistake)
-      * 55%, 3.0        -> 2000  (mixed strategy but big gap → still hard
-                                  to identify the right answer)
+    The canonical CSV-bound score, which blends freq + EV gap +
+    archetype/concept + hand class, is computed downstream in
+    :mod:`pipeline.preflop.batch` after facts are extracted. THIS
+    function is just for the cheap pre-facts estimate.
     """
     frequency = top_action_frequency(spot)
     freq_easy = max(0.0, min(1.0, (frequency - 0.55) / 0.45))
-
-    if ev_gap_bb is None:
-        easy = freq_easy
-    else:
-        ev_easy = max(0.0, min(1.0, ev_gap_bb / _EV_GAP_FULL_CREDIT_BB))
-        easy = _FREQ_WEIGHT * freq_easy + _EV_GAP_WEIGHT * ev_easy
-
-    score = 3000 - easy * 2500
+    score = 3000 - freq_easy * 2500
     return round(max(_DIFFICULTY_FLOOR, min(_DIFFICULTY_CEILING, score)))
 
 

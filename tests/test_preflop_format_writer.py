@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.explanation_generator import GeneratedExplanation  # noqa: E402
 from pipeline.format_writer import CSV_COLUMNS  # noqa: E402
+from pipeline.preflop.difficulty import DifficultyResult  # noqa: E402
 from pipeline.preflop.fact_extractor import (  # noqa: E402
     PreflopFacts,
     VillainRangeStats,
@@ -32,6 +33,22 @@ from pipeline.preflop.format_writer import (  # noqa: E402
     format_preflop_question,
     write_preflop_csv,
 )
+
+
+def _difficulty(score: int = 1500) -> DifficultyResult:
+    """Test fixture: a DifficultyResult with the given score and
+    plausible per-axis values. The axes are wired up so reviewers
+    inspecting test output won't be confused by zeros everywhere."""
+    return DifficultyResult(
+        score=score,
+        easy_freq=0.5,
+        easy_ev=0.5,
+        easy_concept=0.5,
+        easy_hand=0.5,
+        easy_blend=0.5,
+        bumps_applied=(),
+        ev_available=True,
+    )
 from pipeline.preflop.grammars.types import (  # noqa: E402
     ParsedAction,
     PreflopActionType,
@@ -208,26 +225,34 @@ def _explanation() -> GeneratedExplanation:
     )
 
 
-# --- 40-column structure (post-archetype column) ---------------------------
-def test_forty_column_structure() -> None:
-    """Every preflop row covers all 40 CSV_COLUMNS.
+# --- 45-column structure (post-difficulty-diagnostics columns) ------------
+def test_forty_five_column_structure() -> None:
+    """Every preflop row covers all 45 CSV_COLUMNS.
 
-    Bumped 38 -> 39 (Phase 3 skills column) -> 40 (archetype column,
-    May 2026 -- surfaces the preflop strategic frame for analytics
-    and reviewer QA).
+    Column-count history:
+      * 38: baseline schema (~Apr 2026)
+      * 39: + skills (Phase 3 user-facing skill labels)
+      * 40: + archetype (preflop strategic frame for QA)
+      * 45: + easy_freq / easy_ev / easy_concept / easy_hand /
+             difficulty_bumps (May 2026 difficulty algorithm redesign;
+             per-axis breakdown of the rating for reviewer QA).
     """
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 40
+    assert len(row) == 45
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""
+    # Difficulty diagnostic columns are populated (the test fixture
+    # uses easy_*=0.5 across the board).
+    assert row["easy_freq"] == "0.500"
+    assert row["easy_concept"] == "0.500"
 
 
 def test_no_column_auto_increments() -> None:
@@ -235,7 +260,7 @@ def test_no_column_auto_increments() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=7,
     )
     assert row1["No"] == "7"
@@ -247,7 +272,7 @@ def test_hand_stage_is_preflop() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert row["Hand Stage"] == "Preflop"
@@ -258,7 +283,7 @@ def test_cards_on_table_is_empty_preflop() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert row["Cards on Table"] == ""
@@ -269,7 +294,7 @@ def test_user_cards_split_into_space_separated() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     # combo "AsQs" renders with suit emojis, space-separated.
@@ -283,7 +308,7 @@ def test_hand_class_is_169_label() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert row["hand_class"] == "AQs"
@@ -294,7 +319,7 @@ def test_board_texture_is_empty_preflop() -> None:
         _open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert row["board_texture"] == ""
@@ -380,7 +405,7 @@ def test_pot_column_renders_dollars_for_cash() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
         stakes_bb_dollars=0.50,
     )
@@ -394,7 +419,7 @@ def test_pot_column_scales_with_stakes() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
         stakes_bb_dollars=2.0,
     )
@@ -408,7 +433,7 @@ def test_pot_column_renders_bb_for_tournament() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
         game_format="tournament",
     )
@@ -422,7 +447,7 @@ def test_range_snapshots_empty_for_open_spot() -> None:
         _open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert row["ip_range"] == ""
@@ -438,7 +463,7 @@ def test_phase_b_columns_populated_when_data_available() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     # concept_tags from Phase B step 1 -- populated when there are
@@ -466,7 +491,7 @@ def test_solver_reference_is_pack_relative_path() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     # pack_id / actor / node_id
@@ -488,7 +513,7 @@ def test_llm_columns_pass_through_from_explanation() -> None:
         _facing_open_facts(),
         explanation,
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     assert row["option 1"] == "Fold"
@@ -504,7 +529,7 @@ def test_difficulty_rating_passes_through() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=2300,
+        difficulty=_difficulty(2300),
         number=1,
     )
     assert row["Difficulty Rating"] == "2300"
@@ -587,7 +612,7 @@ def test_action_frequencies_descending_percentages() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     # Fixture is SB facing a BTN open -- hero's raise is the 2nd of the
@@ -718,7 +743,7 @@ def test_defaults_render_cash_at_default_stakes() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
     )
     # $0.25/$0.50 cash, 100bb -> $50 default stack.
@@ -735,7 +760,7 @@ def test_stakes_kwarg_scales_dollar_columns() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
         stakes_bb_dollars=2.0,
     )
@@ -748,7 +773,7 @@ def test_tournament_game_format_uses_bb_stack() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
         game_format="tournament",
     )
@@ -761,7 +786,7 @@ def test_live_or_online_kwarg() -> None:
         _facing_open_facts(),
         _explanation(),
         pack=_pack(),
-        difficulty_score=1500,
+        difficulty=_difficulty(1500),
         number=1,
         live_or_online="Live",
     )
@@ -775,8 +800,8 @@ def test_write_preflop_csv_round_trip() -> None:
         count = write_preflop_csv(
             out,
             [
-                (_facing_open_facts(), _explanation(), 1500),
-                (_facing_3bet_facts(), _explanation(), 2200),
+                (_facing_open_facts(), _explanation(), _difficulty(1500)),
+                (_facing_3bet_facts(), _explanation(), _difficulty(2200)),
             ],
             pack=_pack(),
         )
@@ -805,7 +830,7 @@ def test_write_preflop_csv_creates_parent_dirs() -> None:
         out = Path(tmp) / "a" / "b" / "c" / "preflop.csv"
         count = write_preflop_csv(
             out,
-            [(_open_facts(), _explanation(), 800)],
+            [(_open_facts(), _explanation(), _difficulty(800))],
             pack=_pack(),
         )
         assert count == 1
@@ -830,7 +855,7 @@ def test_invalid_combo_length_raises() -> None:
             facts,
             _explanation(),
             pack=_pack(),
-            difficulty_score=1500,
+            difficulty=_difficulty(1500),
             number=1,
         )
 

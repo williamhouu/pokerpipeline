@@ -58,6 +58,7 @@ from typing import Any
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
 from pipeline.preflop.concept_tags import compute_concept_tags
+from pipeline.preflop.difficulty import DifficultyResult
 from pipeline.preflop.fact_extractor import (
     PreflopFacts,
     construct_villain_range_path,
@@ -616,7 +617,7 @@ def build_preflop_row(
     explanation: GeneratedExplanation,
     *,
     pack: PreflopPack,
-    difficulty_score: int,
+    difficulty: DifficultyResult,
     number: int,
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
@@ -628,7 +629,12 @@ def build_preflop_row(
         facts: The Layer 5 data block for the spot.
         explanation: The six LLM-written CSV columns from Layer 6.
         pack: The source preflop pack (table size, stack depth, sb ratio).
-        difficulty_score: Layer 4's difficulty rating (500-3000).
+        difficulty: The :class:`DifficultyResult` from
+            :func:`pipeline.preflop.difficulty.compute_difficulty`. Its
+            ``score`` populates the Difficulty Rating column; the
+            per-axis breakdown populates the diagnostic columns
+            (easy_freq, easy_ev, easy_concept, easy_hand, plus the
+            bumps_applied audit column).
         number: The ``No`` column value -- per-batch auto-increment.
         stakes_bb_dollars: BB size in dollars. Default 0.50 = Tier 1.
         live_or_online: "Online" or "Live". Cosmetic.
@@ -705,7 +711,7 @@ def build_preflop_row(
         "Preflop Pot Type": _pot_type_for_facts(facts),
         "Pot Participant": _pot_participant_for_facts(facts),
         "Stack Depth": _stack_depth_bucket(pack.stack_depth_bb),
-        "Difficulty Rating": str(difficulty_score),
+        "Difficulty Rating": str(difficulty.score),
         # Skill tags -- Phase 3 taxonomy, not yet mapped (same as postflop).
         "tag_1": "",
         "tag_2": "",
@@ -759,13 +765,31 @@ def build_preflop_row(
         # surfacing it in the CSV makes "show me all 3bet_as_bluff
         # spots" and similar analytics trivial.
         "archetype": facts.archetype,
+        # Diagnostic columns: per-axis breakdown of the difficulty
+        # score (May 2026). Each axis is in [0, 1] where 1 = "easy on
+        # this dimension". The Difficulty Rating column is computed
+        # from a weighted sum of these four. Surfacing them lets the
+        # reviewer see WHY a spot got a particular rating without
+        # re-running the algorithm. ``easy_ev`` is empty when the EV
+        # engine couldn't score the spot (raise-involved spots in v1
+        # -- see pipeline.preflop.ev_engine).
+        "easy_freq": f"{difficulty.easy_freq:.3f}",
+        "easy_ev": (
+            f"{difficulty.easy_ev:.3f}" if difficulty.ev_available else ""
+        ),
+        "easy_concept": f"{difficulty.easy_concept:.3f}",
+        "easy_hand": f"{difficulty.easy_hand:.3f}",
+        # Names of any BUMP_RULES that fired for this spot. Currently
+        # the table is empty so this is always ''; populated as bumps
+        # are added in pipeline.preflop.difficulty.BUMP_RULES.
+        "difficulty_bumps": ", ".join(difficulty.bumps_applied),
     }
 
 
 # --- CSV writer --------------------------------------------------------------
 def write_preflop_csv(
     path: Path | str,
-    rows: Iterable[tuple[PreflopFacts, GeneratedExplanation, int]],
+    rows: Iterable[tuple[PreflopFacts, GeneratedExplanation, DifficultyResult]],
     *,
     pack: PreflopPack,
     stakes_bb_dollars: float = 0.50,
@@ -774,10 +798,12 @@ def write_preflop_csv(
 ) -> int:
     """Write preflop question rows to a CSV at ``path``; return rows written.
 
-    ``rows`` is an iterable of ``(facts, explanation, difficulty_score)``
-    triples. The ``No`` column auto-increments from 1 across the output.
-    Parent directories are created if needed; the 38-column header is
-    always written.
+    ``rows`` is an iterable of ``(facts, explanation, difficulty)``
+    triples where ``difficulty`` is the
+    :class:`pipeline.preflop.difficulty.DifficultyResult` from the
+    4-axis algorithm. The ``No`` column auto-increments from 1
+    across the output. Parent directories are created if needed;
+    the full CSV header is always written.
 
     Args:
         path: Output CSV path (Path or string). Parent created if missing.
@@ -804,7 +830,7 @@ def write_preflop_csv(
                 facts,
                 explanation,
                 pack=pack,
-                difficulty_score=difficulty,
+                difficulty=difficulty,
                 number=number,
                 stakes_bb_dollars=stakes_bb_dollars,
                 live_or_online=live_or_online,
