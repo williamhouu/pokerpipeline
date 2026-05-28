@@ -957,7 +957,14 @@ def generate_preflop_answer_explanation(
         run_preflop_audit_validators,
     )
 
+    # Track the most recent attempt so we can surface it on failure --
+    # `last_text` is the raw LLM output (always available after the first
+    # call); `last_candidate` is the parsed GeneratedExplanation when
+    # parsing succeeded but a downstream validator rejected it (None
+    # when parsing itself failed).
     last_error: str | None = None
+    last_text = ""
+    last_candidate: GeneratedExplanation | None = None
     for _ in range(max_retries + 1):
         response = call_messages_create(
             client,
@@ -971,6 +978,7 @@ def generate_preflop_answer_explanation(
             in_t, out_t, cache_c, cache_r = _extract_usage(response)
             usage_callback(model, in_t, out_t, cache_c, cache_r)
         text = _extract_text(response)
+        last_text = text
         try:
             explanation_prose = _parse_explanation_only_response(text)
             # Pad options to 4 for the CSV row.
@@ -983,6 +991,7 @@ def generate_preflop_answer_explanation(
                 correct_answer=correct_answer,
                 answer_explanation=explanation_prose,
             )
+            last_candidate = candidate
             # Structural check passed; now Layer 7 audit. On failure,
             # the validator's error message becomes the retry prompt.
             audit_result = run_preflop_audit_validators(candidate, facts)
@@ -1008,7 +1017,9 @@ def generate_preflop_answer_explanation(
     raise ExplanationValidationError(
         f"Layer 6 (preflop, explanation-only) failed after "
         f"{max_retries + 1} attempts; last error: {last_error}. "
-        f"Spot routed to human review."
+        f"Spot routed to human review.",
+        last_attempt_text=last_text,
+        last_attempt_candidate=last_candidate,
     )
 
 

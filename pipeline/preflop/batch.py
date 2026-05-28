@@ -57,6 +57,7 @@ from pipeline.explanation_generator import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,
+    ExplanationValidationError,
     GeneratedExplanation,
 )
 from pipeline.preflop.ev_engine import compute_ev_gap_bb
@@ -67,7 +68,10 @@ from pipeline.preflop.fact_extractor import (
     DEFAULT_EQUITY_RUNOUTS,
     extract_facts,
 )
-from pipeline.preflop.format_writer import write_preflop_csv
+from pipeline.preflop.format_writer import (
+    format_preflop_question,
+    write_preflop_csv,
+)
 from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.node_enumerator import (
     PreflopDecisionNode,
@@ -111,6 +115,45 @@ ProgressCallback = Callable[[str, int, int], None]
 
 # --- result dataclass -------------------------------------------------------
 @dataclass(frozen=True)
+class PreflopFailure:
+    """Full context of one spot that didn't make it to the CSV.
+
+    Built by the batch loop when generation throws. Carries enough data
+    that a reviewer can read it and decide: was the LLM wrong, or did
+    the validator misfire? In particular:
+
+    * ``question_text`` / ``options`` / ``correct_answer`` -- the
+      deterministic inputs the LLM was working from. These are
+      identical to what the CSV would have shown if the spot had passed.
+    * ``failed_explanation`` -- the prose the LLM actually wrote on its
+      last attempt. Empty when no LLM response parsed cleanly (e.g.
+      a pre-call ValueError on bad inputs).
+    * ``error_message`` -- the validator failure or exception message
+      that routed this spot to review.
+
+    Rendered as a one-line summary by ``__str__`` for log compatibility
+    with the old ``list[str]`` shape; the admin panel's UI uses the
+    structured fields directly.
+    """
+
+    node_id: str
+    hand_class: str
+    hero_position: str
+    archetype: str  # may be "" if facts never built (e.g. pre-call error)
+    question_text: str
+    context_text: str
+    options: list[str] = field(default_factory=list)
+    correct_answer: str = ""
+    failed_explanation: str = ""
+    action_frequencies: dict[str, float] = field(default_factory=dict)
+    error_message: str = ""
+
+    def __str__(self) -> str:
+        """Backward-compat one-line form for logs / old print loops."""
+        return f"{self.node_id} / {self.hand_class}: {self.error_message}"
+
+
+@dataclass(frozen=True)
 class BatchResult:
     """Outcome of one preflop batch generation run."""
 
@@ -124,10 +167,11 @@ class BatchResult:
     # count here too -- they just don't make it to the CSV.
     questions_attempted: int
 
-    # Per-spot error messages. Each entry is a single-line string of the
-    # form "<node_id> / <hand_class>: <error>". Empty list when every
-    # attempt succeeded.
-    failures: list[str] = field(default_factory=list)
+    # Per-spot failures with full context (question / options / correct /
+    # the LLM's failed explanation / error). Empty list when every
+    # attempt succeeded. PreflopFailure.__str__ provides the legacy
+    # one-line form when the admin panel's log mode prints them.
+    failures: list[PreflopFailure] = field(default_factory=list)
 
     # How many worthy spots were found before the random-sample step.
     # Useful UI feedback: "found 1,200 worthy spots, sampled 30 of them".
@@ -339,7 +383,7 @@ def generate_preflop_batch(
 
     # 5. Per-spot: extract facts, generate explanation, collect row triples.
     rows: list[tuple] = []
-    failures: list[str] = []
+    failures: list[PreflopFailure] = []
     # Token totals -- summed by ``_record_usage`` which Layer 6 calls
     # once per successful API request (including retries).
     usage_totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
@@ -368,9 +412,16 @@ def generate_preflop_batch(
                 index,
                 sample_size,
             )
+        # Per-spot inputs we'll capture even on failure so the reviewer
+        # gets full context. extract_facts / build_options are
+        # essentially never the failure source, but if they raise we
+        # still want a row in `failures` rather than silently dropping
+        # the spot.
+        facts: object | None = None
+        options: list[str] = []
+        correct: str = ""
         try:
             facts = extract_facts(spot, pack, equity_runouts=equity_runouts)
-            # Deterministic option selection -- pure Python, no LLM.
             options, correct = build_options(facts, style=answer_style)
             if dry_run:
                 explanation = _placeholder_explanation(options, correct)
@@ -396,7 +447,13 @@ def generate_preflop_batch(
             rows.append((facts, explanation, enriched_difficulty))
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
-            failures.append(f"{spot.node.node_id} / {spot.hero_hand_class}: {exc}")
+            failures.append(
+                _build_failure(
+                    spot, facts, options, correct, exc,
+                    pack=pack, stakes_bb_dollars=stakes_bb_dollars,
+                    live_or_online=live_or_online, game_format=game_format,
+                )
+            )
             logger.warning(
                 "batch: spot %s / %s failed: %s",
                 spot.node.node_id,
@@ -459,9 +516,86 @@ def _placeholder_explanation(
     )
 
 
+def _build_failure(
+    spot: PreflopSpot,
+    facts: object | None,
+    options: list[str],
+    correct: str,
+    exc: BaseException,
+    *,
+    pack: PreflopPack,
+    stakes_bb_dollars: float,
+    live_or_online: str,
+    game_format: str,
+) -> PreflopFailure:
+    """Build a PreflopFailure with as much context as available.
+
+    Some failure modes fire BEFORE facts are extracted (e.g. equity
+    sampler bugs) -- in those cases we have only ``spot`` and the
+    exception. Other failures fire AFTER an LLM call -- the
+    :class:`ExplanationValidationError` carries the last-attempt text
+    + parsed candidate, which we pull into the failure record so the
+    reviewer can see what the LLM actually wrote.
+
+    Renders the question text best-effort (skips on extract_facts
+    failures since the renderer needs facts).
+    """
+    # Lazy import to avoid a cycle with format_writer at module load.
+    question_text = ""
+    context_text = ""
+    archetype = ""
+    action_frequencies: dict[str, float] = {}
+    if facts is not None:
+        try:
+            question_text = format_preflop_question(
+                facts,
+                pack=pack,
+                stakes_bb_dollars=stakes_bb_dollars,
+                live_or_online=live_or_online,
+                game_format=game_format,
+            )
+        except Exception:  # noqa: BLE001
+            question_text = "(question render failed)"
+        archetype = getattr(facts, "archetype", "") or ""
+        action_frequencies = dict(
+            getattr(getattr(facts, "spot", None), "action_frequencies", {})
+            or {}
+        )
+
+    # If the exception is an ExplanationValidationError we attached
+    # context on (the last LLM attempt's parsed candidate), pull it
+    # for the failed_explanation field.
+    failed_explanation = ""
+    if isinstance(exc, ExplanationValidationError):
+        candidate = getattr(exc, "last_attempt_candidate", None)
+        if candidate is not None:
+            failed_explanation = candidate.answer_explanation or ""
+        elif getattr(exc, "last_attempt_text", ""):
+            # Parsing failed before we got a candidate -- show the raw
+            # text so reviewers can see what came out of the model.
+            failed_explanation = (
+                f"(raw text, did not parse) {exc.last_attempt_text}"
+            )
+
+    return PreflopFailure(
+        node_id=spot.node.node_id,
+        hand_class=spot.hero_hand_class,
+        hero_position=spot.node.actor,
+        archetype=archetype,
+        question_text=question_text,
+        context_text=context_text,
+        options=list(options),
+        correct_answer=correct,
+        failed_explanation=failed_explanation,
+        action_frequencies=action_frequencies,
+        error_message=str(exc),
+    )
+
+
 __all__ = [
     "ACTION_CONTEXTS",
     "BatchResult",
+    "PreflopFailure",
     "ProgressCallback",
     "collect_worthy_spots",
     "filter_nodes",

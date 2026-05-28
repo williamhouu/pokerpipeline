@@ -289,7 +289,31 @@ class ExplanationValidationError(RuntimeError):
     """Raised when the LLM's output fails validation after one retry.
 
     Layer 7 catches this and routes the spot to human review.
+
+    Optionally carries the LLM's most recent attempt so the batch
+    layer can surface it to a human reviewer with full context:
+    the raw text the model produced, plus the parsed
+    :class:`GeneratedExplanation` if parsing succeeded but a downstream
+    validator rejected it.
+
+    Attributes:
+        last_attempt_text: Raw text from the most recent LLM response.
+            Empty string when no API call happened (rare; usually a
+            pre-call error like a bad correct_answer).
+        last_attempt_candidate: Parsed GeneratedExplanation from the
+            most recent attempt, or None if parsing never succeeded.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        last_attempt_text: str = "",
+        last_attempt_candidate: GeneratedExplanation | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.last_attempt_text = last_attempt_text
+        self.last_attempt_candidate = last_attempt_candidate
 
 
 # --- frequency-to-prefix mapping (deterministic, no LLM) ---------------------

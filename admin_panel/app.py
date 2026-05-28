@@ -1440,6 +1440,90 @@ def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) ->
     )
 
 
+def _render_preflop_failures(failures: list) -> None:
+    """Render per-spot failures with full question/options/explanation context.
+
+    Each failure is its own expander -- the header is a one-line
+    summary (position + hand + short error category), the body shows
+    the deterministic context (Context line, full Question prose, all
+    four options with the correct one marked) plus the LLM's actual
+    last attempt and the validator's error message.
+
+    Failures with no LLM output (pre-call errors) skip the
+    "LLM's attempted explanation" block.
+    """
+    n = len(failures)
+    st.warning(
+        f"⚠️  **{n} spot{'s' if n != 1 else ''} routed to human review** "
+        "(failed validation after retry budget exhausted)."
+    )
+
+    for i, failure in enumerate(failures, start=1):
+        # Short error category for the expander header (first ~80 chars
+        # after stripping the boilerplate prefix).
+        err = (failure.error_message or "").strip()
+        if "last error:" in err:
+            err_short = err.split("last error:", 1)[1].strip()
+        else:
+            err_short = err
+        err_short = err_short.replace("\n", " ")[:90]
+
+        header_archetype = (
+            f"· {failure.archetype}" if failure.archetype else ""
+        )
+        with st.expander(
+            f"**#{i}**  {failure.hero_position} {failure.hand_class}  "
+            f"{header_archetype}  ·  _{err_short}_"
+        ):
+            # --- Question side (deterministic) ---
+            if failure.question_text:
+                st.markdown("**Question:**")
+                st.text(failure.question_text)
+            else:
+                st.caption("_(question render not available -- pre-LLM failure)_")
+
+            # --- Options + correct ---
+            if failure.options:
+                st.markdown("**Options:**")
+                for j, opt in enumerate(failure.options, start=1):
+                    if not opt:
+                        continue
+                    is_correct = opt == failure.correct_answer
+                    marker = "✅" if is_correct else "·"
+                    st.text(f"  {marker} option {j}: {opt}")
+                if failure.correct_answer:
+                    st.caption(
+                        f"_Correct answer (deterministic): "
+                        f"`{failure.correct_answer}`_"
+                    )
+
+            # --- Action frequencies (so reviewer can sanity-check the
+            #     validator's "Pio freq" claims in the error) ---
+            if failure.action_frequencies:
+                freqs = ", ".join(
+                    f"{label}: {freq:.0%}"
+                    for label, freq in sorted(
+                        failure.action_frequencies.items(),
+                        key=lambda kv: -kv[1],
+                    )
+                    if freq > 0
+                )
+                if freqs:
+                    st.caption(f"_Pio strategy at this node: {freqs}_")
+
+            # --- LLM's last attempt ---
+            if failure.failed_explanation:
+                st.markdown("**LLM's attempted explanation (last retry):**")
+                st.info(failure.failed_explanation)
+
+            # --- Validator / exception message ---
+            st.markdown("**Why it was rejected:**")
+            st.error(failure.error_message)
+
+            # --- Debug footer ---
+            st.caption(f"_node_id: `{failure.node_id}`_")
+
+
 def _render_preflop_result_ui(result: BatchResult) -> None:
     """Render the per-batch result UI: cost, summary, failures, download, preview.
 
@@ -1488,9 +1572,7 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
         )
 
     if result.failures:
-        with st.expander(f"⚠️ {len(result.failures)} per-spot failures"):
-            for failure in result.failures:
-                st.text(failure)
+        _render_preflop_failures(result.failures)
 
     if result.output_path is None or not result.output_path.is_file():
         return
