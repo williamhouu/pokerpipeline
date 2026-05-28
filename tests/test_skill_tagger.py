@@ -174,11 +174,53 @@ def test_value_betting_fires_on_thin_value() -> None:
     )
 
 
-def test_bluffing() -> None:
+def test_bluffing_postflop_tag() -> None:
+    """Original postflop trigger -- bluff_spot tag fires the skill."""
     assert _has(
         "Bluffing",
         _ctx(path="postflop", concept_tags=frozenset({"bluff_spot"})),
     )
+
+
+def test_bluffing_preflop_3bet_as_bluff() -> None:
+    """Preflop archetype `3bet_as_bluff` is an explicit bluff."""
+    assert _has("Bluffing", _ctx(archetype="3bet_as_bluff"))
+
+
+def test_bluffing_preflop_all_5_bluff_archetypes() -> None:
+    """Strict trigger -- only the EXPLICIT _as_bluff archetypes qualify."""
+    for archetype in (
+        "3bet_as_bluff", "4bet_as_bluff", "5bet_as_bluff",
+        "squeeze_as_bluff", "all_in_as_bluff",
+    ):
+        assert _has(
+            "Bluffing", _ctx(archetype=archetype)
+        ), f"bluff archetype {archetype!r} did not fire Bluffing"
+
+
+def test_bluffing_does_not_fire_on_value_archetype_with_low_equity() -> None:
+    """The point of strict tagging: a call_for_implied_odds spot with
+    low equity is NOT a bluff. The value-frame archetype rules it out."""
+    assert not _has(
+        "Bluffing",
+        _ctx(
+            archetype="call_for_implied_odds",
+            concept_tags=frozenset({"dominated"}),  # low equity
+        ),
+    )
+
+
+def test_bluffing_does_not_fire_on_3bet_for_value() -> None:
+    """3bet_for_value is a value 3-bet, NOT a bluff. Must not tag."""
+    assert not _has("Bluffing", _ctx(archetype="3bet_for_value"))
+
+
+def test_bluffing_does_not_fire_on_fold_archetypes() -> None:
+    """Folding is never a bluff."""
+    for archetype in ("fold_pot_odds", "fold_dominated", "fold_outranged"):
+        assert not _has(
+            "Bluffing", _ctx(archetype=archetype)
+        ), f"fold archetype {archetype!r} should NOT fire Bluffing"
 
 
 def test_bet_sizing_off_until_phase_4() -> None:

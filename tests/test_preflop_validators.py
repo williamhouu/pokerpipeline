@@ -181,6 +181,53 @@ def test_composite_frequencies_fails_when_secondary_is_noise() -> None:
         or "raise" in result.error_message.lower()
 
 
+def test_composite_frequencies_passes_4bet_at_4bet_spot() -> None:
+    """Regression for the multi-raise alias bug. BB facing BTN open +
+    SB 3-bet would 4-bet at raise_level=3. canonicalize_strategy
+    relabels Pio's raise as '4-bet'. The LLM correctly says 'Mostly
+    4-bet, sometimes Fold' -- the validator must resolve '4-bet' to
+    the same internal 'raise' bucket the strategy is stored under,
+    not look up '4-bet' literally and find 0%."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.FOLD),
+        ParsedAction("CO", PreflopActionType.FOLD),
+        ParsedAction("BTN", PreflopActionType.RAISE, 60.0),
+        ParsedAction("SB", PreflopActionType.RAISE, 150.0),  # 3-bet by SB
+    )
+    spot = PreflopSpot(
+        node=PreflopDecisionNode(
+            pack_id="t", actor="BB",
+            history_before=history, actions=(),
+        ),
+        hero_hand_class="99",
+        hero_card_combo="9h9d",
+        action_frequencies={"Raise 5x": 0.7, "Fold": 0.244, "Call": 0.056},
+        dominant_action="Raise 5x",
+        dominant_frequency=0.7,
+    )
+    facts = PreflopFacts(
+        spot=spot,
+        villain_stats=VillainRangeStats(
+            position="SB", action_label="Raise 150%",
+            weighted_combo_count=80.0, pct_of_dealt_hands=6.0,
+            top_combos=(),
+        ),
+        hero_equity_vs_villain=0.42,
+        archetype="4bet_for_value",
+    )
+    # Hero's would-be raise is the 3rd raise = "4-bet" via canonicalize.
+    generated = _gen(
+        options=("Fold", "Mostly 4-bet, sometimes Fold", "", ""),
+        correct="Mostly 4-bet, sometimes Fold",
+    )
+    result = validate_composite_label_frequencies(generated, facts)
+    assert result.is_valid, (
+        f"validator should accept '4-bet' as the LLM verb when the "
+        f"canonical strategy is stored under 'raise': {result.error_message}"
+    )
+
+
 def test_composite_frequencies_fails_when_primary_smaller() -> None:
     """Primary verb should have HIGHER freq than secondary."""
     facts = _facts(

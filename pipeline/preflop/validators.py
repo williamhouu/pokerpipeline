@@ -74,6 +74,33 @@ _KNOWN_PREFLOP_VERBS = frozenset({
     "fold", "call", "raise", "3-bet", "4-bet", "5-bet", "all-in", "check",
 })
 
+# Raise-family verbs that share a single frequency entry in the
+# strategy lookup. canonicalize_strategy collapses multi-size raises
+# at the same node into one canonical-label entry, and the validator
+# stores them all under "raise". To keep storage and lookup in sync,
+# both directions normalise raise-family verbs through this helper.
+_RAISE_FAMILY = frozenset({"raise", "3-bet", "4-bet", "5-bet"})
+
+
+def _normalize_verb(verb: str) -> str:
+    """Map raise-family verbs to a single 'raise' bucket for lookup.
+
+    Pio's canonical strategy can label hero's raise as `"3-bet"`,
+    `"4-bet"`, or `"5-bet"` depending on the action history's raise
+    level (set by ``pipeline.preflop.options.canonicalize_action_label``).
+    The validators store all of these under a single ``"raise"`` key
+    so multi-size raise spots merge cleanly; this helper applies the
+    same normalisation on the lookup side so a LLM-side option verb
+    like ``"4-bet"`` finds the strategy frequency stored under
+    ``"raise"``.
+
+    Without this, a poker-correct LLM choosing "Mostly 4-bet" at a
+    BB-vs-3bet spot would be rejected because the lookup returned 0%
+    -- the actual 4-bet frequency is stored under "raise", not
+    "4-bet". See git history for the bug-fix commit message.
+    """
+    return "raise" if verb in _RAISE_FAMILY else verb
+
 # Postflop terms that should never appear in preflop prose. Compiled
 # as word-boundary regex so "flopped" matches but "preflop" doesn't.
 # Case-insensitive.
@@ -291,14 +318,19 @@ def validate_composite_label_frequencies(
     if not strategy:
         return PreflopValidationResult.ok()
 
-    # Build a verb->freq lookup keyed by first-word verb.
+    # Build a verb->freq lookup keyed by first-word verb. Raise-family
+    # verbs (3-bet / 4-bet / 5-bet) collapse into a single "raise"
+    # entry via _normalize_verb -- the SAME normalisation is applied
+    # when looking up the option-side verb below, so a poker-correct
+    # "Mostly 4-bet" at a BB-vs-3bet spot resolves to the raise
+    # frequency stored under "raise".
     verb_to_freq: dict[str, float] = {}
     for label, freq in strategy.items():
         first = label.lower().split()[0].strip(".,") if label else ""
-        if first in _KNOWN_PREFLOP_VERBS or first in ("3-bet", "4-bet", "5-bet"):
-            # If multiple raise sizings appear, sum into a single "raise" entry.
-            key = "raise" if first in ("3-bet", "4-bet", "5-bet") else first
-            verb_to_freq[key] = verb_to_freq.get(key, 0.0) + freq
+        if first not in _KNOWN_PREFLOP_VERBS:
+            continue
+        key = _normalize_verb(first)
+        verb_to_freq[key] = verb_to_freq.get(key, 0.0) + freq
 
     if not verb_to_freq:
         return PreflopValidationResult.ok()
@@ -316,8 +348,10 @@ def validate_composite_label_frequencies(
             )
             continue
 
-        p_freq = verb_to_freq.get(primary, 0.0)
-        s_freq = verb_to_freq.get(secondary, 0.0)
+        # Apply the same raise-family normalisation that the storage
+        # side used so "4-bet" finds the raise frequency.
+        p_freq = verb_to_freq.get(_normalize_verb(primary), 0.0)
+        s_freq = verb_to_freq.get(_normalize_verb(secondary), 0.0)
 
         if p_freq < _COMPOSITE_LABEL_MIN_FREQ:
             failures.append(

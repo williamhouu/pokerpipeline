@@ -218,6 +218,19 @@ _ARCHETYPES_CALL = frozenset({"call_for_value", "call_for_implied_odds"})
 _ARCHETYPES_ALL_IN = frozenset({"all_in_for_value", "all_in_as_bluff"})
 _ARCHETYPES_FOLD = frozenset({"fold_dominated", "fold_pot_odds"})
 
+# Preflop archetypes that are EXPLICIT bluffs -- hero is betting/raising
+# with a hand whose value comes from fold equity rather than equity vs
+# villain's continuing range. The Bluffing skill uses this set as its
+# strict trigger; spots that happen to have low equity but a value-frame
+# archetype do NOT qualify.
+_ARCHETYPES_BLUFF_PREFLOP = frozenset({
+    "3bet_as_bluff",
+    "4bet_as_bluff",
+    "5bet_as_bluff",
+    "squeeze_as_bluff",
+    "all_in_as_bluff",
+})
+
 _BLIND_TAGS = frozenset({"small_blind", "big_blind"})
 _LATE_POS = frozenset({"CO", "BTN"})
 
@@ -287,7 +300,16 @@ SKILL_CATALOG: dict[str, SkillRule] = {
         "thin_value_spot" in c.concept_tags
         or "merged_value_spot" in c.concept_tags
     ),
-    "Bluffing": lambda c: "bluff_spot" in c.concept_tags,
+    # Bluffing fires STRICTLY: either the postflop `bluff_spot` tag,
+    # OR a preflop archetype that's explicitly labelled `_as_bluff`
+    # (3bet_as_bluff, 4bet_as_bluff, 5bet_as_bluff, squeeze_as_bluff,
+    # all_in_as_bluff). Low-equity value spots (e.g. an SB calling KQs
+    # vs BTN open with 42% equity) do NOT qualify -- the value-frame
+    # archetype rules them out. Only the explicit bluff archetypes count.
+    "Bluffing": lambda c: (
+        "bluff_spot" in c.concept_tags
+        or c.archetype in _ARCHETYPES_BLUFF_PREFLOP
+    ),
 
     # --- Section 3: Defense & Response (3) -- POSTFLOP ---
     "Bluff Catching": lambda c: "bluffcatch_spot" in c.concept_tags,
@@ -548,9 +570,15 @@ SKILL_META: dict[str, SkillMeta] = {
         "betting a range that's ahead of villain's calling range.",
     ),
     "Bluffing": SkillMeta(
-        "Betting & Aggression", _POSTFLOP,
-        "Fires on the `bluff_spot` tag -- hero is betting / raising "
-        "with a hand that's not currently best.",
+        "Betting & Aggression", _PREFLOP,
+        "Fires on EXPLICIT bluff archetypes only -- strict by design. "
+        "Preflop: when the archetype is `3bet_as_bluff`, `4bet_as_bluff`, "
+        "`5bet_as_bluff`, `squeeze_as_bluff`, or `all_in_as_bluff` "
+        "(hero is raising/shoving with a hand whose value comes from "
+        "fold equity, not equity vs villain's continuing range). "
+        "Postflop: when the `bluff_spot` tag fires. Low-equity hands "
+        "in value-frame archetypes do NOT qualify -- the value-frame "
+        "label rules them out.",
     ),
     # --- Section 3: Defense & Response ---
     "Bluff Catching": SkillMeta(
