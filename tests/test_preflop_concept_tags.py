@@ -248,6 +248,55 @@ def test_multiway_pot_does_not_fire_heads_up() -> None:
     assert multiway_pot(facts) is False
 
 
+def test_multiway_pot_does_not_fire_when_hero_opened_then_faces_3bet() -> None:
+    """Regression: heads-up 'HJ opens, CO 3-bets, HJ decides' was wrongly
+    tagged multiway because hero's own open in history_before doubled
+    against the +1-for-hero in the helper. With the dedupe fix, the
+    set of active positions is {HJ, CO} -> 2 players, not multiway."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),  # hero's open
+        ParsedAction("CO", PreflopActionType.RAISE, 77.0),  # villain's 3-bet
+        ParsedAction("BTN", PreflopActionType.FOLD),
+        ParsedAction("SB", PreflopActionType.FOLD),
+        ParsedAction("BB", PreflopActionType.FOLD),
+    )
+    facts = _facts(actor="HJ", history=history)
+    assert multiway_pot(facts) is False, (
+        "HJ vs CO post-3-bet is heads-up; hero's own open in history "
+        "should not double-count against the +1 for hero"
+    )
+
+
+def test_multiway_pot_does_not_fire_when_hero_opened_then_faces_bb_3bet() -> None:
+    """Mirror of the above: 'HJ opens, BB 3-bets, HJ decides' -- the
+    user's other reported example. Heads-up between HJ and BB."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
+        ParsedAction("CO", PreflopActionType.FOLD),
+        ParsedAction("BTN", PreflopActionType.FOLD),
+        ParsedAction("SB", PreflopActionType.FOLD),
+        ParsedAction("BB", PreflopActionType.RAISE, 150.0),
+    )
+    facts = _facts(actor="HJ", history=history)
+    assert multiway_pot(facts) is False
+
+
+def test_multiway_pot_fires_when_three_players_in_after_call() -> None:
+    """True multiway: BTN opens, BB calls, hero is SB facing the spot
+    after both. Active = {BTN, BB, SB} = 3."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.FOLD),
+        ParsedAction("CO", PreflopActionType.FOLD),
+        ParsedAction("BTN", PreflopActionType.RAISE, 60.0),
+        ParsedAction("BB", PreflopActionType.CALL),
+    )
+    facts = _facts(actor="SB", history=history)
+    assert multiway_pot(facts) is True
+
+
 # --- Hand strength tags -----------------------------------------------------
 def test_premium_pair() -> None:
     assert premium_pair(_facts(hand_class="AA")) is True

@@ -66,13 +66,28 @@ def _calls_after_last_raise(facts: PreflopFacts) -> int:
 
 
 def _non_fold_actor_count(facts: PreflopFacts) -> int:
-    """Players still in the pot at hero's decision point (incl. hero)."""
-    non_folds = sum(
-        1
+    """Players still in the pot at hero's decision point (incl. hero).
+
+    Counts UNIQUE positions that took a non-fold action in the action
+    history, plus hero. Set semantics dedupe so hero's own prior raise
+    (e.g. an open before later facing a 3-bet) isn't double-counted
+    against the explicit +1 for hero -- that was the bug behind
+    multiway_pot firing on heads-up "HJ opens, CO 3-bets, HJ decides"
+    spots.
+
+    Examples:
+        * HJ opens, CO 3-bets, HJ decides -> {HJ, CO} = 2 (heads-up).
+        * BTN opens, BB calls, hero is SB to act -> {BTN, BB, SB} = 3
+          (squeeze opportunity, truly multiway).
+        * UTG to act first (open) -> {UTG} = 1 (hero alone).
+    """
+    active_positions: set[str] = {
+        a.position
         for a in facts.spot.node.history_before
         if a.action_type is not PreflopActionType.FOLD
-    )
-    return non_folds + 1  # +1 for hero
+    }
+    active_positions.add(facts.spot.node.actor)
+    return len(active_positions)
 
 
 def _hand_class(facts: PreflopFacts) -> str:
