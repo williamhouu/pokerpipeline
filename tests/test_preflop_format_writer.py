@@ -330,6 +330,83 @@ def test_ip_oop_positions_sb_vs_non_blind() -> None:
     assert _ip_oop_positions("SB", "BTN") == ("BTN", "SB")
 
 
+def test_pot_open_spot_is_just_blinds() -> None:
+    """First-to-act spot (no history) -> pot is SB + BB = $0.75 at $0.50/bb."""
+    from pipeline.preflop.format_writer import _compute_pot_bb
+
+    facts = _open_facts()
+    # No raises in history -> pot = sb + bb = 0.5 + 1.0 = 1.5bb.
+    assert _compute_pot_bb(facts, _pack()) == pytest.approx(1.5)
+
+
+def test_pot_after_open_includes_open_size() -> None:
+    """After BTN opens 2.5bb, the pot has BTN's 2.5 + SB 0.5 + BB 1.0 = 4bb."""
+    from pipeline.preflop.format_writer import _compute_pot_bb
+
+    facts = _facing_open_facts()  # SB facing BTN open
+    # SB hasn't acted yet but has the SB in; BB has the BB in; BTN
+    # opened to 2.5bb. Hero's choice hasn't entered the pot yet.
+    # Pot = 0.5 (SB) + 1.0 (BB) + 2.5 (BTN open) = 4.0bb.
+    assert _compute_pot_bb(facts, _pack()) == pytest.approx(4.0)
+
+
+def test_pot_after_3bet_includes_open_plus_3bet() -> None:
+    """Open + 3-bet pot. BTN opens 2.5, BB 3-bets to 12 (Ryan-pack 182%
+    token in the lookup), hero (BTN) deciding. Pot = 12 + 2.5 (BTN's
+    open commit, NOT matched) + 0.5 SB. Wait actually BB's 3-bet
+    REPLACES the BTN's 2.5? No -- BTN's 2.5 stays in but doesn't
+    increase. Total = BB's 12 + BTN's 2.5 + SB's 0.5 = 15."""
+    from pipeline.preflop.format_writer import _compute_pot_bb
+
+    facts = _facing_3bet_facts()
+    # _facing_3bet_facts has actor=BTN with history:
+    #   UTG fold, HJ fold, CO fold, BTN raise 60%, SB fold, BB raise 182%
+    # Open size (60% -> 2.5bb), 3-bet size (182% -> 12bb).
+    # Committed: SB=0.5, BB=12.0, BTN=2.5. Pot = 15.0bb.
+    assert _compute_pot_bb(facts, _pack()) == pytest.approx(15.0)
+
+
+def test_pot_column_renders_dollars_for_cash() -> None:
+    """POT column shows cash dollars when game_format=cash."""
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty_score=1500,
+        number=1,
+        stakes_bb_dollars=0.50,
+    )
+    # 4.0bb * $0.50 = $2.00.
+    assert row["POT"] == "$2"
+
+
+def test_pot_column_scales_with_stakes() -> None:
+    """At $1/$2, the same 4bb pot renders as $8."""
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty_score=1500,
+        number=1,
+        stakes_bb_dollars=2.0,
+    )
+    # 4.0bb * $2 = $8.
+    assert row["POT"] == "$8"
+
+
+def test_pot_column_renders_bb_for_tournament() -> None:
+    """Tournament mode renders pot in bb."""
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty_score=1500,
+        number=1,
+        game_format="tournament",
+    )
+    assert row["POT"] == "4bb"
+
+
 def test_range_snapshots_empty_for_open_spot() -> None:
     """No villain (open spot) -> both ip_range and oop_range empty.
     There's no IP/OOP frame without a 2-player anchor."""

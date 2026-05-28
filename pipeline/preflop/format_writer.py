@@ -241,6 +241,74 @@ def _split_combo(combo: str) -> tuple[str, str]:
     return combo[:2], combo[2:]
 
 
+# --- pot reconstruction ------------------------------------------------------
+def _compute_pot_bb(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+) -> float:
+    """Reconstruct the pot in bb at hero's decision point.
+
+    Walks ``facts.spot.node.history_before`` maintaining each position's
+    committed chips. The pot at any point is the sum of all committed
+    amounts. Starts with SB and BB posting their blinds.
+
+    For raise actions, the raise size in bb comes from
+    :func:`pipeline.preflop.action_history._raise_size_bb` (same lookup
+    table the question-narrative renderer uses, so the prose
+    ``"opens to $1.25"`` and the POT column stay in sync). For all-ins
+    we approximate the shove as the effective stack depth -- precise
+    side-pot math would need stack tracking per position, deferred.
+
+    Returns the pot in big blinds. Callers convert to dollars (for
+    cash) or render directly as bb (for tournaments).
+    """
+    from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
+
+    committed: dict[str, float] = {"SB": pack.sb_to_bb_ratio, "BB": 1.0}
+    current_max_bet = 1.0  # everyone has to match the BB to enter
+    raise_level = 0
+    for parsed in facts.spot.node.history_before:
+        pos = parsed.position
+        if parsed.action_type is PreflopActionType.FOLD:
+            # Fold doesn't add chips. Any chips already committed (SB / BB
+            # blinds, or anyone who raised then we later see them fold,
+            # though that shouldn't appear in history_before) stay in.
+            continue
+        if parsed.action_type is PreflopActionType.CALL:
+            # Caller matches the current bet level.
+            committed[pos] = current_max_bet
+            continue
+        if parsed.action_type is PreflopActionType.RAISE:
+            raise_level += 1
+            bb_size = _raise_size_bb(parsed, raise_level, pack)
+            committed[pos] = bb_size
+            current_max_bet = bb_size
+            continue
+        if parsed.action_type is PreflopActionType.ALL_IN:
+            raise_level += 1
+            # Approximation: shove to effective stack. Precise side-pot
+            # math would need per-position stack tracking.
+            committed[pos] = float(pack.stack_depth_bb)
+            current_max_bet = float(pack.stack_depth_bb)
+            continue
+    return sum(committed.values())
+
+
+def _render_pot(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+    *,
+    stakes_bb_dollars: float,
+    game_format: str,
+) -> str:
+    """The POT column value. Cash -> dollars (e.g. ``"$6.00"``);
+    tournament -> bb (e.g. ``"12bb"``)."""
+    pot_bb = _compute_pot_bb(facts, pack)
+    if game_format == "cash":
+        return _dollars(round(pot_bb * stakes_bb_dollars, 2))
+    return _bb(pot_bb)
+
+
 # --- raise-count math --------------------------------------------------------
 def _count_prior_raises(history: tuple[ParsedAction, ...]) -> int:
     """How many raise/all-in actions appear in this prior-action history.
@@ -565,7 +633,12 @@ def build_preflop_row(
         # decoded (see docs/ryan_range_pack_index.md). Deferred to a
         # follow-up so step 8 stays focused.
         "Seats": (facts.villain_stats.position if facts.villain_stats else ""),
-        "POT": "",  # TODO(phase-b): reconstruct pot from raise %-tokens.
+        "POT": _render_pot(
+            facts,
+            pack,
+            stakes_bb_dollars=stakes_bb_dollars,
+            game_format=game_format,
+        ),
         # Question content. Context + Question are deterministic; the
         # LLM (Layer 6) writes the four options + correct answer +
         # explanation.
