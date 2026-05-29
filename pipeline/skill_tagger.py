@@ -368,17 +368,26 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     "Range Polarization": lambda c: "villain_polarized" in c.concept_tags,
 
     # --- Section 6: Positional & Situational (4) ---
-    # In Position: hero acts after villain. Preflop, this means hero is
-    # last to act (BTN closes vs. open, IP caller vs. 3-bet, etc.).
-    # Approximation: late position AND there's a villain action history.
+    # In Position: hero acts after villain postflop. Preflop, that's late
+    # position vs an open/3-bet (BTN/CO), PLUS the blind-vs-blind exception:
+    # in a BvB pot the SB is the dealer and acts LAST postflop, so the SB
+    # is IN position (mirrors _ip_oop_positions in preflop.format_writer and
+    # the "Relative Position" column). Without the BvB clause the SB here
+    # would be mislabeled OOP.
     "In Position Play": lambda c: (
-        c.hero_position in _LATE_POS
-        and c.n_prior_raises >= 1
+        (c.hero_position in _LATE_POS and c.n_prior_raises >= 1)
+        or (
+            c.hero_position == "SB"
+            and "bvb_spot" in c.concept_tags
+            and c.n_prior_raises >= 1
+        )
     ),
     "Out of Position Play": lambda c: (
-        # Blinds defending, or earlier positions in a non-RFI spot.
+        # Blinds defending, or earlier positions in a non-RFI spot --
+        # EXCEPT the SB in a BvB pot, which is in position (see above).
         bool(c.concept_tags & _BLIND_TAGS)
         and c.n_prior_raises >= 1
+        and not (c.hero_position == "SB" and "bvb_spot" in c.concept_tags)
     ),
     "Multiway Pot Strategy": lambda c: "multiway_pot" in c.concept_tags,
     # TODO Phase 4: Drawing Hand Strategy is postflop-specific and needs

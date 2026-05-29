@@ -362,6 +362,31 @@ def test_out_of_position_play_blinds_facing_raise() -> None:
     )
 
 
+def test_bvb_small_blind_is_in_position_not_out() -> None:
+    """In blind-vs-blind the SB acts last postflop, so it's IN position --
+    NOT out of position (which the blind-defending heuristic would wrongly
+    fire). Mirrors the Relative Position column's BvB-SB rule."""
+    ctx = _ctx(
+        hero_position="SB",
+        n_prior_raises=2,
+        concept_tags=frozenset({"small_blind", "facing_3bet", "bvb_spot"}),
+    )
+    assert _has("In Position Play", ctx)
+    assert not _has("Out of Position Play", ctx)
+
+
+def test_small_blind_vs_nonblind_open_is_out_of_position() -> None:
+    """SB defending a BTN/CO open (not BvB) is genuinely OOP -- the BvB
+    exception must not leak to non-BvB blind spots."""
+    ctx = _ctx(
+        hero_position="SB",
+        n_prior_raises=1,
+        concept_tags=frozenset({"small_blind", "facing_single_raise"}),
+    )
+    assert _has("Out of Position Play", ctx)
+    assert not _has("In Position Play", ctx)
+
+
 def test_multiway_pot() -> None:
     assert _has(
         "Multiway Pot Strategy",
