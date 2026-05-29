@@ -56,9 +56,13 @@ def test_column_structure():
              hero-vs-villain seat matchup, split out of Relative
              Position when that column was repurposed to IP/OOP), and
              a reorder: Notes + hand_class moved to the tail. (May 2026.)
+      * 44 = +ranges (May 2026: position-labeled JSON of every active
+             player's range -- multiway-capable, supersedes ip/oop).
     """
-    assert len(CSV_COLUMNS) == 43
+    assert len(CSV_COLUMNS) == 44
     assert CSV_COLUMNS[0] == "No"
+    # ranges sits right after oop_range (the range cluster).
+    assert CSV_COLUMNS[CSV_COLUMNS.index("oop_range") + 1] == "ranges"
     # tag_1/2/3 are gone.
     assert "tag_1" not in CSV_COLUMNS
     # Cluster after Difficulty Rating: skills, action_frequencies, ev_gap_bb.
@@ -75,7 +79,7 @@ def test_column_structure():
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 43
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 44
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""

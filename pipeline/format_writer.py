@@ -75,8 +75,14 @@ CSV_COLUMNS = [
     # Ryan ask (May 2026): 169-class range snapshots in canonical Ryan-pack
     # ordering ('AA:0.0,A2s:1.0,...'). Enables future UI range-grid rendering
     # alongside each question. SOLVER_FACT category (deterministic from solver
-    # output, not LLM-generated).
+    # output, not LLM-generated). Heads-up only (hero + one villain).
     "ip_range", "oop_range",
+    # Multiway-capable range column (May 2026): a JSON object mapping each
+    # STILL-ACTIVE player's position to its 169-class range string, e.g.
+    # {"UTG":"AA:1,A2s:0.6,...","SB":"...","BB":"..."}. Includes hero;
+    # excludes folded players and seats yet to act. Supersedes ip_range/
+    # oop_range (which assume exactly 2 players) for the app's range UI.
+    "ranges",
     "solver_reference", "validation_status",
     # Strategic archetype label from pipeline.preflop.fact_extractor
     # (preflop only -- postflop has no archetype layer). One of the
@@ -319,6 +325,9 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
                      if spot_data.ip_range_snapshot else ""),
         "oop_range": (format_hand_class_range(spot_data.oop_range_snapshot)
                       if spot_data.oop_range_snapshot else ""),
+        # Position-labeled multiway range column -- preflop-only for now;
+        # the postflop path doesn't enumerate per-seat preflop ranges.
+        "ranges": "",
         # Phase 3 skill tagging. Empty string when skill_tagger can't
         # build a postflop SkillContext (the postflop adapter is a stub
         # awaiting verified output -- see pipeline.skill_tagger module

@@ -1,7 +1,7 @@
 """Layer 8 (preflop edition): Format Writer for preflop spots.
 
 The preflop sibling of ``pipeline.format_writer``. Same role: produce a CSV
-row in the 43-column team template (``CSV_COLUMNS`` is the canonical schema
+row in the 44-column team template (``CSV_COLUMNS`` is the canonical schema
 defined in the postflop module and reused verbatim here) from a populated
 ``PreflopFacts`` + a ``GeneratedExplanation`` + the source ``PreflopPack``.
 
@@ -51,6 +51,7 @@ Uses the standard library ``csv`` module; no pandas dependency.
 from __future__ import annotations
 
 import csv
+import json
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -499,6 +500,78 @@ def _render_range_snapshots(
     )
 
 
+# --- multiway range column (position-labeled, active players only) -----------
+# Preflop seat order, for deterministic JSON key ordering. Positions not
+# listed sort last (defensive; shouldn't happen for the Ryan pack).
+_PREFLOP_SEAT_ORDER = ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN", "SB", "BB")
+
+
+def _active_villain_actions(
+    node: PreflopDecisionNode,
+) -> dict[str, ParsedAction]:
+    """Map each STILL-ACTIVE villain position to its last non-fold action.
+
+    Active = put chips in (raise / call / all-in) and did NOT subsequently
+    fold. Excludes hero, folded players, and seats that never acted (an
+    action hasn't reached them yet). The value is that position's most
+    recent non-fold action, which names their range file.
+    """
+    last_action: dict[str, ParsedAction] = {}
+    for a in node.history_before:
+        if a.position == node.actor:
+            continue  # hero -- handled separately
+        if a.action_type is PreflopActionType.FOLD:
+            last_action.pop(a.position, None)  # folded -> drop
+            continue
+        last_action[a.position] = a
+    return last_action
+
+
+def _compute_active_ranges(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+) -> dict[str, dict[str, float]]:
+    """169-class range for every still-active player, keyed by position.
+
+    Always includes hero (their range entering this decision). Each active
+    villain's range is read from the file naming their last non-fold action;
+    a missing file is skipped defensively so a pack gap can't crash the row.
+    """
+    node = facts.spot.node
+    ranges: dict[str, dict[str, float]] = {
+        node.actor: _compute_hero_range_snapshot(node),
+    }
+    for pos, action in _active_villain_actions(node).items():
+        try:
+            path = construct_villain_range_path(node, action, pack)
+        except (ValueError, KeyError):
+            continue
+        if not path.is_file():
+            continue
+        ranges[pos] = parse_range_file(path)
+    return ranges
+
+
+def _render_active_ranges(facts: PreflopFacts, pack: PreflopPack) -> str:
+    """The ``ranges`` CSV column: a JSON object mapping each active player's
+    position to its 169-class range string, ordered by seat. Compact JSON
+    (no spaces) so the cell stays small; empty string if nothing resolved.
+    """
+    ranges = _compute_active_ranges(facts, pack)
+    if not ranges:
+        return ""
+    ordered = sorted(
+        ranges.items(),
+        key=lambda kv: (
+            _PREFLOP_SEAT_ORDER.index(kv[0])
+            if kv[0] in _PREFLOP_SEAT_ORDER
+            else len(_PREFLOP_SEAT_ORDER)
+        ),
+    )
+    serialized = {pos: format_hand_class_range(r) for pos, r in ordered}
+    return json.dumps(serialized, separators=(",", ":"))
+
+
 # --- question-narrative renderer ---------------------------------------------
 # Delegates to pipeline.preflop.action_history, which builds the brief-spec
 # `hand` dict and calls pipeline.action_history.format_action_history. This
@@ -720,6 +793,11 @@ def build_preflop_row(
         # the snapshot round-trips cleanly into a range-grid UI later.
         "ip_range": _ip_range_value,
         "oop_range": _oop_range_value,
+        # Multiway-capable range column: JSON {position: 169-class range}
+        # for every still-active player (hero + non-folded actors). The
+        # app's range UI reads this; supersedes ip_range/oop_range, which
+        # only model 2 players.
+        "ranges": _render_active_ranges(facts, pack),
         # Phase 3: user-facing skill labels for the app's "study X"
         # features. Distinct from concept_tags (which carries the
         # computational atoms) -- skills is the user-readable mapping

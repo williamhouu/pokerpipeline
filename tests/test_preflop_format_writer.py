@@ -26,6 +26,7 @@ from pipeline.preflop.fact_extractor import (  # noqa: E402
     VillainRangeStats,
 )
 from pipeline.preflop.format_writer import (  # noqa: E402
+    _active_villain_actions,
     _position_matchup,
     _pot_participant_for_facts,
     _pot_type_for_facts,
@@ -240,6 +241,8 @@ def test_column_structure() -> None:
       * 43: - tag_1/tag_2/tag_3 (dropped); + Position Matchup (the
              hero-vs-villain seat matchup, split out of Relative Position
              when that column was repurposed to IP/OOP). (May 2026.)
+      * 44: + ranges (position-labeled JSON of every active player's
+             range -- multiway-capable). (May 2026.)
     """
     row = build_preflop_row(
         _facing_open_facts(),
@@ -249,7 +252,7 @@ def test_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 43
+    assert len(row) == 44
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""
@@ -391,6 +394,39 @@ def test_dollar_display_is_the_default() -> None:
     assert row["User Seat"] == "SB-$50-$0.25"
     assert row["POT"] == "$2"
     assert "$1.25" in row["Question"]
+
+
+# --- ranges column (position-labeled, active players only) ----------------
+def test_active_villain_actions_excludes_folds_and_hero() -> None:
+    """The active-player set = positions with a live non-fold action,
+    excluding hero and anyone who folded. _facing_3bet_facts: BTN opened
+    (hero), BB 3-bet, SB folded, early seats folded -> only BB is a live
+    villain."""
+    active = _active_villain_actions(_facing_3bet_facts().spot.node)
+    assert set(active.keys()) == {"BB"}
+
+
+def test_active_villain_actions_squeeze_keeps_opener_and_caller() -> None:
+    """HJ opens, CO calls, hero=BTN -> both the opener and the caller are
+    live villains (a caller is still active)."""
+    active = _active_villain_actions(_squeeze_facts().spot.node)
+    assert set(active.keys()) == {"HJ", "CO"}
+
+
+def test_ranges_column_is_json_keyed_by_position_incl_hero() -> None:
+    """The `ranges` column is a JSON object keyed by seat and always
+    includes hero. (Villain range files aren't on the synthetic test
+    pack's disk, so only the always-computed hero key is asserted here;
+    the multiway smoke covers villains against the real pack.)"""
+    import json
+    row = build_preflop_row(
+        _facing_3bet_facts(), _explanation(), pack=_pack(),
+        difficulty=_difficulty(1500), number=1,
+    )
+    parsed = json.loads(row["ranges"])      # must be valid JSON
+    assert isinstance(parsed, dict)
+    assert "BTN" in parsed                  # hero is always present
+    assert ", " not in row["ranges"]        # compact (no whitespace)
 
 
 def test_hand_class_is_169_label() -> None:
