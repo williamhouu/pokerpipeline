@@ -119,7 +119,11 @@ _EV_GAP_FULL_CREDIT_BB: float = 3.0
 ARCHETYPE_BASE_EASE: dict[str, float] = {
     "open_for_value":         1.00,
     "fold_outranged":         1.00,
-    "fold_dominated":         0.70,
+    # Folding a clearly-dominated hand is about as trivial as poker gets,
+    # so this sits near the top (was 0.70, which left obvious junk-folds
+    # mis-rated as medium). fold_pot_odds stays lower: folding despite
+    # decent equity is a closer, more teachable decision.
+    "fold_dominated":         0.95,
     "fold_pot_odds":          0.60,
     "call_for_value":         0.60,
     "call_for_implied_odds":  0.55,
@@ -168,6 +172,41 @@ HAND_CLASS_EASE: dict[str, float] = {
     "suited_connector":     0.40,  # implied odds + position math
 }
 _HAND_DEFAULT_EASE: float = 0.55
+
+# Clear suited trash (e.g. 73s, 84s): suited, both cards low, and gapped --
+# an auto-fold from essentially everywhere, so easy to evaluate. Rated a
+# touch below offsuit junk (0.90) since suited hands have marginally more
+# playability. CONSERVATIVE by design: anything with a broadway/ace, a 9,
+# or a small gap (connectors / one-gappers) is EXCLUDED, so genuinely more
+# playable hands like K2s, T6s, 86s, 53s keep the neutral default.
+_TRASH_SUITED_EASE: float = 0.82
+_RANK_VALUE: dict[str, int] = {
+    "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+    "T": 10, "J": 11, "Q": 12, "K": 13, "A": 14,
+}
+# Highest card must be <= this (8) -> no broadway, no ace, no 9.
+_TRASH_SUITED_MAX_RANK: int = 8
+# Cards must be at least this far apart (2 = excludes connectors + one-gappers).
+_TRASH_SUITED_MIN_GAP: int = 2
+
+
+def _is_clear_trash_suited(hand_class: str) -> bool:
+    """True for clearly-trash SUITED hands (73s, 84s, 62s ...).
+
+    Conservative: suited only, highest card <= 8 (so no broadway/ace/9),
+    and a gap of >= 2 (so suited connectors and one-gappers -- which have
+    real playability -- are excluded). K2s, T6s, 86s, 53s all return False.
+    """
+    if len(hand_class) != 3 or hand_class[2] != "s":
+        return False
+    hi_rank = _RANK_VALUE.get(hand_class[0])
+    lo_rank = _RANK_VALUE.get(hand_class[1])
+    if hi_rank is None or lo_rank is None:
+        return False
+    hi, lo = max(hi_rank, lo_rank), min(hi_rank, lo_rank)
+    if hi > _TRASH_SUITED_MAX_RANK:
+        return False
+    return (hi - lo - 1) >= _TRASH_SUITED_MIN_GAP
 
 
 # === bump rules ==============================================================
@@ -303,9 +342,17 @@ def compute_difficulty(
     # axis 3: concept
     archetype = facts.archetype or "unclassified"
     base_concept = ARCHETYPE_BASE_EASE.get(archetype, _CONCEPT_BASE_DEFAULT)
-    tag_delta = sum(
-        CONCEPT_TAG_MODIFIERS.get(tag, 0.0) for tag in firing_tags
-    )
+    # When hero is FOLDING, spot-complexity penalties (multiway / short
+    # stack) don't make the decision harder -- folding trash is trivial
+    # whether heads-up or multiway. So drop the negative modifiers for
+    # fold spots; positive modifiers (e.g. deep_stack) still apply.
+    is_fold = facts.spot.dominant_action.startswith("Fold")
+    tag_delta = 0.0
+    for tag in firing_tags:
+        mod = CONCEPT_TAG_MODIFIERS.get(tag, 0.0)
+        if is_fold and mod < 0:
+            continue  # don't penalize a fold for multiway / short stack
+        tag_delta += mod
     easy_concept = _clip(
         base_concept + tag_delta,
         _CONCEPT_EASE_MIN,
@@ -314,12 +361,16 @@ def compute_difficulty(
 
     # axis 4: hand class. Pick the first matching tag in HAND_CLASS_EASE's
     # insertion order (so premium_pair wins over a hypothetical conflicting
-    # tag). Default 0.55 when none fire.
+    # tag). When no tag fires, recognize clear suited trash (73s etc.) as
+    # an easy hand; otherwise fall back to the neutral default.
     easy_hand = _HAND_DEFAULT_EASE
     for tag, ease in HAND_CLASS_EASE.items():
         if tag in firing_tags:
             easy_hand = ease
             break
+    else:
+        if _is_clear_trash_suited(facts.spot.hero_hand_class):
+            easy_hand = _TRASH_SUITED_EASE
 
     # --- weighted sum (with EV weight redistribution when needed) -------------
     if ev_available:

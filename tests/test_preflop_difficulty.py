@@ -475,3 +475,90 @@ def test_users_real_spot_5_hj_a8s_vs_3bet() -> None:
     #            = ~0.529
     # score = 3000 - 0.529*2500 = ~1678
     assert 1550 <= result.score <= 1800
+
+
+# --- A+B+C: trivial folds rate near the floor (May 2026) ------------------
+def _fold_facts(
+    *,
+    hand_class: str,
+    combo: str,
+    archetype: str = "fold_dominated",
+    multiway: bool = False,
+) -> PreflopFacts:
+    """A 100%-fold spot for difficulty testing. combo must match
+    hand_class so the concept tagger computes the right hand-class tags."""
+    if multiway:
+        # UTG opens, SB 3-bets, hero (BB) folds -> 3 non-fold actors.
+        history = (
+            ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+            ParsedAction("HJ", PreflopActionType.FOLD),
+            ParsedAction("CO", PreflopActionType.FOLD),
+            ParsedAction("BTN", PreflopActionType.FOLD),
+            ParsedAction("SB", PreflopActionType.RAISE, 150.0),
+        )
+    else:
+        history = (
+            ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+            ParsedAction("HJ", PreflopActionType.FOLD),
+            ParsedAction("CO", PreflopActionType.FOLD),
+            ParsedAction("BTN", PreflopActionType.FOLD),
+            ParsedAction("SB", PreflopActionType.FOLD),
+        )
+    spot = PreflopSpot(
+        node=PreflopDecisionNode(
+            pack_id="t", actor="BB", history_before=history, actions=(),
+        ),
+        hero_hand_class=hand_class,
+        hero_card_combo=combo,
+        action_frequencies={"Fold": 1.0},
+        dominant_action="Fold",
+        dominant_frequency=1.0,
+    )
+    return PreflopFacts(
+        spot=spot,
+        villain_stats=VillainRangeStats(
+            position="UTG", action_label="Raise 60%",
+            weighted_combo_count=120.0, pct_of_dealt_hands=9.0, top_combos=(),
+        ),
+        hero_equity_vs_villain=0.28,  # dominated
+        archetype=archetype,
+    )
+
+
+def test_clear_trash_suited_fold_rates_near_floor() -> None:
+    """73s as a pure dominated fold is about as easy as poker gets -- it
+    should land near the easy floor, not in the medium band."""
+    result = compute_difficulty(_fold_facts(hand_class="73s", combo="7s3s"))
+    assert result.easy_hand == pytest.approx(0.82)   # clear-trash-suited
+    assert result.score <= 650
+
+
+def test_multiway_does_not_penalize_a_fold() -> None:
+    """A trivial fold is just as easy heads-up as multiway -- the
+    multiway_pot penalty must not apply to fold spots (else the same junk
+    fold scores meaningfully harder just because more players entered)."""
+    hu = compute_difficulty(
+        _fold_facts(hand_class="73s", combo="7s3s", multiway=False))
+    mw = compute_difficulty(
+        _fold_facts(hand_class="73s", combo="7s3s", multiway=True))
+    assert mw.easy_concept == pytest.approx(hu.easy_concept)
+    assert abs(mw.score - hu.score) <= 20
+
+
+def test_fold_dominated_base_is_easy() -> None:
+    """A dominated fold gets a high concept ease (was 0.70, now ~0.95)."""
+    result = compute_difficulty(_fold_facts(hand_class="72o", combo="7h2c"))
+    assert result.easy_concept == pytest.approx(0.95)
+    assert result.score <= 650
+
+
+def test_trash_bump_is_conservative_k2s_not_bumped() -> None:
+    """C is deliberately narrow: K2s is much better than 73s and must NOT
+    get the trash-suited ease -- it stays at the neutral default, so its
+    fold scores higher than a 73s fold."""
+    k2s = compute_difficulty(_fold_facts(hand_class="K2s", combo="Ks2s"))
+    seven_three = compute_difficulty(
+        _fold_facts(hand_class="73s", combo="7s3s"))
+    assert k2s.easy_hand == pytest.approx(0.55)        # neutral default
+    assert seven_three.easy_hand == pytest.approx(0.82)
+    assert k2s.score > seven_three.score
