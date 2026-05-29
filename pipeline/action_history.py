@@ -233,7 +233,14 @@ def _street_block(name, pot, cards, actions, hero, is_tournament) -> str:
 def format_action_history(hand) -> str:
     """The action history block: position, hole cards, and the action sequence."""
     _validate(hand)
-    is_tournament = hand["format"] == "tournament"
+    # `is_tournament` here really means "render amounts in bb (with a 'bb'
+    # suffix) rather than dollars". Tournaments always do; a cash game can
+    # opt in via hand["display_unit"] == "bb" (the admin "Display amounts
+    # as: Big blinds" toggle) without changing its cash semantics.
+    is_tournament = (
+        hand["format"] == "tournament"
+        or hand.get("display_unit") == "bb"
+    )
     hero = hand["hero_position"]
     raise_counter = [0]                          # shared across the preflop street
 

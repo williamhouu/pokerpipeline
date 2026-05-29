@@ -303,6 +303,78 @@ def test_dry_run_no_worthy_spots_returns_empty_result(tmp_path: Path) -> None:
     assert not out.exists()
 
 
+def test_difficulty_band_excludes_all_when_min_above_ceiling(
+    tmp_path: Path,
+) -> None:
+    """A min_difficulty above the algorithm's hard ceiling rejects every
+    spot -- no rows, and difficulty_filtered_out counts the rejections."""
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=out,
+        total_questions=10,
+        min_difficulty=3201,  # above DIFFICULTY_MAX (3200)
+        dry_run=True,
+        random_seed=42,
+    )
+    assert result.worthy_spots_available == 2
+    assert result.questions_written == 0
+    assert result.questions_attempted == 0
+    assert result.difficulty_filtered_out == 2
+    assert result.output_path is None
+    assert not out.exists()
+
+
+def test_difficulty_band_excludes_all_when_max_below_floor(
+    tmp_path: Path,
+) -> None:
+    """A max_difficulty below the hard floor rejects every spot too."""
+    pack = _build_open_only_pack(tmp_path)
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        max_difficulty=399,  # below DIFFICULTY_MIN (400)
+        dry_run=True,
+        random_seed=42,
+    )
+    assert result.questions_written == 0
+    assert result.difficulty_filtered_out == 2
+
+
+def test_default_band_filters_nothing(tmp_path: Path) -> None:
+    """The default full band is a no-op filter: every worthy spot is kept
+    and difficulty_filtered_out stays at 0."""
+    pack = _build_open_only_pack(tmp_path)
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        dry_run=True,
+        random_seed=42,
+    )
+    assert result.questions_written == 2
+    assert result.difficulty_filtered_out == 0
+
+
+def test_min_ev_gap_gate_passes_raise_spots_through(tmp_path: Path) -> None:
+    """The min-EV-gap gate only filters spots the EV engine could score.
+    Open/raise spots have ev_gap=None, so even an impossibly high gate
+    leaves them in (otherwise the gate would wipe out every open spot)."""
+    pack = _build_open_only_pack(tmp_path)  # open spots -> ev_gap is None
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        min_ev_gap_bb=99.0,  # impossibly high; raise spots still pass
+        dry_run=True,
+        random_seed=42,
+    )
+    assert result.questions_written == 2
+    assert result.difficulty_filtered_out == 0
+
+
 def test_random_seed_makes_sampling_deterministic(tmp_path: Path) -> None:
     """Same seed -> same row order in the CSV."""
     pack = _build_open_only_pack(tmp_path)

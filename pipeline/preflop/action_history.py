@@ -157,6 +157,7 @@ def build_hand_dict(
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
+    display_in_bb: bool = False,
 ) -> dict[str, Any]:
     """Construct the brief's ``hand`` dict from a PreflopFacts + pack.
 
@@ -178,11 +179,17 @@ def build_hand_dict(
     bb_dollars = stakes_bb_dollars
     sb_dollars = round(bb_dollars * pack.sb_to_bb_ratio, 2)
 
-    # For cash, bb amounts in the action history get converted to dollars
-    # (so a 2.5bb open becomes "$1.25"). For tournaments, amounts stay in
-    # bb (the `_chips` formatter in pipeline.action_history appends "bb"
-    # when is_tournament=True), so the multiplier is 1.0.
-    bb_amount_multiplier = bb_dollars if game_format == "cash" else 1.0
+    # Render amounts in bb (with a "bb" suffix) when the game is a
+    # tournament OR the caller asked for bb display on a cash game
+    # (the admin "Display amounts as: Big blinds" toggle). Otherwise
+    # cash renders dollars.
+    render_in_bb = display_in_bb or game_format != "cash"
+
+    # For dollar display, bb amounts in the action history get converted
+    # to dollars (so a 2.5bb open becomes "$1.25"). For bb display the
+    # amounts stay in bb (the `_chips` formatter appends "bb"), so the
+    # multiplier is 1.0.
+    bb_amount_multiplier = 1.0 if render_in_bb else bb_dollars
 
     # Walk history_before, tracking raise count to assign raise levels.
     actions: list[tuple] = []
@@ -196,12 +203,12 @@ def build_hand_dict(
         else:
             actions.append(_to_action_tuple(parsed, 0, bb_amount_multiplier, pack))
 
-    # Effective stack: cash = dollars, tournament = bb.
-    eff_stack: float
-    if game_format == "cash":
-        eff_stack = round(pack.stack_depth_bb * bb_dollars, 2)
-    else:
-        eff_stack = float(pack.stack_depth_bb)
+    # Effective stack in the display unit: bb when rendering bb, else dollars.
+    eff_stack: float = (
+        float(pack.stack_depth_bb)
+        if render_in_bb
+        else round(pack.stack_depth_bb * bb_dollars, 2)
+    )
 
     # Hero cards: split the 4-char combo into the action_history shape.
     combo = facts.spot.hero_card_combo
@@ -212,6 +219,9 @@ def build_hand_dict(
     return {
         "stakes": {"sb": sb_dollars, "bb": bb_dollars},
         "format": game_format,
+        # Tells pipeline.action_history.format_action_history to render the
+        # "bb" suffix even on a cash game (without changing cash semantics).
+        "display_unit": "bb" if render_in_bb else "dollars",
         "venue": live_or_online.lower(),
         "stage": None,
         "buy_in": None,
@@ -235,6 +245,7 @@ def format_preflop_action_history(
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
+    display_in_bb: bool = False,
 ) -> str:
     """Preflop action history per the brief's spec.
 
@@ -266,6 +277,7 @@ def format_preflop_action_history(
         stakes_bb_dollars=stakes_bb_dollars,
         live_or_online=live_or_online,
         game_format=game_format,
+        display_in_bb=display_in_bb,
     )
     return format_action_history(hand)
 

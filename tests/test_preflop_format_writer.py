@@ -26,6 +26,7 @@ from pipeline.preflop.fact_extractor import (  # noqa: E402
     VillainRangeStats,
 )
 from pipeline.preflop.format_writer import (  # noqa: E402
+    _position_matchup,
     _pot_participant_for_facts,
     _pot_type_for_facts,
     _relative_position,
@@ -225,9 +226,9 @@ def _explanation() -> GeneratedExplanation:
     )
 
 
-# --- 45-column structure (post-difficulty-diagnostics columns) ------------
-def test_forty_five_column_structure() -> None:
-    """Every preflop row covers all 45 CSV_COLUMNS.
+# --- 43-column structure (post-reorg) -------------------------------------
+def test_column_structure() -> None:
+    """Every preflop row covers all 43 CSV_COLUMNS.
 
     Column-count history:
       * 38: baseline schema (~Apr 2026)
@@ -236,6 +237,9 @@ def test_forty_five_column_structure() -> None:
       * 45: + easy_freq / easy_ev / easy_concept / easy_hand /
              difficulty_bumps (May 2026 difficulty algorithm redesign;
              per-axis breakdown of the rating for reviewer QA).
+      * 43: - tag_1/tag_2/tag_3 (dropped); + Position Matchup (the
+             hero-vs-villain seat matchup, split out of Relative Position
+             when that column was repurposed to IP/OOP). (May 2026.)
     """
     row = build_preflop_row(
         _facing_open_facts(),
@@ -245,7 +249,7 @@ def test_forty_five_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 45
+    assert len(row) == 43
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""
@@ -289,7 +293,7 @@ def test_cards_on_table_is_empty_preflop() -> None:
     assert row["Cards on Table"] == ""
 
 
-def test_user_cards_split_into_space_separated() -> None:
+def test_user_cards_rank_suitword_format() -> None:
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -297,8 +301,96 @@ def test_user_cards_split_into_space_separated() -> None:
         difficulty=_difficulty(1500),
         number=1,
     )
-    # combo "AsQs" renders with suit emojis, space-separated.
-    assert row["User Cards"] == "A♠️ Q♠️"
+    # combo "AsQs" renders in the app's rank-suitword form (comma-space
+    # separated) so the app can place chips/cards on its poker table.
+    assert row["User Cards"] == "A-spades, Q-spades"
+
+
+# --- app table-state encoding (User Seat / Seats / POT) -------------------
+# The 7 "table-state" columns must render in the Runout app's exact poker-
+# table format (POS-$remaining-$amount-action) so the app can place chips.
+# Ported from the team's gto-formatter engine; these lock the grammar.
+def _table_cols(facts):  # type: ignore[no-untyped-def]
+    from pipeline.preflop.app_table_format import build_app_table_columns
+    return build_app_table_columns(facts, _pack())
+
+
+def test_table_encoding_facing_open() -> None:
+    """SB faces a BTN open. Hero (SB) shows posted blind; BTN shows the
+    open; BB (behind, unfolded) shows its blind. Pot = all posted money."""
+    c = _table_cols(_facing_open_facts())
+    assert c["user_seat"] == "SB-$50-$0.25"
+    assert c["seats"] == "BB-$50-$0.5, BTN-$49-$1.25-raise"
+    assert c["pot"] == "$2"
+    assert c["cards_on_table"] == ""
+
+
+def test_table_encoding_hero_opened_then_faces_3bet() -> None:
+    """Hero (BTN) opened then faces a BB 3-bet. User Seat shows hero's own
+    open; a folded blind (SB) is still shown with a FOLD marker; the 3-bet
+    shows the leveled '3-bet' verb. Seats sort ascending by amount."""
+    c = _table_cols(_facing_3bet_facts())
+    assert c["user_seat"] == "BTN-$49-$1.25-raise"
+    assert c["seats"] == "SB-$50-$0.25-FOLD, BB-$44-$6-3-bet"
+    assert c["pot"] == "$7.5"
+
+
+def test_table_encoding_squeeze_shows_caller_and_blinds() -> None:
+    """3-way (HJ open, CO call) with hero=BTN. The caller renders '-call';
+    the yet-to-act blinds behind hero are shown with their posted blinds."""
+    c = _table_cols(_squeeze_facts())
+    assert c["user_seat"] == "BTN-$50"
+    assert c["seats"] == (
+        "SB-$50-$0.25, BB-$50-$0.5, HJ-$49-$1.25-raise, CO-$49-$1.25-call"
+    )
+    assert c["pot"] == "$3.25"
+
+
+def test_table_encoding_open_shows_full_table() -> None:
+    """Open decision (UTG first to act): every seat behind hero is shown
+    (no action), plus the posted blinds. Pot is just the blinds."""
+    c = _table_cols(_open_facts())
+    assert c["user_seat"] == "UTG-$50"
+    assert c["seats"] == "HJ-$50, CO-$50, BTN-$50, SB-$50-$0.25, BB-$50-$0.5"
+    assert c["pot"] == "$0.75"
+
+
+def test_display_in_bb_renders_big_blinds_but_keeps_cash_label() -> None:
+    """The 'Display amounts as: Big blinds' toggle (display_in_bb=True) must
+    render every amount in bb -- Question prose, the table-state columns,
+    Context stack -- WITHOUT flipping the Cash/Tourney label (it's still a
+    cash game, just shown in bb). Regression: the toggle was previously a
+    dead control and everything stayed in dollars."""
+    row = build_preflop_row(
+        _facing_open_facts(),  # SB faces a BTN open
+        _explanation(),
+        pack=_pack(),
+        difficulty=_difficulty(1500),
+        number=1,
+        display_in_bb=True,
+    )
+    assert row["Cash/Tourney"] == "Cash"          # semantics unchanged
+    assert row["Context"] == "6-Handed, $0.25/$0.50, Stacks 100bb"
+    assert row["User Seat"] == "SB-99.5BB-0.5BB"
+    assert row["Seats"] == "BB-99BB-1BB, BTN-97.5BB-2.5BB-raise"
+    assert row["POT"] == "4BB"
+    assert row["Default Stack"] == "100BB"
+    assert "2.5bb" in row["Question"]             # prose amounts in bb
+    assert "$" not in row["User Seat"] and "$" not in row["Seats"]
+
+
+def test_dollar_display_is_the_default() -> None:
+    """Default (display_in_bb omitted) renders dollars, unchanged."""
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty=_difficulty(1500),
+        number=1,
+    )
+    assert row["User Seat"] == "SB-$50-$0.25"
+    assert row["POT"] == "$2"
+    assert "$1.25" in row["Question"]
 
 
 def test_hand_class_is_169_label() -> None:
@@ -437,7 +529,8 @@ def test_pot_column_renders_bb_for_tournament() -> None:
         number=1,
         game_format="tournament",
     )
-    assert row["POT"] == "4bb"
+    # App format uses uppercase "BB" (matching the gto-formatter engine).
+    assert row["POT"] == "4BB"
 
 
 def test_range_snapshots_empty_for_open_spot() -> None:
@@ -651,14 +744,38 @@ def test_pot_participant_multi_way_for_squeeze() -> None:
     assert _pot_participant_for_facts(_squeeze_facts()) == "Multi-Way"
 
 
-def test_relative_position_with_villain() -> None:
-    """Relative Position = hero_vs_villain when there's a villain."""
-    assert _relative_position(_facing_open_facts()) == "SB_vs_BTN"
+def test_pot_participant_heads_up_when_hero_opened_then_faces_3bet() -> None:
+    """Regression: hero's own open in history_before must not be
+    double-counted against the +hero term. BTN opens, BB 3-bets, BTN
+    decides -> {BTN, BB} = 2 unique actors -> heads-up, NOT multi-way.
+    (Mirrors the screenshot bug: HJ opens, SB 3-bets, still heads-up.)"""
+    assert _pot_participant_for_facts(_facing_3bet_facts()) == "Heads-Up"
 
 
-def test_relative_position_open_is_just_hero() -> None:
-    """No villain (open spot) -> Relative Position = just hero's seat."""
-    assert _relative_position(_open_facts()) == "UTG"
+def test_position_matchup_with_villain() -> None:
+    """Position Matchup = hero_vs_villain when there's a villain."""
+    assert _position_matchup(_facing_open_facts()) == "SB_vs_BTN"
+
+
+def test_position_matchup_open_is_just_hero() -> None:
+    """No villain (open spot) -> Position Matchup = just hero's seat."""
+    assert _position_matchup(_open_facts()) == "UTG"
+
+
+def test_relative_position_oop_when_villain_acts_later() -> None:
+    """SB faces a BTN open: BTN acts last postflop -> hero (SB) is OOP."""
+    assert _relative_position(_facing_open_facts()) == "Out of Position"
+
+
+def test_relative_position_ip_when_hero_acts_later() -> None:
+    """BTN faces a BB 3-bet: BTN acts last postflop -> hero is IP."""
+    assert _relative_position(_facing_3bet_facts()) == "In Position"
+
+
+def test_relative_position_open_btn_is_in_position() -> None:
+    """Open spot from a non-BTN/SB seat -> someone behind acts later
+    postflop, so the opener is out of position. UTG opens -> OOP."""
+    assert _relative_position(_open_facts()) == "Out of Position"
 
 
 # --- question narrative (deterministic, no LLM) -----------------------------
@@ -778,7 +895,8 @@ def test_tournament_game_format_uses_bb_stack() -> None:
         game_format="tournament",
     )
     assert row["Cash/Tourney"] == "Tournament"
-    assert row["Default Stack"] == "100bb"
+    # App format uses uppercase "BB" (matching the gto-formatter engine).
+    assert row["Default Stack"] == "100BB"
 
 
 def test_live_or_online_kwarg() -> None:

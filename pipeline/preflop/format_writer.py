@@ -1,7 +1,7 @@
 """Layer 8 (preflop edition): Format Writer for preflop spots.
 
 The preflop sibling of ``pipeline.format_writer``. Same role: produce a CSV
-row in the 38-column team template (``CSV_COLUMNS`` is the canonical schema
+row in the 43-column team template (``CSV_COLUMNS`` is the canonical schema
 defined in the postflop module and reused verbatim here) from a populated
 ``PreflopFacts`` + a ``GeneratedExplanation`` + the source ``PreflopPack``.
 
@@ -57,7 +57,11 @@ from typing import Any
 
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
-from pipeline.preflop.concept_tags import compute_concept_tags
+from pipeline.preflop.app_table_format import build_app_table_columns
+from pipeline.preflop.concept_tags import (
+    _non_fold_actor_count,
+    compute_concept_tags,
+)
 from pipeline.preflop.difficulty import DifficultyResult
 from pipeline.preflop.fact_extractor import (
     PreflopFacts,
@@ -102,16 +106,6 @@ _VILLAIN_REF: dict[str, str] = {
     "BB": "The Big Blind",
 }
 
-# Card-suit to emoji. Mirrors action_history._SUIT_EMOJI. ``❤️`` uses U+2764
-# (heavy heart) + U+FE0F variation selector; the other three use the standard
-# suit codepoints + U+FE0F. Matches the team's voice in the Question column.
-_SUIT_EMOJI: dict[str, str] = {
-    "s": "♠️",
-    "h": "❤️",
-    "d": "♦️",
-    "c": "♣️",
-}
-
 # Preflop raise levels: how many raises happened before this action.
 # 1 = open, 2 = 3-bet, 3 = 4-bet, 4 = 5-bet, anything beyond falls back
 # to "raise" (very rare; defensive fallback only).
@@ -152,11 +146,6 @@ def _dollars(amount: float) -> str:
     if isinstance(amount, float) and not amount.is_integer():
         return f"${amount:,.2f}"
     return f"${int(amount):,}"
-
-
-def _bb(value: float) -> str:
-    """A big-blind count formatted as e.g. '100bb'."""
-    return f"{round(value)}bb"
 
 
 def _stack_depth_bucket(effective_stack_bb: float) -> str:
@@ -221,27 +210,6 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
     return ", ".join(parts)
 
 
-def _format_card(card: str) -> str:
-    """One card as rank + suit emoji ('Th' -> 'T<heart>').
-
-    Mirrors ``pipeline.action_history.format_card``. Lowercases the suit
-    letter for emoji lookup so 'TH' / 'Th' / 'th' all work.
-    """
-    if len(card) != 2:
-        raise ValueError(f"card must be 2 chars (rank+suit), got {card!r}")
-    rank, suit = card[0], card[1].lower()
-    if suit not in _SUIT_EMOJI:
-        raise ValueError(f"unknown suit {suit!r} in {card!r}")
-    return rank + _SUIT_EMOJI[suit]
-
-
-def _split_combo(combo: str) -> tuple[str, str]:
-    """Split a 4-char combo string ('AhKc') into its two 2-char cards."""
-    if len(combo) != 4:
-        raise ValueError(f"combo must be 4 chars, got {combo!r}")
-    return combo[:2], combo[2:]
-
-
 # --- pot reconstruction ------------------------------------------------------
 def _compute_pot_bb(
     facts: PreflopFacts,
@@ -293,21 +261,6 @@ def _compute_pot_bb(
             current_max_bet = float(pack.stack_depth_bb)
             continue
     return sum(committed.values())
-
-
-def _render_pot(
-    facts: PreflopFacts,
-    pack: PreflopPack,
-    *,
-    stakes_bb_dollars: float,
-    game_format: str,
-) -> str:
-    """The POT column value. Cash -> dollars (e.g. ``"$6.00"``);
-    tournament -> bb (e.g. ``"12bb"``)."""
-    pot_bb = _compute_pot_bb(facts, pack)
-    if game_format == "cash":
-        return _dollars(round(pot_bb * stakes_bb_dollars, 2))
-    return _bb(pot_bb)
 
 
 def _compute_preflop_skills(
@@ -383,32 +336,44 @@ def _pot_type_for_facts(facts: PreflopFacts) -> str:
 def _pot_participant_for_facts(facts: PreflopFacts) -> str:
     """The Pot Participant column value (Heads-Up vs Multi-Way).
 
-    Heuristic: count non-fold actors in ``history_before`` plus hero.
-    If <=2 active actors (one villain + hero), it's heads-up. Otherwise
-    multi-way. This is approximate -- seats still to act may also enter
-    -- but matches what the postflop column does (which is also a
-    snapshot at the decision point, not the final hand state).
+    Counts UNIQUE non-fold positions still in the pot (incl. hero) via
+    the same set-dedup helper the ``multiway_pot`` concept tag uses, so
+    the two never disagree. Counting raw actions instead double-counts
+    hero's own earlier open when hero later faces a 3-bet (e.g. "HJ
+    opens, SB 3-bets, HJ decides" is heads-up, not multi-way).
     """
-    active = sum(
-        1
-        for a in facts.spot.node.history_before
-        if a.action_type is not PreflopActionType.FOLD
-    )
-    # +1 for hero (about to act).
-    return "Heads-Up" if active + 1 <= 2 else "Multi-Way"
+    return "Heads-Up" if _non_fold_actor_count(facts) <= 2 else "Multi-Way"
 
 
-def _relative_position(facts: PreflopFacts) -> str:
-    """The Relative Position column value.
+def _position_matchup(facts: PreflopFacts) -> str:
+    """The Position Matchup column value -- hero-vs-villain seats.
 
-    Postflop uses ``"BB_vs_BTN"`` (hero vs villain). Mirror that for
-    preflop, with a fallback to just hero's seat when there's no
-    specific villain (open spots).
+    ``"BB_vs_BTN"`` style (mirrors the postflop ``position_dynamic``),
+    with a fallback to just hero's seat when there's no specific villain
+    (open spots).
     """
     hero = facts.spot.node.actor
     if facts.villain_stats is None:
         return hero
     return f"{hero}_vs_{facts.villain_stats.position}"
+
+
+def _relative_position(facts: PreflopFacts) -> str:
+    """The Relative Position column value -- hero's IP/OOP standing.
+
+    "In Position" when hero acts last postflop, else "Out of Position".
+    With a villain we use the postflop-order rule
+    (:func:`_ip_oop_positions`). On open spots (no villain yet) the
+    opener is in position only when nobody behind acts later postflop --
+    true for the BTN, and for the SB in a blind-vs-blind open (SB is the
+    dealer and acts last postflop heads-up). Every other open leaves a
+    seat to act behind hero, so it's out of position.
+    """
+    hero = facts.spot.node.actor
+    if facts.villain_stats is None:
+        return "In Position" if hero in ("BTN", "SB") else "Out of Position"
+    ip_pos, _oop_pos = _ip_oop_positions(hero, facts.villain_stats.position)
+    return "In Position" if hero == ip_pos else "Out of Position"
 
 
 def _solver_reference(facts: PreflopFacts, pack: PreflopPack) -> str:
@@ -549,6 +514,7 @@ def format_preflop_question(
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
+    display_in_bb: bool = False,
 ) -> str:
     """Deterministic action-history narrative for the Question column.
 
@@ -586,6 +552,7 @@ def format_preflop_question(
         stakes_bb_dollars=stakes_bb_dollars,
         live_or_online=live_or_online,
         game_format=game_format,
+        display_in_bb=display_in_bb,
     )
 
 
@@ -593,21 +560,25 @@ def _context_column(
     pack: PreflopPack,
     stakes_bb_dollars: float,
     game_format: str,
+    display_in_bb: bool = False,
 ) -> str:
     """The Context column value -- short prose mirroring the postflop format.
 
-    Format: ``"<table_size>-Handed, <stakes>, Stacks <stack>"`` for cash;
-    ``"<table_size>-Handed, <stack>bb stacks"`` for tournament. Matches the
-    postflop ``ScenarioConfig.context`` shape so the column reads
-    identically across both paths.
+    Cash, dollar display: ``"<n>-Handed, <stakes>, Stacks <$stack>"``.
+    Cash, bb display: ``"<n>-Handed, <stakes>, Stacks <N>bb"`` -- keeps the
+    dollar stake identity but expresses the stack in big blinds (the admin
+    "Display amounts as: Big blinds" toggle). Tournament:
+    ``"<n>-Handed, <N>bb stacks"``. Matches the postflop
+    ``ScenarioConfig.context`` shape so the column reads identically.
     """
     if game_format == "cash":
         sb_dollars = round(stakes_bb_dollars * pack.sb_to_bb_ratio, 2)
-        stack_dollars = round(pack.stack_depth_bb * stakes_bb_dollars, 2)
         stakes_str = f"{_dollars(sb_dollars)}/{_dollars(stakes_bb_dollars)}"
-        return (
-            f"{pack.table_size}-Handed, {stakes_str}, Stacks {_dollars(stack_dollars)}"
-        )
+        if display_in_bb:
+            stack_str = f"{pack.stack_depth_bb}bb"
+        else:
+            stack_str = _dollars(round(pack.stack_depth_bb * stakes_bb_dollars, 2))
+        return f"{pack.table_size}-Handed, {stakes_str}, Stacks {stack_str}"
     return f"{pack.table_size}-Handed, {pack.stack_depth_bb}bb stacks"
 
 
@@ -622,6 +593,7 @@ def build_preflop_row(
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
+    display_in_bb: bool = False,
 ) -> dict[str, str]:
     """Turn one populated PreflopFacts + its LLM-written explanation into a CSV row.
 
@@ -649,16 +621,21 @@ def build_preflop_row(
             field).
     """
     spot = facts.spot
-    node = spot.node
 
-    card_a, card_b = _split_combo(spot.hero_card_combo)
-    user_cards = _format_card(card_a) + " " + _format_card(card_b)
-
-    # Stack in dollars/bb derived from pack + stakes config.
-    if game_format == "cash":
-        default_stack = _dollars(pack.stack_depth_bb * stakes_bb_dollars)
-    else:
-        default_stack = _bb(pack.stack_depth_bb)
+    # The 7 "table-state" columns (User Seat / User Cards / Cards on Table
+    # / Table Size / Default Stack / Seats / POT) in the Runout app's exact
+    # poker-table format -- seat-stack-amount-action tokens the app renders
+    # as chips. Built natively from structured facts (see
+    # pipeline.preflop.app_table_format), reusing the same resolved dollar
+    # amounts the Question prose uses so the two never disagree.
+    table_cols = build_app_table_columns(
+        facts,
+        pack,
+        stakes_bb_dollars=stakes_bb_dollars,
+        live_or_online=live_or_online,
+        game_format=game_format,
+        display_in_bb=display_in_bb,
+    )
 
     # IP / OOP range snapshots. Single call -- the helper reads two range
     # files (hero's per-action ranges + villain's range file) so we don't
@@ -667,34 +644,27 @@ def build_preflop_row(
 
     return {
         "No": str(number),
-        # UI rendering. Cards on Table is empty for preflop (no board).
-        "User Seat": node.actor,
-        "User Cards": user_cards,
-        "Cards on Table": "",
-        "Table Size": str(pack.table_size),
-        "Default Stack": default_stack,
-        # Seats / POT: the postflop renderer carries a richer
-        # per-villain stack/commitment view. Preflop pot tracking from
-        # %-of-pot raise tokens needs the pack's sizing conventions
-        # decoded (see docs/ryan_range_pack_index.md). Deferred to a
-        # follow-up so step 8 stays focused.
-        "Seats": (facts.villain_stats.position if facts.villain_stats else ""),
-        "POT": _render_pot(
-            facts,
-            pack,
-            stakes_bb_dollars=stakes_bb_dollars,
-            game_format=game_format,
-        ),
+        # UI rendering -- the app's table-state format.
+        "User Seat": table_cols["user_seat"],
+        "User Cards": table_cols["user_cards"],
+        "Cards on Table": table_cols["cards_on_table"],
+        "Table Size": table_cols["table_size"],
+        "Default Stack": table_cols["default_stack"],
+        "Seats": table_cols["seats"],
+        "POT": table_cols["pot"],
         # Question content. Context + Question are deterministic; the
         # LLM (Layer 6) writes the four options + correct answer +
         # explanation.
-        "Context": _context_column(pack, stakes_bb_dollars, game_format),
+        "Context": _context_column(
+            pack, stakes_bb_dollars, game_format, display_in_bb=display_in_bb
+        ),
         "Question": format_preflop_question(
             facts,
             pack=pack,
             stakes_bb_dollars=stakes_bb_dollars,
             live_or_online=live_or_online,
             game_format=game_format,
+            display_in_bb=display_in_bb,
         ),
         "Question Type": "Hand Scenario Question.",
         "Hand Stage": "Preflop",
@@ -707,15 +677,14 @@ def build_preflop_row(
         # Classification.
         "Cash/Tourney": _GAME_FORMAT_PROSE.get(game_format, game_format.capitalize()),
         "Live or Online": live_or_online,
+        # Hero's IP/OOP standing; the seat matchup ("BB_vs_BTN") moves to
+        # the "Position Matchup" column.
         "Relative Position": _relative_position(facts),
         "Preflop Pot Type": _pot_type_for_facts(facts),
         "Pot Participant": _pot_participant_for_facts(facts),
         "Stack Depth": _stack_depth_bucket(pack.stack_depth_bb),
         "Difficulty Rating": str(difficulty.score),
-        # Skill tags -- Phase 3 taxonomy, not yet mapped (same as postflop).
-        "tag_1": "",
-        "tag_2": "",
-        "tag_3": "",
+        "Position Matchup": _position_matchup(facts),
         "Notes": "Auto-generated by poker-pipeline (preflop path).",
         # Pipeline columns.
         # concept_tags: comma-separated list of firing preflop tags from
@@ -795,6 +764,7 @@ def write_preflop_csv(
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
+    display_in_bb: bool = False,
 ) -> int:
     """Write preflop question rows to a CSV at ``path``; return rows written.
 
@@ -835,6 +805,7 @@ def write_preflop_csv(
                 stakes_bb_dollars=stakes_bb_dollars,
                 live_or_online=live_or_online,
                 game_format=game_format,
+                display_in_bb=display_in_bb,
             )
             writer.writerow(row)
             written += 1

@@ -85,6 +85,8 @@ from admin_panel import jobs, usage  # noqa: E402
 from pipeline.explanation_generator import build_system_prompt  # noqa: E402
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
+    DIFFICULTY_MAX,
+    DIFFICULTY_MIN,
     BatchResult,
     generate_preflop_batch,
     node_action_context,
@@ -974,11 +976,13 @@ def _render_generate_page_preflop() -> None:
 
     st.divider()
 
-    # --- 4. Difficulty (reuses the postflop preset+slider) ---
+    # --- 4. Difficulty ---
     st.subheader("4. Difficulty")
     st.caption(
-        "How dominant the correct answer is in the solver. Same filter as "
-        "postflop -- a 55-95% window is the question-worthy sweet spot."
+        "Presets target a band of the COMPUTED difficulty rating -- the "
+        "4-axis score (frequency, EV gap, archetype/concept, hand class), "
+        "not frequency alone. The generator keeps only spots whose rating "
+        "lands in the band, so a preset reliably yields that tier."
     )
     with st.popover("ℹ️  How is the Difficulty Rating calculated?"):
         _render_difficulty_explainer()
@@ -989,21 +993,70 @@ def _render_generate_page_preflop() -> None:
         horizontal=True,
         key="preflop_difficulty_preset",
     )
-    presets_map = {
-        "Easy": (85, 95),
-        "Medium": (70, 85),
-        "Hard": (55, 70),
-        "Mixed": (55, 95),
-        "Custom": (65, 75),
+    # Difficulty-RATING bands (the score runs ~400-3200). Mixed = full
+    # range. These thirds split the brief's 500-3000 MVP band; tune here.
+    difficulty_bands = {
+        "Easy":   (400, 1300),
+        "Medium": (1300, 2100),
+        "Hard":   (2100, 3200),
+        "Mixed":  (DIFFICULTY_MIN, DIFFICULTY_MAX),
+        "Custom": (400, 3200),
     }
-    default_low, default_high = presets_map[preset]
-    freq_low, freq_high = st.slider(
-        "Solver frequency window (%)",
-        min_value=50,
-        max_value=100,
-        value=(default_low, default_high),
+    # Always show the slider so the band is visible; for the fixed presets
+    # it's read-only (disabled) and snaps to that preset's band, for Custom
+    # it's editable. The key varies by preset so switching presets re-seeds
+    # the slider to the new band (a keyed Streamlit widget otherwise ignores
+    # a changed `value=` once its session-state entry exists).
+    preset_low, preset_high = difficulty_bands[preset]
+    band_low, band_high = st.slider(
+        "Difficulty rating band",
+        min_value=DIFFICULTY_MIN,
+        max_value=DIFFICULTY_MAX,
+        value=(preset_low, preset_high),
+        step=50,
         disabled=(preset != "Custom"),
-        key="preflop_difficulty_slider",
+        key=f"preflop_difficulty_slider_{preset}",
+        help=(
+            "The computed-rating band this batch keeps. Presets snap it to "
+            "a tier; pick Custom to set your own range."
+        ),
+    )
+
+    # Advanced: question-worthiness window + EV-gap quality gate. These
+    # are SEPARATE from difficulty -- worthiness decides whether a spot is
+    # teachable at all; the EV gate drops near-coinflip call/fold spots.
+    with st.expander("Advanced filters (worthiness window · EV-gap gate)"):
+        st.caption(
+            "The frequency worthiness window gates whether a decision is "
+            "teachable at all (the brief's 55-95% sweet spot). The EV-gap "
+            "gate is a quality filter on call/fold spots."
+        )
+        freq_low, freq_high = st.slider(
+            "Solver frequency worthiness window (%)",
+            min_value=50,
+            max_value=100,
+            value=(55, 95),
+            key="preflop_worthiness_slider",
+            help="Below 55% = no clear best answer to teach; 100% = trivial.",
+        )
+        min_ev_gap = st.slider(
+            "Minimum EV gap (bb) — 0 = off",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.05,
+            key="preflop_min_ev_gap",
+            help=(
+                "Drops call/fold spots whose EV gap to the 2nd-best action "
+                "is below this. Raise spots (no computed EV) always pass."
+            ),
+        )
+
+    # Visible settings summary -- exactly what THIS batch will use.
+    _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
+    st.caption(
+        f"**Active settings** — difficulty rating **{band_low}–{band_high}** · "
+        f"worthiness freq **{freq_low}–{freq_high}%** · EV-gap gate **{_ev_txt}**"
     )
 
     st.divider()
@@ -1036,7 +1089,7 @@ def _render_generate_page_preflop() -> None:
         "Total questions in this batch",
         min_value=1,
         max_value=10_000,
-        value=20,
+        value=10,
         step=5,
         key="preflop_total",
         help=(
@@ -1103,7 +1156,8 @@ def _render_generate_page_preflop() -> None:
     est_cost = total * cost_per_q
     st.info(
         f"**Estimated**: {total} questions · ~${est_cost:.2f} · "
-        f"freq {freq_low}-{freq_high}% · {len(filtered_nodes):,} nodes available"
+        f"difficulty {band_low}-{band_high} · {len(filtered_nodes):,} "
+        f"nodes available"
     )
 
     st.divider()
@@ -1154,6 +1208,10 @@ def _render_generate_page_preflop() -> None:
             action_contexts=list(action_contexts),
             freq_min=freq_low / 100.0,
             freq_max=freq_high / 100.0,
+            min_difficulty=int(band_low),
+            max_difficulty=int(band_high),
+            min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+            display_in_bb=_currency.startswith("Big blinds"),
             total_questions=int(total),
             output_filename=_out_filename,
             model_label=_model,
@@ -1169,6 +1227,10 @@ def _start_preflop_job(
     action_contexts: list[str],
     freq_min: float,
     freq_max: float,
+    min_difficulty: int,
+    max_difficulty: int,
+    min_ev_gap_bb: float | None,
+    display_in_bb: bool,
     total_questions: int,
     output_filename: str,
     model_label: str,
@@ -1227,6 +1289,10 @@ def _start_preflop_job(
             action_contexts=action_contexts,
             min_frequency=freq_min,
             max_frequency=freq_max,
+            min_difficulty=min_difficulty,
+            max_difficulty=max_difficulty,
+            min_ev_gap_bb=min_ev_gap_bb,
+            display_in_bb=display_in_bb,
             answer_style=answer_style,
             model=model_api,
             dry_run=dry_run,
@@ -1786,15 +1852,23 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f"No questions produced. "
             f"Nodes after filter: **{result.nodes_after_filter}**, "
             f"worthy spots available: **{result.worthy_spots_available}**, "
+            f"rejected by difficulty/EV filters: "
+            f"**{result.difficulty_filtered_out}**, "
             f"failures: **{len(result.failures)}**. "
-            "Try a wider frequency window or different filters."
+            "Try a wider difficulty band, the Mixed preset, or a wider "
+            "worthiness window."
         )
     else:
+        _band_note = (
+            f", {result.difficulty_filtered_out} rejected by difficulty/EV "
+            f"filters" if result.difficulty_filtered_out else ""
+        )
         st.success(
             f"Wrote **{result.questions_written}** questions to "
             f"`{result.output_path}` "
             f"(attempted {result.questions_attempted}, "
-            f"{result.worthy_spots_available} worthy spots available)."
+            f"{result.worthy_spots_available} worthy spots available"
+            f"{_band_note})."
         )
 
     if result.failures:
@@ -1820,13 +1894,6 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
         use_container_width=True,
         key=download_key,
     )
-    st.caption(
-        f"File: {result.output_path.name} · "
-        f"{len(csv_bytes):,} bytes · {result.questions_written} questions · "
-        f"38 columns (the in-page preview below shows only 14 of them; "
-        f"download for the full CSV)."
-    )
-
     # In-place preview: first ~20 rows of the most useful columns.
     df = pd.read_csv(result.output_path, encoding="utf-8-sig")
     preview_cols = [
@@ -1844,8 +1911,16 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
         "Answer Explanation",
         "Difficulty Rating",
         "action_frequencies",
+        "ev_gap_bb",
+        "skills",
     ]
     present_cols = [c for c in preview_cols if c in df.columns]
+    st.caption(
+        f"File: {result.output_path.name} · "
+        f"{len(csv_bytes):,} bytes · {result.questions_written} questions · "
+        f"{len(df.columns)} columns (the in-page preview below shows only "
+        f"{len(present_cols)} of them; download for the full CSV)."
+    )
     st.dataframe(
         df[present_cols].head(20), hide_index=True, use_container_width=True
     )

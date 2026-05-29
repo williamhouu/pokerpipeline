@@ -250,32 +250,69 @@ explanations before the tagger goes to production.
 
 ## Output format
 
-Source of truth is **Google Sheets**. The existing **29 columns stay unchanged**; the
-pipeline writes to them via a formatter and adds **16 new columns** (5 from the
-brief + 1 from Apr-2026 Ryan-feedback Fix 3 + 2 from May-2026 Ryan ask
-+ 1 from May-2026 Phase 3 skill tagging + 1 from May-2026 archetype-QA ask
-+ 5 from May-2026 difficulty-algorithm redesign):
+Source of truth is **Google Sheets**. The schema is **43 columns**. The
+pipeline writes the team's template columns via a formatter and adds the
+new pipeline columns below.
+
+**May-2026 reorg:** `tag_1`/`tag_2`/`tag_3` (the old empty Phase-3
+placeholder template columns) were **dropped** — `skills` superseded them.
+The **`Relative Position`** column was **repurposed** from the
+hero-vs-villain seat matchup to hero's IP/OOP standing (`In Position` /
+`Out of Position`); the old matchup string (`BB_vs_BTN`) now lives in a new
+**`Position Matchup`** column right after `concept_tags`. Columns were also
+reordered: the difficulty/skill/EV diagnostic cluster sits right after
+`Difficulty Rating`, and `hand_class` + `Notes` close out the row.
+
+Column numbers below are 1-indexed positions in the current
+`CSV_COLUMNS` order (defined in `pipeline/format_writer.py`):
 
 | Col | Name | Purpose |
 |-----|------|---------|
-| 30 | `concept_tags` | comma-separated tags (5–10/question); LLM input + retrieval key |
-| 31 | `hand_class` | single label, e.g. `top_pair_with_flush_draw` |
-| 32 | `board_texture` | single label, e.g. `monotone_connected_broadway` |
-| 33 | `solver_reference` | path back to the exact solve node — the key QA/debugging column |
-| 34 | `ev_gap_bb` | EV gap to second-best action; `<0.30` surfaces questionable questions |
+| 21 | `Relative Position` | hero's IP/OOP standing: `In Position` / `Out of Position`. Postflop reads `meta.hero_in_position`; preflop derives it from postflop action order (`In Position` when hero acts last postflop). (Repurposed May 2026.) |
+| 26 | `skills` | comma-separated user-facing skill labels from `pipeline/skill_tagger.py` — the 42-skill catalog the app uses for "study X" features. Distinct from `concept_tags` (computational atoms) — `skills` is the mapped user-readable layer. Strict tagging: 2–5 skills/question typical. (Phase 3, May 2026.) |
+| 27 | `action_frequencies` | comma-separated `<verb>: <integer>%` (Fix 3, Apr 2026) — Pio's range strategy at a glance |
+| 28 | `ev_gap_bb` | EV gap to second-best action; `<0.30` surfaces questionable questions |
+| 29 | `concept_tags` | comma-separated tags (5–10/question); LLM input + retrieval key |
+| 30 | `Position Matchup` | hero-vs-villain seat matchup, e.g. `BB_vs_BTN` (just the hero seat on open spots with no villain). Was the old `Relative Position` value. (New May 2026.) |
+| 31 | `board_texture` | single label, e.g. `monotone_connected_broadway` (empty preflop) |
+| 32 | `ip_range` | 169-entry preflop-pack-format snapshot of the IP player's range at this node (`AA:1.0,A2s:0.621,...`). Enables future UI range-grid rendering per question. (Ryan ask, May 2026.) |
+| 33 | `oop_range` | same as `ip_range`, for the OOP player |
+| 34 | `solver_reference` | path back to the exact solve node — the key QA/debugging column |
 | 35 | `validation_status` | `draft`/`auto_approved`/`flagged`/`needs_review`/`approved`/`rejected` |
-| 36 | `action_frequencies` | comma-separated `<verb>: <integer>%` (Fix 3, Apr 2026) — Pio's range strategy at a glance |
-| 37 | `ip_range` | 169-entry preflop-pack-format snapshot of the IP player's range at this node (`AA:1.0,A2s:0.621,...`). Enables future UI range-grid rendering per question. (Ryan ask, May 2026.) |
-| 38 | `oop_range` | same as `ip_range`, for the OOP player |
-| 39 | `skills` | comma-separated user-facing skill labels from `pipeline/skill_tagger.py` — the 42-skill catalog the app uses for "study X" features. Distinct from `concept_tags` (computational atoms) — `skills` is the mapped user-readable layer. Strict tagging: 2–5 skills/question typical. (Phase 3, May 2026.) |
-| 40 | `archetype` | preflop strategic frame: one of the 16 labels from `pipeline.preflop.fact_extractor.classify_archetype` (`open_for_value`, `3bet_for_value`, `squeeze_as_bluff`, `fold_dominated`, etc.) or `unclassified`. Empty for postflop rows (postflop has no archetype layer). The LLM already gets this in its SOLVER DATA block as the strategic frame; the CSV column is for analytics + reviewer QA. (May 2026.) |
-| 41 | `easy_freq` | Difficulty-algorithm diagnostic. Per-spot ease score on the frequency axis in [0, 1] -- 0 = max-hard (55% dominant), 1 = max-easy (100% pure). See `pipeline/preflop/difficulty.py` for the formula. Preflop only; empty for postflop rows. |
-| 42 | `easy_ev` | Per-spot ease on the EV-gap axis in [0, 1] -- 0 = max-hard (0bb gap), 1 = max-easy (3bb+ gap). Empty when the EV engine couldn't score the spot (raise-involved spots). Preflop only. |
-| 43 | `easy_concept` | Per-spot ease on the archetype-and-concept-tag axis. Lookup table in `pipeline/preflop/difficulty.py:ARCHETYPE_BASE_EASE` plus `CONCEPT_TAG_MODIFIERS`. Preflop only. |
-| 44 | `easy_hand` | Per-spot ease on the hand-class axis. U-shaped: premium hands AND clear trash are easy; marginal hands are hard. Preflop only. |
-| 45 | `difficulty_bumps` | Comma-separated names of any `BUMP_RULES` from `pipeline/preflop/difficulty.py` that fired for this spot. Empty when no bumps fired (current default: the table is empty pending observed mis-scored patterns). |
+| 36 | `archetype` | preflop strategic frame: one of the 16 labels from `pipeline.preflop.fact_extractor.classify_archetype` (`open_for_value`, `3bet_for_value`, `squeeze_as_bluff`, `fold_dominated`, etc.) or `unclassified`. Empty for postflop rows (postflop has no archetype layer). The LLM already gets this in its SOLVER DATA block as the strategic frame; the CSV column is for analytics + reviewer QA. (May 2026.) |
+| 37 | `easy_freq` | Difficulty-algorithm diagnostic. Per-spot ease score on the frequency axis in [0, 1] -- 0 = max-hard (55% dominant), 1 = max-easy (100% pure). See `pipeline/preflop/difficulty.py` for the formula. Preflop only; empty for postflop rows. |
+| 38 | `easy_ev` | Per-spot ease on the EV-gap axis in [0, 1] -- 0 = max-hard (0bb gap), 1 = max-easy (3bb+ gap). Empty when the EV engine couldn't score the spot (raise-involved spots). Preflop only. |
+| 39 | `easy_concept` | Per-spot ease on the archetype-and-concept-tag axis. Lookup table in `pipeline/preflop/difficulty.py:ARCHETYPE_BASE_EASE` plus `CONCEPT_TAG_MODIFIERS`. Preflop only. |
+| 40 | `easy_hand` | Per-spot ease on the hand-class axis. U-shaped: premium hands AND clear trash are easy; marginal hands are hard. Preflop only. |
+| 41 | `difficulty_bumps` | Comma-separated names of any `BUMP_RULES` from `pipeline/preflop/difficulty.py` that fired for this spot. Empty when no bumps fired (current default: the table is empty pending observed mis-scored patterns). |
+| 42 | `hand_class` | single label, e.g. `top_pair_with_flush_draw` (preflop: the 169-class label like `AKo`) |
+| 43 | `Notes` | provenance string, e.g. "Auto-generated by poker-pipeline (preflop path)." |
 
-The difficulty algorithm (cols 41-45 are its diagnostics) is a weighted
+**App-format table columns (May 2026).** The 7 "table-state" columns
+`User Seat`, `User Cards`, `Cards on Table`, `Table Size`, `Default
+Stack`, `Seats`, `POT` are emitted in the Runout app's exact poker-table
+format (e.g. `User Seat` = `HJ-$49-$1.25-raise`, `Seats` =
+`SB-$45-$5-3-bet, BB-$50-$0.5-FOLD`, cards as `K-spades, J-spades`) so the
+CSV feeds the app's chip/seat renderer directly. Built natively from
+structured facts in `pipeline/preflop/app_table_format.py` — a port of the
+team's `gto-formatter` engine's output *spec* (that engine regex-parses the
+LLM prose; we build from structured data instead). It reuses
+`action_history.build_hand_dict`'s resolved dollar amounts so the tokens
+always agree with the Question prose + pot. Cash: remaining stacks round to
+whole dollars, wagers keep cents; tournament: BB units.
+
+**Difficulty presets are score-band filters (May 2026).** The admin
+Generate page's Easy/Medium/Hard/Mixed presets now filter on the COMPUTED
+4-axis difficulty rating (Easy 400–1300, Medium 1300–2100, Hard 2100–3200,
+Mixed full), not the frequency window. `generate_preflop_batch` takes
+`min_difficulty`/`max_difficulty`/`min_ev_gap_bb` and rejects out-of-band
+spots *before* the LLM call (no wasted spend); `BatchResult.
+difficulty_filtered_out` reports the rejection count. The frequency
+worthiness window (55–95%) + an optional min-EV-gap quality gate live in the
+page's "Advanced filters" expander. (Postflop tab still uses legacy freq
+presets — dormant, pending Pio solves.)
+
+The difficulty algorithm (cols 37-41 are its diagnostics) is a weighted
 sum: `easy = 0.40 * easy_freq + 0.30 * easy_ev + 0.20 * easy_concept +
 0.10 * easy_hand`, then `difficulty = round(clip(3000 - easy * 2500,
 400, 3200))`. EV-weight redistributes across the other three when
@@ -295,12 +332,14 @@ A real sample of the team's output, and the **authoritative format spec**. Two s
   (`concept_tags`, `hand_class`, `board_texture`, `solver_reference`,
   `ev_gap_bb`), then `validation_status`. So the brief's "29 existing" = `No` +
   the 28 named template columns. Layer 8 (`format_writer.py`) emits this layout
-  plus ten additional columns added post-baseline: `action_frequencies` (Fix
+  plus columns added post-baseline: `action_frequencies` (Fix
   3, Apr 2026), `ip_range` + `oop_range` (Ryan ask, May 2026), `skills`
   (Phase 3 user-facing skill tagger, May 2026), `archetype` (preflop
-  strategic frame surfaced for QA, May 2026), and `easy_freq` + `easy_ev`
+  strategic frame surfaced for QA, May 2026), `easy_freq` + `easy_ev`
   + `easy_concept` + `easy_hand` + `difficulty_bumps` (difficulty-algorithm
-  diagnostics, May 2026) — current total 45 columns.
+  diagnostics, May 2026), and `Position Matchup` (May 2026 reorg). The
+  three empty `tag_1`/`tag_2`/`tag_3` placeholder columns were dropped in
+  the same reorg — current total 43 columns.
 - **Sheet 2 "Golden explanation examples - I"** — ~10 sample `Answer Explanation`s
   showing the coaching voice Layer 6's LLM prompt must reproduce.
 

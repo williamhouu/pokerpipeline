@@ -96,6 +96,15 @@ from pipeline.preflop.spot_sampler import (
 
 logger = logging.getLogger(__name__)
 
+# Difficulty-score band defaults: the full hard-clamped range the 4-axis
+# algorithm can emit (see pipeline.preflop.difficulty). "Mixed" preset =
+# this full band; the narrower presets (Easy / Medium / Hard) pass a
+# sub-band so the generator keeps only spots whose COMPUTED rating lands
+# in the requested tier -- the freq window alone no longer determines
+# difficulty now that it's one of four axes.
+DIFFICULTY_MIN: int = 400
+DIFFICULTY_MAX: int = 3200
+
 # Action-context labels, matching the admin panel's filter dropdown. The
 # orchestrator and the UI must share the same vocabulary so the UI
 # multiselect strings round-trip cleanly to the filter logic.
@@ -182,6 +191,12 @@ class BatchResult:
     # How many nodes survived the position + action-context filter.
     # Sanity-check companion to worthy_spots_available.
     nodes_after_filter: int = 0
+
+    # How many worthy spots were rejected by the difficulty-band / min-EV
+    # filters (they passed the freq worthiness gate but their computed
+    # rating fell outside the requested tier). UI feedback: a narrow
+    # preset that starves the batch shows up here.
+    difficulty_filtered_out: int = 0
 
     # Token-usage totals across every Anthropic call in the batch.
     # Populated only when the LLM is actually invoked (dry-run leaves
@@ -297,10 +312,14 @@ def generate_preflop_batch(
     action_contexts: Iterable[str] | None = None,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    min_difficulty: int = DIFFICULTY_MIN,
+    max_difficulty: int = DIFFICULTY_MAX,
+    min_ev_gap_bb: float | None = None,
     answer_style: str = "auto",
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
     game_format: str = "cash",
+    display_in_bb: bool = False,
     model: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -327,10 +346,27 @@ def generate_preflop_batch(
             (see :data:`ACTION_CONTEXTS`). None / empty = all contexts.
         min_frequency, max_frequency: Frequency window for the
             worthiness filter. Defaults to the brief's 55-95% sweet
-            spot.
+            spot. This is a question-WORTHINESS gate (is the decision
+            teachable at all), distinct from the difficulty band below.
+        min_difficulty, max_difficulty: Keep only spots whose COMPUTED
+            4-axis difficulty rating lands in [min, max]. Defaults to the
+            full band (DIFFICULTY_MIN..DIFFICULTY_MAX = no filter). The
+            admin panel's Easy/Medium/Hard presets pass sub-bands here.
+            The score is computed before the (paid) LLM call so out-of-
+            band spots cost no tokens.
+        min_ev_gap_bb: Optional quality gate -- drop spots whose EV gap
+            to the second-best action is below this (bb). None = off.
+            Only applies to spots the EV engine could score (call/fold);
+            raise-involved spots (ev_gap None) always pass so the gate
+            doesn't wipe out the raise-decision population.
         stakes_bb_dollars: BB size in dollars, forwarded to the row
             builder. Default 0.50 = Tier 1.
         live_or_online, game_format: Cosmetic columns; forwarded.
+        display_in_bb: When True, render all amounts (Question prose,
+            User Seat / Seats / Pot / Default Stack, Context stack) in
+            big blinds instead of dollars, even for a cash game. The
+            Cash/Tourney column still reflects game_format. Wired to the
+            admin "Display amounts as: Big blinds" toggle.
         model: Anthropic model id for Layer 6. Defaults to the postflop
             production model (Opus 4.7).
         temperature, max_tokens: Layer 6 sampling controls.
@@ -370,22 +406,30 @@ def generate_preflop_batch(
         max_frequency=max_frequency,
     )
 
-    # 4. Sample up to total_questions.
-    sample_size = min(total_questions, len(worthy))
-    if sample_size <= 0:
+    # 4. Nothing worthy -> empty result.
+    if not worthy:
         return BatchResult(
             output_path=None,
             questions_written=0,
             questions_attempted=0,
             failures=[],
-            worthy_spots_available=len(worthy),
+            worthy_spots_available=0,
             nodes_after_filter=len(filtered_nodes),
         )
-    sampled = rng.sample(worthy, sample_size)
+    # Randomise order so the difficulty-band / EV-gap filter doesn't bias
+    # toward whichever nodes happen to enumerate first; we then walk the
+    # shuffled pool until total_questions rows are collected.
+    rng.shuffle(worthy)
 
-    # 5. Per-spot: extract facts, generate explanation, collect row triples.
+    # 5. Per-spot: extract facts, compute the 4-axis difficulty, apply the
+    #    difficulty-band + min-EV-gap filters BEFORE the (paid) LLM call,
+    #    then generate. Stop once total_questions rows are collected.
     rows: list[tuple] = []
     failures: list[PreflopFailure] = []
+    # Cosmetic progress denominator: we can never produce more rows than
+    # there are worthy spots, so cap the bar's total at that upper bound
+    # (the difficulty/EV filters may end the run below it).
+    progress_total = min(total_questions, len(worthy))
     # Token totals -- summed by ``_record_usage`` which Layer 6 calls
     # once per successful API request (including retries).
     usage_totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
@@ -402,28 +446,64 @@ def generate_preflop_batch(
         usage_totals["cache_creation"] += cache_creation
         usage_totals["cache_read"] += cache_read
 
+    # Tally of spots that passed the worthiness gate but were rejected by
+    # the difficulty-band / EV-gap filters (useful UI feedback when a
+    # narrow preset starves the batch). ``attempted`` counts only spots
+    # we committed an LLM call to (post-filter).
+    attempted = 0
+    difficulty_filtered_out = 0
     # ``_evaluation`` carried the pre-facts freq-only difficulty; we
-    # discard it now and recompute below with EV gap once facts are
-    # available. Kept in the tuple so collect_worthy_spots's return
-    # shape stays stable.
-    for index, (spot, _evaluation) in enumerate(sampled):
+    # discard it and recompute the canonical 4-axis rating below.
+    for spot, _evaluation in worthy:
+        if len(rows) >= total_questions:
+            break
+        # --- facts + canonical difficulty (no API spend yet) -------------
+        # compute_difficulty blends freq + EV gap + archetype/concept +
+        # hand class (with EV-weight redistribution when the EV engine
+        # couldn't score the spot, typical for raise-involved spots).
+        # A failure here is rare (equity / extract issues) but must not
+        # abort the batch.
+        try:
+            facts: object = extract_facts(
+                spot, pack, equity_runouts=equity_runouts)
+            ev_gap = compute_ev_gap_bb(facts, pack)
+            difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(
+                _build_failure(
+                    spot, None, [], "", exc,
+                    pack=pack, stakes_bb_dollars=stakes_bb_dollars,
+                    live_or_online=live_or_online, game_format=game_format,
+                )
+            )
+            logger.warning(
+                "batch: spot %s / %s facts/difficulty failed: %s",
+                spot.node.node_id, spot.hero_hand_class, exc,
+            )
+            continue
+        # --- difficulty-band + min-EV-gap filter -------------------------
+        if not (min_difficulty <= difficulty.score <= max_difficulty):
+            difficulty_filtered_out += 1
+            continue
+        # EV gate only when the EV engine scored the spot; raise-involved
+        # spots (ev_gap None) pass unconditionally.
+        if (min_ev_gap_bb is not None and ev_gap is not None
+                and ev_gap < min_ev_gap_bb):
+            difficulty_filtered_out += 1
+            continue
+
+        # --- generation (the paid step) ----------------------------------
+        attempted += 1
         if progress_callback is not None:
             progress_callback(
-                f"Generating question {index + 1}/{sample_size} "
+                f"Generating question {len(rows) + 1}/{progress_total} "
                 f"({spot.node.actor} / {spot.hero_hand_class})",
-                index,
-                sample_size,
+                len(rows),
+                progress_total,
             )
-        # Per-spot inputs we'll capture even on failure so the reviewer
-        # gets full context. extract_facts / build_options are
-        # essentially never the failure source, but if they raise we
-        # still want a row in `failures` rather than silently dropping
-        # the spot.
-        facts: object | None = None
         options: list[str] = []
         correct: str = ""
         try:
-            facts = extract_facts(spot, pack, equity_runouts=equity_runouts)
             options, correct = build_options(facts, style=answer_style)
             if dry_run:
                 explanation = _placeholder_explanation(options, correct)
@@ -438,15 +518,6 @@ def generate_preflop_batch(
                     max_tokens=max_tokens,
                     usage_callback=_record_usage,
                 )
-            # Compute the full 4-axis difficulty rating. The pre-facts
-            # evaluation.difficulty_score was a freq-only estimate used
-            # only for the worthiness gate; the canonical rating comes
-            # from compute_difficulty which blends freq + EV gap +
-            # archetype/concept + hand class (with EV-weight
-            # redistribution when the EV engine couldn't score the
-            # spot, typical for raise-involved spots).
-            ev_gap = compute_ev_gap_bb(facts, pack)
-            difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap)
             rows.append((facts, explanation, difficulty))
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
@@ -476,16 +547,18 @@ def generate_preflop_batch(
             stakes_bb_dollars=stakes_bb_dollars,
             live_or_online=live_or_online,
             game_format=game_format,
+            display_in_bb=display_in_bb,
         )
         final_out = out_path
 
     return BatchResult(
         output_path=final_out,
         questions_written=written,
-        questions_attempted=sample_size,
+        questions_attempted=attempted,
         failures=failures,
         worthy_spots_available=len(worthy),
         nodes_after_filter=len(filtered_nodes),
+        difficulty_filtered_out=difficulty_filtered_out,
         total_input_tokens=usage_totals["input"],
         total_output_tokens=usage_totals["output"],
         total_cache_creation_tokens=usage_totals["cache_creation"],

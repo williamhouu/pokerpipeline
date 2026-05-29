@@ -41,7 +41,7 @@ def _spot(effective_stack_bb: float = 98.0,
     )
 
 
-def test_forty_five_column_structure():
+def test_column_structure():
     """Column-count history:
       * 35 baseline (.xlsx Sheet 1)
       * 36 = +action_frequencies (Apr 2026 Ryan-feedback Fix 3)
@@ -52,30 +52,37 @@ def test_forty_five_column_structure():
              +difficulty_bumps (May 2026: 4-axis difficulty diagnostic
              columns -- the per-axis breakdown of the Difficulty Rating
              so reviewers can see WHY a spot got its score).
+      * 43 = -tag_1 -tag_2 -tag_3 (dropped), +Position Matchup (the
+             hero-vs-villain seat matchup, split out of Relative
+             Position when that column was repurposed to IP/OOP), and
+             a reorder: Notes + hand_class moved to the tail. (May 2026.)
     """
-    assert len(CSV_COLUMNS) == 45
+    assert len(CSV_COLUMNS) == 43
     assert CSV_COLUMNS[0] == "No"
-    # Pre-diagnostic tail (positions 33..38 from the end).
-    assert CSV_COLUMNS[-11] == "validation_status"
-    assert CSV_COLUMNS[-10] == "action_frequencies"
-    assert CSV_COLUMNS[-9] == "ip_range"
-    assert CSV_COLUMNS[-8] == "oop_range"
-    assert CSV_COLUMNS[-7] == "skills"
-    assert CSV_COLUMNS[-6] == "archetype"
-    # New difficulty-diagnostic tail.
-    assert CSV_COLUMNS[-5] == "easy_freq"
-    assert CSV_COLUMNS[-4] == "easy_ev"
-    assert CSV_COLUMNS[-3] == "easy_concept"
-    assert CSV_COLUMNS[-2] == "easy_hand"
-    assert CSV_COLUMNS[-1] == "difficulty_bumps"
+    # tag_1/2/3 are gone.
+    assert "tag_1" not in CSV_COLUMNS
+    # Cluster after Difficulty Rating: skills, action_frequencies, ev_gap_bb.
+    diff_i = CSV_COLUMNS.index("Difficulty Rating")
+    assert CSV_COLUMNS[diff_i + 1:diff_i + 4] == [
+        "skills", "action_frequencies", "ev_gap_bb"]
+    # Position Matchup sits right after concept_tags; board_texture right
+    # before ip_range.
+    assert CSV_COLUMNS[CSV_COLUMNS.index("concept_tags") + 1] == "Position Matchup"
+    assert CSV_COLUMNS[CSV_COLUMNS.index("ip_range") - 1] == "board_texture"
+    # hand_class then Notes close out the row.
+    assert CSV_COLUMNS[-2:] == ["hand_class", "Notes"]
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 45
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 43
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""
+    # Relative Position is hero's IP/OOP standing; the seat matchup moved
+    # to Position Matchup. The _spot() fixture has hero_in_position=False.
+    assert row["Relative Position"] == "Out of Position"
+    assert row["Position Matchup"] == "BB_vs_BTN"
 
 
 def test_no_and_validation_status():
