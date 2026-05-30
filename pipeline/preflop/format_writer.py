@@ -67,7 +67,6 @@ from pipeline.preflop.difficulty import DifficultyResult
 from pipeline.preflop.fact_extractor import (
     PreflopFacts,
     construct_villain_range_path,
-    identify_villain,
 )
 from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
 from pipeline.preflop.node_enumerator import PreflopDecisionNode
@@ -445,61 +444,6 @@ def _compute_hero_range_snapshot(
     return out
 
 
-def _compute_villain_range_snapshot(
-    facts: PreflopFacts,
-    pack: PreflopPack,
-) -> dict[str, float] | None:
-    """Villain's 169-class range at their last raise/all-in node.
-
-    Returns None when:
-      - there's no villain (e.g. hero is first to act -- open spot)
-      - the villain's range file isn't on disk (defensive: missing pack
-        data shouldn't crash the row builder)
-    """
-    villain = identify_villain(facts.spot.node)
-    if villain is None:
-        return None
-    try:
-        path = construct_villain_range_path(facts.spot.node, villain, pack)
-    except (ValueError, KeyError):
-        return None
-    if not path.is_file():
-        return None
-    return parse_range_file(path)
-
-
-def _render_range_snapshots(
-    facts: PreflopFacts,
-    pack: PreflopPack,
-) -> tuple[str, str]:
-    """Return ``(ip_range_str, oop_range_str)`` -- the CSV column values.
-
-    Both empty strings for open spots (no villain to anchor IP/OOP
-    against). When there's a villain, both columns are populated with
-    169-entry Ryan-pack-format snapshots (the same format
-    :func:`pipeline.preflop_ranges.parse_range_file` consumes, so the
-    column round-trips cleanly).
-    """
-    if facts.villain_stats is None:
-        return ("", "")
-    hero_pos = facts.spot.node.actor
-    villain_pos = facts.villain_stats.position
-    ip_pos, _oop_pos = _ip_oop_positions(hero_pos, villain_pos)
-    hero_range = _compute_hero_range_snapshot(facts.spot.node)
-    villain_range = _compute_villain_range_snapshot(facts, pack)
-    if villain_range is None:
-        return ("", "")
-    if hero_pos == ip_pos:
-        return (
-            format_hand_class_range(hero_range),
-            format_hand_class_range(villain_range),
-        )
-    return (
-        format_hand_class_range(villain_range),
-        format_hand_class_range(hero_range),
-    )
-
-
 # --- multiway range column (position-labeled, active players only) -----------
 # Preflop seat order, for deterministic JSON key ordering. Positions not
 # listed sort last (defensive; shouldn't happen for the Ryan pack).
@@ -710,11 +654,6 @@ def build_preflop_row(
         display_in_bb=display_in_bb,
     )
 
-    # IP / OOP range snapshots. Single call -- the helper reads two range
-    # files (hero's per-action ranges + villain's range file) so we don't
-    # want to do it twice.
-    _ip_range_value, _oop_range_value = _render_range_snapshots(facts, pack)
-
     return {
         "No": str(number),
         # UI rendering -- the app's table-state format.
@@ -786,17 +725,10 @@ def build_preflop_row(
         "action_frequencies": _format_action_frequencies(
             canonicalize_strategy(facts),
         ),
-        # ip_range / oop_range: 169-class Ryan-pack-format snapshots at
-        # the preflop node. Both populated when there's a villain;
-        # both empty for open spots (no villain to anchor IP/OOP
-        # against). Format matches what parse_range_file consumes, so
-        # the snapshot round-trips cleanly into a range-grid UI later.
-        "ip_range": _ip_range_value,
-        "oop_range": _oop_range_value,
-        # Multiway-capable range column: JSON {position: 169-class range}
-        # for every still-active player (hero + non-folded actors). The
-        # app's range UI reads this; supersedes ip_range/oop_range, which
-        # only model 2 players.
+        # Range column: JSON {position: 169-class range} for every
+        # still-active player (hero + non-folded actors). The app's range
+        # UI reads this. (Replaced the heads-up-only ip_range/oop_range
+        # pair, dropped May 2026.)
         "ranges": _render_active_ranges(facts, pack),
         # Phase 3: user-facing skill labels for the app's "study X"
         # features. Distinct from concept_tags (which carries the

@@ -243,6 +243,8 @@ def test_column_structure() -> None:
              when that column was repurposed to IP/OOP). (May 2026.)
       * 44: + ranges (position-labeled JSON of every active player's
              range -- multiway-capable). (May 2026.)
+      * 42: - ip_range -oop_range (dropped; superseded by `ranges`).
+             (May 2026.)
     """
     row = build_preflop_row(
         _facing_open_facts(),
@@ -252,7 +254,7 @@ def test_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 44
+    assert len(row) == 42
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""
@@ -569,25 +571,10 @@ def test_pot_column_renders_bb_for_tournament() -> None:
     assert row["POT"] == "4BB"
 
 
-def test_range_snapshots_empty_for_open_spot() -> None:
-    """No villain (open spot) -> both ip_range and oop_range empty.
-    There's no IP/OOP frame without a 2-player anchor."""
-    row = build_preflop_row(
-        _open_facts(),
-        _explanation(),
-        pack=_pack(),
-        difficulty=_difficulty(1500),
-        number=1,
-    )
-    assert row["ip_range"] == ""
-    assert row["oop_range"] == ""
-
-
 def test_phase_b_columns_populated_when_data_available() -> None:
     """All Phase B columns now populate from their respective engines.
     Empty values only when the upstream data is missing (e.g. no villain
-    -> ev_gap_bb can't compute; synthetic pack without villain range
-    file -> ip_range/oop_range empty)."""
+    -> ev_gap_bb can't compute)."""
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -602,11 +589,6 @@ def test_phase_b_columns_populated_when_data_available() -> None:
     assert "small_blind" in tag_list
     assert "facing_single_raise" in tag_list
     assert "ace_blocker" in tag_list
-    # ip_range / oop_range from Phase B step 2. The synthetic fixture
-    # has villain_stats but the synthetic pack lacks the villain's
-    # range file on disk, so the snapshot helper returns empty --
-    # defensive fallback. The real-pack smoke test covers the populated
-    # path.
     # ev_gap_bb from Phase B step 4. The fixture is BB facing BTN open
     # with action_frequencies {Call: 0.60, Raise 308%: 0.40, Fold: 0.0}.
     # Top-2 canonical actions are Call and 3-bet -- the engine returns

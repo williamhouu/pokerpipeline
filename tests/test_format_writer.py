@@ -58,22 +58,25 @@ def test_column_structure():
              a reorder: Notes + hand_class moved to the tail. (May 2026.)
       * 44 = +ranges (May 2026: position-labeled JSON of every active
              player's range -- multiway-capable, supersedes ip/oop).
+      * 42 = -ip_range -oop_range (dropped May 2026: superseded by the
+             `ranges` column, which is a strict superset).
     """
-    assert len(CSV_COLUMNS) == 44
+    assert len(CSV_COLUMNS) == 42
     assert CSV_COLUMNS[0] == "No"
-    # ranges sits right after oop_range (the range cluster).
-    assert CSV_COLUMNS[CSV_COLUMNS.index("oop_range") + 1] == "ranges"
+    # ip_range/oop_range are gone; ranges carries every active player's range.
+    assert "ip_range" not in CSV_COLUMNS and "oop_range" not in CSV_COLUMNS
+    assert "ranges" in CSV_COLUMNS
     # tag_1/2/3 are gone.
     assert "tag_1" not in CSV_COLUMNS
     # Cluster after Difficulty Rating: skills, action_frequencies, ev_gap_bb.
     diff_i = CSV_COLUMNS.index("Difficulty Rating")
     assert CSV_COLUMNS[diff_i + 1:diff_i + 4] == [
         "skills", "action_frequencies", "ev_gap_bb"]
-    # Position Matchup sits right after concept_tags; ranges right after
-    # oop_range. The QA/provenance cluster follows the strategic frame:
+    # Position Matchup right after concept_tags; ranges right after it.
+    # The QA/provenance cluster follows the strategic frame:
     # archetype -> board_texture -> solver_reference -> validation_status.
     assert CSV_COLUMNS[CSV_COLUMNS.index("concept_tags") + 1] == "Position Matchup"
-    assert CSV_COLUMNS[CSV_COLUMNS.index("oop_range") + 1] == "ranges"
+    assert CSV_COLUMNS[CSV_COLUMNS.index("Position Matchup") + 1] == "ranges"
     arch_i = CSV_COLUMNS.index("archetype")
     assert CSV_COLUMNS[arch_i:arch_i + 4] == [
         "archetype", "board_texture", "solver_reference", "validation_status"]
@@ -83,7 +86,7 @@ def test_column_structure():
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 44
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 42
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""
@@ -135,32 +138,6 @@ def test_action_frequencies_column_handles_empty_strategy():
         correct_action="bet", range_aggregate_strategy={}, ev_gap_bb=0.0))
     row = build_row(spot, 1500, 1)
     assert row["action_frequencies"] == ""
-
-
-# --- Ryan ask (May 2026): ip_range / oop_range UI columns -------------------
-def test_ip_oop_range_columns_empty_string_when_snapshots_missing():
-    """Legacy SpotData (no snapshots populated) -> empty-string columns; the
-    row is still valid, the columns are blank. Keeps back-compat for tests
-    that construct minimal SpotData fixtures without going through Layer 5."""
-    row = build_row(_spot(), 1500, 1)
-    assert row["ip_range"] == ""
-    assert row["oop_range"] == ""
-
-
-def test_ip_oop_range_columns_populated_from_snapshot():
-    """When the snapshots are populated, the columns serialise to Ryan-pack
-    format: 169 'Hand:weight' pairs in canonical order, comma-separated."""
-    from pipeline.preflop_ranges import canonical_169_hand_classes
-    spot = _spot()
-    classes = canonical_169_hand_classes()
-    spot.ip_range_snapshot = {c: (1.0 if c == "AA" else 0.0) for c in classes}
-    spot.oop_range_snapshot = {c: (0.5 if c == "KK" else 0.0) for c in classes}
-    row = build_row(spot, 1500, 1)
-    # Both columns are 169-entry, comma-separated strings.
-    assert row["ip_range"].split(",")[0] == "AA:1"
-    assert len(row["ip_range"].split(",")) == 169
-    assert "KK:0.5" in row["oop_range"].split(",")
-    assert len(row["oop_range"].split(",")) == 169
 
 
 def test_board_texture_broadway_alias():
