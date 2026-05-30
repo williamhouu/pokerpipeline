@@ -14,6 +14,13 @@ Six pages selected via the sidebar:
                  Runs on a background thread (see admin_panel.jobs) so
                  sidebar / tab switches don't abandon in-flight batches.
                  Postflop path button is disabled until Pio solves land.
+  * Review    -- per-question reader for a chosen batch: the full
+                 Question, options (correct highlighted), the whole
+                 explanation, and the solver frequencies, one card at a
+                 time. Light grade buttons (approve / needs-review /
+                 reject + note) save to a sidecar <batch>.review.json via
+                 admin_panel.review -- the CSV is never mutated. Ranges
+                 are tucked into a small expander at the end.
   * History   -- table of every CSV under test_output/preflop_batches/,
                  multi-row select with confirmed bulk delete, per-file
                  preview + download. Each batch lands in its own
@@ -43,6 +50,7 @@ read from that data.
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -78,7 +86,7 @@ import streamlit as st  # noqa: E402
 # reruns (sidebar clicks, tab switches) don't kill them mid-flight.
 # Usage helper computes per-batch $ cost from token totals and appends
 # a JSONL log so a lifetime spend total survives admin-panel restarts.
-from admin_panel import jobs, usage  # noqa: E402
+from admin_panel import jobs, review, usage  # noqa: E402
 
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
@@ -2261,6 +2269,209 @@ def render_browse_page() -> None:
             st.text(f"Action freq:   {row['action_frequencies']}")
 
 
+# --- page: Review -----------------------------------------------------------
+_REVIEW_STATUS_LABEL = {
+    "approved": "✅ Approved",
+    "needs_review": "⚠️ Needs review",
+    "rejected": "❌ Rejected",
+}
+
+
+def _cell(row: pd.Series, col: str) -> str:
+    """A row cell as a clean string ('' for missing / NaN)."""
+    if col not in row:
+        return ""
+    val = row[col]
+    if pd.isna(val):
+        return ""
+    return str(val)
+
+
+def _md_lines(text: str) -> str:
+    """Render multi-line CSV text in Markdown with line breaks preserved
+    (Markdown collapses single newlines otherwise)."""
+    return text.replace("\n", "  \n")
+
+
+def render_review_page() -> None:
+    """Read each generated question in full and grade it.
+
+    Grades save to a sidecar ``<batch>.review.json`` (see
+    :mod:`admin_panel.review`) -- the generated CSV is never modified, so
+    review is fully non-destructive and reversible.
+    """
+    st.title("Review questions")
+    st.caption(
+        "Read each generated question in full and grade it. Grades save to a "
+        "sidecar `.review.json` next to the batch -- the CSV is never touched."
+    )
+
+    outputs = _scan_preflop_outputs()
+    if outputs.empty:
+        st.info("No batches yet. Generate one on the **Generate** page first.")
+        return
+
+    # --- batch picker ---
+    labels = [
+        f"{r.filename}  ({r.questions} questions · {r.modified})"
+        for r in outputs.itertuples()
+    ]
+    paths = list(outputs["_path"])
+    pick = st.selectbox(
+        "Batch", options=range(len(labels)), format_func=lambda i: labels[i]
+    )
+    csv_path = Path(paths[pick])
+
+    try:
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+    except (OSError, ValueError) as exc:
+        st.error(f"Couldn't read {csv_path.name}: {exc}")
+        return
+    if df.empty:
+        st.warning("This batch has no rows.")
+        return
+
+    reviews = review.load_reviews(csv_path)
+    summary = review.summarize(df["No"].tolist(), reviews)
+
+    # --- progress summary ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Reviewed", f"{summary.reviewed}/{summary.total}")
+    c2.metric("✅ Approved", summary.approved)
+    c3.metric("⚠️ Needs review", summary.needs_review)
+    c4.metric("❌ Rejected", summary.rejected)
+    if summary.quality_pct is not None:
+        st.caption(
+            f"Quality so far: **{summary.quality_pct:.0f}%** approved "
+            f"(of {summary.approved + summary.rejected} approve/reject grades)."
+        )
+
+    st.divider()
+
+    # --- per-file navigation state ---
+    nav_key = f"review_idx::{csv_path.name}"
+    idx = st.session_state.get(nav_key, 0)
+    idx = max(0, min(int(idx), len(df) - 1))
+
+    nos = df["No"].tolist()
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("◀ Prev", use_container_width=True, disabled=idx == 0):
+            st.session_state[nav_key] = idx - 1
+            st.rerun()
+    with nav3:
+        if st.button(
+            "Next ▶", use_container_width=True, disabled=idx >= len(df) - 1
+        ):
+            st.session_state[nav_key] = idx + 1
+            st.rerun()
+    with nav2:
+        jump = st.selectbox(
+            "Jump to question",
+            options=range(len(df)),
+            index=idx,
+            format_func=lambda i: f"#{nos[i]}  ({i + 1}/{len(df)})",
+            label_visibility="collapsed",
+        )
+        if jump != idx:
+            st.session_state[nav_key] = jump
+            st.rerun()
+
+    row = df.iloc[idx]
+    no = str(row["No"])
+    existing = reviews.get(no, {})
+
+    # --- the question card ---
+    with st.container(border=True):
+        h1, h2, h3, h4 = st.columns([1, 2, 2, 2])
+        h1.markdown(f"**#{_cell(row, 'No')}**")
+        h2.markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
+        h3.markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
+        h4.markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
+        if existing.get("status"):
+            st.markdown(
+                "Current grade: "
+                + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
+            )
+
+        ctx = _cell(row, "Context")
+        if ctx:
+            st.caption(ctx)
+        st.markdown("**Question**")
+        st.markdown(_md_lines(_cell(row, "Question")))
+
+        st.markdown("**Options**")
+        correct = _cell(row, "Correct Answer")
+        for i in (1, 2, 3, 4):
+            opt = _cell(row, f"option {i}")
+            if opt:
+                st.markdown(("✅ " if opt == correct else "▫️ ") + opt)
+
+        st.markdown("**Answer Explanation**")
+        st.info(_md_lines(_cell(row, "Answer Explanation")))
+
+        st.markdown(
+            f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}"
+        )
+
+        # Compact strategic facts.
+        bits = []
+        for col, label in (
+            ("archetype", "archetype"),
+            ("ev_gap_bb", "EV gap"),
+            ("hand_class", "hand"),
+            ("Position Matchup", "matchup"),
+            ("Pot Participant", "pot"),
+        ):
+            val = _cell(row, col)
+            if val:
+                bits.append(f"{label}: `{val}`")
+        if bits:
+            st.caption(" · ".join(bits))
+        if _cell(row, "concept_tags"):
+            st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+        if _cell(row, "skills"):
+            st.caption(f"skills: {_cell(row, 'skills')}")
+
+        # Ranges: tucked away small at the end -- "we know it's there".
+        ranges_val = _cell(row, "ranges")
+        n_players = review.range_player_count(ranges_val)
+        if n_players:
+            with st.expander(f"ranges · {n_players} players (rarely needed)"):
+                try:
+                    st.code(
+                        json.dumps(json.loads(ranges_val), indent=2),
+                        language="json",
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    st.code(ranges_val)
+        else:
+            st.caption("ranges: (none)")
+
+    # --- grading ---
+    st.markdown("**Grade**")
+    note = st.text_area(
+        "Note (optional)",
+        value=existing.get("note", ""),
+        key=f"review_note::{csv_path.name}::{no}",
+        height=70,
+    )
+
+    def _grade(status: str) -> None:
+        review.save_review(csv_path, no, status, note)
+        # Auto-advance to the next ungraded-friendly question (just next).
+        st.session_state[nav_key] = min(idx + 1, len(df) - 1)
+        st.rerun()
+
+    g1, g2, g3 = st.columns(3)
+    if g1.button("✅ Approve", use_container_width=True, type="primary"):
+        _grade("approved")
+    if g2.button("⚠️ Needs review", use_container_width=True):
+        _grade("needs_review")
+    if g3.button("❌ Reject", use_container_width=True):
+        _grade("rejected")
+
+
 # --- page: Prompt -----------------------------------------------------------
 def render_prompt_page() -> None:
     """The system prompt editor.
@@ -2704,7 +2915,7 @@ def main() -> None:
     st.sidebar.caption("Preflop pipeline · Phase 3 (skill tagging)")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "History", "Browse", "Prompt",
+        options=["Files", "Generate", "Review", "History", "Browse", "Prompt",
                  "Skills", "Concept Tags"],
         index=0,
     )
@@ -2768,6 +2979,8 @@ def main() -> None:
         render_files_page()
     elif page == "Generate":
         render_generate_page()
+    elif page == "Review":
+        render_review_page()
     elif page == "History":
         render_history_page()
     elif page == "Browse":
