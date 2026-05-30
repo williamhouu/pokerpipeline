@@ -41,6 +41,7 @@ from pipeline.preflop.explanation_generator import (  # noqa: E402
     _detect_option_style_preflop,
     _expected_correct_prefix_preflop,
     _extract_text,
+    _normalize_prose,
     _option_style_instruction_preflop,
     _question_framing_preflop,
     _trim_facts_for_prompt,
@@ -640,3 +641,22 @@ def test_generate_preflop_answer_explanation_uses_override(
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- answer_explanation prose normalization (clean Sheets paste) -----------
+def test_normalize_prose_strips_leading_paragraph_spaces() -> None:
+    raw = "First para.\n\n Second para.\n\n  Third para."
+    out = _normalize_prose(raw)
+    assert out == "First para.\n\nSecond para.\n\nThird para."
+    assert all(not line.startswith(" ") for line in out.split("\n"))
+
+
+def test_normalize_prose_collapses_blank_runs_to_single() -> None:
+    raw = "A.\n\n\n\nB."
+    assert _normalize_prose(raw) == "A.\n\nB."
+
+
+def test_normalize_prose_normalizes_crlf() -> None:
+    raw = "A.\r\n\r\nB."
+    assert _normalize_prose(raw) == "A.\n\nB."
+    assert "\r" not in _normalize_prose(raw)

@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -856,14 +857,32 @@ def _explanation_only_user_prompt(
     return system, messages
 
 
+def _normalize_prose(text: str) -> str:
+    """Tidy LLM prose so it pastes cleanly from the CSV into Sheets.
+
+    Fixes two recurring cosmetic issues:
+      * a stray leading space some models put at the start of each
+        paragraph ("...call.\\n\\n You opened HJ..."), and
+      * inconsistent blank-line runs between paragraphs.
+
+    Normalizes line endings to ``\\n``, strips whitespace from every line
+    (killing leading/trailing spaces), collapses any run of blank lines to
+    a single blank line, and trims the whole string. Result: paragraphs
+    separated by exactly one blank line, none with a leading space.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    stripped = "\n".join(line.strip() for line in text.split("\n"))
+    collapsed = re.sub(r"\n{3,}", "\n\n", stripped)
+    return collapsed.strip()
+
+
 def _parse_explanation_only_response(text: str) -> str:
     """Pull the answer_explanation string out of a single-field JSON response.
 
     Tolerates accidental code fences + leading prose, same as
-    :func:`pipeline.explanation_generator.parse_response`.
+    :func:`pipeline.explanation_generator.parse_response`. The extracted
+    prose is normalized (:func:`_normalize_prose`) for clean Sheets paste.
     """
-    import re  # noqa: PLC0415
-
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     if not cleaned.startswith("{"):
         start = cleaned.find("{")
@@ -884,7 +903,7 @@ def _parse_explanation_only_response(text: str) -> str:
         raise ExplanationValidationError(
             f"LLM response missing or empty answer_explanation: {data!r}"
         )
-    return explanation
+    return _normalize_prose(explanation)
 
 
 def generate_preflop_answer_explanation(

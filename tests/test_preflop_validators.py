@@ -30,7 +30,6 @@ from pipeline.preflop.validators import (  # noqa: E402
     run_preflop_audit_validators,
     validate_banned_phrases,
     validate_composite_label_frequencies,
-    validate_no_postflop_talk,
     validate_no_standalone_sometimes,
     validate_option_set,
 )
@@ -242,35 +241,6 @@ def test_composite_frequencies_fails_when_primary_smaller() -> None:
     assert not result.is_valid
 
 
-# --- validate_no_postflop_talk --------------------------------------------
-def test_postflop_talk_fails_on_flop_reference() -> None:
-    generated = _gen(prose="On the flop, we want to bet small for value.")
-    result = validate_no_postflop_talk(generated, _facts())
-    assert not result.is_valid
-    assert "flop" in result.error_message.lower()
-
-
-def test_postflop_talk_fails_on_board_reference() -> None:
-    generated = _gen(prose="The board favors hero's range, so we c-bet.")
-    result = validate_no_postflop_talk(generated, _facts())
-    assert not result.is_valid
-
-
-def test_postflop_talk_passes_on_pure_preflop_prose() -> None:
-    generated = _gen(
-        prose="With AKo and pot odds of 25%, we have plenty of equity to call.",
-    )
-    result = validate_no_postflop_talk(generated, _facts())
-    assert result.is_valid, result.error_message
-
-
-def test_postflop_talk_exempts_word_preflop() -> None:
-    """'preflop' contains 'flop' as a substring -- shouldn't fire."""
-    generated = _gen(prose="This is a standard preflop decision.")
-    result = validate_no_postflop_talk(generated, _facts())
-    assert result.is_valid, result.error_message
-
-
 # --- validate_banned_phrases ----------------------------------------------
 def test_banned_phrases_fails_on_em_dash() -> None:
     generated = _gen(prose="We have a decent hand — call here.")
@@ -321,15 +291,17 @@ def test_runner_short_circuits_on_first_failure() -> None:
     assert "raise" in result.error_message.lower() or "doesn't offer" in result.error_message.lower()
 
 
-def test_runner_catches_postflop_leak_when_options_clean() -> None:
+def test_runner_allows_playability_talk() -> None:
+    """The postflop-keyword check was removed: prose that mentions
+    postflop playability ("on most flops", "guessing on runouts") is no
+    longer rejected when the options + punctuation are clean."""
     generated = _gen(
         options=("Fold", "Call", "", ""),
         correct="Call",
-        prose="With AK we have great equity on most flops.",
+        prose="With AK we have great equity and good playability on most flops.",
     )
     result = run_preflop_audit_validators(generated, _facts())
-    assert not result.is_valid
-    assert "postflop" in result.error_message.lower() or "flop" in result.error_message.lower()
+    assert result.is_valid, result.error_message
 
 
 # --- ValidationResult sanity ---------------------------------------------

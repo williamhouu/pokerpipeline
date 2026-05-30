@@ -25,13 +25,15 @@ becomes the retry message):
      uses the "Mostly X, sometimes Y" composite shape, X must
      actually be the dominant action and both X + Y must each be
      at least 5% of the canonical strategy.
-  4. :func:`validate_no_postflop_talk` -- preflop prose shouldn't
-     reference the flop, turn, river, board, or community cards
-     (recurring LLM failure mode).
-  5. :func:`validate_banned_phrases` -- em dashes, semicolons, and
+  4. :func:`validate_banned_phrases` -- em dashes, semicolons, and
      the team's literal-phrase blocklist (e.g. "leverage the dead
      money", "dynamic spot") are banned. The LLM is told these in
      the system prompt; this validator hard-enforces.
+
+(A ``validate_no_postflop_talk`` keyword check was removed -- it
+hard-banned terms like "runout"/"draws" and false-positived on
+legitimate preflop playability talk; the system prompt already steers
+the model to preflop-only reasoning.)
 
 Strategy / failure-pattern validators are stubbed in
 :func:`run_preflop_audit_validators` but currently always pass --
@@ -100,28 +102,6 @@ def _normalize_verb(verb: str) -> str:
     "4-bet". See git history for the bug-fix commit message.
     """
     return "raise" if verb in _RAISE_FAMILY else verb
-
-# Postflop terms that should never appear in preflop prose. Compiled
-# as word-boundary regex so "flopped" matches but "preflop" doesn't.
-# Case-insensitive.
-_POSTFLOP_TERM_PATTERNS = tuple(re.compile(rf"\b{term}\b", re.IGNORECASE) for term in [
-    "flop", "flops", "flopped",
-    "turn card", "turn",
-    "river", "rivered",
-    "board", "boards",
-    "community card", "community cards",
-    "runout", "runouts", "run out",
-    "draws", "drawing dead",
-    "set mining", "set-mining",  # could be relevant preflop ("smallpair sets")
-    # but more often a postflop concept; tune if we see false positives
-])
-# Phrases that LOOK postflop but are actually fine preflop.
-# If the term appears INSIDE one of these phrases, don't flag it.
-_POSTFLOP_TERM_EXEMPTIONS = (
-    "preflop", "before the flop", "before any community cards",
-    "set mine",  # "we want to set mine this small pair" is preflop talk
-    "set-mine",
-)
 
 # Em dashes (Unicode and the LLM's tendency to use them) + semicolons
 # are banned by the team's voice rules. The LLM is told this in the
@@ -385,42 +365,6 @@ def validate_composite_label_frequencies(
     return PreflopValidationResult.ok()
 
 
-def validate_no_postflop_talk(
-    generated: GeneratedExplanation,
-    facts: PreflopFacts,  # noqa: ARG001
-) -> PreflopValidationResult:
-    """Preflop prose shouldn't reference flop/turn/river/board/etc.
-
-    Recurring LLM failure mode: the model knows poker and reaches for
-    postflop concepts (range vs. board interaction, drawing odds, etc.)
-    when none of that has happened yet. Hard-flag any postflop term
-    that isn't inside one of the exempt phrases (e.g. "preflop", which
-    contains "flop").
-    """
-    text = generated.answer_explanation or ""
-    if not text:
-        return PreflopValidationResult.ok()
-
-    # Mask out exempt phrases so their substring matches don't flag.
-    masked = text.lower()
-    for phrase in _POSTFLOP_TERM_EXEMPTIONS:
-        masked = masked.replace(phrase, " " * len(phrase))
-
-    hits: set[str] = set()
-    for pattern in _POSTFLOP_TERM_PATTERNS:
-        for match in pattern.finditer(masked):
-            hits.add(match.group(0))
-
-    if hits:
-        return PreflopValidationResult.fail(
-            "preflop explanation references postflop concepts -- "
-            "remove mentions of: " + ", ".join(sorted(hits))
-            + ". Preflop questions cover only the action before any "
-            "community cards are dealt."
-        )
-    return PreflopValidationResult.ok()
-
-
 def validate_banned_phrases(
     generated: GeneratedExplanation,
     facts: PreflopFacts,  # noqa: ARG001
@@ -480,7 +424,6 @@ def run_preflop_audit_validators(
         validate_option_set,
         validate_no_standalone_sometimes,
         validate_composite_label_frequencies,
-        validate_no_postflop_talk,
         validate_banned_phrases,
     ):
         result = check(generated, facts)
@@ -494,7 +437,6 @@ __all__ = [
     "run_preflop_audit_validators",
     "validate_banned_phrases",
     "validate_composite_label_frequencies",
-    "validate_no_postflop_talk",
     "validate_no_standalone_sometimes",
     "validate_option_set",
 ]
