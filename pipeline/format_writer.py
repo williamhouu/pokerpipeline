@@ -71,7 +71,6 @@ CSV_COLUMNS = [
     # Position" value before that column was repurposed to IP/OOP.
     # (May 2026 reorg.)
     "Position Matchup",
-    "board_texture",
     # Ryan ask (May 2026): 169-class range snapshots in canonical Ryan-pack
     # ordering ('AA:0.0,A2s:1.0,...'). Enables future UI range-grid rendering
     # alongside each question. SOLVER_FACT category (deterministic from solver
@@ -83,14 +82,18 @@ CSV_COLUMNS = [
     # excludes folded players and seats yet to act. Supersedes ip_range/
     # oop_range (which assume exactly 2 players) for the app's range UI.
     "ranges",
-    "solver_reference", "validation_status",
     # Strategic archetype label from pipeline.preflop.fact_extractor
     # (preflop only -- postflop has no archetype layer). One of the
     # 16 preflop archetypes: open_for_value, 3bet_for_value /
     # 3bet_as_bluff, squeeze_for_value, fold_dominated, etc. Empty for
     # postflop rows. Used by the LLM as the strategic frame; surfaced
     # in the CSV for analytics / reviewer QA. (May 2026 ask.)
+    # Followed by board_texture / solver_reference / validation_status
+    # (May 2026 reorder: grouped the QA/provenance cluster after the
+    # strategic frame).
     "archetype",
+    "board_texture",
+    "solver_reference", "validation_status",
     # Difficulty algorithm diagnostic columns (May 2026 redesign). The
     # `Difficulty Rating` column is a weighted blend of these four
     # axes plus optional bump rules; surfacing them lets reviewers

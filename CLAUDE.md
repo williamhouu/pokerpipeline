@@ -274,13 +274,13 @@ Column numbers below are 1-indexed positions in the current
 | 28 | `ev_gap_bb` | EV gap to second-best action; `<0.30` surfaces questionable questions |
 | 29 | `concept_tags` | comma-separated tags (5–10/question); LLM input + retrieval key |
 | 30 | `Position Matchup` | hero-vs-villain seat matchup, e.g. `BB_vs_BTN` (just the hero seat on open spots with no villain). Was the old `Relative Position` value. (New May 2026.) |
-| 31 | `board_texture` | single label, e.g. `monotone_connected_broadway` (empty preflop) |
-| 32 | `ip_range` | 169-entry preflop-pack-format snapshot of the IP player's range at this node (`AA:1.0,A2s:0.621,...`). Heads-up only (hero + one villain). Superseded by `ranges` for the app's range UI; kept for back-compat. (Ryan ask, May 2026.) |
-| 33 | `oop_range` | same as `ip_range`, for the OOP player |
-| 34 | `ranges` | **Multiway-capable** range column: compact JSON mapping each STILL-ACTIVE player's position to its 169-class range string, e.g. `{"UTG":"AA:1,...","SB":"...","BB":"..."}`. Includes hero; excludes folded players and seats yet to act. Built in `pipeline/preflop/format_writer.py:_render_active_ranges`. This is what the app's range UI consumes. (May 2026.) |
-| 35 | `solver_reference` | path back to the exact solve node — the key QA/debugging column |
-| 36 | `validation_status` | `draft`/`auto_approved`/`flagged`/`needs_review`/`approved`/`rejected` |
-| 37 | `archetype` | preflop strategic frame: one of the 16 labels from `pipeline.preflop.fact_extractor.classify_archetype` (`open_for_value`, `3bet_for_value`, `squeeze_as_bluff`, `fold_dominated`, etc.) or `unclassified`. Empty for postflop rows (postflop has no archetype layer). The LLM already gets this in its SOLVER DATA block as the strategic frame; the CSV column is for analytics + reviewer QA. (May 2026.) |
+| 31 | `ip_range` | 169-entry preflop-pack-format snapshot of the IP player's range at this node (`AA:1.0,A2s:0.621,...`). Heads-up only (hero + one villain). Superseded by `ranges` for the app's range UI; kept for back-compat. (Ryan ask, May 2026.) |
+| 32 | `oop_range` | same as `ip_range`, for the OOP player |
+| 33 | `ranges` | **Multiway-capable** range column: compact JSON mapping each STILL-ACTIVE player's position to its 169-class range string, e.g. `{"UTG":"AA:1,...","SB":"...","BB":"..."}`. Includes hero; excludes folded players and seats yet to act. Built in `pipeline/preflop/format_writer.py:_render_active_ranges`. This is what the app's range UI consumes. (May 2026.) |
+| 34 | `archetype` | preflop strategic frame: one of the 16 labels from `pipeline.preflop.fact_extractor.classify_archetype` (`open_for_value`, `3bet_for_value`, `squeeze_as_bluff`, `fold_dominated`, etc.) or `unclassified`. Empty for postflop rows (postflop has no archetype layer). The LLM already gets this in its SOLVER DATA block as the strategic frame; the CSV column is for analytics + reviewer QA. (May 2026.) |
+| 35 | `board_texture` | single label, e.g. `monotone_connected_broadway` (empty preflop) |
+| 36 | `solver_reference` | path back to the exact solve node — the key QA/debugging column |
+| 37 | `validation_status` | `draft`/`auto_approved`/`flagged`/`needs_review`/`approved`/`rejected` |
 | 38 | `easy_freq` | Difficulty-algorithm diagnostic. Per-spot ease score on the frequency axis in [0, 1] -- 0 = max-hard (55% dominant), 1 = max-easy (100% pure). See `pipeline/preflop/difficulty.py` for the formula. Preflop only; empty for postflop rows. |
 | 39 | `easy_ev` | Per-spot ease on the EV-gap axis in [0, 1] -- 0 = max-hard (0bb gap), 1 = max-easy (3bb+ gap). Empty when the EV engine couldn't score the spot (raise-involved spots). Preflop only. |
 | 40 | `easy_concept` | Per-spot ease on the archetype-and-concept-tag axis. Lookup table in `pipeline/preflop/difficulty.py:ARCHETYPE_BASE_EASE` plus `CONCEPT_TAG_MODIFIERS`. Preflop only. |
