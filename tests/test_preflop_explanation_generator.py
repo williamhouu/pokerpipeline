@@ -317,15 +317,28 @@ def test_user_prompt_has_gold_examples_solver_data_and_framing() -> None:
     assert "OPTION STYLE" in prompt
 
 
-def test_framing_renders_prior_action_history_as_prose() -> None:
+def test_framing_renders_prior_action_history_with_bet_levels() -> None:
     facts = _frequency_facts()
     framing = _question_framing_preflop(facts)
-    # Each prior action shows up with the right verb form.
+    # Prior action uses deterministic bet-level labels, NOT raw Pio tokens
+    # (BTN's first raise is the open) -- so the LLM never recounts levels.
     assert "UTG folds" in framing
-    assert "BTN raises 60%" in framing
+    assert "BTN opens" in framing
+    assert "raises 60%" not in framing  # no raw % tokens
     # Hero's hand class + position appear.
     assert "AQs" in framing
     assert "SB" in framing
+
+
+def test_framing_includes_full_labeled_strategy_with_zeros() -> None:
+    """The framing carries the canonical bet-level strategy including
+    0%-frequency actions, so the model knows what the solver never does."""
+    facts = _frequency_facts()  # Call 60%, 3-bet 40%, Fold 0%
+    framing = _question_framing_preflop(facts)
+    assert "Full solver strategy at this node:" in framing
+    assert "Call: 60%" in framing
+    assert "3-bet: 40%" in framing
+    assert "Fold: 0%" in framing  # zero action shown, not dropped
 
 
 def test_framing_handles_no_villain_open_spot() -> None:
@@ -346,15 +359,18 @@ def test_framing_includes_archetype_guidance_when_set() -> None:
     assert PREFLOP_ARCHETYPE_GUIDANCE["3bet_as_bluff"] in framing
 
 
-def test_trim_facts_drops_zero_frequencies_and_keeps_villain_stats() -> None:
+def test_trim_facts_canonical_strategy_keeps_zeros_and_keeps_villain_stats() -> None:
     facts = _frequency_facts()
     trimmed = _trim_facts_for_prompt(facts)
-    # Hand class + dominant action.
+    # Hand class + dominant action (canonical bet-level label).
     assert trimmed["hand_class"] == "AQs"
     assert trimmed["dominant_action"] == "Call"
-    # Zero-frequency Fold is dropped from the strategy.
-    assert "Fold" not in trimmed["action_frequencies"]
+    # The strategy uses canonical labels (3-bet, not "Raise 308%") and now
+    # KEEPS 0%-frequency actions so the LLM knows what the solver never does.
     assert trimmed["action_frequencies"]["Call"] == 0.60
+    assert trimmed["action_frequencies"]["3-bet"] == 0.40
+    assert trimmed["action_frequencies"]["Fold"] == 0.0  # kept, not dropped
+    assert "Raise 308%" not in trimmed["action_frequencies"]  # raw token gone
     # Villain stats present.
     assert trimmed["villain_stats"]["position"] == "BTN"
     assert any(

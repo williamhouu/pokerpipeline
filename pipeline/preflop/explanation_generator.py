@@ -71,6 +71,7 @@ from pipeline.explanation_generator import (
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.gold_examples import load_preflop_gold_examples
 from pipeline.preflop.grammars.types import PreflopActionType
+from pipeline.preflop.options import canonicalize_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,12 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "Structure the body as: (a) verdict, (b) the reasoning (your hand "
     "class, position, prior action, villain's range, equity), (c) an "
     "optional one-line exploit note when the spot is population-sensitive. "
-    "Skip (c) if it doesn't apply.",
+    "Skip (c) if it doesn't apply. If you include the exploit note, it must "
+    "point to an action the solver ACTUALLY mixes: name the specific "
+    "secondary action from the SOLVER DATA action_frequencies (the "
+    "non-correct action with the highest non-zero frequency) and frame the "
+    "deviation toward THAT action. Never suggest deviating toward an action "
+    "shown at 0% frequency.",
     # 4. Length: 2-5 sentences
     "Keep the explanation between 2 and 5 sentences. Tight is better than "
     "thorough. If you can say it in 3 sentences, say it in 3.",
@@ -408,6 +414,33 @@ def _option_style_instruction_preflop(style: str, facts: PreflopFacts) -> str:
     )
 
 
+_BET_LEVEL_VERB = {1: "opens", 2: "3-bets", 3: "4-bets", 4: "5-bets"}
+
+
+def _render_history_bet_levels(node: object) -> str:
+    """Prior preflop action with deterministic bet-level labels, e.g.
+    ``"SB opens, BB 3-bets"`` -- NOT raw Pio tokens like ``"SB raises 76%"``.
+
+    The raise-level counter (open / 3-bet / 4-bet / 5-bet) is the same one
+    the Question prose uses, so the LLM is handed the bet levels rather than
+    having to recount them (a recurring source of 3-bet/4-bet mislabels).
+    """
+    parts: list[str] = []
+    level = 0
+    for entry in node.history_before:  # type: ignore[attr-defined]
+        if entry.action_type is PreflopActionType.RAISE:
+            level += 1
+            parts.append(f"{entry.position} {_BET_LEVEL_VERB.get(level, 'raises')}")
+        elif entry.action_type is PreflopActionType.ALL_IN:
+            level += 1
+            parts.append(f"{entry.position} shoves all-in")
+        elif entry.action_type is PreflopActionType.CALL:
+            parts.append(f"{entry.position} calls")
+        elif entry.action_type is PreflopActionType.FOLD:
+            parts.append(f"{entry.position} folds")
+    return ", ".join(parts) or "no prior action (hero is first to act)"
+
+
 def _question_framing_preflop(facts: PreflopFacts) -> str:
     """The plain-English description of what's being decided at this spot.
 
@@ -420,33 +453,31 @@ def _question_framing_preflop(facts: PreflopFacts) -> str:
     villain_pos = (
         facts.villain_stats.position if facts.villain_stats else "no specific villain"
     )
-    actions = (
-        ", ".join(sorted(spot.action_frequencies.keys())) or "(no actions recorded)"
+    # The full solver strategy with canonical bet-level labels (Call /
+    # 3-bet / 4-bet / Fold / All-in), INCLUDING zero-frequency actions --
+    # so the LLM knows e.g. "Call: 0%" and won't suggest deviating toward
+    # an action the solver never takes. Labels match the Question + options
+    # so the model never has to recount bet levels itself.
+    canon = canonicalize_strategy(facts)
+    dominant_label = (
+        max(canon.items(), key=lambda kv: kv[1])[0] if canon else spot.dominant_action
     )
-    # Render prior history as "UTG opens 60%, HJ folds, CO raises 77%".
-    history_parts: list[str] = []
-    for entry in node.history_before:
-        if entry.action_type is PreflopActionType.RAISE:
-            verb = f"raises {entry.raise_size_pct:g}%"
-        elif entry.action_type is PreflopActionType.CALL:
-            verb = "calls"
-        elif entry.action_type is PreflopActionType.FOLD:
-            verb = "folds"
-        elif entry.action_type is PreflopActionType.ALL_IN:
-            verb = "shoves all-in"
-        else:  # pragma: no cover
-            verb = entry.action_type.value
-        history_parts.append(f"{entry.position} {verb}")
-    history_str = ", ".join(history_parts) or "no prior action (hero is first to act)"
+    strategy_str = ", ".join(
+        f"{label}: {freq:.0%}"
+        for label, freq in sorted(canon.items(), key=lambda kv: -kv[1])
+    )
+    history_str = _render_history_bet_levels(node)
 
     framing = (
         f"Stage: preflop. Hero ({hero_pos}) is holding "
         f"{spot.hero_hand_class} ({spot.hero_card_combo}). Prior action: "
         f"{history_str}. Decision-point villain: {villain_pos}. "
-        f"Available actions in the solver: {actions}. The solver-correct "
-        f'action is "{spot.dominant_action}" '
+        f"Full solver strategy at this node: {strategy_str}. "
+        f'The solver-correct action is "{dominant_label}" '
         f"(frequency {spot.dominant_frequency:.0%}). The explanation must "
-        f"justify exactly that action."
+        f"justify exactly that action. Use these exact action names "
+        f"(open, 3-bet, 4-bet, call, fold) when describing the action -- "
+        f"do not recount or relabel the bet levels."
     )
     archetype = facts.archetype
     if archetype and archetype in PREFLOP_ARCHETYPE_GUIDANCE:
@@ -486,12 +517,20 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         "hand_class": spot.hero_hand_class,
         "hero_card_combo": spot.hero_card_combo,
         "actor": spot.node.actor,
+        # The canonical bet-level-labeled strategy (Call / 3-bet / 4-bet /
+        # Fold / All-in), INCLUDING 0%-frequency actions so the LLM knows
+        # which actions the solver never takes. Raw Pio tokens ("Raise 50%")
+        # + dropping 0%s made the model relabel/recount bet levels and
+        # suggest deviating toward 0%-frequency actions.
         "action_frequencies": {
             label: round(freq, 4)
-            for label, freq in spot.action_frequencies.items()
-            if freq > 0
+            for label, freq in canonicalize_strategy(facts).items()
         },
-        "dominant_action": spot.dominant_action,
+        "dominant_action": (
+            max(canonicalize_strategy(facts).items(), key=lambda kv: kv[1])[0]
+            if spot.action_frequencies
+            else spot.dominant_action
+        ),
         "dominant_frequency": round(spot.dominant_frequency, 4),
         "archetype": facts.archetype,
         # Concept tags from pipeline.preflop.concept_tags -- the firing
