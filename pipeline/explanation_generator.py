@@ -55,7 +55,7 @@ from pipeline.fact_extractor.spot_data import SpotData
 # good for iterating on prompts before committing to a real batch).
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
-DEFAULT_MAX_TOKENS = 1500                  # 4 short options + a 2-5 sentence explanation
+DEFAULT_MAX_TOKENS = 2000                  # 4 short options + a multi-paragraph explanation
 GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"
 
 # Models that have deprecated the `temperature` parameter. The Anthropic

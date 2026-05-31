@@ -72,6 +72,7 @@ from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
 from pipeline.preflop.node_enumerator import PreflopDecisionNode
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import PreflopPack
+from pipeline.preflop.position import hero_relative_position
 from pipeline.preflop_ranges import (
     canonical_169_hand_classes,
     format_hand_class_range,
@@ -361,19 +362,10 @@ def _position_matchup(facts: PreflopFacts) -> str:
 def _relative_position(facts: PreflopFacts) -> str:
     """The Relative Position column value -- hero's IP/OOP standing.
 
-    "In Position" when hero acts last postflop, else "Out of Position".
-    With a villain we use the postflop-order rule
-    (:func:`_ip_oop_positions`). On open spots (no villain yet) the
-    opener is in position only when nobody behind acts later postflop --
-    true for the BTN, and for the SB in a blind-vs-blind open (SB is the
-    dealer and acts last postflop heads-up). Every other open leaves a
-    seat to act behind hero, so it's out of position.
+    Thin wrapper over :func:`pipeline.preflop.position.hero_relative_position`
+    (the shared single source so the CSV and the Layer 6 prompt agree).
     """
-    hero = facts.spot.node.actor
-    if facts.villain_stats is None:
-        return "In Position" if hero in ("BTN", "SB") else "Out of Position"
-    ip_pos, _oop_pos = _ip_oop_positions(hero, facts.villain_stats.position)
-    return "In Position" if hero == ip_pos else "Out of Position"
+    return hero_relative_position(facts)
 
 
 def _solver_reference(facts: PreflopFacts, pack: PreflopPack) -> str:
@@ -386,40 +378,6 @@ def _solver_reference(facts: PreflopFacts, pack: PreflopPack) -> str:
     directly. Pure prose; the path doesn't have to exist on disk.
     """
     return f"{pack.pack_id}/{facts.spot.node.actor}/{facts.spot.node.node_id}"
-
-
-# --- IP / OOP range snapshots ------------------------------------------------
-# Postflop action order: SB → BB → UTG → UTG+1 → UTG+2 → LJ → HJ → CO → BTN.
-# Lower rank acts first postflop → that's the OOP player. Higher rank acts
-# last → IP. The heads-up BvB case (only SB and BB) is the standard
-# exception: SB acts LAST postflop in HU, so SB is IP and BB is OOP.
-_POSTFLOP_RANK: dict[str, int] = {
-    "SB": 0,
-    "BB": 1,
-    "UTG": 2,
-    "UTG+1": 3,
-    "UTG+2": 4,
-    "LJ": 5,
-    "HJ": 6,
-    "CO": 7,
-    "BTN": 8,
-}
-
-
-def _ip_oop_positions(hero_pos: str, villain_pos: str) -> tuple[str, str]:
-    """Return ``(ip_position, oop_position)`` for a 2-way preflop spot.
-
-    Heads-up BvB (only SB + BB): SB is the dealer and acts last
-    postflop, so SB is IP. Otherwise the player whose postflop rank is
-    higher (acts later) is IP.
-    """
-    if {hero_pos, villain_pos} == {"SB", "BB"}:
-        return ("SB", "BB")
-    hero_rank = _POSTFLOP_RANK.get(hero_pos, -1)
-    villain_rank = _POSTFLOP_RANK.get(villain_pos, -1)
-    if hero_rank > villain_rank:
-        return (hero_pos, villain_pos)
-    return (villain_pos, hero_pos)
 
 
 def _compute_hero_range_snapshot(

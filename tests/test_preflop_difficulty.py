@@ -562,3 +562,21 @@ def test_trash_bump_is_conservative_k2s_not_bumped() -> None:
     assert k2s.easy_hand == pytest.approx(0.55)        # neutral default
     assert seven_three.easy_hand == pytest.approx(0.82)
     assert k2s.score > seven_three.score
+
+
+# --- pot-odds break-even equity (ev_engine, fed to Layer 6) ----------------
+def test_break_even_equity_is_pot_odds_threshold() -> None:
+    """break_even = call_cost / (pot + call_cost). For _fold_facts (UTG opens
+    to 2.5bb, SB 3-bets to 10bb, hero=BB to act), BB calls 10 - 1 posted = 9bb
+    into a pot of 0.5 + 10 + 2.5 = 13bb -> 9 / (13 + 9) ~= 0.41."""
+    from pipeline.preflop.ev_engine import compute_break_even_equity
+    from pipeline.preflop.pack import PreflopPack
+    pack = PreflopPack(
+        pack_id="t", root_path=Path("/tmp/x"), grammar_name="ryan_pack",
+        table_size=6, stack_depth_bb=100, open_size_bb=2.5,
+        sb_to_bb_ratio=0.5, description="t",
+    )
+    be = compute_break_even_equity(
+        _fold_facts(hand_class="73s", combo="7s3s", multiway=True), pack)
+    assert be is not None
+    assert 0.30 <= be <= 0.50

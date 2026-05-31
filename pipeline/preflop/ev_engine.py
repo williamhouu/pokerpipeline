@@ -138,6 +138,26 @@ def ev_call_bb(facts: PreflopFacts, pack: PreflopPack) -> float | None:
     return eq * (pot_bb + call_cost_bb) - call_cost_bb
 
 
+def compute_break_even_equity(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+) -> float | None:
+    """Pot-odds threshold to call, in [0, 1]: ``cost / (pot + cost)``.
+
+    The minimum equity hero needs for a call to break even against the
+    chips already in the middle. Layer 6 cites this instead of doing the
+    pot-odds arithmetic itself.
+
+    Returns ``None`` when hero faces no bet to call (call_cost is 0 -- e.g.
+    hero is the aggressor or can check), since there's no price to meet.
+    """
+    pot_bb, call_cost_bb = _pot_and_call_cost_bb(facts, pack)
+    total = pot_bb + call_cost_bb
+    if call_cost_bb <= 0 or total <= 0:
+        return None
+    return call_cost_bb / total
+
+
 def compute_ev_gap_bb(
     facts: PreflopFacts,
     pack: PreflopPack,

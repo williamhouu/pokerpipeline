@@ -53,7 +53,6 @@ import logging
 import os
 import re
 from collections.abc import Callable
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +71,7 @@ from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.gold_examples import load_preflop_gold_examples
 from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.options import canonicalize_strategy
+from pipeline.preflop.position import hero_relative_position
 
 logger = logging.getLogger(__name__)
 
@@ -133,15 +133,20 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "Structure the body as: (a) verdict, (b) the reasoning (your hand "
     "class, position, prior action, villain's range, equity), (c) an "
     "optional one-line exploit note when the spot is population-sensitive. "
-    "Skip (c) if it doesn't apply. If you include the exploit note, it must "
-    "point to an action the solver ACTUALLY mixes: name the specific "
-    "secondary action from the SOLVER DATA action_frequencies (the "
-    "non-correct action with the highest non-zero frequency) and frame the "
-    "deviation toward THAT action. Never suggest deviating toward an action "
-    "shown at 0% frequency.",
-    # 4. Length: 2-5 sentences
-    "Keep the explanation between 2 and 5 sentences. Tight is better than "
-    "thorough. If you can say it in 3 sentences, say it in 3.",
+    "Skip (c) if it doesn't apply. The exploit note describes a deviation "
+    "against a SPECIFIC opponent tendency, so it MAY point to an action the "
+    "solver shows at 0% (deviating toward a non-GTO action is exactly what "
+    "exploiting a non-GTO opponent means) -- but you must name the read "
+    "(e.g. 'against a nitty SB who opens far tighter than this') and the "
+    "deviation has to follow logically from it. Never misstate the solver's "
+    "own numbers: the SOLVER DATA action_frequencies are the GTO baseline, "
+    "so do not call the GTO line 'a fold' or claim the solver mixes an "
+    "action it shows at 0%.",
+    # 4. Length: as long as the spot needs, no hard sentence count
+    "Be as long as the spot genuinely needs and no longer. Lead tight and "
+    "get to the point, but if a spot has real nuance, take the room and "
+    "break it into short paragraphs. Do not pad to hit a length, and do "
+    "not cram a complex spot into one line.",
     # 5. Concrete naming (positions, hand classes -- NO board features)
     "Name things concretely: positions by abbreviation (UTG, HJ, CO, BTN, "
     "SB, BB), hands by 169-class label (AKo, JTs, 77, A2s). Never reference "
@@ -415,6 +420,31 @@ def _option_style_instruction_preflop(style: str, facts: PreflopFacts) -> str:
 
 
 _BET_LEVEL_VERB = {1: "opens", 2: "3-bets", 3: "4-bets", 4: "5-bets"}
+_BET_LEVEL_NOUN = {1: "open", 2: "3-bet", 3: "4-bet", 4: "5-bet"}
+
+
+def _villain_action_label(facts: PreflopFacts) -> str | None:
+    """The decision-point villain's action as a deterministic bet-level
+    label ("open" / "3-bet" / "4-bet" / "call" / "all-in"), NOT the raw
+    Pio token ("Raise 99%"). Prevents the model from recounting bet levels
+    and mislabeling the villain's action (e.g. a 3-bet as a "4-bet")."""
+    if facts.villain_stats is None:
+        return None
+    vpos = facts.villain_stats.position
+    level = 0
+    label: str | None = None
+    for entry in facts.spot.node.history_before:
+        if entry.action_type is PreflopActionType.RAISE:
+            level += 1
+            if entry.position == vpos:
+                label = _BET_LEVEL_NOUN.get(level, "raise")
+        elif entry.action_type is PreflopActionType.ALL_IN:
+            level += 1
+            if entry.position == vpos:
+                label = "all-in"
+        elif entry.action_type is PreflopActionType.CALL and entry.position == vpos:
+            label = "call"
+    return label
 
 
 def _render_history_bet_levels(node: object) -> str:
@@ -533,17 +563,28 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         ),
         "dominant_frequency": round(spot.dominant_frequency, 4),
         "archetype": facts.archetype,
+        # Hero's in-position / out-of-position standing, computed (not left
+        # to the LLM to infer -- it got the blind-vs-blind SB case wrong).
+        "hero_position": hero_relative_position(facts),
+        # Prior action with deterministic bet-level labels ("SB opens, BB
+        # 3-bets") -- the SAME single source as the framing + Question, so
+        # the model never recounts bet levels from raw tokens.
+        "prior_action": _render_history_bet_levels(spot.node),
         # Concept tags from pipeline.preflop.concept_tags -- the firing
         # tags for this spot. Layer 6 uses them to anchor the explanation
         # in specific strategic concepts (e.g. "ace_blocker" makes
         # 3-bet bluff prose more concrete).
         "concept_tags": _compute_concept_tags_for_prompt(facts),
     }
+    if facts.break_even_equity is not None:
+        # Pot-odds threshold to call -- cite this instead of doing the math.
+        out["break_even_equity_to_call"] = round(facts.break_even_equity, 4)
     if facts.villain_stats is not None:
         v = facts.villain_stats
         out["villain_stats"] = {
             "position": v.position,
-            "action_label": v.action_label,
+            # Bet-level label (3-bet / 4-bet / ...), not the raw Pio token.
+            "action": _villain_action_label(facts) or v.action_label,
             "weighted_combo_count": round(v.weighted_combo_count, 2),
             "pct_of_dealt_hands": round(v.pct_of_dealt_hands, 2),
             "top_combos": [
@@ -551,21 +592,22 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
                 for hand_class, weight in v.top_combos
             ],
         }
+    # Two DISTINCT equity numbers, named unambiguously so the model can't
+    # conflate them: cite hand-equity for "your hand has X%", and use
+    # range-equity only for range-vs-range advantage claims.
     if facts.hero_equity_vs_villain is not None:
-        out["hero_equity_vs_villain"] = round(facts.hero_equity_vs_villain, 4)
-        out["hero_equity_runouts_used"] = facts.hero_equity_runouts_used
+        out["your_hand_equity_vs_villain_range"] = round(
+            facts.hero_equity_vs_villain, 4
+        )
+        out["hand_equity_sample_size"] = facts.hero_equity_runouts_used
     if facts.hero_range_equity_vs_villain is not None:
-        out["hero_range_equity_vs_villain"] = round(
+        out["your_range_equity_vs_villain_range"] = round(
             facts.hero_range_equity_vs_villain, 4
         )
     if facts.blockers:
         # Sort by count desc for readability; the LLM tends to cite the
         # top blockers first.
         out["blockers"] = dict(sorted(facts.blockers.items(), key=lambda kv: -kv[1]))
-    # Render the prior history as a list of structured dicts -- the LLM
-    # gets the framing string for prose and the structured form for any
-    # references it wants to make to specific actors.
-    out["history_before"] = [asdict(entry) for entry in spot.node.history_before]
     return out
 
 
@@ -871,14 +913,21 @@ def _explanation_only_user_prompt(
         f"CORRECT ANSWER (also pre-chosen, verbatim): {correct_answer!r}\n\n"
         "SOLVER DATA (every strategic claim in your explanation must trace "
         "back to a field below; do not invent equity numbers or range "
-        "claims):\n"
+        "claims). When you state your hand's equity, cite "
+        "your_hand_equity_vs_villain_range -- your_range_equity_vs_villain_"
+        "range is your WHOLE range's equity, use it only for range-vs-range "
+        "advantage, never for 'your hand has X%'. When you state the price "
+        "to call, cite break_even_equity_to_call. Describe the action using "
+        "the bet-level labels in prior_action / villain_stats.action "
+        "(open, 3-bet, 4-bet) -- do not recount:\n"
         f"{json.dumps(_trim_facts_for_prompt(facts), indent=2, default=str)}\n\n"
         "Your job: write ONLY the answer_explanation field justifying why the "
         "correct answer is correct. Respond with a single JSON object: "
         '{"answer_explanation": "<your prose>"} -- no other keys, no markdown '
         "fences, no prose outside the JSON. The explanation must follow "
-        "every voice rule above (2-5 sentences, second person, verdict-first, "
-        "suit emojis for specific cards, no em dashes or semicolons, etc.)."
+        "every voice rule in the system prompt (length, second person, "
+        "verdict-first, suit emojis for specific cards, no em dashes or "
+        "semicolons, etc.)."
     )
     messages = [
         {

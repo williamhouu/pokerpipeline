@@ -132,6 +132,13 @@ class PreflopFacts:
     # See classify_archetype() in this module for the full list.
     archetype: str = ""
 
+    # Break-even equity for calling, in [0.0, 1.0] -- the pot-odds threshold
+    # hero needs to call (call_cost / (pot + call_cost)). Layer 6 cites this
+    # instead of computing pot odds itself ("you need about 41% to call").
+    # Populated by the batch for call/fold spots (needs the pack's chip
+    # geometry); None when hero faces no bet to call or it isn't computable.
+    break_even_equity: float | None = None
+
 
 # --- villain identification -------------------------------------------------
 def identify_villain(

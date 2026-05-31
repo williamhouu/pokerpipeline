@@ -457,7 +457,7 @@ def test_board_texture_is_empty_preflop() -> None:
 
 def test_ip_oop_positions_blind_vs_button() -> None:
     """Non-BvB: the non-blind position is IP, BB is OOP."""
-    from pipeline.preflop.format_writer import _ip_oop_positions
+    from pipeline.preflop.position import ip_oop_positions as _ip_oop_positions
 
     assert _ip_oop_positions("BB", "BTN") == ("BTN", "BB")
     assert _ip_oop_positions("BTN", "BB") == ("BTN", "BB")
@@ -469,7 +469,7 @@ def test_ip_oop_positions_bvb_heads_up() -> None:
     """BvB heads-up: SB is the dealer and acts LAST postflop -> SB is IP,
     BB is OOP. This is the standard HU exception to the postflop-order
     rule."""
-    from pipeline.preflop.format_writer import _ip_oop_positions
+    from pipeline.preflop.position import ip_oop_positions as _ip_oop_positions
 
     assert _ip_oop_positions("SB", "BB") == ("SB", "BB")
     assert _ip_oop_positions("BB", "SB") == ("SB", "BB")
@@ -477,7 +477,7 @@ def test_ip_oop_positions_bvb_heads_up() -> None:
 
 def test_ip_oop_positions_two_non_blind_seats() -> None:
     """Two non-blind seats: later in postflop order is IP."""
-    from pipeline.preflop.format_writer import _ip_oop_positions
+    from pipeline.preflop.position import ip_oop_positions as _ip_oop_positions
 
     # BTN later than CO, CO later than HJ, etc.
     assert _ip_oop_positions("BTN", "CO") == ("BTN", "CO")
@@ -487,7 +487,7 @@ def test_ip_oop_positions_two_non_blind_seats() -> None:
 def test_ip_oop_positions_sb_vs_non_blind() -> None:
     """SB is the very first to act postflop (in non-HU), so SB is OOP
     against any non-blind."""
-    from pipeline.preflop.format_writer import _ip_oop_positions
+    from pipeline.preflop.position import ip_oop_positions as _ip_oop_positions
 
     assert _ip_oop_positions("BTN", "SB") == ("BTN", "SB")
     assert _ip_oop_positions("SB", "BTN") == ("BTN", "SB")

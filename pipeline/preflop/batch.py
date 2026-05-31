@@ -50,7 +50,7 @@ from __future__ import annotations
 import logging
 import random
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pipeline.explanation_generator import (
@@ -63,7 +63,10 @@ from pipeline.explanation_generator import (
 from pipeline.preflop.difficulty import (
     compute_difficulty,
 )
-from pipeline.preflop.ev_engine import compute_ev_gap_bb
+from pipeline.preflop.ev_engine import (
+    compute_break_even_equity,
+    compute_ev_gap_bb,
+)
 from pipeline.preflop.explanation_generator import (
     generate_preflop_answer_explanation,
 )
@@ -466,6 +469,12 @@ def generate_preflop_batch(
         try:
             facts: object = extract_facts(
                 spot, pack, equity_runouts=equity_runouts)
+            # Enrich with the pot-odds break-even equity (needs the pack's
+            # chip geometry) so Layer 6 can cite it instead of computing
+            # pot odds itself. None on spots with no bet to call.
+            facts = replace(
+                facts, break_even_equity=compute_break_even_equity(facts, pack)
+            )
             ev_gap = compute_ev_gap_bb(facts, pack)
             difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap)
         except Exception as exc:  # noqa: BLE001

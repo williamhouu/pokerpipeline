@@ -312,7 +312,8 @@ def test_user_prompt_has_gold_examples_solver_data_and_framing() -> None:
     # Solver data block.
     assert "SOLVER DATA" in prompt
     assert '"archetype": "3bet_as_bluff"' in prompt
-    assert "hero_equity_vs_villain" in prompt
+    assert "your_hand_equity_vs_villain_range" in prompt  # disambiguated key
+    assert '"hero_position":' in prompt                   # IP/OOP fed, not inferred
     # Option-style instruction is included.
     assert "OPTION STYLE" in prompt
 
@@ -371,13 +372,19 @@ def test_trim_facts_canonical_strategy_keeps_zeros_and_keeps_villain_stats() -> 
     assert trimmed["action_frequencies"]["3-bet"] == 0.40
     assert trimmed["action_frequencies"]["Fold"] == 0.0  # kept, not dropped
     assert "Raise 308%" not in trimmed["action_frequencies"]  # raw token gone
-    # Villain stats present.
+    # Villain stats present, with a bet-level action label (not raw token).
     assert trimmed["villain_stats"]["position"] == "BTN"
+    assert trimmed["villain_stats"]["action"] == "open"  # BTN's raise = the open
     assert any(
         combo["hand_class"] == "AA" for combo in trimmed["villain_stats"]["top_combos"]
     )
-    # Equity fields.
-    assert trimmed["hero_equity_vs_villain"] == 0.474
+    # Two distinct, unambiguously-named equity fields.
+    assert trimmed["your_hand_equity_vs_villain_range"] == 0.474
+    assert "hero_equity_vs_villain" not in trimmed  # old ambiguous key gone
+    # IP/OOP + bet-level prior action are fed, not left to the LLM.
+    assert trimmed["hero_position"] == "Out of Position"   # SB vs BTN open
+    assert "BTN opens" in trimmed["prior_action"]          # bet-level label
+    assert "raises 60%" not in trimmed["prior_action"]     # not raw token
     # Blockers.
     assert trimmed["blockers"] == {"AKo": 4, "AA": 1, "AKs": 1}
 
@@ -385,7 +392,7 @@ def test_trim_facts_canonical_strategy_keeps_zeros_and_keeps_villain_stats() -> 
 def test_trim_facts_no_villain_skips_villain_stats() -> None:
     trimmed = _trim_facts_for_prompt(_open_facts())
     assert "villain_stats" not in trimmed
-    assert "hero_equity_vs_villain" not in trimmed
+    assert "your_hand_equity_vs_villain_range" not in trimmed
     assert "blockers" not in trimmed
     assert trimmed["archetype"] == "fold_outranged"
 
