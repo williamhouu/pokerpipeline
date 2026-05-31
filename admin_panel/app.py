@@ -2172,10 +2172,12 @@ def render_history_page() -> None:
 
 # --- page: Browse ----------------------------------------------------------
 def render_browse_page() -> None:
-    st.title("Browse generated questions")
-    st.caption(
-        "Showing the existing 70-question Tier-1 dataset. Once batches "
-        "start generating, this view shows live results."
+    st.title("Browse the legacy demo dataset")
+    st.warning(
+        "⚠️ This page shows a **static hand-authored demo file** "
+        "(`test_output/tier1_consolidated.csv`) — 70 **postflop** example "
+        "questions, NOT pipeline output. To read + grade the questions the "
+        "pipeline actually generates (preflop), use the **Review** tab."
     )
 
     if not TIER1_CSV.exists():
@@ -2470,6 +2472,31 @@ def render_review_page() -> None:
         _grade("needs_review")
     if g3.button("❌ Reject", use_container_width=True):
         _grade("rejected")
+
+    # --- remove from batch (destructive: edits the CSV) ---
+    st.divider()
+    with st.expander("🗑  Remove this question from the batch"):
+        st.caption(
+            "Deletes question "
+            f"**#{no}** from `{csv_path.name}` permanently. The remaining "
+            "questions keep their numbers (gaps are fine). This edits the "
+            "CSV file -- it can't be undone from here."
+        )
+        confirm = st.checkbox(
+            "Yes, remove it", key=f"review_rm_confirm::{csv_path.name}::{no}"
+        )
+        if st.button(
+            "Remove from batch",
+            type="primary",
+            disabled=not confirm,
+            key=f"review_rm_btn::{csv_path.name}::{no}",
+        ):
+            if review.remove_question(csv_path, no):
+                st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
+                st.toast(f"Removed #{no} from {csv_path.name}")
+                st.rerun()
+            else:
+                st.warning(f"#{no} was not found in the batch.")
 
 
 # --- page: Prompt -----------------------------------------------------------

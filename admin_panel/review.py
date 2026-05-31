@@ -11,6 +11,7 @@ sidecar maps ``str(No) -> {"status": ..., "note": ...}``.
 
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,44 @@ def summarize(
     )
 
 
+def remove_review(csv_path: Path, no: str | int) -> None:
+    """Drop one question's grade from the sidecar (no-op if absent)."""
+    reviews = load_reviews(csv_path)
+    if str(no) in reviews:
+        del reviews[str(no)]
+        path = review_sidecar_path(csv_path)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(reviews, fh, indent=2, ensure_ascii=False)
+
+
+def remove_question(csv_path: Path, no: str | int) -> bool:
+    """Remove a question (by its ``No``) from a batch CSV, in place.
+
+    Rewrites the CSV with the stdlib csv module (utf-8-sig, preserving the
+    exact column order) and drops the question's review grade. The ``No``
+    of the remaining rows is left UNCHANGED -- gaps are fine, and keeping
+    the ids stable means review grades + any external references don't
+    silently shift to a different question.
+
+    Returns True iff a row was actually removed.
+    """
+    if not csv_path.is_file():
+        return False
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+    kept = [row for row in rows if str(row.get("No")) != str(no)]
+    if len(kept) == len(rows):
+        return False  # no row matched that No
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    remove_review(csv_path, no)
+    return True
+
+
 def range_player_count(ranges_json: str) -> int:
     """Number of players in a ``ranges`` JSON cell (0 if empty/malformed)."""
     if not ranges_json:
@@ -134,6 +173,8 @@ __all__ = [
     "ReviewSummary",
     "load_reviews",
     "range_player_count",
+    "remove_question",
+    "remove_review",
     "review_sidecar_path",
     "save_review",
     "summarize",
