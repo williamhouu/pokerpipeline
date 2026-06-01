@@ -878,33 +878,39 @@ def load_preflop_system_prompt() -> str:
 # schema) and there's no retry-on-mismatch loop -- correct_answer can never
 # disagree with the options when both come from the same deterministic
 # source.
-def _explanation_only_user_prompt(
-    facts: PreflopFacts,
+def _gold_cached_block(
     gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...],
-    options: list[str],
-    correct_answer: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build (system, messages) for the explanation-only path.
+) -> str:
+    """The cached user-prompt block: gold-example intro + the examples.
 
-    Splits the user prompt into a cached gold-example block and a live
-    block (same cache strategy as the full-generation path).
+    Shared by the live API path (:func:`_explanation_only_user_prompt`)
+    and the read-only preview (:func:`build_explanation_prompt_parts`), so
+    what the prompt-workshop UI shows can never drift from what the model
+    actually received.
     """
-    system = [
-        {
-            "type": "text",
-            "text": load_preflop_system_prompt(),
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-    cached_block = (
+    return (
         "Read these gold examples to lock in the voice. Imitate the cadence, "
         "verdict-first structure, and concrete naming. Do not copy phrasing.\n\n"
         f"{_format_gold_examples(gold_examples)}"
     )
-    # Format the option set for the LLM: one bullet per option, plus the
-    # correct_answer called out separately so the model knows what to justify.
+
+
+def _explanation_live_block(
+    facts: PreflopFacts,
+    options: list[str],
+    correct_answer: str,
+) -> str:
+    """The per-spot (non-cached) user block for the explanation-only path.
+
+    Everything here varies per question: the scenario framing, the
+    pre-chosen options + correct answer, the SOLVER DATA json, and the
+    output-format instructions. Shared by the live API path and the
+    preview builder.
+    """
+    # One bullet per option, plus the correct_answer called out separately
+    # so the model knows what to justify.
     options_block = "\n".join(f"  * {opt}" for opt in options)
-    live_block = (
+    return (
         "\n\n=== NEW QUESTION TO WRITE ===\n\n"
         f"{_question_framing_preflop(facts)}\n\n"
         "OPTIONS (already chosen by the deterministic option-selection module; "
@@ -929,20 +935,125 @@ def _explanation_only_user_prompt(
         "verdict-first, suit emojis for specific cards, no em dashes or "
         "semicolons, etc.)."
     )
+
+
+def _explanation_only_user_prompt(
+    facts: PreflopFacts,
+    gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    options: list[str],
+    correct_answer: str,
+    *,
+    system_prompt: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build (system, messages) for the explanation-only path.
+
+    Splits the user prompt into a cached gold-example block and a live
+    block (same cache strategy as the full-generation path).
+
+    ``system_prompt`` overrides the active system prompt for this single
+    call -- the prompt-workshop UI passes a specific named prompt here to
+    test it without mutating the on-disk override. ``None`` = use
+    :func:`load_preflop_system_prompt` (override file or built-in default).
+    """
+    system_text = (
+        system_prompt if system_prompt is not None else load_preflop_system_prompt()
+    )
+    system = [
+        {
+            "type": "text",
+            "text": system_text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
     messages = [
         {
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": cached_block,
+                    "text": _gold_cached_block(gold_examples),
                     "cache_control": {"type": "ephemeral"},
                 },
-                {"type": "text", "text": live_block},
+                {
+                    "type": "text",
+                    "text": _explanation_live_block(facts, options, correct_answer),
+                },
             ],
         }
     ]
     return system, messages
+
+
+def build_shared_prompt_parts(
+    *,
+    system_prompt: str | None = None,
+    gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+) -> dict[str, str]:
+    """The prompt parts that are CONSTANT across a whole batch.
+
+    Namely the system prompt and the cached gold-example block -- identical
+    for every question in a run. The batch-metadata writer records these
+    ONCE (rather than per question), and :func:`build_explanation_prompt_parts`
+    layers the per-spot block on top.
+    """
+    if gold_examples is None:
+        gold_examples = list(load_preflop_gold_examples())[:GOLD_EXAMPLE_COUNT]
+    system_text = (
+        system_prompt if system_prompt is not None else load_preflop_system_prompt()
+    )
+    return {
+        "system_prompt": system_text,
+        "gold_block": _gold_cached_block(gold_examples),
+    }
+
+
+def build_explanation_prompt_parts(
+    facts: PreflopFacts,
+    options: list[str],
+    correct_answer: str,
+    *,
+    system_prompt: str | None = None,
+    gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+) -> dict[str, Any]:
+    """Break the explanation-only prompt into its parts, for read-only display.
+
+    Reuses the EXACT block builders the live API path
+    (:func:`_explanation_only_user_prompt`) uses, so what the admin panel
+    shows is what the model receives. Nothing here calls the API.
+
+    ``system_prompt`` / ``gold_examples`` default to the same sources the
+    live path uses -- the active override-or-default system prompt and the
+    default gold pool -- so the preview matches a real call's inputs.
+
+    Returns a dict with both the SHARED parts (identical across a batch:
+    ``system_prompt``, ``gold_block``) and the PER-SPOT parts that vary
+    each question (``framing``, ``options``, ``correct_answer``,
+    ``solver_data``, ``live_block``), plus ``assembled`` -- the whole
+    thing as one readable string.
+    """
+    shared = build_shared_prompt_parts(
+        system_prompt=system_prompt, gold_examples=gold_examples
+    )
+    system_text = shared["system_prompt"]
+    gold_block = shared["gold_block"]
+    live_block = _explanation_live_block(facts, options, correct_answer)
+    assembled = (
+        "===== SYSTEM PROMPT =====\n"
+        f"{system_text}\n\n"
+        "===== GOLD EXAMPLES (cached) =====\n"
+        f"{gold_block}"
+        f"{live_block}"
+    )
+    return {
+        "system_prompt": system_text,
+        "gold_block": gold_block,
+        "framing": _question_framing_preflop(facts),
+        "options": list(options),
+        "correct_answer": correct_answer,
+        "solver_data": _trim_facts_for_prompt(facts),
+        "live_block": live_block,
+        "assembled": assembled,
+    }
 
 
 def _normalize_prose(text: str) -> str:
@@ -1004,6 +1115,7 @@ def generate_preflop_answer_explanation(
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     gold_examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    system_prompt: str | None = None,
     max_retries: int = 1,
     usage_callback: UsageCallback | None = None,
 ) -> GeneratedExplanation:
@@ -1027,6 +1139,10 @@ def generate_preflop_answer_explanation(
         model: Model id (e.g. ``"claude-opus-4-7"``).
         temperature, max_tokens: Sampling controls.
         gold_examples: Optional gold-example pool override.
+        system_prompt: Optional system-prompt override for this call. The
+            prompt-workshop UI passes a specific named prompt here to test
+            it without touching the on-disk override file. None = use the
+            active prompt (override file or built-in default).
         max_retries: Retry count on parse failures. Default 1.
         usage_callback: Optional reporter fired once per API call with
             ``(model, input_tokens, output_tokens,
@@ -1052,7 +1168,7 @@ def generate_preflop_answer_explanation(
         gold_examples = list(load_preflop_gold_examples())[:GOLD_EXAMPLE_COUNT]
 
     system, messages = _explanation_only_user_prompt(
-        facts, gold_examples, options, correct_answer
+        facts, gold_examples, options, correct_answer, system_prompt=system_prompt
     )
 
     # Layer 7 audit validators (pipeline.preflop.validators) -- imported
@@ -1135,6 +1251,8 @@ __all__ = [
     "PREFLOP_ARCHETYPE_GUIDANCE",
     "VOICE_RULES_PREFLOP",
     "UsageCallback",
+    "build_explanation_prompt_parts",
+    "build_shared_prompt_parts",
     "build_preflop_system_prompt",
     "build_preflop_user_prompt",
     "generate_preflop_answer_explanation",

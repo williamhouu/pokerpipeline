@@ -375,7 +375,10 @@ def test_display_in_bb_renders_big_blinds_but_keeps_cash_label() -> None:
         display_in_bb=True,
     )
     assert row["Cash/Tourney"] == "Cash"          # semantics unchanged
-    assert row["Context"] == "6-Handed, $0.25/$0.50, Stacks 100bb"
+    # Venue leads (default Online); this pack_id carries a rake note.
+    assert row["Context"] == (
+        "Online · 6-Handed, $0.25/$0.50, Stacks 100bb · Rake 4% / 0.3bb cap"
+    )
     assert row["User Seat"] == "SB-99.5BB-0.5BB"
     assert row["Seats"] == "BB-99BB-1BB, BTN-97.5BB-2.5BB-raise"
     assert row["POT"] == "4BB"
@@ -994,6 +997,47 @@ def test_invalid_combo_length_raises() -> None:
             difficulty=_difficulty(1500),
             number=1,
         )
+
+
+def test_context_leads_with_venue_and_trails_with_rake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Context starts with the venue (Online/Live) and ends with a labeled
+    rake note (per-pack), so beginners see the format + rake at a glance."""
+    from pipeline.preflop import format_writer as fw
+
+    pack = _pack()
+    monkeypatch.setitem(fw._PACK_RAKE_NOTES, pack.pack_id, "4% / 0.3bb cap")
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=pack,
+        difficulty=_difficulty(1500),
+        number=1,
+        live_or_online="Online",
+    )
+    assert row["Context"].startswith("Online · ")
+    assert row["Context"].endswith(" · Rake 4% / 0.3bb cap")
+
+
+def test_context_live_venue_and_omits_rake_when_unlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Live venue leads; a pack with no listed rake gets no rake suffix."""
+    from pipeline.preflop import format_writer as fw
+
+    pack = _pack()
+    monkeypatch.delitem(fw._PACK_RAKE_NOTES, pack.pack_id, raising=False)
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=pack,
+        difficulty=_difficulty(1500),
+        number=1,
+        live_or_online="Live",
+    )
+    assert row["Context"].startswith("Live · ")
+    assert "Rake" not in row["Context"]
 
 
 if __name__ == "__main__":

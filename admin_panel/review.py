@@ -157,6 +157,78 @@ def remove_question(csv_path: Path, no: str | int) -> bool:
     return True
 
 
+def batch_meta_path(csv_path: Path) -> Path:
+    """Path to the prompt/inputs metadata sidecar for a batch CSV."""
+    return csv_path.with_suffix(".meta.json")
+
+
+def load_batch_meta(csv_path: Path) -> dict[str, object] | None:
+    """Return the parsed ``<batch>.meta.json`` for a batch, or None.
+
+    None when the sidecar is missing or malformed -- batches made before
+    prompt tracking simply have no meta, and the Review page treats that as
+    "inputs unavailable" rather than erroring.
+    """
+    path = batch_meta_path(csv_path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def meta_question_for(
+    meta: dict[str, object],
+    *,
+    hand_class: str,
+    solver_reference: str,
+) -> dict[str, object] | None:
+    """Find the meta question record matching one CSV row.
+
+    Matches on (node_id, hand_class) -- a spot's unique key -- rather than
+    the ``No`` column, so the join survives the Review page's
+    remove-question feature (which leaves gaps in ``No``). ``node_id`` is
+    matched as a substring of the row's ``solver_reference``
+    (``<pack>/<actor>/<node_id>``), which is robust to path-format changes.
+    """
+    questions = meta.get("questions")
+    if not isinstance(questions, list):
+        return None
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        q_node = str(q.get("node_id", ""))
+        if (
+            q_node
+            and q_node in solver_reference
+            and str(q.get("hand_class", "")) == hand_class
+        ):
+            return q
+    return None
+
+
+def assembled_prompt(meta: dict[str, object], question: dict[str, object]) -> str:
+    """Reconstruct the full prompt for one question: system + gold + live.
+
+    Mirrors the ``assembled`` layout of
+    ``pipeline.preflop.explanation_generator.build_explanation_prompt_parts``
+    but from the stored snapshot, so it shows exactly what was sent at
+    generation time (even if the prompt was edited or renamed since).
+    """
+    system_text = str(meta.get("prompt_text", ""))
+    gold_block = str(meta.get("gold_block", ""))
+    live_block = str(question.get("live_block", ""))
+    return (
+        "===== SYSTEM PROMPT =====\n"
+        f"{system_text}\n\n"
+        "===== GOLD EXAMPLES (cached) =====\n"
+        f"{gold_block}"
+        f"{live_block}"
+    )
+
+
 def range_player_count(ranges_json: str) -> int:
     """Number of players in a ``ranges`` JSON cell (0 if empty/malformed)."""
     if not ranges_json:
@@ -171,7 +243,11 @@ def range_player_count(ranges_json: str) -> int:
 __all__ = [
     "REVIEW_STATUSES",
     "ReviewSummary",
+    "assembled_prompt",
+    "batch_meta_path",
+    "load_batch_meta",
     "load_reviews",
+    "meta_question_for",
     "range_player_count",
     "remove_question",
     "remove_review",

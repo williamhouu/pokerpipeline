@@ -47,10 +47,13 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import random
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pipeline.explanation_generator import (
@@ -68,6 +71,8 @@ from pipeline.preflop.ev_engine import (
     compute_ev_gap_bb,
 )
 from pipeline.preflop.explanation_generator import (
+    build_explanation_prompt_parts,
+    build_shared_prompt_parts,
     generate_preflop_answer_explanation,
 )
 from pipeline.preflop.fact_extractor import (
@@ -215,6 +220,15 @@ class BatchResult:
     # than computed per-call) because the whole batch uses one model.
     model_used: str = ""
 
+    # Display name of the prompt this batch ran on (the prompt-workshop
+    # label, e.g. "Concise voice v2"). Empty when the caller didn't tag
+    # the run. The actual prompt text + sha live in the meta sidecar.
+    prompt_name: str = ""
+    # Path to the <stem>.meta.json sidecar written next to the CSV --
+    # holds the prompt snapshot + per-question inputs for the inspector.
+    # None when no rows were produced (no CSV, no meta).
+    meta_path: Path | None = None
+
 
 # --- node filtering ---------------------------------------------------------
 def node_action_context(node: PreflopDecisionNode) -> str:
@@ -326,6 +340,8 @@ def generate_preflop_batch(
     model: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    system_prompt: str | None = None,
+    prompt_name: str = "",
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
     dry_run: bool = False,
     client: object | None = None,
@@ -373,6 +389,12 @@ def generate_preflop_batch(
         model: Anthropic model id for Layer 6. Defaults to the postflop
             production model (Opus 4.7).
         temperature, max_tokens: Layer 6 sampling controls.
+        system_prompt: Optional system-prompt text to run this batch on
+            (the prompt-workshop UI passes a specific named prompt here).
+            None = use the active override-or-default prompt.
+        prompt_name: Display label for the prompt, recorded in the meta
+            sidecar so outputs can be tagged with which prompt produced
+            them. Cosmetic; doesn't affect generation.
         equity_runouts: Per-villain-combo equity sample count for
             ``extract_facts``. Default 200. Lower for faster batches at
             lower equity-number precision.
@@ -428,6 +450,9 @@ def generate_preflop_batch(
     #    difficulty-band + min-EV-gap filters BEFORE the (paid) LLM call,
     #    then generate. Stop once total_questions rows are collected.
     rows: list[tuple] = []
+    # Per-spot prompt inputs (framing / options / correct / solver-data /
+    # live block), captured in row order for the meta sidecar + inspector.
+    prompt_records: list[dict[str, object]] = []
     failures: list[PreflopFailure] = []
     # Cosmetic progress denominator: we can never produce more rows than
     # there are worthy spots, so cap the bar's total at that upper bound
@@ -526,8 +551,20 @@ def generate_preflop_batch(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     usage_callback=_record_usage,
+                    system_prompt=system_prompt,
                 )
             rows.append((facts, explanation, difficulty))
+            # Record the exact (deterministic) inputs that produced this row,
+            # in the same order rows are written to the CSV. Cheap + no API:
+            # gold examples are lru-cached and the parts are pure functions.
+            prompt_records.append(
+                _prompt_record(
+                    spot,
+                    build_explanation_prompt_parts(
+                        facts, options, correct, system_prompt=system_prompt
+                    ),
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
             failures.append(
@@ -548,6 +585,7 @@ def generate_preflop_batch(
     # parent dirs as needed.
     written = 0
     final_out: Path | None = None
+    meta_path: Path | None = None
     if rows:
         written = write_preflop_csv(
             out_path,
@@ -559,6 +597,25 @@ def generate_preflop_batch(
             display_in_bb=display_in_bb,
         )
         final_out = out_path
+        # Sidecar metadata: which prompt produced these rows + the exact
+        # per-spot inputs, in CSV row order. Powers output->prompt tagging
+        # and the prompt inspector. Written for dry-runs too (the inputs
+        # are real even when the explanations are placeholders).
+        shared = build_shared_prompt_parts(system_prompt=system_prompt)
+        meta = _build_batch_meta(
+            prompt_name=prompt_name,
+            system_prompt=shared["system_prompt"],
+            gold_block=shared["gold_block"],
+            model=model,
+            temperature=temperature,
+            seed=random_seed,
+            dry_run=dry_run,
+            prompt_records=prompt_records,
+        )
+        meta_path = out_path.with_suffix(".meta.json")
+        meta_path.write_text(
+            json.dumps(meta, indent=2, default=str), encoding="utf-8"
+        )
 
     return BatchResult(
         output_path=final_out,
@@ -575,10 +632,64 @@ def generate_preflop_batch(
         # Only record the model id when we actually called it. Dry-run
         # leaves usage at 0 -- model_used "" signals "no LLM ran".
         model_used=model if not dry_run else "",
+        prompt_name=prompt_name,
+        meta_path=meta_path,
     )
 
 
 # --- internal helpers -------------------------------------------------------
+def _prompt_record(spot: PreflopSpot, parts: dict[str, object]) -> dict[str, object]:
+    """One per-question record for the meta sidecar.
+
+    ``parts`` comes from
+    :func:`pipeline.preflop.explanation_generator.build_explanation_prompt_parts`.
+    We keep only the per-spot VARYING pieces (the shared system prompt +
+    gold block are stored once at the batch level) plus the node / hand id
+    so the inspector can label each row.
+    """
+    return {
+        "node_id": spot.node.node_id,
+        "hand_class": spot.hero_hand_class,
+        "framing": parts["framing"],
+        "options": parts["options"],
+        "correct_answer": parts["correct_answer"],
+        "solver_data": parts["solver_data"],
+        "live_block": parts["live_block"],
+    }
+
+
+def _build_batch_meta(
+    *,
+    prompt_name: str,
+    system_prompt: str,
+    gold_block: str,
+    model: str,
+    temperature: float,
+    seed: int | None,
+    dry_run: bool,
+    prompt_records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Assemble the ``<stem>.meta.json`` payload for one batch.
+
+    Records the prompt SNAPSHOT (name + text + sha) so a later edit or
+    rename of that prompt can't make this batch's provenance ambiguous,
+    the run settings (model / temperature / seed), and the per-question
+    inputs in CSV row order.
+    """
+    return {
+        "prompt_name": prompt_name,
+        "prompt_sha": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        "prompt_text": system_prompt,
+        "gold_block": gold_block,
+        "model": "" if dry_run else model,
+        "temperature": temperature,
+        "seed": seed,
+        "dry_run": dry_run,
+        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "questions": prompt_records,
+    }
+
+
 def _placeholder_explanation(
     options: list[str],
     correct_answer: str,

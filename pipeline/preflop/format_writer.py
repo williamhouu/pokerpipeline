@@ -531,20 +531,33 @@ def format_preflop_question(
     )
 
 
+# Per-pack rake descriptor surfaced in the Context column so a learner (and
+# reviewer) sees the rake that shaped these ranges -- rake materially changes
+# preflop strategy (it's why cold-call ranges run tight). Keyed by pack_id; a
+# pack not listed gets no rake suffix (e.g. tournaments). Add new packs here.
+_PACK_RAKE_NOTES: dict[str, str] = {
+    "ryan_preflop_tree_6max_100bb": "4% / 0.3bb cap",
+}
+
+
 def _context_column(
     pack: PreflopPack,
     stakes_bb_dollars: float,
     game_format: str,
     display_in_bb: bool = False,
+    live_or_online: str = "Online",
 ) -> str:
     """The Context column value -- short prose mirroring the postflop format.
 
-    Cash, dollar display: ``"<n>-Handed, <stakes>, Stacks <$stack>"``.
-    Cash, bb display: ``"<n>-Handed, <stakes>, Stacks <N>bb"`` -- keeps the
-    dollar stake identity but expresses the stack in big blinds (the admin
-    "Display amounts as: Big blinds" toggle). Tournament:
-    ``"<n>-Handed, <N>bb stacks"``. Matches the postflop
-    ``ScenarioConfig.context`` shape so the column reads identically.
+    Shape: ``"<Online|Live> · <core> · Rake <r>"``. The venue leads so a
+    beginner immediately sees the format; the rake (from
+    :data:`_PACK_RAKE_NOTES`, keyed by pack_id) trails with a ``Rake`` label
+    so it's unambiguous. Venue is omitted when not Online/Live (e.g. "Not
+    specified"); rake is omitted for packs without a listed note.
+
+    Core (cash, dollars): ``"<n>-Handed, <stakes>, Stacks <$stack>"``; cash
+    bb-display swaps the stack to ``<N>bb`` (the admin "Display amounts as:
+    Big blinds" toggle); tournament: ``"<n>-Handed, <N>bb stacks"``.
     """
     if game_format == "cash":
         sb_dollars = round(stakes_bb_dollars * pack.sb_to_bb_ratio, 2)
@@ -553,8 +566,18 @@ def _context_column(
             stack_str = f"{pack.stack_depth_bb}bb"
         else:
             stack_str = _dollars(round(pack.stack_depth_bb * stakes_bb_dollars, 2))
-        return f"{pack.table_size}-Handed, {stakes_str}, Stacks {stack_str}"
-    return f"{pack.table_size}-Handed, {pack.stack_depth_bb}bb stacks"
+        core = f"{pack.table_size}-Handed, {stakes_str}, Stacks {stack_str}"
+    else:
+        core = f"{pack.table_size}-Handed, {pack.stack_depth_bb}bb stacks"
+
+    parts: list[str] = []
+    if live_or_online in ("Online", "Live"):
+        parts.append(live_or_online)
+    parts.append(core)
+    rake = _PACK_RAKE_NOTES.get(pack.pack_id, "")
+    if rake:
+        parts.append(f"Rake {rake}")
+    return " · ".join(parts)
 
 
 # --- the main row builder ----------------------------------------------------
@@ -626,7 +649,8 @@ def build_preflop_row(
         # LLM (Layer 6) writes the four options + correct answer +
         # explanation.
         "Context": _context_column(
-            pack, stakes_bb_dollars, game_format, display_in_bb=display_in_bb
+            pack, stakes_bb_dollars, game_format, display_in_bb=display_in_bb,
+            live_or_online=live_or_online,
         ),
         "Question": format_preflop_question(
             facts,

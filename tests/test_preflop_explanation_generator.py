@@ -683,3 +683,86 @@ def test_normalize_prose_normalizes_crlf() -> None:
     raw = "A.\r\n\r\nB."
     assert _normalize_prose(raw) == "A.\n\nB."
     assert "\r" not in _normalize_prose(raw)
+
+
+# --- prompt-workshop support: explicit system_prompt + inspection preview ---
+def test_explicit_system_prompt_param_beats_override_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ``system_prompt`` param wins over the on-disk override file, so the
+    workshop UI can test a named prompt without mutating the saved override."""
+    from pipeline.preflop.explanation_generator import (
+        generate_preflop_answer_explanation,
+    )
+
+    override = tmp_path / "preflop_system.txt"
+    override.write_text("FILE OVERRIDE PROMPT", encoding="utf-8")
+    monkeypatch.setattr(
+        "pipeline.preflop.explanation_generator._PROMPT_OVERRIDE_PATH",
+        override,
+    )
+    client = _mock_client(['{"answer_explanation": "This is a clear fold."}'])
+    param_prompt = "PARAM PROMPT WINS"
+    generate_preflop_answer_explanation(
+        _frequency_facts(),
+        options=["Fold", "Call"],
+        correct_answer="Call",
+        client=client,
+        gold_examples=_GOLD_STUB,
+        system_prompt=param_prompt,
+    )
+    # The system block sent to the API is the param, not the override file.
+    assert client._calls[0]["system"][0]["text"] == param_prompt
+
+
+def test_build_explanation_prompt_parts_matches_live_payload() -> None:
+    """The inspection preview reuses the same block builders as the live API
+    path, so what the workshop UI shows equals what the model receives."""
+    from pipeline.preflop.explanation_generator import (
+        _explanation_only_user_prompt,
+        build_explanation_prompt_parts,
+    )
+
+    facts = _frequency_facts()
+    options = ["Fold", "Call", "Raise 308%"]
+    correct = "Raise 308%"
+    custom = "WORKSHOP SYSTEM PROMPT"
+
+    system, messages = _explanation_only_user_prompt(
+        facts, _GOLD_STUB, options, correct, system_prompt=custom
+    )
+    parts = build_explanation_prompt_parts(
+        facts, options, correct, system_prompt=custom, gold_examples=_GOLD_STUB
+    )
+    # System text matches the system block actually sent.
+    assert parts["system_prompt"] == custom == system[0]["text"]
+    # The two user content blocks (cached gold + live) match the preview.
+    sent_blocks = messages[0]["content"]
+    assert parts["gold_block"] == sent_blocks[0]["text"]
+    assert parts["live_block"] == sent_blocks[1]["text"]
+
+
+def test_build_explanation_prompt_parts_exposes_per_spot_inputs() -> None:
+    """The preview surfaces the per-spot varying inputs (options, correct
+    answer, solver data, framing) for read-only inspection."""
+    from pipeline.preflop.explanation_generator import (
+        build_explanation_prompt_parts,
+    )
+
+    facts = _frequency_facts()
+    options = ["Fold", "Call", "Raise 308%"]
+    correct = "Raise 308%"
+    parts = build_explanation_prompt_parts(
+        facts, options, correct, gold_examples=_GOLD_STUB
+    )
+    assert parts["options"] == options
+    assert parts["correct_answer"] == correct
+    # solver_data is the trimmed facts dict, with the disambiguated equity key.
+    assert isinstance(parts["solver_data"], dict)
+    assert "your_hand_equity_vs_villain_range" in parts["solver_data"]
+    # framing names the hero hand.
+    assert "AQs" in parts["framing"]
+    # assembled string carries every labeled section.
+    assert "SYSTEM PROMPT" in parts["assembled"]
+    assert "GOLD EXAMPLE 1" in parts["assembled"]
+    assert "SOLVER DATA" in parts["assembled"]

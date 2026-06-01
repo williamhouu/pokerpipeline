@@ -12,6 +12,8 @@ generation-loop tests that exercise the LLM call use a mock client.
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +27,7 @@ from pipeline.format_writer import CSV_COLUMNS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
     ACTION_CONTEXTS,
     BatchResult,
+    _build_batch_meta,
     collect_worthy_spots,
     filter_nodes,
     generate_preflop_batch,
@@ -511,6 +514,112 @@ def test_batch_result_is_frozen_and_carries_intermediate_counts(tmp_path: Path) 
 
     with pytest.raises(FrozenInstanceError):
         result.questions_written = 99  # type: ignore[misc]
+
+
+# --- prompt-workshop: meta sidecar -----------------------------------------
+def test_build_batch_meta_snapshots_prompt_and_records() -> None:
+    records: list[dict[str, object]] = [
+        {
+            "node_id": "n1",
+            "hand_class": "AKs",
+            "framing": "f",
+            "options": ["Fold", "Call"],
+            "correct_answer": "Call",
+            "solver_data": {"x": 1},
+            "live_block": "live",
+        },
+    ]
+    meta = _build_batch_meta(
+        prompt_name="My Prompt",
+        system_prompt="THE SYSTEM PROMPT",
+        gold_block="GOLD",
+        model="claude-opus-4-7",
+        temperature=0.3,
+        seed=42,
+        dry_run=False,
+        prompt_records=records,
+    )
+    assert meta["prompt_name"] == "My Prompt"
+    assert meta["prompt_text"] == "THE SYSTEM PROMPT"
+    # Snapshot sha lets a later edit/rename of the prompt stay unambiguous.
+    assert meta["prompt_sha"] == hashlib.sha256(b"THE SYSTEM PROMPT").hexdigest()
+    assert meta["gold_block"] == "GOLD"
+    assert meta["model"] == "claude-opus-4-7"
+    assert meta["questions"] == records
+
+
+def test_build_batch_meta_blanks_model_on_dry_run() -> None:
+    meta = _build_batch_meta(
+        prompt_name="",
+        system_prompt="s",
+        gold_block="g",
+        model="claude-opus-4-7",
+        temperature=0.0,
+        seed=None,
+        dry_run=True,
+        prompt_records=[],
+    )
+    # Dry-run didn't call the model, so the id is blanked (matches model_used).
+    assert meta["model"] == ""
+    assert meta["dry_run"] is True
+
+
+def test_dry_run_writes_meta_sidecar_with_prompt_tag_and_inputs(
+    tmp_path: Path,
+) -> None:
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=out,
+        total_questions=10,
+        dry_run=True,
+        random_seed=42,
+        system_prompt="WORKSHOP PROMPT UNDER TEST",
+        prompt_name="Workshop v1",
+    )
+    # The sidecar sits next to the CSV and is surfaced on the result.
+    expected_meta = out.with_suffix(".meta.json")
+    assert result.meta_path == expected_meta
+    assert expected_meta.is_file()
+    assert result.prompt_name == "Workshop v1"
+
+    meta = json.loads(expected_meta.read_text(encoding="utf-8"))
+    assert meta["prompt_name"] == "Workshop v1"
+    # The run was built against the custom prompt, snapshotted verbatim.
+    assert meta["prompt_text"] == "WORKSHOP PROMPT UNDER TEST"
+    assert meta["dry_run"] is True
+    # One meta question per CSV row, captured in row order.
+    assert len(meta["questions"]) == result.questions_written == 2
+    q0 = meta["questions"][0]
+    assert set(q0) >= {
+        "node_id",
+        "hand_class",
+        "framing",
+        "options",
+        "correct_answer",
+        "solver_data",
+        "live_block",
+    }
+    assert isinstance(q0["solver_data"], dict)
+    assert isinstance(q0["options"], list)
+    assert "SOLVER DATA" in q0["live_block"]
+
+
+def test_no_rows_writes_no_meta(tmp_path: Path) -> None:
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=out,
+        total_questions=10,
+        action_contexts=["Facing 4-bet+"],  # open-only pack has none
+        dry_run=True,
+        random_seed=42,
+    )
+    assert result.questions_written == 0
+    assert result.meta_path is None
+    assert not out.with_suffix(".meta.json").exists()
 
 
 if __name__ == "__main__":

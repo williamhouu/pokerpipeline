@@ -86,11 +86,14 @@ import streamlit as st  # noqa: E402
 # reruns (sidebar clicks, tab switches) don't kill them mid-flight.
 # Usage helper computes per-batch $ cost from token totals and appends
 # a JSONL log so a lifetime spend total survives admin-panel restarts.
-from admin_panel import jobs, review, usage  # noqa: E402
+from admin_panel import compare, jobs, range_view, review, usage  # noqa: E402
 
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
-from pipeline.explanation_generator import build_system_prompt  # noqa: E402
+from pipeline.explanation_generator import (  # noqa: E402
+    DEFAULT_TEMPERATURE,
+    build_system_prompt,
+)
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
     DIFFICULTY_MAX,
@@ -99,6 +102,7 @@ from pipeline.preflop.batch import (  # noqa: E402
     generate_preflop_batch,
     node_action_context,
 )
+from pipeline.preflop.fact_extractor import PreflopFacts  # noqa: E402
 from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopDecisionNode,
     enumerate_nodes_by_actor,
@@ -348,6 +352,47 @@ def _cached_preflop_nodes_by_actor() -> dict[str, tuple[PreflopDecisionNode, ...
     if not packs:
         return {}
     return enumerate_nodes_by_actor(packs)
+
+
+@st.cache_resource(show_spinner="Building a sample spot for the prompt preview…")
+def _preview_sample_spot() -> tuple[PreflopFacts, list[str], str] | None:
+    """One representative (facts, options, correct_answer) for the prompt
+    preview. Cached for the session (extract_facts runs equity sims).
+
+    Picks a facing-a-raise spot so the SOLVER DATA block is rich (villain
+    stats + equities + blockers + concept tags) -- i.e. shows the most.
+    """
+    from dataclasses import replace  # noqa: PLC0415
+
+    from pipeline.preflop.ev_engine import compute_break_even_equity  # noqa: PLC0415
+    from pipeline.preflop.fact_extractor import extract_facts  # noqa: PLC0415
+    from pipeline.preflop.grammars.types import PreflopActionType  # noqa: PLC0415
+    from pipeline.preflop.options import build_options  # noqa: PLC0415
+    from pipeline.preflop.spot_sampler import (  # noqa: PLC0415
+        enumerate_spots_for_node,
+    )
+
+    packs = _cached_preflop_packs()
+    if not packs:
+        return None
+    pack = packs[0]
+    raise_types = (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    for nodes in _cached_preflop_nodes_by_actor().values():
+        for node in nodes:
+            if not any(a.action_type in raise_types for a in node.history_before):
+                continue
+            for spot in enumerate_spots_for_node(node, min_total_weight=0.05):
+                try:
+                    facts = extract_facts(spot, pack, equity_runouts=80)
+                    facts = replace(
+                        facts,
+                        break_even_equity=compute_break_even_equity(facts, pack),
+                    )
+                    options, correct = build_options(facts, style="auto")
+                except Exception:  # noqa: BLE001
+                    continue
+                return facts, options, correct
+    return None
 
 
 def ranges_pack_status() -> tuple[bool, dict[str, int]]:
@@ -1033,7 +1078,9 @@ def _render_generate_page_preflop() -> None:
     # Advanced: question-worthiness window + EV-gap quality gate. These
     # are SEPARATE from difficulty -- worthiness decides whether a spot is
     # teachable at all; the EV gate drops near-coinflip call/fold spots.
-    with st.expander("Advanced filters (worthiness window · EV-gap gate)"):
+    with st.expander(
+        "Advanced filters (worthiness window · EV-gap gate)", expanded=True
+    ):
         st.caption(
             "The frequency worthiness window gates whether a decision is "
             "teachable at all (the brief's 55-95% sweet spot). The EV-gap "
@@ -1060,11 +1107,17 @@ def _render_generate_page_preflop() -> None:
             ),
         )
 
-    # Visible settings summary -- exactly what THIS batch will use.
+    # Visible settings summary -- exactly what THIS batch will use. Promoted
+    # to a prominent info box so the numbers are obvious the moment you pick
+    # a preset (the preset moves the difficulty band; worthiness + EV-gap are
+    # separate gates, shown here so all three are always visible).
     _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
-    st.caption(
-        f"**Active settings** — difficulty rating **{band_low}–{band_high}** · "
-        f"worthiness freq **{freq_low}–{freq_high}%** · EV-gap gate **{_ev_txt}**"
+    st.info(
+        f"**Numbers in effect for this batch** — difficulty rating "
+        f"**{band_low}–{band_high}**  ·  worthiness frequency "
+        f"**{freq_low}–{freq_high}%**  ·  EV-gap gate **{_ev_txt}**.  "
+        "Presets move the difficulty band; the worthiness window + EV-gap "
+        "are separate gates you set in Advanced filters above."
     )
 
     st.divider()
@@ -1170,7 +1223,91 @@ def _render_generate_page_preflop() -> None:
 
     st.divider()
 
-    # --- 9. Generate button (kicks off a BACKGROUND job) ---
+    # --- 9. Prompt (which system prompt this batch runs on) ---
+    st.subheader("9. Prompt")
+    from admin_panel.prompt_library import PromptLibrary  # noqa: PLC0415
+    from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+        build_preflop_system_prompt,
+    )
+
+    _plib = PromptLibrary()
+    _plib.ensure_seeded(
+        build_preflop_system_prompt, legacy_override=PREFLOP_PROMPT_OVERRIDE_PATH
+    )
+    _prompt_entries = _plib.list()
+    _active_slug = _plib.active_slug()
+    _prompt_text: str | None = None
+    _prompt_name = ""
+    if not _prompt_entries:
+        st.caption("No prompts in the library; the built-in default will be used.")
+    else:
+        _pslugs = [e.slug for e in _prompt_entries]
+        _pnames = {e.slug: e.name for e in _prompt_entries}
+        if st.session_state.get("gen_prompt_select") not in _pslugs:
+            st.session_state["gen_prompt_select"] = _active_slug or _pslugs[0]
+        _chosen = st.selectbox(
+            "Run this batch with prompt",
+            options=_pslugs,
+            format_func=lambda s: (
+                f"{_pnames[s]}  ★ active" if s == _active_slug else _pnames[s]
+            ),
+            key="gen_prompt_select",
+            help=(
+                "Defaults to the ★ active prompt. Pick another to A/B it -- the "
+                "batch and every output row are tagged with this prompt's name. "
+                "Manage prompts on the Prompt library page."
+            ),
+        )
+        _entry = _plib.get(_chosen)
+        _prompt_text = _entry.text
+        _prompt_name = _entry.name
+        _not_active = "" if _chosen == _active_slug else "  ·  (not the active prompt)"
+        st.caption(f"**{_prompt_name}** · {len(_prompt_text):,} chars{_not_active}")
+
+    _cmp1, _cmp2 = st.columns(2)
+    with _cmp1:
+        _pin_seed = st.toggle(
+            "Use the same hands every run",
+            key="gen_pin_seed",
+            help=(
+                "Normally each batch draws a fresh random set of hands, so two "
+                "runs aren't comparable. Turn this on to reuse the SAME hands "
+                "every run (chosen by the seed number below). Then if you change "
+                "the prompt and run again, any difference in the output comes "
+                "from the PROMPT, not from getting different hands — like giving "
+                "two students the identical test."
+            ),
+        )
+    with _cmp2:
+        _deterministic = st.toggle(
+            "Make the wording repeatable",
+            key="gen_temp0",
+            help=(
+                "The AI has a 'creativity' setting (called temperature). Left "
+                "alone it's slightly random, so the same hand can come out worded "
+                "differently each run. Turn this on to set it to zero: the same "
+                "prompt on the same hand gives the exact same answer every time. "
+                "Handy when comparing prompts so you're judging the prompt, not "
+                "random wording luck. Leave it off for real batches — a little "
+                "variety reads more naturally."
+            ),
+        )
+    _seed_input = st.number_input(
+        "Test-set seed",
+        min_value=0,
+        max_value=1_000_000,
+        value=42,
+        step=1,
+        key="gen_seed_val",
+        disabled=not _pin_seed,
+        help="Same seed + same filters = the same sampled spots.",
+    )
+    _seed_val = int(_seed_input) if _pin_seed else None
+    _temp_val = 0.0 if _deterministic else DEFAULT_TEMPERATURE
+
+    st.divider()
+
+    # --- 10. Generate button (kicks off a BACKGROUND job) ---
     # Inputs ready when: at least one position selected AND at least one
     # action context AND filtered_nodes non-empty AND total > 0.
     # Disabled while another job is in flight -- the active-job panel
@@ -1225,6 +1362,10 @@ def _render_generate_page_preflop() -> None:
             model_label=_model,
             dry_run=bool(_dry_run),
             answer_style=answer_style_canonical,
+            system_prompt=_prompt_text,
+            prompt_name=_prompt_name,
+            random_seed=_seed_val,
+            temperature=_temp_val,
         )
 
 
@@ -1244,6 +1385,10 @@ def _start_preflop_job(
     model_label: str,
     dry_run: bool,
     answer_style: str,
+    system_prompt: str | None = None,
+    prompt_name: str = "",
+    random_seed: int | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> None:
     """Kick off a preflop batch on a background thread and rerun.
 
@@ -1303,8 +1448,11 @@ def _start_preflop_job(
             display_in_bb=display_in_bb,
             answer_style=answer_style,
             model=model_api,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            prompt_name=prompt_name,
             dry_run=dry_run,
-            random_seed=None,
+            random_seed=random_seed,
         )
     except RuntimeError as exc:
         # Another job is already running. The button-disable check
@@ -2348,6 +2496,18 @@ def render_review_page() -> None:
             f"(of {summary.approved + summary.rejected} approve/reject grades)."
         )
 
+    # Prompt provenance for this batch (from the .meta.json sidecar).
+    _meta = review.load_batch_meta(csv_path)
+    if _meta:
+        _pname = str(_meta.get("prompt_name") or "(unnamed prompt)")
+        _pmodel = str(_meta.get("model") or "dry-run")
+        st.caption(
+            f"🧪 Prompt: **{_pname}**  ·  model `{_pmodel}`  ·  "
+            f"temp `{_meta.get('temperature')}`  ·  seed `{_meta.get('seed')}`"
+        )
+    else:
+        st.caption("🧪 Prompt: _no metadata for this batch_")
+
     st.divider()
 
     # --- per-file navigation state ---
@@ -2435,11 +2595,25 @@ def render_review_page() -> None:
         if _cell(row, "skills"):
             st.caption(f"skills: {_cell(row, 'skills')}")
 
-        # Ranges: tucked away small at the end -- "we know it's there".
+        # Ranges: a button to the visual Range viewer, raw JSON tucked away.
         ranges_val = _cell(row, "ranges")
         n_players = review.range_player_count(ranges_val)
+        if st.button(
+            "📊  View ranges for this spot",
+            key=f"view_ranges::{csv_path.name}::{no}",
+            use_container_width=True,
+            help="Open the Range viewer tab with this question's node loaded.",
+        ):
+            st.session_state["ranges_node_id"] = (
+                range_view.node_id_from_solver_reference(
+                    _cell(row, "solver_reference")
+                )
+            )
+            st.session_state["ranges_from_q"] = no
+            st.session_state["_pending_nav"] = "Ranges"
+            st.rerun()
         if n_players:
-            with st.expander(f"ranges · {n_players} players (rarely needed)"):
+            with st.expander(f"raw ranges JSON · {n_players} players"):
                 try:
                     st.code(
                         json.dumps(json.loads(ranges_val), indent=2),
@@ -2447,8 +2621,38 @@ def render_review_page() -> None:
                     )
                 except (json.JSONDecodeError, TypeError):
                     st.code(ranges_val)
-        else:
-            st.caption("ranges: (none)")
+
+        # --- prompt + inputs inspector (read-only) ---
+        with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
+            _q = None
+            if _meta:
+                _q = review.meta_question_for(
+                    _meta,
+                    hand_class=_cell(row, "hand_class"),
+                    solver_reference=_cell(row, "solver_reference"),
+                )
+            if _meta is None or _q is None:
+                st.caption(
+                    "No matching inputs in this batch's metadata "
+                    "(older batch, or generated outside the admin panel)."
+                )
+            else:
+                _raw_opts = _q.get("options", [])
+                _opts = (
+                    [o for o in _raw_opts if isinstance(o, str)]
+                    if isinstance(_raw_opts, list)
+                    else []
+                )
+                st.markdown("**Per-question inputs** (computed, not editable)")
+                st.markdown("Options: " + ", ".join(f"`{o}`" for o in _opts))
+                st.markdown(f"Correct answer: `{_q.get('correct_answer', '')}`")
+                st.markdown("SOLVER DATA fed to the LLM:")
+                st.code(
+                    json.dumps(_q.get("solver_data"), indent=2, default=str),
+                    language="json",
+                )
+                st.markdown("**Full assembled prompt** (system + gold + this spot)")
+                st.code(review.assembled_prompt(_meta, _q))
 
     # --- grading ---
     st.markdown("**Grade**")
@@ -2499,25 +2703,510 @@ def render_review_page() -> None:
                 st.warning(f"#{no} was not found in the batch.")
 
 
+# --- page: Ranges -----------------------------------------------------------
+def render_ranges_page() -> None:
+    """Visual 13x13 range grids for any decision node.
+
+    Reached by browsing (pick a position + node) or by the Review page's
+    "View ranges for this spot" button, which stashes the node_id and
+    navigates here. Renders the hero's per-action ranges (the strategy) plus
+    each active villain's range.
+    """
+    from pipeline.preflop.fact_extractor import (  # noqa: PLC0415
+        construct_villain_range_path,
+    )
+    from pipeline.preflop.grammars.types import (  # noqa: PLC0415
+        ParsedAction,
+        PreflopActionType,
+    )
+    from pipeline.preflop_ranges import parse_range_file  # noqa: PLC0415
+
+    st.title("Range viewer")
+    st.caption(
+        "Standard 13×13 charts: upper-right = suited, diagonal = pairs, "
+        "lower-left = offsuit. Greener = higher frequency. Hero's actions "
+        "show the strategy (what to do with each hand); villains show the "
+        "range they're in the pot with."
+    )
+    with st.popover("📋  Match this pack in GTO Wizard"):
+        st.markdown(
+            "To sanity-check a spot in GTO Wizard, load a solution with these "
+            "settings. **This pack's actual rake is 4% with a 0.3bb cap** "
+            "(low-stakes online style), which is why cold-call ranges run "
+            "tight:\n\n"
+            "- **Solutions:** Cash\n"
+            "- **Type:** Classic\n"
+            "- **Players:** 6-max\n"
+            "- **Stack:** 100bb\n"
+            "- **Preflop bet sizes:** With cold calls\n"
+            "- **Opening size:** 2.5x\n"
+            "- **Rake:** closest GTOW preset is **NL50** (its presets don't "
+            "let you type 4% / 0.3bb directly)\n"
+            "- **Postflop bet sizes:** any (doesn't affect preflop)\n\n"
+            "**Confirming the match:** pick the rake where **T9s in the CO "
+            "facing a HJ open folds ~90% with just a sliver of call**. Less "
+            "rake (NL100+) flats more; more rake (NL10/NL25) goes pure "
+            "3-bet-or-fold. The tightness is correct for a raked game, not a bug."
+        )
+
+    ranges_ok, _ = ranges_pack_status()
+    # Reuse the cached, registry-safe accessors (a raw discover_packs() here
+    # would re-register the pack and raise on the second page visit).
+    packs = _cached_preflop_packs() if ranges_ok else ()
+    if not packs:
+        st.warning("No range pack found in `ranges/`.")
+        return
+    pack = packs[0]
+    by_actor = _cached_preflop_nodes_by_actor()
+    node_by_id = {n.node_id: n for ns in by_actor.values() for n in ns}
+    if not node_by_id:
+        st.warning("The range pack has no parseable nodes.")
+        return
+
+    # Target node: from a Review question, or browse.
+    from_q = st.session_state.get("ranges_from_q")
+    target_id = st.session_state.get("ranges_node_id")
+    if target_id in node_by_id and from_q is not None:
+        st.success(f"Showing ranges for review question #{from_q}.")
+        if st.button("← Browse all ranges instead", key="ranges_clear"):
+            st.session_state.pop("ranges_node_id", None)
+            st.session_state.pop("ranges_from_q", None)
+            st.rerun()
+    else:
+        actors = sorted(by_actor)
+        col_a, col_b = st.columns([1, 4])
+        with col_a:
+            actor = st.selectbox("Position", options=actors, key="ranges_actor")
+        actor_nodes = sorted(by_actor.get(actor, ()), key=lambda n: n.node_id)
+        with col_b:
+            target_id = st.selectbox(
+                f"Node — {len(actor_nodes)} where {actor} acts",
+                options=[n.node_id for n in actor_nodes],
+                format_func=lambda nid: (
+                    f"{node_action_context(node_by_id[nid])} · {nid}"
+                ),
+                key="ranges_node",
+            )
+
+    node = node_by_id.get(target_id) if target_id else None
+    if node is None:
+        st.info("Pick a node to view its ranges.")
+        return
+
+    # The pack encodes raise sizes as a percent-of-pot token (e.g. "60%").
+    # Convert to big blinds using the SAME helper the Question prose uses, so
+    # the viewer's amounts match the question text (e.g. "opens to 2.5bb")
+    # instead of showing the raw percent token. bb (not dollars) because the
+    # ranges are stake-independent.
+    from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
+
+    _verbs = {
+        PreflopActionType.FOLD: "folds",
+        PreflopActionType.CALL: "calls",
+        PreflopActionType.ALL_IN: "shoves all-in",
+    }
+
+    def _verb(a: ParsedAction, raise_level: int) -> str:
+        if a.action_type is PreflopActionType.RAISE:
+            return f"raises to {_raise_size_bb(a, raise_level, pack):g}bb"
+        return _verbs.get(a.action_type, a.action_type.value.lower())
+
+    # Tag each prior action with its bet level (1 = open, 2 = 3-bet, ...) so
+    # the size converter knows which raise it is.
+    leveled: list[tuple[ParsedAction, int]] = []
+    _lvl = 0
+    for a in node.history_before:
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
+            _lvl += 1
+        leveled.append((a, _lvl))
+
+    st.subheader(f"{node.actor} · {node_action_context(node)}")
+    if leveled:
+        st.caption(
+            "Action so far → "
+            + " · ".join(f"{a.position} {_verb(a, lvl)}" for a, lvl in leveled)
+        )
+
+    _action_color = {
+        PreflopActionType.FOLD: range_view.COLOR_FOLD,
+        PreflopActionType.CALL: range_view.COLOR_CALL,
+        PreflopActionType.RAISE: range_view.COLOR_RAISE,
+        PreflopActionType.ALL_IN: range_view.COLOR_ALLIN,
+    }
+    _action_order = {
+        PreflopActionType.FOLD: 0,
+        PreflopActionType.CALL: 1,
+        PreflopActionType.RAISE: 2,
+        PreflopActionType.ALL_IN: 3,
+    }
+    all_hands = [range_view.hand_at(i, j) for i in range(13) for j in range(13)]
+
+    # --- hero strategy: ONE grid, cells coloured by the action mix ---
+    st.markdown(f"### {node.actor} strategy — one grid, coloured by action")
+    legend = "".join(
+        f'<span style="display:inline-block;width:12px;height:12px;'
+        f"background:{color};border-radius:2px;margin:0 5px 0 14px;"
+        f'vertical-align:middle;"></span>{name}'
+        for name, color in (
+            ("fold", range_view.COLOR_FOLD),
+            ("call", range_view.COLOR_CALL),
+            ("raise", range_view.COLOR_RAISE),
+            ("all-in", range_view.COLOR_ALLIN),
+        )
+    )
+    st.html(f'<div style="font-size:13px;margin-bottom:4px;">{legend}</div>')
+
+    # Read each action's range file ONCE, ordered fold/call/raise/all-in.
+    hero_actions: list[tuple[str, dict[str, float], str]] = []
+    for opt in sorted(node.actions, key=lambda o: _action_order.get(o.action_type, 9)):
+        try:
+            hw = parse_range_file(opt.range_file.path)
+        except (OSError, ValueError):
+            hw = {}
+        hero_actions.append(
+            (opt.label, hw, _action_color.get(opt.action_type, "#888888"))
+        )
+    hero_segments: dict[str, list[tuple[float, str]]] = {}
+    hero_freqs: dict[str, dict[str, float]] = {}
+    for hand in all_hands:
+        segs: list[tuple[float, str]] = []
+        freqs: dict[str, float] = {}
+        for label, weights, color in hero_actions:
+            freq = weights.get(hand, 0.0)
+            freqs[label] = freq
+            if freq > 0.0:
+                segs.append((freq, color))
+        hero_segments[hand] = segs
+        hero_freqs[hand] = freqs
+    st.html(range_view.grid_html(hero_segments))
+
+    # --- villains already in: one single-colour grid each, labelled by the
+    #     action that produced that range ---
+    last: dict[str, tuple[ParsedAction, int]] = {}
+    for a, lvl in leveled:
+        if a.position == node.actor:
+            continue
+        if a.action_type is PreflopActionType.FOLD:
+            last.pop(a.position, None)
+            continue
+        last[a.position] = (a, lvl)
+
+    villain_weights: dict[str, dict[str, float]] = {}
+    if last:
+        st.markdown("### Players already in — their ranges")
+        for pos, (action, lvl) in last.items():
+            st.markdown(f"**{pos}** {_verb(action, lvl)} — this is {pos}'s range here")
+            try:
+                path = construct_villain_range_path(node, action, pack)
+                vw = parse_range_file(path) if path.is_file() else {}
+            except (ValueError, KeyError, OSError):
+                vw = {}
+            if not vw:
+                st.caption("range file unavailable")
+                continue
+            villain_weights[pos] = vw
+            segs_by_hand = {
+                h: [(vw.get(h, 0.0), range_view.COLOR_INRANGE)] for h in all_hands
+            }
+            st.html(range_view.grid_html(segs_by_hand))
+
+    # --- inspect one hand across everyone (the "click a cell" stand-in) ---
+    st.markdown("### Inspect a hand")
+    st.caption(
+        "Streamlit can't capture a click on a coloured cell, so pick a hand "
+        "here to see its exact breakdown across every player."
+    )
+    pick = st.selectbox("Hand", options=all_hands, key="ranges_inspect_hand")
+    if pick:
+        fr = hero_freqs.get(pick, {})
+        active = [f"{lbl} {f * 100:.1f}%" for lbl, f in fr.items() if f > 0.0]
+        st.markdown(
+            f"**{node.actor}** with **{pick}**: "
+            + (" · ".join(active) if active else "not in range / pure fold")
+        )
+        for pos, weights in villain_weights.items():
+            st.markdown(
+                f"**{pos}** with **{pick}**: "
+                f"in range {weights.get(pick, 0.0) * 100:.1f}%"
+            )
+
+
+# --- page: Compare (head-to-head prompt A/B) --------------------------------
+def render_compare_page() -> None:
+    """Run two prompts on the SAME spots and judge them side by side.
+
+    Reuses :func:`generate_preflop_batch` twice with the same seed (so both
+    prompts see identical spots) and temperature 0, then joins the two CSVs
+    spot-by-spot and lets you pick a winner per spot with a running tally.
+    """
+    import os  # noqa: PLC0415
+
+    from admin_panel.prompt_library import PromptLibrary  # noqa: PLC0415
+    from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+        build_preflop_system_prompt,
+    )
+
+    st.title("Compare prompts (A/B)")
+    st.caption(
+        "Run two prompts on the SAME spots (same hands, temperature 0) and "
+        "judge them side by side — so any difference is the prompt, not luck."
+    )
+
+    lib = PromptLibrary()
+    lib.ensure_seeded(
+        build_preflop_system_prompt, legacy_override=PREFLOP_PROMPT_OVERRIDE_PATH
+    )
+    entries = lib.list()
+    if len(entries) < 2:
+        st.warning("Create at least two prompts on the Prompt library page first.")
+        return
+    slugs = [e.slug for e in entries]
+    names = {e.slug: e.name for e in entries}
+
+    c1, c2 = st.columns(2)
+    with c1:
+        a_slug = st.selectbox(
+            "Prompt A", slugs, index=0, format_func=lambda s: names[s], key="cmp_a"
+        )
+    with c2:
+        b_slug = st.selectbox(
+            "Prompt B", slugs, index=1, format_func=lambda s: names[s], key="cmp_b"
+        )
+
+    # Spot filters — applied IDENTICALLY to both prompts so the A/B stays fair.
+    f1, f2 = st.columns(2)
+    with f1:
+        positions = st.multiselect(
+            "Hero positions",
+            options=sorted(_cached_preflop_nodes_by_actor().keys()),
+            default=sorted(_cached_preflop_nodes_by_actor().keys()),
+            key="cmp_pos",
+            help="Empty = all positions.",
+        )
+    with f2:
+        contexts = st.multiselect(
+            "Action faced",
+            options=[
+                "Opening",
+                "Facing single raise",
+                "Facing 3-bet",
+                "Facing 4-bet+",
+                "After call(s)",
+            ],
+            default=["Facing single raise", "Facing 3-bet"],
+            key="cmp_ctx",
+            help="Empty = all action types.",
+        )
+
+    difficulty_bands = {
+        "Easy": (400, 1300),
+        "Medium": (1300, 2100),
+        "Hard": (2100, 3200),
+        "Mixed": (DIFFICULTY_MIN, DIFFICULTY_MAX),
+    }
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        n_spots = int(
+            st.number_input("Spots", min_value=1, max_value=25, value=5, key="cmp_n")
+        )
+    with s2:
+        preset = st.radio(
+            "Difficulty",
+            options=list(difficulty_bands),
+            index=3,  # Mixed = full band
+            horizontal=True,
+            key="cmp_diff",
+        )
+    with s3:
+        model_label = st.radio(
+            "Model", options=list(_MODEL_LABEL_TO_API), index=1, key="cmp_model"
+        )
+    band_low, band_high = difficulty_bands[preset]
+    s4, s5 = st.columns(2)
+    with s4:
+        seed = int(
+            st.number_input(
+                "Seed", min_value=0, max_value=1_000_000, value=42, key="cmp_seed"
+            )
+        )
+    with s5:
+        dry = st.toggle("Dry run", key="cmp_dry", help="No API calls — flow check.")
+
+    same = a_slug == b_slug
+    if same:
+        st.info("Pick two different prompts to compare.")
+    if st.button(
+        "Run comparison",
+        type="primary",
+        disabled=same or jobs.has_active_job(),
+        key="cmp_run",
+    ):
+        if not dry and not os.environ.get("ANTHROPIC_API_KEY"):
+            st.error(
+                "ANTHROPIC_API_KEY is not set. Add it to `.env`, or enable Dry "
+                "run to test the flow."
+            )
+            return
+        packs = _cached_preflop_packs()
+        if not packs:
+            st.error("No range pack found in `ranges/`.")
+            return
+        pack = packs[0]
+        model_api = _MODEL_LABEL_TO_API.get(model_label, model_label)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        PREFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_a = PREFLOP_OUTPUT_DIR / f"compare_{ts}_A.csv"
+        out_b = PREFLOP_OUTPUT_DIR / f"compare_{ts}_B.csv"
+        with st.status(
+            "Running both prompts on the same spots…", expanded=True
+        ) as status:
+            st.write(f"Prompt A — {names[a_slug]}")
+            res_a = generate_preflop_batch(
+                pack=pack,
+                output_path=out_a,
+                total_questions=n_spots,
+                hero_positions=positions or None,
+                action_contexts=contexts or None,
+                min_difficulty=band_low,
+                max_difficulty=band_high,
+                system_prompt=lib.get_text(a_slug),
+                prompt_name=names[a_slug],
+                random_seed=seed,
+                temperature=0.0,
+                model=model_api,
+                dry_run=dry,
+            )
+            st.write(f"Prompt B — {names[b_slug]}")
+            res_b = generate_preflop_batch(
+                pack=pack,
+                output_path=out_b,
+                total_questions=n_spots,
+                hero_positions=positions or None,
+                action_contexts=contexts or None,
+                min_difficulty=band_low,
+                max_difficulty=band_high,
+                system_prompt=lib.get_text(b_slug),
+                prompt_name=names[b_slug],
+                random_seed=seed,
+                temperature=0.0,
+                model=model_api,
+                dry_run=dry,
+            )
+            status.update(label="Comparison ready", state="complete")
+        st.session_state["cmp_result"] = {
+            "a_csv": str(res_a.output_path or out_a),
+            "b_csv": str(res_b.output_path or out_b),
+            "a_name": names[a_slug],
+            "b_name": names[b_slug],
+        }
+        st.rerun()
+
+    result = st.session_state.get("cmp_result")
+    if not result:
+        return
+    a_csv = Path(result["a_csv"])
+    b_csv = Path(result["b_csv"])
+    if not (a_csv.is_file() and b_csv.is_file()):
+        st.info("Run a comparison above to see results.")
+        return
+
+    df_a = pd.read_csv(a_csv, encoding="utf-8-sig", dtype=str).fillna("")
+    df_b = pd.read_csv(b_csv, encoding="utf-8-sig", dtype=str).fillna("")
+    rows_a = [{str(k): str(v) for k, v in r.items()} for r in df_a.to_dict("records")]
+    rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
+    pairs = compare.join_by_spot(rows_a, rows_b)
+    verdicts = compare.load_verdicts(a_csv)
+    counts = compare.tally(verdicts)
+
+    st.divider()
+    st.markdown(
+        f"### Tally — **{result['a_name']}** {counts['A']}  ·  "
+        f"**{result['b_name']}** {counts['B']}  ·  tie {counts['tie']}   "
+        f"({len(verdicts)}/{len(pairs)} judged)"
+    )
+    if not pairs:
+        st.warning("No shared spots to compare (did both runs produce rows?).")
+        return
+
+    opts = [f"{result['a_name']} better", "Tie", f"{result['b_name']} better"]
+    to_verdict = {opts[0]: "A", opts[1]: "tie", opts[2]: "B"}
+    from_verdict = {"A": opts[0], "tie": opts[1], "B": opts[2]}
+
+    for key, row_a, row_b in pairs:
+        with st.container(border=True):
+            if row_a.get("Context"):
+                st.caption(row_a["Context"])
+            st.markdown(_md_lines(row_a.get("Question", "")))
+            picks = ", ".join(
+                row_a.get(f"option {i}", "")
+                for i in (1, 2, 3, 4)
+                if row_a.get(f"option {i}", "")
+            )
+            st.caption(
+                f"Options: {picks}  ·  Correct: **{row_a.get('Correct Answer', '')}**"
+            )
+            # Shared strategic facts (identical for both prompts -- same spot),
+            # shown once, mirroring the Review card.
+            if row_a.get("action_frequencies"):
+                st.markdown(f"**Solver frequencies:** {row_a['action_frequencies']}")
+            fact_bits: list[str] = []
+            for col, lbl in (
+                ("archetype", "archetype"),
+                ("ev_gap_bb", "EV gap"),
+                ("hand_class", "hand"),
+                ("Difficulty Rating", "difficulty"),
+                ("Position Matchup", "matchup"),
+                ("Pot Participant", "pot"),
+            ):
+                val = row_a.get(col, "")
+                if val:
+                    fact_bits.append(f"{lbl}: `{val}`")
+            if fact_bits:
+                st.caption(" · ".join(fact_bits))
+            if row_a.get("concept_tags"):
+                st.caption(f"concept tags: {row_a['concept_tags']}")
+            if row_a.get("skills"):
+                st.caption(f"skills: {row_a['skills']}")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**{result['a_name']}**")
+                st.info(_md_lines(row_a.get("Answer Explanation", "")))
+            with col_b:
+                st.markdown(f"**{result['b_name']}**")
+                st.info(_md_lines(row_b.get("Answer Explanation", "")))
+            cur = verdicts.get(key)
+            idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
+            choice = st.radio(
+                "Which is better?",
+                opts,
+                index=idx,
+                horizontal=True,
+                key=f"cmp_v_{key}",
+            )
+            if choice is not None and to_verdict[choice] != cur:
+                compare.save_verdict(a_csv, key, to_verdict[choice])
+                st.rerun()
+
+
 # --- page: Prompt -----------------------------------------------------------
 def render_prompt_page() -> None:
-    """The system prompt editor.
+    """The prompt library: create, name, edit, and switch between the
+    Layer 6 system prompts you're workshopping.
 
-    Right now only the **preflop** prompt is editable -- preflop is the only
-    path that actually generates questions (postflop is blocked on Pio
-    solves; its prompt is shown read-only for reference).
-
-    Edits to the preflop prompt save to ``admin_panel/prompts/preflop_system.txt``.
-    :func:`pipeline.preflop.explanation_generator.load_preflop_system_prompt`
-    checks for that file at every call -- so edits take effect on the
-    NEXT batch you start (no admin-panel restart needed). Reset deletes
-    the file, reverting to the built-in default.
+    Preflop only (postflop is blocked on Pio solves; its prompt is shown
+    read-only for reference). Prompts live under
+    ``admin_panel/prompts/library/`` via
+    :class:`admin_panel.prompt_library.PromptLibrary`. The ACTIVE prompt is
+    the default for new batches and is mirrored into the legacy
+    ``preflop_system.txt`` so any code path that reads
+    ``load_preflop_system_prompt()`` stays in sync. The Generate page can
+    run any library prompt per batch and tags each output with it.
     """
-    st.title("System prompt editor")
+    st.title("Prompt library")
     st.caption(
-        "Edit the system prompt Layer 6 sends to Claude. Edits save to a "
-        "file under `admin_panel/prompts/` and take effect on the next batch "
-        "you start -- no restart needed."
+        "Create, name, and switch between the system prompts Layer 6 sends "
+        "to Claude. The ★ active prompt is the default for new batches; edits "
+        "take effect on the next batch — no restart needed."
     )
 
     mode = st.radio(
@@ -2552,136 +3241,214 @@ def render_prompt_page() -> None:
         )
         return
 
-    # --- Preflop mode: editable with override file ---
+    # --- Preflop mode: the prompt LIBRARY ---
+    from admin_panel.prompt_library import PromptLibrary  # noqa: PLC0415
     from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
         build_preflop_system_prompt,
-        load_preflop_system_prompt,
     )
 
-    override_path = PREFLOP_PROMPT_OVERRIDE_PATH
-    default_prompt = build_preflop_system_prompt()
-    active_prompt = load_preflop_system_prompt()
-    using_override = override_path.is_file()
+    lib = PromptLibrary()
+    lib.ensure_seeded(
+        build_preflop_system_prompt, legacy_override=PREFLOP_PROMPT_OVERRIDE_PATH
+    )
 
-    # Status banner.
-    if using_override:
-        st.warning(
-            f"🟡 **Override active.** Edits are loaded from "
-            f"`{override_path.relative_to(REPO_ROOT)}`. Click "
-            "**Reset to default** below to revert."
+    def _sync_legacy_override() -> None:
+        """Mirror the active prompt into the legacy single-file override so
+        ``load_preflop_system_prompt()`` (any path that doesn't pass
+        system_prompt explicitly) stays in sync with the library."""
+        active_text = lib.active_text()
+        if active_text is not None:
+            PREFLOP_PROMPT_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            PREFLOP_PROMPT_OVERRIDE_PATH.write_text(active_text, encoding="utf-8")
+
+    # --- create a new prompt ---
+    entries = lib.list()
+    with st.expander("➕  New prompt", expanded=not entries):
+        new_name = st.text_input("Name", key="new_prompt_name")
+        seed_from = st.radio(
+            "Start from",
+            ["Built-in default", "Copy of active prompt", "Blank"],
+            horizontal=True,
+            key="new_prompt_seed",
+            help=(
+                "Built-in default gives you the FULL editable prompt — voice "
+                "rules, archetype catalog, banned phrases, output rules — to "
+                "tweak. (The solver-data block and gold examples are assembled "
+                "per question and aren't part of the saved prompt.) Blank is a "
+                "clean canvas."
+            ),
         )
-    else:
-        st.success(
-            "🟢 **Using built-in default prompt.** Save your first edit "
-            "to switch to override mode."
-        )
+        if st.button("Create prompt", type="primary", key="create_prompt_btn"):
+            if not new_name.strip():
+                st.error("Give the prompt a name first.")
+            else:
+                if seed_from == "Built-in default":
+                    seed_text = build_preflop_system_prompt()
+                elif seed_from == "Copy of active prompt":
+                    act = lib.active_entry()
+                    seed_text = act.text if act else build_preflop_system_prompt()
+                else:
+                    seed_text = ""
+                created = lib.create(new_name, seed_text)
+                lib.set_active(created.slug)
+                _sync_legacy_override()
+                st.session_state["prompt_select"] = created.slug
+                st.success(f"Created '{created.name}' and made it active.")
+                st.rerun()
 
-    st.caption(
-        f"Active: **{'override' if using_override else 'built-in default'}** · "
-        f"{len(active_prompt):,} chars · "
-        f"~{len(active_prompt) // 4:,} tokens (rough estimate)"
-    )
+    entries = lib.list()
+    if not entries:
+        st.info("No prompts yet — create one above.")
+        return
 
-    edited = st.text_area(
-        "Preflop system prompt (edit live)",
-        value=active_prompt,
-        height=600,
-        key="preflop_prompt_textarea",
-        help=(
-            "Edits to this box are session-local until you click Save. "
-            "Save writes to admin_panel/prompts/preflop_system.txt and "
-            "takes effect on the next batch."
-        ),
-    )
+    active_slug = lib.active_slug()
+    slugs = [e.slug for e in entries]
+    name_by_slug = {e.slug: e.name for e in entries}
 
-    # Edit-diff indicator.
-    if edited != active_prompt:
-        diff_chars = len(edited) - len(active_prompt)
+    # Keep the selection valid across create / delete reruns.
+    if st.session_state.get("prompt_select") not in slugs:
+        st.session_state["prompt_select"] = active_slug or slugs[0]
+
+    def _label(slug: str) -> str:
+        star = "  ★ active" if slug == active_slug else ""
+        return f"{name_by_slug[slug]}{star}"
+
+    sel = st.selectbox("Prompt", options=slugs, format_func=_label, key="prompt_select")
+    entry = lib.get(sel)
+
+    # --- row of actions ---
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    with c1:
+        if sel == active_slug:
+            st.success("★ Active")
+        elif st.button("Set active", key="set_active_btn", use_container_width=True):
+            lib.set_active(sel)
+            _sync_legacy_override()
+            st.rerun()
+    with c2:
+        if st.button("Duplicate", key="dup_btn", use_container_width=True):
+            dup = lib.duplicate(sel)
+            st.session_state["prompt_select"] = dup.slug
+            st.success(f"Duplicated as '{dup.name}'.")
+            st.rerun()
+    with c3:
+        if st.button(
+            "Delete",
+            key="del_btn",
+            use_container_width=True,
+            disabled=len(entries) == 1,
+        ):
+            lib.delete(sel)
+            st.session_state.pop("prompt_select", None)
+            _sync_legacy_override()
+            st.rerun()
+    with c4:
+        updated = f" · updated {entry.updated_at[:10]}" if entry.updated_at else ""
         st.caption(
-            f"🔵 Unsaved edits ({diff_chars:+,} chars vs. currently active prompt). "
-            "Click Save to persist."
+            f"{len(entry.text):,} chars · ~{len(entry.text) // 4:,} tokens{updated}"
+        )
+
+    # --- rename + notes ---
+    m1, m2 = st.columns(2)
+    with m1:
+        new_title = st.text_input("Rename", value=entry.name, key=f"rename_{sel}")
+        if st.button(
+            "Save name",
+            key=f"renamebtn_{sel}",
+            disabled=(not new_title.strip() or new_title == entry.name),
+        ):
+            lib.rename(sel, new_title)
+            st.rerun()
+    with m2:
+        notes = st.text_input(
+            "Notes (what you're trying)", value=entry.notes, key=f"notes_{sel}"
+        )
+        if st.button(
+            "Save notes", key=f"notesbtn_{sel}", disabled=notes == entry.notes
+        ):
+            lib.update_notes(sel, notes)
+            st.rerun()
+
+    # --- the editable prompt text ---
+    edited = st.text_area(
+        "System prompt",
+        value=entry.text,
+        height=520,
+        key=f"prompt_edit_{sel}",
+        help="Edits are session-local until you click Save prompt.",
+    )
+    if edited != entry.text:
+        st.caption(
+            f"🔵 Unsaved edits ({len(edited) - len(entry.text):+,} chars vs. saved)."
+        )
+    if st.button(
+        "💾  Save prompt",
+        type="primary",
+        key=f"save_{sel}",
+        disabled=(edited == entry.text),
+    ):
+        lib.update_text(sel, edited)
+        if sel == active_slug:
+            _sync_legacy_override()
+        st.success("✅ Saved.")
+        st.rerun()
+
+    # --- preview the FULL prompt the model receives (sample spot) ---
+    with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
+        st.caption(
+            "Everything the model receives for one example question, using the "
+            "text above as the system prompt. The gold examples, the SOLVER "
+            "DATA block, and the instructions around it are assembled per "
+            "question — shown here, but not part of the saved prompt. Note the "
+            "SOLVER DATA block already feeds `concept_tags` and the villain's "
+            "range (`villain_stats.top_combos`); it does NOT feed `skills`."
+        )
+        sample = _preview_sample_spot()
+        if sample is None:
+            st.caption("(Couldn't build a sample spot — is the range pack present?)")
+        else:
+            from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+                build_explanation_prompt_parts,
+            )
+
+            s_facts, s_options, s_correct = sample
+            parts = build_explanation_prompt_parts(
+                s_facts, s_options, s_correct, system_prompt=edited
+            )
+            st.code(parts["assembled"])
+
+    # --- compare against the built-in default ---
+    with st.expander("👁  Compare with built-in default"):
+        default_prompt = build_preflop_system_prompt()
+        st.caption(
+            f"Built-in default: {len(default_prompt):,} chars  ·  "
+            f"this prompt: {len(entry.text):,} chars  ·  "
+            f"diff {len(entry.text) - len(default_prompt):+,}"
+        )
+        st.text_area(
+            "Built-in default (read-only)",
+            value=default_prompt,
+            height=320,
+            disabled=True,
+            key=f"default_ro_{sel}",
         )
 
     st.divider()
-
-    # --- Action buttons ---
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        save_clicked = st.button(
-            "💾  Save",
-            type="primary",
-            use_container_width=True,
-            disabled=(edited == active_prompt),
-            help=(
-                "Writes the textarea content to "
-                "admin_panel/prompts/preflop_system.txt. Next batch picks "
-                "it up automatically."
-            ),
-        )
-    with col2:
-        reset_clicked = st.button(
-            "↺  Reset to default",
-            use_container_width=True,
-            disabled=not using_override,
-            help=(
-                "Deletes the override file. Next batch uses the built-in "
-                "default from build_preflop_system_prompt()."
-            ),
-        )
-    with col3:
-        show_default_clicked = st.button(
-            "👁  Show built-in default",
-            use_container_width=True,
-            disabled=not using_override,
-            help="Diff the current override against the built-in default.",
-        )
-
-    if save_clicked:
-        override_path.parent.mkdir(parents=True, exist_ok=True)
-        override_path.write_text(edited, encoding="utf-8")
-        st.success(
-            f"✅ Saved to `{override_path.relative_to(REPO_ROOT)}`. "
-            "Next batch will use these edits."
-        )
-        st.rerun()
-
-    if reset_clicked:
-        override_path.unlink()
-        st.success("✅ Override deleted. Next batch will use the built-in default.")
-        st.rerun()
-
-    if show_default_clicked:
-        with st.expander("Built-in default prompt (read-only)", expanded=True):
-            st.text_area(
-                "Default",
-                value=default_prompt,
-                height=400,
-                disabled=True,
-                key="default_prompt_readonly",
-            )
-            st.caption(
-                f"Default: {len(default_prompt):,} chars  ·  "
-                f"Override: {len(active_prompt):,} chars  ·  "
-                f"Diff: {len(active_prompt) - len(default_prompt):+,} chars"
-            )
-
-    st.divider()
-
-    # --- Safety notes ---
-    st.subheader("⚠️  Editing the prompt — what to know")
+    st.subheader("⚠️  Working with prompts — what to know")
     st.markdown(
         """
-- **Test with a dry-run first.** A typo in the prompt can break the
-  JSON output format and waste a batch's API spend. Dry-run is free,
-  so verify shape before any real generation.
-- **The default prompt encodes hard-won lessons** -- 10 voice rules,
+- **The ★ active prompt is the default for new batches.** On the Generate
+  page you can also pick any prompt per run, and every batch records which
+  prompt produced it.
+- **Test with a dry-run first.** A typo can break the JSON output format
+  and waste a batch's spend. Dry-run is free — verify shape first.
+- **The built-in default encodes hard-won lessons** -- 10 voice rules,
   banned phrases, archetype framing, the May 2026 Ryan-feedback fixes.
-  Treat rewrites as research, not casual editing.
-- **Big prompt changes change Claude's behavior in non-obvious ways.**
-  When experimenting, switch to Sonnet 4.6 on the Generate page first
-  (~5× cheaper) and only validate the winners with Opus 4.7.
-- **The override file is gitignored by default** -- copy your edits
-  somewhere safe if you need them across machines.
+  Treat big rewrites as research, not casual editing.
+- **Iterate cheap.** Experiment on Sonnet 4.6 (~5× cheaper) and only
+  validate the winners on Opus 4.7.
+- **The library is gitignored** -- copy prompts you want to keep across
+  machines somewhere safe.
         """
     )
 
@@ -2940,11 +3707,17 @@ def main() -> None:
 
     st.sidebar.title("🎰 Poker Pipeline")
     st.sidebar.caption("Preflop pipeline · Phase 3 (skill tagging)")
+    # Apply any pending programmatic navigation (e.g. the Review page's
+    # "View ranges" button) BEFORE the nav widget is created -- a widget's
+    # session value can't be set after it's instantiated in the same run.
+    if "_pending_nav" in st.session_state:
+        st.session_state["nav_page"] = st.session_state.pop("_pending_nav")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "Review", "History", "Browse", "Prompt",
-                 "Skills", "Concept Tags"],
+        options=["Files", "Generate", "Review", "Ranges", "History", "Browse",
+                 "Prompt", "Compare", "Skills", "Concept Tags"],
         index=0,
+        key="nav_page",
     )
 
     # Live job indicator -- visible from any page, auto-refreshes once
@@ -3008,12 +3781,16 @@ def main() -> None:
         render_generate_page()
     elif page == "Review":
         render_review_page()
+    elif page == "Ranges":
+        render_ranges_page()
     elif page == "History":
         render_history_page()
     elif page == "Browse":
         render_browse_page()
     elif page == "Prompt":
         render_prompt_page()
+    elif page == "Compare":
+        render_compare_page()
     elif page == "Skills":
         render_skills_page()
     elif page == "Concept Tags":
