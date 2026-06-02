@@ -434,6 +434,107 @@ def test_ranges_column_is_json_keyed_by_position_incl_hero() -> None:
     assert ", " not in row["ranges"]        # compact (no whitespace)
 
 
+def test_action_mix_for_node_is_per_hand_action_mix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_action_mix_for_node` inverts the per-action range files into a
+    per-hand mix: hand -> action -> {freq[, to_bb]}, raise/jam carry a bb
+    size, and pure-fold hands are dropped (renderer defaults them to fold)."""
+    from pipeline.preflop import format_writer as fw
+    from pipeline.preflop.grammars.types import ParsedRangeFile
+    from pipeline.preflop.node_enumerator import PreflopActionOption
+
+    canned = {
+        "raise.txt": {"AA": 1.0, "A5s": 0.4, "72o": 0.0},
+        "call.txt": {"AA": 0.0, "A5s": 0.1, "72o": 0.0},
+        "fold.txt": {"AA": 0.0, "A5s": 0.5, "72o": 1.0},
+    }
+    monkeypatch.setattr(fw, "parse_range_file", lambda p: canned[Path(p).name])
+
+    def _opt(
+        action_type: PreflopActionType, pct: float | None, name: str
+    ) -> PreflopActionOption:
+        return PreflopActionOption(
+            action_type=action_type,
+            raise_size_pct=pct,
+            range_file=ParsedRangeFile(
+                pack_id="x", path=Path(name), actor="UTG",
+                actor_action=action_type, actor_raise_size_pct=pct,
+                action_history=(),
+            ),
+        )
+
+    node = PreflopDecisionNode(
+        pack_id="x", actor="UTG", history_before=(),
+        actions=(
+            _opt(PreflopActionType.RAISE, 60.0, "raise.txt"),
+            _opt(PreflopActionType.CALL, None, "call.txt"),
+            _opt(PreflopActionType.FOLD, None, "fold.txt"),
+        ),
+    )
+    chart = fw._action_mix_for_node(node, _pack())
+
+    # AA: pure open, tagged with the pack's open size in bb.
+    assert chart["AA"] == {"raise": {"freq": 1.0, "to_bb": 2.5}}
+    # A5s: a real mix across all three actions; only the raise carries to_bb.
+    assert chart["A5s"]["raise"] == {"freq": 0.4, "to_bb": 2.5}
+    assert chart["A5s"]["call"] == {"freq": 0.1}
+    assert chart["A5s"]["fold"] == {"freq": 0.5}
+    # 72o pure-folds -> omitted entirely.
+    assert "72o" not in chart
+
+
+def test_ranges_full_mix_against_real_pack() -> None:
+    """On the real pack, `ranges` is the full per-position action mix: the
+    hero is a real strategy (NOT the old all-1s presence mask), and the
+    live villain resolves to the chart they had when it was on them."""
+    import json
+
+    ranges_dir = Path(__file__).resolve().parent.parent / "ranges"
+    if not ranges_dir.is_dir():
+        pytest.skip("ranges/ not present locally")
+    from pipeline.preflop.format_writer import _render_active_ranges
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+    from pipeline.preflop.pack import clear_registry, discover_packs
+    from pipeline.preflop.spot_sampler import PreflopSpot
+
+    clear_registry()
+    packs = discover_packs(ranges_dir)
+    if not packs:
+        pytest.skip("Ryan pack not present under ranges/")
+    pack = packs[0]
+    # HJ facing a single UTG open -> exactly one live villain (the opener).
+    node = next(
+        n
+        for n in enumerate_nodes(packs)
+        if n.actor == "HJ"
+        and len(n.history_before) == 1
+        and n.history_before[0].position == "UTG"
+        and n.history_before[0].action_type is PreflopActionType.RAISE
+    )
+    spot = PreflopSpot(
+        node=node, hero_hand_class="AKs", hero_card_combo="AsKs",
+        action_frequencies={"Fold": 0.0, "Call": 0.5, "Raise 77%": 0.5},
+        dominant_action="Call", dominant_frequency=0.5,
+    )
+    facts = PreflopFacts(spot=spot, villain_stats=None, archetype="3bet_as_bluff")
+    ranges = json.loads(_render_active_ranges(facts, pack))
+
+    assert {"HJ", "UTG"} <= set(ranges)           # hero + the opener present
+    hero = ranges["HJ"]
+    assert any(len(mix) > 1 for mix in hero.values())  # real mix, not all-1s
+    assert len(hero) < 169                              # pure folds omitted
+    for mix in hero.values():
+        for action, metrics in mix.items():
+            assert action in {"fold", "call", "raise", "allin"}
+            assert 0.0 < metrics["freq"] <= 1.0
+            if action in {"raise", "allin"}:
+                assert metrics["to_bb"] > 0
+    # The villain (UTG) chart is their OPENING range: AA opens, 72o absent.
+    assert "raise" in ranges["UTG"]["AA"]
+    assert "72o" not in ranges["UTG"]
+
+
 def test_hand_class_is_169_label() -> None:
     """Preflop hand_class is the 169-class label (AKo), not a postflop
     made-hand breakdown."""

@@ -64,18 +64,17 @@ from pipeline.preflop.concept_tags import (
     compute_concept_tags,
 )
 from pipeline.preflop.difficulty import DifficultyResult
-from pipeline.preflop.fact_extractor import (
-    PreflopFacts,
-    construct_villain_range_path,
-)
+from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
-from pipeline.preflop.node_enumerator import PreflopDecisionNode
+from pipeline.preflop.node_enumerator import (
+    PreflopActionOption,
+    PreflopDecisionNode,
+)
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import PreflopPack
 from pipeline.preflop.position import hero_relative_position
 from pipeline.preflop_ranges import (
     canonical_169_hand_classes,
-    format_hand_class_range,
     parse_range_file,
 )
 
@@ -380,26 +379,147 @@ def _solver_reference(facts: PreflopFacts, pack: PreflopPack) -> str:
     return f"{pack.pack_id}/{facts.spot.node.actor}/{facts.spot.node.node_id}"
 
 
-def _compute_hero_range_snapshot(
-    node: PreflopDecisionNode,
-) -> dict[str, float]:
-    """Hero's 169-class range at the decision node.
+# A single position's preflop chart: the full action mix per hand at the
+# node where that position acts. hand_class -> action_label -> metrics,
+# where metrics is {"freq": <0-1>} plus {"to_bb": <size>} for raise/all-in.
+# Pure-fold hands are omitted (a renderer treats a missing hand as 100%
+# fold), which keeps the cell small. This replaced the old "presence"
+# snapshot, which summed every action's weight and so collapsed to a
+# useless all-1s mask for the hero (it carried no strategy). (June 2026.)
+_PositionChart = dict[str, dict[str, dict[str, float]]]
 
-    Sums the per-hand-class weights across all of hero's action range
-    files. Each cell is the hand class's PRESENCE at this node (how
-    often it reaches here from the parent decisions) -- which is what
-    a range-grid UI shows. Range cells in [0, 1]; cells with zero
-    weight (hand class never reaches the node) stay at 0.
+# {(pack_id, root): {(actor, history_before): node}} so a villain's OWN
+# decision node resolves in O(1) without re-walking the ~9k-node tree per
+# row. The tree is deterministic per pack, so memoising for the process
+# lifetime is safe.
+_NODE_INDEX_CACHE: dict[
+    tuple[str, str],
+    dict[tuple[str, tuple[ParsedAction, ...]], PreflopDecisionNode],
+] = {}
 
-    Returns a complete 169-entry dict so the renderer downstream can
-    rely on canonical-order iteration.
+
+def _node_index(
+    pack: PreflopPack,
+) -> dict[tuple[str, tuple[ParsedAction, ...]], PreflopDecisionNode]:
+    """All of the pack's decision nodes, keyed by ``(actor, history_before)``.
+
+    Lets us recover any player's OWN decision node (where they faced the
+    spot) from a later node's history -- needed to show each villain's full
+    action mix at the moment it was on them, not just the action they took.
     """
-    out: dict[str, float] = {cls: 0.0 for cls in canonical_169_hand_classes()}
-    for opt in node.actions:
-        weights = parse_range_file(opt.range_file.path)
-        for cls in canonical_169_hand_classes():
-            out[cls] += weights.get(cls, 0.0)
-    return out
+    cache_key = (pack.pack_id, str(pack.root_path))
+    cached = _NODE_INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    from pipeline.preflop.node_enumerator import (  # noqa: PLC0415
+        enumerate_nodes_by_actor,
+    )
+
+    index: dict[tuple[str, tuple[ParsedAction, ...]], PreflopDecisionNode] = {}
+    for nodes in enumerate_nodes_by_actor([pack]).values():
+        for n in nodes:
+            index[(n.actor, n.history_before)] = n
+    _NODE_INDEX_CACHE[cache_key] = index
+    return index
+
+
+def _villain_decision_node(
+    hero_node: PreflopDecisionNode,
+    villain_pos: str,
+    pack: PreflopPack,
+) -> PreflopDecisionNode | None:
+    """The node where ``villain_pos`` made their last non-fold decision.
+
+    That node carries the villain's FULL action menu (every option's range
+    file), so we render their complete mix -- the chart for that seat at the
+    moment they acted -- not just the single action they took. Returns
+    ``None`` if it can't be resolved (defensive; the caller skips it).
+    """
+    last_index: int | None = None
+    for i, a in enumerate(hero_node.history_before):
+        if a.position == villain_pos and a.action_type is not PreflopActionType.FOLD:
+            last_index = i
+    if last_index is None:
+        return None
+    prefix = hero_node.history_before[:last_index]
+    return _node_index(pack).get((villain_pos, prefix))
+
+
+def _normalize_action(
+    option: PreflopActionOption,
+    actor: str,
+    raise_level: int,
+    pack: PreflopPack,
+) -> tuple[str, float | None]:
+    """Map a node action option to a ``(label, to_bb)`` pair.
+
+    Labels are normalised verbs the app renders directly
+    (fold/call/raise/allin); raises and jams carry their size in big blinds
+    (matching the Question prose), folds and calls carry no size.
+    """
+    action_type = option.action_type
+    if action_type is PreflopActionType.FOLD:
+        return "fold", None
+    if action_type is PreflopActionType.CALL:
+        return "call", None
+    if action_type is PreflopActionType.ALL_IN:
+        # A preflop jam commits the effective stack.
+        return "allin", float(pack.stack_depth_bb)
+    if action_type is PreflopActionType.RAISE:
+        from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
+
+        parsed = ParsedAction(
+            position=actor,
+            action_type=PreflopActionType.RAISE,
+            raise_size_pct=option.raise_size_pct,
+        )
+        return "raise", round(_raise_size_bb(parsed, raise_level, pack), 2)
+    return action_type.value.lower(), None
+
+
+def _action_mix_for_node(
+    node: PreflopDecisionNode,
+    pack: PreflopPack,
+) -> _PositionChart:
+    """The full per-hand action mix at ``node`` -- this position's preflop chart.
+
+    For each hand class, the frequency of every action the solver offers
+    here (fold / call / raise / all-in), with raise/jam sizes in bb. Hands
+    that pure-fold are omitted (the renderer treats a missing hand as 100%
+    fold), so a typical chart is ~30-60 hands rather than all 169.
+    """
+    raise_level = (
+        sum(
+            1
+            for a in node.history_before
+            if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+        )
+        + 1
+    )
+    # Read each action's range file once, paired with its normalised label.
+    loaded: list[tuple[str, float | None, dict[str, float]]] = [
+        (
+            *_normalize_action(option, node.actor, raise_level, pack),
+            parse_range_file(option.range_file.path),
+        )
+        for option in node.actions
+    ]
+
+    chart: _PositionChart = {}
+    for hand in canonical_169_hand_classes():
+        entry: dict[str, dict[str, float]] = {}
+        for label, to_bb, weights in loaded:
+            freq = weights.get(hand, 0.0)
+            if freq <= 0.0:
+                continue
+            metrics = {"freq": round(freq, 4)}
+            if to_bb is not None:
+                metrics["to_bb"] = to_bb
+            entry[label] = metrics
+        # Omit hands that only ever fold -- the renderer defaults them to fold.
+        if any(label != "fold" for label in entry):
+            chart[hand] = entry
+    return chart
 
 
 # --- multiway range column (position-labeled, active players only) -----------
@@ -432,32 +552,38 @@ def _active_villain_actions(
 def _compute_active_ranges(
     facts: PreflopFacts,
     pack: PreflopPack,
-) -> dict[str, dict[str, float]]:
-    """169-class range for every still-active player, keyed by position.
+) -> dict[str, _PositionChart]:
+    """Full preflop chart for every still-active player, keyed by position.
 
-    Always includes hero (their range entering this decision). Each active
-    villain's range is read from the file naming their last non-fold action;
-    a missing file is skipped defensively so a pack gap can't crash the row.
+    Hero's chart comes from their current decision node; each active
+    villain's comes from the node where THEY last acted -- so it's the range
+    + mix they had when it was on them, not just the one action they took. A
+    villain whose node or range files can't be resolved is skipped
+    defensively so a pack gap can't crash the row.
     """
     node = facts.spot.node
-    ranges: dict[str, dict[str, float]] = {
-        node.actor: _compute_hero_range_snapshot(node),
+    ranges: dict[str, _PositionChart] = {
+        node.actor: _action_mix_for_node(node, pack),
     }
-    for pos, action in _active_villain_actions(node).items():
+    for pos in _active_villain_actions(node):
+        villain_node = _villain_decision_node(node, pos, pack)
+        if villain_node is None:
+            continue
         try:
-            path = construct_villain_range_path(node, action, pack)
-        except (ValueError, KeyError):
+            ranges[pos] = _action_mix_for_node(villain_node, pack)
+        except (OSError, ValueError):
             continue
-        if not path.is_file():
-            continue
-        ranges[pos] = parse_range_file(path)
     return ranges
 
 
 def _render_active_ranges(facts: PreflopFacts, pack: PreflopPack) -> str:
     """The ``ranges`` CSV column: a JSON object mapping each active player's
-    position to its 169-class range string, ordered by seat. Compact JSON
-    (no spaces) so the cell stays small; empty string if nothing resolved.
+    position to its full preflop chart, ordered by seat. Compact JSON (no
+    spaces); empty string if nothing resolved.
+
+    Shape: ``{"<POS>":{"<hand>":{"<action>":{"freq":f,"to_bb":b}}}}`` --
+    action is fold/call/raise/allin; raise/allin carry a bb size; pure-fold
+    hands are omitted. The app renders each hand cell as that action mix.
     """
     ranges = _compute_active_ranges(facts, pack)
     if not ranges:
@@ -470,8 +596,7 @@ def _render_active_ranges(facts: PreflopFacts, pack: PreflopPack) -> str:
             else len(_PREFLOP_SEAT_ORDER)
         ),
     )
-    serialized = {pos: format_hand_class_range(r) for pos, r in ordered}
-    return json.dumps(serialized, separators=(",", ":"))
+    return json.dumps(dict(ordered), separators=(",", ":"))
 
 
 # --- question-narrative renderer ---------------------------------------------

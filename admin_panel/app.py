@@ -2721,8 +2721,8 @@ def render_ranges_page() -> None:
     navigates here. Renders the hero's per-action ranges (the strategy) plus
     each active villain's range.
     """
-    from pipeline.preflop.fact_extractor import (  # noqa: PLC0415
-        construct_villain_range_path,
+    from pipeline.preflop.format_writer import (  # noqa: PLC0415
+        _villain_decision_node,
     )
     from pipeline.preflop.grammars.types import (  # noqa: PLC0415
         ParsedAction,
@@ -2865,32 +2865,45 @@ def render_ranges_page() -> None:
     )
     st.html(f'<div style="font-size:13px;margin-bottom:4px;">{legend}</div>')
 
-    # Read each action's range file ONCE, ordered fold/call/raise/all-in.
-    hero_actions: list[tuple[str, dict[str, float], str]] = []
-    for opt in sorted(node.actions, key=lambda o: _action_order.get(o.action_type, 9)):
-        try:
-            hw = parse_range_file(opt.range_file.path)
-        except (OSError, ValueError):
-            hw = {}
-        hero_actions.append(
-            (opt.label, hw, _action_color.get(opt.action_type, "#888888"))
-        )
-    hero_segments: dict[str, list[tuple[float, str]]] = {}
-    hero_freqs: dict[str, dict[str, float]] = {}
-    for hand in all_hands:
-        segs: list[tuple[float, str]] = []
-        freqs: dict[str, float] = {}
-        for label, weights, color in hero_actions:
-            freq = weights.get(hand, 0.0)
-            freqs[label] = freq
-            if freq > 0.0:
-                segs.append((freq, color))
-        hero_segments[hand] = segs
-        hero_freqs[hand] = freqs
+    # Build (segments, freqs) for ANY node, coloured by ACTION (fold=blue,
+    # call=green, raise=red, all-in=dark). Used for the hero AND every
+    # villain so the grids read the same way -- a villain who raised shows
+    # red, not a flat "in range" green that looks like a call.
+    def _mix_segments(
+        grid_node: PreflopDecisionNode,
+    ) -> tuple[dict[str, list[tuple[float, str]]], dict[str, dict[str, float]]]:
+        acts: list[tuple[str, dict[str, float], str]] = []
+        for opt in sorted(
+            grid_node.actions, key=lambda o: _action_order.get(o.action_type, 9)
+        ):
+            try:
+                weights = parse_range_file(opt.range_file.path)
+            except (OSError, ValueError):
+                weights = {}
+            acts.append(
+                (opt.label, weights, _action_color.get(opt.action_type, "#888888"))
+            )
+        segments: dict[str, list[tuple[float, str]]] = {}
+        freqs: dict[str, dict[str, float]] = {}
+        for hand in all_hands:
+            segs: list[tuple[float, str]] = []
+            fr: dict[str, float] = {}
+            for label, hand_weights, color in acts:
+                freq = hand_weights.get(hand, 0.0)
+                fr[label] = freq
+                if freq > 0.0:
+                    segs.append((freq, color))
+            segments[hand] = segs
+            freqs[hand] = fr
+        return segments, freqs
+
+    hero_segments, hero_freqs = _mix_segments(node)
     st.html(range_view.grid_html(hero_segments))
 
-    # --- villains already in: one single-colour grid each, labelled by the
-    #     action that produced that range ---
+    # --- villains already in: each grid is THAT player's full strategy at
+    #     the node where they acted, coloured by action (same legend as the
+    #     hero). Fixes the old flat-green grid that made a villain who RAISED
+    #     look like they were only calling. ---
     last: dict[str, tuple[ParsedAction, int]] = {}
     for a, lvl in leveled:
         if a.position == node.actor:
@@ -2900,24 +2913,25 @@ def render_ranges_page() -> None:
             continue
         last[a.position] = (a, lvl)
 
-    villain_weights: dict[str, dict[str, float]] = {}
+    villain_freqs: dict[str, dict[str, dict[str, float]]] = {}
     if last:
         st.markdown("### Players already in — their ranges")
+        st.caption(
+            "Each grid is that player's FULL strategy when it was on them "
+            "(same colour legend as above) — not just the one action that "
+            "kept them in the pot."
+        )
         for pos, (action, lvl) in last.items():
-            st.markdown(f"**{pos}** {_verb(action, lvl)} — this is {pos}'s range here")
-            try:
-                path = construct_villain_range_path(node, action, pack)
-                vw = parse_range_file(path) if path.is_file() else {}
-            except (ValueError, KeyError, OSError):
-                vw = {}
-            if not vw:
-                st.caption("range file unavailable")
+            villain_node = _villain_decision_node(node, pos, pack)
+            if villain_node is None:
+                st.caption(f"**{pos}**: decision node unavailable")
                 continue
-            villain_weights[pos] = vw
-            segs_by_hand = {
-                h: [(vw.get(h, 0.0), range_view.COLOR_INRANGE)] for h in all_hands
-            }
-            st.html(range_view.grid_html(segs_by_hand))
+            v_segments, v_freqs = _mix_segments(villain_node)
+            villain_freqs[pos] = v_freqs
+            st.markdown(
+                f"**{pos}** {_verb(action, lvl)} — their strategy with each hand"
+            )
+            st.html(range_view.grid_html(v_segments))
 
     # --- inspect one hand across everyone (the "click a cell" stand-in) ---
     st.markdown("### Inspect a hand")
@@ -2933,10 +2947,14 @@ def render_ranges_page() -> None:
             f"**{node.actor}** with **{pick}**: "
             + (" · ".join(active) if active else "not in range / pure fold")
         )
-        for pos, weights in villain_weights.items():
+        for pos, v_freqs in villain_freqs.items():
+            pos_fr = v_freqs.get(pick, {})
+            pos_active = [
+                f"{lbl} {f * 100:.1f}%" for lbl, f in pos_fr.items() if f > 0.0
+            ]
             st.markdown(
                 f"**{pos}** with **{pick}**: "
-                f"in range {weights.get(pick, 0.0) * 100:.1f}%"
+                + (" · ".join(pos_active) if pos_active else "not in range / pure fold")
             )
 
 
