@@ -544,7 +544,6 @@ def _context_column(
     pack: PreflopPack,
     stakes_bb_dollars: float,
     game_format: str,
-    display_in_bb: bool = False,
     live_or_online: str = "Online",
 ) -> str:
     """The Context column value -- short prose mirroring the postflop format.
@@ -555,20 +554,18 @@ def _context_column(
     so it's unambiguous. Venue is omitted when not Online/Live (e.g. "Not
     specified"); rake is omitted for packs without a listed note.
 
-    Core (cash, dollars): ``"<n>-Handed, <stakes>, Stacks <$stack>"``; cash
-    bb-display swaps the stack to ``<N>bb`` (the admin "Display amounts as:
-    Big blinds" toggle); tournament: ``"<n>-Handed, <N>bb stacks"``.
+    Core (cash): ``"<n>-Handed, <stakes>"``; tournament: ``"<n>-Handed"``.
+    The stack size is intentionally NOT shown here -- the dedicated
+    ``Default Stack`` column already carries it, so repeating it in the
+    Context was redundant (dropped June 2026 per Zach's feedback). This
+    also makes the Context independent of the ``display_in_bb`` toggle.
     """
     if game_format == "cash":
         sb_dollars = round(stakes_bb_dollars * pack.sb_to_bb_ratio, 2)
         stakes_str = f"{_dollars(sb_dollars)}/{_dollars(stakes_bb_dollars)}"
-        if display_in_bb:
-            stack_str = f"{pack.stack_depth_bb}bb"
-        else:
-            stack_str = _dollars(round(pack.stack_depth_bb * stakes_bb_dollars, 2))
-        core = f"{pack.table_size}-Handed, {stakes_str}, Stacks {stack_str}"
+        core = f"{pack.table_size}-Handed, {stakes_str}"
     else:
-        core = f"{pack.table_size}-Handed, {pack.stack_depth_bb}bb stacks"
+        core = f"{pack.table_size}-Handed"
 
     parts: list[str] = []
     if live_or_online in ("Online", "Live"):
@@ -649,7 +646,7 @@ def build_preflop_row(
         # LLM (Layer 6) writes the four options + correct answer +
         # explanation.
         "Context": _context_column(
-            pack, stakes_bb_dollars, game_format, display_in_bb=display_in_bb,
+            pack, stakes_bb_dollars, game_format,
             live_or_online=live_or_online,
         ),
         "Question": format_preflop_question(

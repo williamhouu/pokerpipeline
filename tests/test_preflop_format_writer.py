@@ -377,7 +377,7 @@ def test_display_in_bb_renders_big_blinds_but_keeps_cash_label() -> None:
     assert row["Cash/Tourney"] == "Cash"          # semantics unchanged
     # Venue leads (default Online); this pack_id carries a rake note.
     assert row["Context"] == (
-        "Online · 6-Handed, $0.25/$0.50, Stacks 100bb · Rake 4% / 0.3bb cap"
+        "Online · 6-Handed, $0.25/$0.50 · Rake 4% / 0.3bb cap"
     )
     assert row["User Seat"] == "SB-99.5BB-0.5BB"
     assert row["Seats"] == "BB-99BB-1BB, BTN-97.5BB-2.5BB-raise"
@@ -889,7 +889,10 @@ def test_defaults_render_cash_at_default_stakes() -> None:
     assert row["Live or Online"] == "Online"
     assert row["Default Stack"] == "$50"
     assert "$0.25/$0.50" in row["Context"]
-    assert "Stacks $50" in row["Context"]
+    # Stack is intentionally NOT in Context anymore -- it lives in the
+    # Default Stack column (asserted "$50" just above), so showing it here
+    # too was redundant (dropped June 2026).
+    assert "Stacks" not in row["Context"]
 
 
 def test_stakes_kwarg_scales_dollar_columns() -> None:
