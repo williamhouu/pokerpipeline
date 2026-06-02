@@ -2518,15 +2518,30 @@ def render_review_page() -> None:
         return
 
     # --- batch picker ---
-    labels = [
-        f"{r.filename}  ({r.questions} questions · {r.modified})"
-        for r in outputs.itertuples()
-    ]
-    paths = list(outputs["_path"])
-    pick = st.selectbox(
-        "Batch", options=range(len(labels)), format_func=lambda i: labels[i]
+    # Select by FILENAME (a stable identity), NOT list position. The list is
+    # sorted newest-modified-first, and ANY edit -- removing a question, or
+    # an auto-saved explanation/difficulty -- rewrites the CSV and bumps its
+    # mtime, which reorders the list. A positional selectbox would then
+    # silently switch you to a different batch on the next rerun (and make a
+    # just-removed question look like it "came back"). Keying on the filename
+    # keeps you on the same batch across reorders.
+    paths_by_name = dict(
+        zip(outputs["filename"], outputs["_path"], strict=True)
     )
-    csv_path = Path(paths[pick])
+    label_by_name = {
+        fn: f"{fn}  ({q} questions · {m})"
+        for fn, q, m in zip(
+            outputs["filename"], outputs["questions"], outputs["modified"],
+            strict=True,
+        )
+    }
+    picked_name = st.selectbox(
+        "Batch",
+        options=list(outputs["filename"]),
+        format_func=lambda n: label_by_name.get(n, n),
+        key="review_batch_pick",
+    )
+    csv_path = Path(paths_by_name[picked_name])
 
     try:
         df = pd.read_csv(csv_path, encoding="utf-8-sig")
