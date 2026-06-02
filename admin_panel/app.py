@@ -2481,6 +2481,24 @@ def _md_lines(text: str) -> str:
     return text.replace("\n", "  \n")
 
 
+def _autosave_review_cell(
+    csv_path: Path, no: str, widget_key: str, kind: str
+) -> None:
+    """on_change callback: persist a Review edit (explanation or difficulty)
+    straight into the batch CSV, so there's no Save button to forget.
+
+    Runs before the rerun Streamlit triggers after a widget change, so the
+    re-read of the CSV at the top of the page reflects the edit immediately.
+    """
+    value = st.session_state.get(widget_key, "")
+    if kind == "difficulty":
+        ok = review.update_difficulty(csv_path, no, str(int(value)))
+    else:
+        ok = review.update_explanation(csv_path, no, str(value))
+    if ok:
+        st.toast(f"Saved #{no}")
+
+
 def render_review_page() -> None:
     """Read each generated question in full and grade it.
 
@@ -2617,29 +2635,37 @@ def render_review_page() -> None:
             if opt:
                 st.markdown(("✅ " if opt == correct else "▫️ ") + opt)
 
-        st.markdown("**Answer Explanation** _(editable — saves into the CSV)_")
-        _orig_expl = _cell(row, "Answer Explanation")
-        _edited_expl = st.text_area(
+        st.markdown("**Answer Explanation** _(edits auto-save into the CSV)_")
+        _expl_key = f"review_expl::{csv_path.name}::{no}"
+        st.text_area(
             "Answer Explanation",
-            value=_orig_expl,
-            key=f"review_expl::{csv_path.name}::{no}",
+            value=_cell(row, "Answer Explanation"),
+            key=_expl_key,
             height=200,
             label_visibility="collapsed",
+            on_change=_autosave_review_cell,
+            args=(csv_path, no, _expl_key, "explanation"),
         )
-        if st.button(
-            "💾  Save explanation edit",
-            key=f"save_expl::{csv_path.name}::{no}",
-            disabled=(_edited_expl == _orig_expl),
-            help="Writes the edited text back into this batch's CSV on disk.",
-        ):
-            if review.update_explanation(csv_path, no, _edited_expl):
-                st.toast(f"Saved explanation for #{no}")
-                st.rerun()
-            else:
-                st.warning(f"Couldn't update #{no} (not found in the batch).")
-        # Rendered preview (suit emojis etc.) of the current saved text.
+        # Editable difficulty -- auto-saves into the CSV just like the
+        # explanation (no Save button; the on_change callback writes it).
+        _diff_key = f"review_diff::{csv_path.name}::{no}"
+        try:
+            _cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
+        except ValueError:
+            _cur_diff = 0
+        st.number_input(
+            "Difficulty Rating (edits auto-save)",
+            min_value=0,
+            max_value=3500,
+            step=10,
+            value=_cur_diff,
+            key=_diff_key,
+            on_change=_autosave_review_cell,
+            args=(csv_path, no, _diff_key, "difficulty"),
+        )
+        # Rendered preview (suit emojis etc.) of the saved explanation.
         with st.expander("Preview (rendered)", expanded=False):
-            st.info(_md_lines(_orig_expl))
+            st.info(_md_lines(_cell(row, "Answer Explanation")))
 
         st.markdown(
             f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}"

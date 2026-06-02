@@ -157,16 +157,16 @@ def remove_question(csv_path: Path, no: str | int) -> bool:
     return True
 
 
-def update_explanation(csv_path: Path, no: str | int, new_text: str) -> bool:
-    """Overwrite one question's ``Answer Explanation`` in a batch CSV, in place.
+def _update_cell(csv_path: Path, no: str | int, column: str, value: str) -> bool:
+    """Overwrite one row's ``column`` cell in a batch CSV, in place.
 
     Mirrors :func:`remove_question`: rewrites with the stdlib csv module
     (utf-8-sig, exact column order preserved). Only the matched row's
-    ``Answer Explanation`` cell changes -- every other cell, every other
-    row, and the column order are untouched -- so the file on disk stays
-    the full, directly-downloadable batch with the edit baked in.
+    ``column`` cell changes -- every other cell, every other row, and the
+    column order are untouched -- so the file on disk stays the full,
+    directly-downloadable batch with the edit baked in.
 
-    Returns True iff a row with that ``No`` was found and updated.
+    Returns True iff a row with that ``No`` was found and ``column`` exists.
     """
     if not csv_path.is_file():
         return False
@@ -174,12 +174,12 @@ def update_explanation(csv_path: Path, no: str | int, new_text: str) -> bool:
         reader = csv.DictReader(fh)
         fieldnames = reader.fieldnames or []
         rows = list(reader)
-    if "Answer Explanation" not in fieldnames:
+    if column not in fieldnames:
         return False
     found = False
     for row in rows:
         if str(row.get("No")) == str(no):
-            row["Answer Explanation"] = new_text
+            row[column] = value
             found = True
             break
     if not found:
@@ -189,6 +189,26 @@ def update_explanation(csv_path: Path, no: str | int, new_text: str) -> bool:
         writer.writeheader()
         writer.writerows(rows)
     return True
+
+
+def update_explanation(csv_path: Path, no: str | int, new_text: str) -> bool:
+    """Overwrite one question's ``Answer Explanation`` cell in place.
+
+    Thin wrapper over :func:`_update_cell`. Returns True iff the row was
+    found and updated.
+    """
+    return _update_cell(csv_path, no, "Answer Explanation", new_text)
+
+
+def update_difficulty(csv_path: Path, no: str | int, new_value: str) -> bool:
+    """Overwrite one question's ``Difficulty Rating`` cell in place.
+
+    Thin wrapper over :func:`_update_cell` -- used by the Review page's
+    inline, auto-saving difficulty editor. ``new_value`` is the rating as a
+    string (the column is integer-valued). Returns True iff the row was
+    found and updated.
+    """
+    return _update_cell(csv_path, no, "Difficulty Rating", new_value)
 
 
 def batch_meta_path(csv_path: Path) -> Path:
@@ -292,5 +312,6 @@ __all__ = [
     "review_sidecar_path",
     "save_review",
     "summarize",
+    "update_difficulty",
     "update_explanation",
 ]

@@ -199,6 +199,35 @@ def test_update_explanation_missing_no_returns_false(tmp_path: Path) -> None:
         assert list(csv.DictReader(fh))[0]["Answer Explanation"] == "x"
 
 
+def test_update_difficulty_rewrites_only_that_cell(tmp_path: Path) -> None:
+    import csv
+    csv_path = tmp_path / "b.csv"
+    fields = ["No", "Difficulty Rating", "Answer Explanation"]
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows([
+            {"No": "1", "Difficulty Rating": "1500", "Answer Explanation": "a"},
+            {"No": "2", "Difficulty Rating": "1800", "Answer Explanation": "b"},
+        ])
+    assert review.update_difficulty(csv_path, 2, "900") is True
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["Difficulty Rating"] == "1500"        # untouched
+    assert rows[1]["Difficulty Rating"] == "900"         # edited
+    assert rows[1]["Answer Explanation"] == "b"          # other cells intact
+
+
+def test_update_difficulty_missing_column_returns_false(tmp_path: Path) -> None:
+    import csv
+    csv_path = tmp_path / "b.csv"
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["No", "Answer Explanation"])
+        writer.writeheader()
+        writer.writerow({"No": "1", "Answer Explanation": "x"})
+    assert review.update_difficulty(csv_path, 1, "900") is False
+
+
 # --- batch meta sidecar (prompt tag + per-spot inputs) ---------------------
 def test_batch_meta_path_is_next_to_csv(tmp_path: Path) -> None:
     csv = tmp_path / "batch_20260601.csv"
