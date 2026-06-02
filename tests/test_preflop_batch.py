@@ -655,5 +655,42 @@ def test_node_is_unconverged_guard_against_real_pack() -> None:
     assert flagged > 0.5 * len(jam)
 
 
+def test_filter_nodes_by_player_count() -> None:
+    """player_counts keeps only nodes with that many players still in."""
+    from pipeline.preflop.batch import active_player_count, filter_nodes
+    from pipeline.preflop.grammars.types import ParsedAction
+    from pipeline.preflop.grammars.types import PreflopActionType as PT
+    from pipeline.preflop.node_enumerator import PreflopDecisionNode
+
+    def _node(actor: str, history: tuple) -> PreflopDecisionNode:
+        return PreflopDecisionNode(
+            pack_id="t", actor=actor, history_before=history, actions=()
+        )
+
+    open_node = _node("UTG", ())                                    # {UTG} = 1
+    heads_up = _node("BB", (ParsedAction("BTN", PT.RAISE, 60.0),))   # {BTN,BB} = 2
+    three_way = _node(
+        "SB", (ParsedAction("HJ", PT.RAISE, 60.0), ParsedAction("CO", PT.CALL))
+    )                                                               # {HJ,CO,SB} = 3
+    assert active_player_count(open_node) == 1
+    assert active_player_count(heads_up) == 2
+    assert active_player_count(three_way) == 3
+
+    nodes = [open_node, heads_up, three_way]
+    # Only heads-up.
+    assert filter_nodes(
+        nodes, hero_positions=None, action_contexts=None, player_counts={2}
+    ) == [heads_up]
+    # None = no filter (everything).
+    assert filter_nodes(
+        nodes, hero_positions=None, action_contexts=None, player_counts=None
+    ) == nodes
+    # Open + three-way.
+    kept = filter_nodes(
+        nodes, hero_positions=None, action_contexts=None, player_counts={1, 3}
+    )
+    assert kept == [open_node, three_way]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

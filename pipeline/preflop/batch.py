@@ -273,24 +273,47 @@ def node_action_context(node: PreflopDecisionNode) -> str:
     return "Facing 4-bet+"
 
 
+def active_player_count(node: PreflopDecisionNode) -> int:
+    """Players still in the pot at this decision (incl. hero).
+
+    Node-level twin of ``concept_tags._non_fold_actor_count``: unique
+    non-fold positions in the history plus the actor. 2 = heads-up,
+    3 = three-way, etc. Used by the player-count filter so the user can
+    ask for, say, only 3- or 4-way spots instead of the deep bloodbaths.
+    """
+    positions = {
+        a.position
+        for a in node.history_before
+        if a.action_type is not PreflopActionType.FOLD
+    }
+    positions.add(node.actor)
+    return len(positions)
+
+
 def filter_nodes(
     nodes: Iterable[PreflopDecisionNode],
     *,
     hero_positions: Iterable[str] | None,
     action_contexts: Iterable[str] | None,
+    player_counts: Iterable[int] | None = None,
 ) -> list[PreflopDecisionNode]:
-    """Apply the UI position + action-context filters to a node iterable.
+    """Apply the UI position / action-context / player-count filters.
 
     None / empty filter = "include everything"; mirrors the admin panel
     behavior where an empty multiselect means "no filter on this axis".
+    ``player_counts`` keeps only nodes with that many players still in the
+    pot (e.g. ``{2, 3}`` for heads-up + three-way only).
     """
     pos_set = set(hero_positions) if hero_positions else None
     ctx_set = set(action_contexts) if action_contexts else None
+    count_set = set(player_counts) if player_counts else None
     out: list[PreflopDecisionNode] = []
     for node in nodes:
         if pos_set is not None and node.actor not in pos_set:
             continue
         if ctx_set is not None and node_action_context(node) not in ctx_set:
+            continue
+        if count_set is not None and active_player_count(node) not in count_set:
             continue
         out.append(node)
     return out
@@ -392,6 +415,7 @@ def generate_preflop_batch(
     total_questions: int,
     hero_positions: Iterable[str] | None = None,
     action_contexts: Iterable[str] | None = None,
+    player_counts: Iterable[int] | None = None,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
     min_difficulty: int = DIFFICULTY_MIN,
@@ -482,11 +506,12 @@ def generate_preflop_batch(
     # 1. Enumerate the pack's nodes once.
     nodes = enumerate_nodes([pack])
 
-    # 2. Filter by position + action context.
+    # 2. Filter by position + action context + player count.
     filtered_nodes = filter_nodes(
         nodes,
         hero_positions=hero_positions,
         action_contexts=action_contexts,
+        player_counts=player_counts,
     )
 
     # 3. Collect worthy spots (presence + freq window).

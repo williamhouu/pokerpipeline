@@ -99,6 +99,7 @@ from pipeline.preflop.batch import (  # noqa: E402
     DIFFICULTY_MAX,
     DIFFICULTY_MIN,
     BatchResult,
+    active_player_count,
     generate_preflop_batch,
     node_action_context,
 )
@@ -1006,14 +1007,29 @@ def _render_generate_page_preflop() -> None:
             default=["Facing single raise", "Facing 3-bet"],
             help="What hero is responding to. Empty = include all.",
         )
+        player_counts = st.multiselect(
+            "Players in the pot",
+            options=[1, 2, 3, 4, 5, 6],
+            default=[1, 2, 3, 4, 5, 6],
+            format_func=lambda n: (
+                "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
+            ),
+            help="How many players are still in at hero's decision. Narrow "
+                 "this (e.g. just 3) for clean three-way spots instead of deep "
+                 "multiway bloodbaths. Empty = include all.",
+        )
 
-    # Filter the node catalog by both filters; show a live count.
+    # Filter the node catalog by all three filters; show a live count.
+    _count_set = set(player_counts) if player_counts else None
     filtered_nodes: list[PreflopDecisionNode] = []
     for actor in hero_positions:
         for node in nodes_by_actor.get(actor, ()):
             ctx = node_action_context(node)
-            if not action_contexts or ctx in action_contexts:
-                filtered_nodes.append(node)
+            if action_contexts and ctx not in action_contexts:
+                continue
+            if _count_set is not None and active_player_count(node) not in _count_set:
+                continue
+            filtered_nodes.append(node)
     st.caption(
         f"**{len(filtered_nodes):,}** decision nodes match these filters "
         f"(of {total_nodes:,} total)."
@@ -1359,6 +1375,7 @@ def _render_generate_page_preflop() -> None:
             pack=packs[0],
             hero_positions=list(hero_positions),
             action_contexts=list(action_contexts),
+            player_counts=list(player_counts),
             freq_min=freq_low / 100.0,
             freq_max=freq_high / 100.0,
             min_difficulty=int(band_low),
@@ -1377,11 +1394,12 @@ def _render_generate_page_preflop() -> None:
         )
 
 
-def _start_preflop_job(
+def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-through
     *,
     pack: PreflopPack,
     hero_positions: list[str],
     action_contexts: list[str],
+    player_counts: list[int],
     freq_min: float,
     freq_max: float,
     min_difficulty: int,
@@ -1448,6 +1466,7 @@ def _start_preflop_job(
             total_questions=total_questions,
             hero_positions=hero_positions,
             action_contexts=action_contexts,
+            player_counts=player_counts,
             min_frequency=freq_min,
             max_frequency=freq_max,
             min_difficulty=min_difficulty,
