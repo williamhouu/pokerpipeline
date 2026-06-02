@@ -17,7 +17,7 @@ from admin_panel import compare  # noqa: E402
 def _row(node: str, hand: str, expl: str) -> dict[str, str]:
     return {
         "solver_reference": f"pack/CO/{node}",
-        "hand_class": hand,
+        "User Cards": hand,  # spot join keys on the hole cards (June 2026)
         "Answer Explanation": expl,
     }
 

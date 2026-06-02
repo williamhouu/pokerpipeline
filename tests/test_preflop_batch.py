@@ -394,8 +394,8 @@ def test_random_seed_makes_sampling_deterministic(tmp_path: Path) -> None:
         with open(out, newline="", encoding="utf-8-sig") as handle:
             reader = csv.reader(handle)
             next(reader)  # header
-            user_seat_idx = CSV_COLUMNS.index("hand_class")
-            return [r[user_seat_idx] for r in reader]
+            hand_col_idx = CSV_COLUMNS.index("User Cards")
+            return [r[hand_col_idx] for r in reader]
 
     assert _run(7) == _run(7)
 

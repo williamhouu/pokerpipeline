@@ -60,18 +60,24 @@ def test_column_structure():
              player's range -- multiway-capable, supersedes ip/oop).
       * 42 = -ip_range -oop_range (dropped May 2026: superseded by the
              `ranges` column, which is a strict superset).
+      * 40 = -difficulty_bumps (always empty -- BUMP_RULES unpopulated)
+             -hand_class (duplicated User Cards on preflop); Notes moved
+             to sit right before ev_gap_bb. (June 2026.)
     """
-    assert len(CSV_COLUMNS) == 42
+    assert len(CSV_COLUMNS) == 40
+    assert "hand_class" not in CSV_COLUMNS
+    assert "difficulty_bumps" not in CSV_COLUMNS
     assert CSV_COLUMNS[0] == "No"
     # ip_range/oop_range are gone; ranges carries every active player's range.
     assert "ip_range" not in CSV_COLUMNS and "oop_range" not in CSV_COLUMNS
     assert "ranges" in CSV_COLUMNS
     # tag_1/2/3 are gone.
     assert "tag_1" not in CSV_COLUMNS
-    # Cluster after Difficulty Rating: skills, action_frequencies, ev_gap_bb.
+    # Cluster after Difficulty Rating: skills, action_frequencies, then
+    # Notes (moved here June 2026), then ev_gap_bb.
     diff_i = CSV_COLUMNS.index("Difficulty Rating")
-    assert CSV_COLUMNS[diff_i + 1:diff_i + 4] == [
-        "skills", "action_frequencies", "ev_gap_bb"]
+    assert CSV_COLUMNS[diff_i + 1:diff_i + 5] == [
+        "skills", "action_frequencies", "Notes", "ev_gap_bb"]
     # Position Matchup right after concept_tags; ranges right after it.
     # The QA/provenance cluster follows the strategic frame:
     # archetype -> board_texture -> solver_reference -> validation_status.
@@ -80,13 +86,17 @@ def test_column_structure():
     arch_i = CSV_COLUMNS.index("archetype")
     assert CSV_COLUMNS[arch_i:arch_i + 4] == [
         "archetype", "board_texture", "solver_reference", "validation_status"]
-    # hand_class then Notes close out the row.
-    assert CSV_COLUMNS[-2:] == ["hand_class", "Notes"]
+    # The four difficulty diagnostic axes close out the row (hand_class +
+    # difficulty_bumps dropped June 2026; Notes moved up before ev_gap_bb).
+    assert CSV_COLUMNS[-4:] == [
+        "easy_freq", "easy_ev", "easy_concept", "easy_hand"]
+    # Notes now sits right before ev_gap_bb.
+    assert CSV_COLUMNS[CSV_COLUMNS.index("ev_gap_bb") - 1] == "Notes"
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 42
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 40
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""
@@ -104,7 +114,6 @@ def test_no_and_validation_status():
 def test_new_pipeline_columns():
     row = build_row(_spot(), 1500, 1)
     assert row["concept_tags"] == "single_raised_pot, range_advantage_hero"
-    assert row["hand_class"] == "top_pair_top_kicker_no_draws"
     # board_texture is the 3-axis string, not the composite word.
     assert row["board_texture"] == "two_tone_disconnected_middling"
     # solver_reference is a descriptive cache path, not a Pio node id.

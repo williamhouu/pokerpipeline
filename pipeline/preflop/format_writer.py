@@ -740,8 +740,6 @@ def build_preflop_row(
             empty strings where the preflop path doesn't yet compute the
             field).
     """
-    spot = facts.spot
-
     # The 7 "table-state" columns (User Seat / User Cards / Cards on Table
     # / Table Size / Default Stack / Seats / POT) in the Runout app's exact
     # poker-table format -- seat-stack-amount-action tokens the app renders
@@ -809,9 +807,6 @@ def build_preflop_row(
         # frame the explanation; Layer 7 validators check the prose
         # mentions tags it should.
         "concept_tags": ", ".join(compute_concept_tags(facts)),
-        # hand_class: the 169-class label (e.g. "AKo"), not the postflop
-        # made-hand + draw breakdown.
-        "hand_class": spot.hero_hand_class,
         # board_texture: empty (no board preflop).
         "board_texture": "",
         "solver_reference": _solver_reference(facts, pack),
@@ -862,10 +857,6 @@ def build_preflop_row(
         ),
         "easy_concept": f"{difficulty.easy_concept:.3f}",
         "easy_hand": f"{difficulty.easy_hand:.3f}",
-        # Names of any BUMP_RULES that fired for this spot. Currently
-        # the table is empty so this is always ''; populated as bumps
-        # are added in pipeline.preflop.difficulty.BUMP_RULES.
-        "difficulty_bumps": ", ".join(difficulty.bumps_applied),
     }
 
 

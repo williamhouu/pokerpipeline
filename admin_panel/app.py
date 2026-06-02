@@ -1519,17 +1519,20 @@ difficulty = round(clip(3000 − easy × 2500, 400, 3200))
 ```
 
 Result: an integer in roughly [500, 3000] (with rare ±100-200 outliers
-in [400, 3200]). The four per-axis values + any bump names that fired
-are surfaced as diagnostic columns in the output CSV
-(`easy_freq`, `easy_ev`, `easy_concept`, `easy_hand`, `difficulty_bumps`)
-so reviewers can see exactly why a spot got its score.
+in [400, 3200]). The four per-axis values are surfaced as the
+diagnostic CSV columns **`easy_freq`, `easy_ev`, `easy_concept`,
+`easy_hand`** (each in [0, 1] -- **1 = easy** on that axis, **0 =
+hard**) so a reviewer can see exactly which axis made a spot easy or
+hard. Each axis below names its column. (Bump deltas still nudge the
+score internally, but `difficulty_bumps` is no longer a CSV column --
+dropped June 2026 since the bump table ships empty.)
 """
     )
 
     # --- axis 1: freq ---
     st.markdown(
         f"""
-### Axis 1 — Top action frequency &nbsp;·&nbsp; weight **{W_FREQ:.0%}**
+### Axis 1 — Top action frequency · CSV `easy_freq` &nbsp;·&nbsp; weight **{W_FREQ:.0%}**
 
 How dominant the correct answer is in Pio's strategy. Lower freq =
 more genuinely mixed = harder to identify the "right" answer.
@@ -1552,7 +1555,7 @@ easy_freq = clip((dominant_freq − 0.55) / 0.45, 0, 1)
     # --- axis 2: ev ---
     st.markdown(
         f"""
-### Axis 2 — EV gap &nbsp;·&nbsp; weight **{W_EV:.0%}**
+### Axis 2 — EV gap · CSV `easy_ev` &nbsp;·&nbsp; weight **{W_EV:.0%}**
 
 The chip cost (in bb) of picking the second-best action over the
 correct one. Bigger gap = clearer "right answer" = easier spot.
@@ -1582,7 +1585,7 @@ mid-difficulty.
     # --- axis 3: concept ---
     st.markdown(
         f"""
-### Axis 3 — Concept &nbsp;·&nbsp; weight **{W_CONCEPT:.0%}**
+### Axis 3 — Concept · CSV `easy_concept` &nbsp;·&nbsp; weight **{W_CONCEPT:.0%}**
 
 How strategically complex the spot's CONTEXT is. Built from two
 pieces: the spot's `archetype` (one of 16 from
@@ -1623,7 +1626,7 @@ easy_concept = ARCHETYPE_BASE_EASE[archetype]
     # --- axis 4: hand ---
     st.markdown(
         f"""
-### Axis 4 — Hand class &nbsp;·&nbsp; weight **{W_HAND:.0%}**
+### Axis 4 — Hand class · CSV `easy_hand` &nbsp;·&nbsp; weight **{W_HAND:.0%}**
 
 The hero's hand class shapes how obvious the right action is.
 **U-shaped**: extreme hands (premium pairs OR clear trash) are easy;
@@ -2423,7 +2426,6 @@ def render_browse_page() -> None:
             st.markdown("**Meta**")
             st.text(f"Difficulty:    {row['Difficulty Rating']}")
             st.text(f"EV gap (bb):   {row['ev_gap_bb']}")
-            st.text(f"Hand class:    {row['hand_class']}")
             st.text(f"Board texture: {row['board_texture']}")
             st.text(f"Action freq:   {row['action_frequencies']}")
 
@@ -2590,7 +2592,6 @@ def render_review_page() -> None:
         for col, label in (
             ("archetype", "archetype"),
             ("ev_gap_bb", "EV gap"),
-            ("hand_class", "hand"),
             ("Position Matchup", "matchup"),
             ("Pot Participant", "pot"),
         ):
@@ -2637,7 +2638,7 @@ def render_review_page() -> None:
             if _meta:
                 _q = review.meta_question_for(
                     _meta,
-                    hand_class=_cell(row, "hand_class"),
+                    user_cards=_cell(row, "User Cards"),
                     solver_reference=_cell(row, "solver_reference"),
                 )
             if _meta is None or _q is None:
@@ -3180,7 +3181,6 @@ def render_compare_page() -> None:
             for col, lbl in (
                 ("archetype", "archetype"),
                 ("ev_gap_bb", "EV gap"),
-                ("hand_class", "hand"),
                 ("Difficulty Rating", "difficulty"),
                 ("Position Matchup", "matchup"),
                 ("Pot Participant", "pot"),

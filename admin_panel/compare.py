@@ -5,7 +5,7 @@ different prompts; this module joins their rows spot-by-spot and tracks a
 win / lose / tie verdict per spot in a sidecar JSON next to batch A's CSV.
 
 No Streamlit here -- unit-testable, same split as :mod:`admin_panel.review`.
-Verdicts are keyed by a stable per-spot key (node_id + hand_class) rather
+Verdicts are keyed by a stable per-spot key (node_id + User Cards) rather
 than row order, so a generation failure on one side can't misalign the join.
 """
 
@@ -23,13 +23,15 @@ def _node_id(solver_reference: str) -> str:
     return solver_reference.rsplit("/", 1)[-1] if solver_reference else ""
 
 
-def spot_key(solver_reference: str, hand_class: str) -> str:
+def spot_key(solver_reference: str, user_cards: str) -> str:
     """Stable per-spot key joining the two batches + keying verdicts.
 
-    A spot is uniquely (node_id, hand_class); using that rather than the
-    ``No`` column means the join survives row reordering / a missing row.
+    A spot is uniquely (node_id, hero hole cards); using that rather than
+    the ``No`` column means the join survives row reordering / a missing
+    row. Keyed on ``User Cards`` (the exact combo) rather than the old
+    ``hand_class`` label, which was dropped from the CSV June 2026.
     """
-    return f"{_node_id(solver_reference)}|{hand_class}"
+    return f"{_node_id(solver_reference)}|{user_cards}"
 
 
 def join_by_spot(
@@ -43,13 +45,13 @@ def join_by_spot(
     prompt) are skipped so the comparison only shows true head-to-heads.
     """
     b_by_key: dict[str, dict[str, str]] = {
-        spot_key(r.get("solver_reference", ""), r.get("hand_class", "")): r
+        spot_key(r.get("solver_reference", ""), r.get("User Cards", "")): r
         for r in rows_b
     }
     out: list[tuple[str, dict[str, str], dict[str, str]]] = []
     for row_a in rows_a:
         key = spot_key(
-            row_a.get("solver_reference", ""), row_a.get("hand_class", "")
+            row_a.get("solver_reference", ""), row_a.get("User Cards", "")
         )
         row_b = b_by_key.get(key)
         if row_b is not None:

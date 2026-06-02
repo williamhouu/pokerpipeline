@@ -647,8 +647,14 @@ def _prompt_record(spot: PreflopSpot, parts: dict[str, object]) -> dict[str, obj
     gold block are stored once at the batch level) plus the node / hand id
     so the inspector can label each row.
     """
+    from pipeline.preflop.app_table_format import _format_user_cards
+
     return {
         "node_id": spot.node.node_id,
+        # user_cards is the Review/inspector join key (matches the CSV's
+        # "User Cards" column); hand_class kept for reference. (June 2026:
+        # hand_class was dropped from the CSV, so user_cards is now the key.)
+        "user_cards": _format_user_cards(spot.hero_card_combo),
         "hand_class": spot.hero_hand_class,
         "framing": parts["framing"],
         "options": parts["options"],

@@ -182,16 +182,20 @@ def load_batch_meta(csv_path: Path) -> dict[str, object] | None:
 def meta_question_for(
     meta: dict[str, object],
     *,
-    hand_class: str,
+    user_cards: str,
     solver_reference: str,
 ) -> dict[str, object] | None:
     """Find the meta question record matching one CSV row.
 
-    Matches on (node_id, hand_class) -- a spot's unique key -- rather than
+    Matches on (node_id, User Cards) -- a spot's unique key -- rather than
     the ``No`` column, so the join survives the Review page's
     remove-question feature (which leaves gaps in ``No``). ``node_id`` is
     matched as a substring of the row's ``solver_reference``
     (``<pack>/<actor>/<node_id>``), which is robust to path-format changes.
+    Keyed on the hero hole cards (``user_cards``) rather than the old
+    ``hand_class`` label, which was dropped from the CSV June 2026; batches
+    generated before that change have no ``user_cards`` in their meta and so
+    won't match (the inspector shows "no metadata", which is graceful).
     """
     questions = meta.get("questions")
     if not isinstance(questions, list):
@@ -203,7 +207,7 @@ def meta_question_for(
         if (
             q_node
             and q_node in solver_reference
-            and str(q.get("hand_class", "")) == hand_class
+            and str(q.get("user_cards", "")) == user_cards
         ):
             return q
     return None

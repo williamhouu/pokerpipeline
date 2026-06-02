@@ -245,6 +245,9 @@ def test_column_structure() -> None:
              range -- multiway-capable). (May 2026.)
       * 42: - ip_range -oop_range (dropped; superseded by `ranges`).
              (May 2026.)
+      * 40: - difficulty_bumps (always empty -- BUMP_RULES unpopulated)
+             - hand_class (duplicated User Cards on preflop); Notes
+             moved to before ev_gap_bb. (June 2026.)
     """
     row = build_preflop_row(
         _facing_open_facts(),
@@ -254,7 +257,7 @@ def test_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 42
+    assert len(row) == 40
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""
@@ -533,19 +536,6 @@ def test_ranges_full_mix_against_real_pack() -> None:
     # The villain (UTG) chart is their OPENING range: AA opens, 72o absent.
     assert "raise" in ranges["UTG"]["AA"]
     assert "72o" not in ranges["UTG"]
-
-
-def test_hand_class_is_169_label() -> None:
-    """Preflop hand_class is the 169-class label (AKo), not a postflop
-    made-hand breakdown."""
-    row = build_preflop_row(
-        _facing_open_facts(),
-        _explanation(),
-        pack=_pack(),
-        difficulty=_difficulty(1500),
-        number=1,
-    )
-    assert row["hand_class"] == "AQs"
 
 
 def test_board_texture_is_empty_preflop() -> None:

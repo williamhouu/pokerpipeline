@@ -62,6 +62,8 @@ CSV_COLUMNS = [
     "skills",
     # Ryan-feedback Fix 3 (Apr 2026): "fold: 10%, call: 60%, raise: 20%, all-in: 10%".
     "action_frequencies",
+    # Provenance string -- moved here (right before ev_gap_bb) June 2026.
+    "Notes",
     "ev_gap_bb",
     # Raw computational tags (5-10/question) -- the LLM-input + retrieval key.
     "concept_tags",
@@ -97,15 +99,11 @@ CSV_COLUMNS = [
     # algorithm. Each axis is a [0, 1] value where 1 = "easy on this
     # dimension". `easy_ev` is empty when the EV engine couldn't
     # score the spot (raise-involved spots in v1).
-    # `difficulty_bumps` names any rules from
-    # pipeline.preflop.difficulty.BUMP_RULES that fired for this spot
-    # (empty when no bumps are active in the table -- currently the
-    # default state).
+    # (`difficulty_bumps` and `hand_class` columns were dropped June 2026:
+    # bumps were always empty since BUMP_RULES is unpopulated, and
+    # hand_class duplicated User Cards on preflop rows. `Notes` moved up to
+    # sit right before `ev_gap_bb`.)
     "easy_freq", "easy_ev", "easy_concept", "easy_hand",
-    "difficulty_bumps",
-    # hand_class then Notes close out the row (May 2026 reorg).
-    "hand_class",
-    "Notes",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -308,7 +306,6 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # The new pipeline columns.
         "concept_tags": ", ".join(spot_data.concept_tags),
         "Position Matchup": meta.position_dynamic or _TBD,
-        "hand_class": spot_data.hand_class.label if spot_data.hand_class else "",
         "board_texture": _board_texture_string(spot_data.board_texture),
         "solver_reference": _solver_reference(meta),
         "ev_gap_bb": f"{decision.ev_gap_bb:.2f}",
@@ -336,7 +333,6 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # When postflop generation is re-architected to use the
         # 4-axis algorithm, this row builder will populate these.
         "easy_freq": "", "easy_ev": "", "easy_concept": "", "easy_hand": "",
-        "difficulty_bumps": "",
     }
 
 

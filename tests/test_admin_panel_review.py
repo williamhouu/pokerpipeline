@@ -192,12 +192,12 @@ def test_load_batch_meta_round_trip(tmp_path: Path) -> None:
 def test_meta_question_for_matches_on_node_and_hand() -> None:
     meta: dict[str, object] = {
         "questions": [
-            {"node_id": "NODE_A", "hand_class": "AKs", "live_block": "LA"},
-            {"node_id": "NODE_B", "hand_class": "QQ", "live_block": "LB"},
+            {"node_id": "NODE_A", "user_cards": "Ah, Ks", "live_block": "LA"},
+            {"node_id": "NODE_B", "user_cards": "Qh, Qd", "live_block": "LB"},
         ],
     }
     q = review.meta_question_for(
-        meta, hand_class="QQ", solver_reference="pack/BTN/NODE_B"
+        meta, user_cards="Qh, Qd", solver_reference="pack/BTN/NODE_B"
     )
     assert q is not None
     assert q["live_block"] == "LB"
@@ -205,19 +205,19 @@ def test_meta_question_for_matches_on_node_and_hand() -> None:
 
 def test_meta_question_for_no_match_returns_none() -> None:
     meta: dict[str, object] = {
-        "questions": [{"node_id": "NODE_A", "hand_class": "AKs", "live_block": "LA"}],
+        "questions": [{"node_id": "NODE_A", "user_cards": "Ah, Ks", "live_block": "LA"}],
     }
     # Right hand, wrong node.
     assert (
         review.meta_question_for(
-            meta, hand_class="AKs", solver_reference="pack/BTN/NODE_Z"
+            meta, user_cards="Ah, Ks", solver_reference="pack/BTN/NODE_Z"
         )
         is None
     )
     # Right node, wrong hand.
     assert (
         review.meta_question_for(
-            meta, hand_class="QQ", solver_reference="pack/BTN/NODE_A"
+            meta, user_cards="Qh, Qd", solver_reference="pack/BTN/NODE_A"
         )
         is None
     )
@@ -226,7 +226,7 @@ def test_meta_question_for_no_match_returns_none() -> None:
 def test_meta_question_for_handles_missing_questions() -> None:
     assert (
         review.meta_question_for(
-            {}, hand_class="AKs", solver_reference="pack/BTN/NODE_A"
+            {}, user_cards="Ah, Ks", solver_reference="pack/BTN/NODE_A"
         )
         is None
     )
