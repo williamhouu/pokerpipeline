@@ -214,7 +214,9 @@ _ARCHETYPES_4BET = frozenset({"4bet_for_value", "4bet_as_bluff"})
 _ARCHETYPES_5BET = frozenset({"5bet_for_value", "5bet_as_bluff"})
 _ARCHETYPES_SQUEEZE = frozenset({"squeeze_for_value", "squeeze_as_bluff"})
 _ARCHETYPES_OPEN = frozenset({"open_for_value", "fold_outranged"})
-_ARCHETYPES_CALL = frozenset({"call_for_value", "call_for_implied_odds"})
+_ARCHETYPES_CALL = frozenset(
+    {"call_for_value", "call_for_implied_odds", "call_allin"}
+)
 _ARCHETYPES_ALL_IN = frozenset({"all_in_for_value", "all_in_as_bluff"})
 _ARCHETYPES_FOLD = frozenset({"fold_dominated", "fold_pot_odds"})
 

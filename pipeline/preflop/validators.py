@@ -53,6 +53,7 @@ from pipeline.explanation_generator import (
     GeneratedExplanation,
 )
 from pipeline.preflop.fact_extractor import PreflopFacts
+from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.options import canonicalize_strategy
 
 # Minimum conditional frequency for an option to count as a valid
@@ -402,6 +403,62 @@ def validate_banned_phrases(
     return PreflopValidationResult.ok()
 
 
+# Concepts that are impossible once the money is all-in preflop -- the hand
+# goes straight to showdown with no further betting. Deliberately NARROW
+# (not a general "no postflop words" ban -- that was removed for
+# false-positiving): mentioning that flush/straight outs add to your SHOWDOWN
+# equity on the runout is fine; "implied odds" / "postflop play" is not.
+_BANNED_ON_ALLIN = (
+    "implied odds",
+    "implied-odds",
+    "postflop",
+    "post-flop",
+    "later streets",
+    "future streets",
+)
+
+
+def validate_no_postflop_on_allin(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> PreflopValidationResult:
+    """On an all-in spot, ban implied-odds / postflop framing.
+
+    When the money is all-in preflop there are no future streets: the hand
+    is a pure pot-odds-vs-equity decision. The screenshot bug was an all-in
+    call whose explanation talked about implied odds, chasing draws to stack
+    callers postflop -- impossible. Runs ONLY on all-in spots (so it can't
+    false-positive on normal preflop playability talk), and the message
+    steers the model back to a pot-odds frame.
+    """
+    node = facts.spot.node
+    is_allin = (
+        facts.archetype == "call_allin"
+        or any(
+            a.action_type is PreflopActionType.ALL_IN
+            for a in node.history_before
+        )
+        or "allin" in (facts.spot.dominant_action or "").lower().replace(" ", "")
+    )
+    if not is_allin:
+        return PreflopValidationResult.ok()
+
+    text = (generated.answer_explanation or "").lower()
+    hits = [phrase for phrase in _BANNED_ON_ALLIN if phrase in text]
+    if hits:
+        return PreflopValidationResult.fail(
+            "this is an ALL-IN spot -- the hand is decided at showdown with no "
+            "further betting, so framing it around "
+            + ", ".join(repr(h) for h in hits)
+            + " is wrong. Reframe purely around pot odds vs raw equity: the "
+            "price you're getting and whether your equity against the all-in "
+            "range clears it. (It's fine to note that flush/straight outs add "
+            "to your SHOWDOWN equity on the runout -- just not implied odds or "
+            "postflop play.)"
+        )
+    return PreflopValidationResult.ok()
+
+
 # --- runner -----------------------------------------------------------------
 def run_preflop_audit_validators(
     generated: GeneratedExplanation,
@@ -424,6 +481,7 @@ def run_preflop_audit_validators(
         validate_option_set,
         validate_no_standalone_sometimes,
         validate_composite_label_frequencies,
+        validate_no_postflop_on_allin,
         validate_banned_phrases,
     ):
         result = check(generated, facts)
@@ -437,6 +495,7 @@ __all__ = [
     "run_preflop_audit_validators",
     "validate_banned_phrases",
     "validate_composite_label_frequencies",
+    "validate_no_postflop_on_allin",
     "validate_no_standalone_sometimes",
     "validate_option_set",
 ]

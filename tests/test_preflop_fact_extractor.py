@@ -471,6 +471,29 @@ def test_archetype_call_for_value():
     assert arch == "call_for_value"
 
 
+def test_archetype_call_allin_facing_a_jam():
+    """Calling an all-in -> call_allin (a pure pot-odds spot), NOT
+    call_for_implied_odds -- there are no future streets to realize equity on,
+    so the implied-odds / draw-chasing frame would be nonsense."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("CO", PreflopActionType.ALL_IN),
+    )
+    spot = _spot_with("Call", {"Call": 1.0, "Fold": 0.0}, history)
+    # 40% equity would otherwise route to call_for_implied_odds; the all-in
+    # in the history overrides that.
+    arch = classify_archetype(spot, history[1], hero_equity_vs_villain=0.40)
+    assert arch == "call_allin"
+
+
+def test_archetype_call_for_implied_odds_when_no_jam():
+    """A speculative call of a RAISE (no all-in) still -> call_for_implied_odds."""
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
+    spot = _spot_with("Call", {"Call": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.40)
+    assert arch == "call_for_implied_odds"
+
+
 def test_archetype_all_in_for_value():
     """Dominant AllIn with positive equity -> all_in_for_value."""
     history = (

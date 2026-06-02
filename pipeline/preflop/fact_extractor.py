@@ -522,6 +522,18 @@ def classify_archetype(
         return "fold_pot_odds"  # folding despite some equity = wrong-priced
 
     if dominant == "Call":
+        # Calling an all-in means no future streets -- it's a pure pot-odds /
+        # raw-equity decision, NOT implied odds or postflop play. At 100bb an
+        # all-in caps the betting, so once one exists in the history any call
+        # here is an all-in call. (June 2026: previously these got
+        # call_for_implied_odds, whose frame told the LLM to talk about
+        # chasing draws / stacking villains in spots where everyone is already
+        # all-in.)
+        if any(
+            a.action_type is PreflopActionType.ALL_IN
+            for a in spot.node.history_before
+        ):
+            return "call_allin"
         return value_or_bluff("call_for_value", "call_for_implied_odds")
 
     if dominant == "AllIn":

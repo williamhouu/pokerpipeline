@@ -127,6 +127,7 @@ ARCHETYPE_BASE_EASE: dict[str, float] = {
     "fold_pot_odds":          0.60,
     "call_for_value":         0.60,
     "call_for_implied_odds":  0.55,
+    "call_allin":             0.55,
     "3bet_for_value":         0.50,
     "3bet_as_bluff":          0.45,
     "squeeze_for_value":      0.30,

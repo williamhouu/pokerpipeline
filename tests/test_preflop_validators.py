@@ -30,6 +30,7 @@ from pipeline.preflop.validators import (  # noqa: E402
     run_preflop_audit_validators,
     validate_banned_phrases,
     validate_composite_label_frequencies,
+    validate_no_postflop_on_allin,
     validate_no_standalone_sometimes,
     validate_option_set,
 )
@@ -42,6 +43,7 @@ def _facts(
     dominant_action: str = "Call",
     dominant_frequency: float = 0.66,
     actor: str = "BB",
+    archetype: str = "call_for_value",
 ) -> PreflopFacts:
     """Minimal PreflopFacts. Default: BB facing a BTN open, 66/34 call/fold."""
     if action_frequencies is None:
@@ -72,7 +74,7 @@ def _facts(
             top_combos=(),
         ),
         hero_equity_vs_villain=0.55,
-        archetype="call_for_value",
+        archetype=archetype,
     )
 
 
@@ -262,6 +264,39 @@ def test_banned_phrases_passes_clean_prose() -> None:
               "blockers and dominate villain's weaker calls.",
     )
     result = validate_banned_phrases(generated, _facts())
+    assert result.is_valid, result.error_message
+
+
+# --- validate_no_postflop_on_allin ----------------------------------------
+def test_no_postflop_on_allin_fails_on_implied_odds() -> None:
+    """On an all-in spot, implied-odds / postflop framing is rejected."""
+    facts = _facts(archetype="call_allin")
+    generated = _gen(
+        prose="The real reason to call is implied odds: you can chase flushes "
+              "and stack a caller on later streets.")
+    result = validate_no_postflop_on_allin(generated, facts)
+    assert not result.is_valid
+    assert "implied odds" in result.error_message.lower()
+
+
+def test_no_postflop_on_allin_passes_pot_odds_prose() -> None:
+    """An all-in spot framed around pot odds + showdown equity passes -- even
+    mentioning flush/straight outs (legit showdown equity on the runout)."""
+    facts = _facts(archetype="call_allin")
+    generated = _gen(
+        prose="You need about 23% equity and you have 40% against the shoving "
+              "range, so the price is right. Your flush and straight outs add "
+              "to your equity on the runout.")
+    result = validate_no_postflop_on_allin(generated, facts)
+    assert result.is_valid, result.error_message
+
+
+def test_no_postflop_on_allin_skips_non_allin_spots() -> None:
+    """On a normal (non-all-in) call, 'implied odds' is fine -> validator skips."""
+    facts = _facts(archetype="call_for_implied_odds")  # facing a raise, not a jam
+    generated = _gen(
+        prose="The reason to call is implied odds with this speculative hand.")
+    result = validate_no_postflop_on_allin(generated, facts)
     assert result.is_valid, result.error_message
 
 

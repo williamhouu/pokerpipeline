@@ -223,6 +223,15 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "implied odds + position: the hand is a -EV preflop call that "
         "becomes profitable through realizing equity postflop."
     ),
+    "call_allin": (
+        "Hero is calling an ALL-IN: the money goes in preflop and the hand is "
+        "decided at showdown, so there is NO postflop play. Frame the "
+        "explanation purely around pot odds vs raw equity -- the price hero is "
+        "getting and whether hero's equity against the all-in range clears it. "
+        "Do NOT mention implied odds, realizing equity postflop, "
+        "drawing/chasing flushes or straights, or stacking anyone: there are "
+        "no future streets."
+    ),
     "all_in_for_value": (
         "Hero is shoving (or calling all-in) with a hand that wants action "
         "from villain's calling range. Rare preflop, usually short-stack "
