@@ -2609,6 +2609,15 @@ def render_review_page() -> None:
     no = str(row["No"])
     existing = reviews.get(no, {})
 
+    # Persistent confirmation of the last removal. After a remove the view
+    # shifts to the NEXT question (it slides into this slot) and remaining
+    # questions keep their original numbers (gaps are intentional), so spell
+    # out exactly what happened -- otherwise it looks like the wrong question
+    # was removed or things got reordered.
+    _removed = st.session_state.pop("_review_last_removed", None)
+    if _removed is not None and str(_removed) != no:
+        st.success(f"🗑 Removed #{_removed}. Now showing #{no}.")
+
     # --- the question card ---
     with st.container(border=True):
         h1, h2, h3, h4 = st.columns([1, 2, 2, 2])
@@ -2771,30 +2780,28 @@ def render_review_page() -> None:
     if g3.button("❌ Reject", use_container_width=True):
         _grade("rejected")
 
-    # --- remove from batch (destructive: edits the CSV) ---
+    # --- remove from batch: ONE click (destructive -- edits the CSV -- but
+    #     recoverable by regenerating). No confirm gate by request; the
+    #     button names the # it'll remove and the persistent note up top
+    #     confirms it afterward, so a misclick is obvious and cheap. ---
     st.divider()
-    with st.expander("🗑  Remove this question from the batch"):
-        st.caption(
-            "Deletes question "
-            f"**#{no}** from `{csv_path.name}` permanently. The remaining "
-            "questions keep their numbers (gaps are fine). This edits the "
-            "CSV file -- it can't be undone from here."
-        )
-        confirm = st.checkbox(
-            "Yes, remove it", key=f"review_rm_confirm::{csv_path.name}::{no}"
-        )
-        if st.button(
-            "Remove from batch",
-            type="primary",
-            disabled=not confirm,
-            key=f"review_rm_btn::{csv_path.name}::{no}",
-        ):
-            if review.remove_question(csv_path, no):
-                st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
-                st.toast(f"Removed #{no} from {csv_path.name}")
-                st.rerun()
-            else:
-                st.warning(f"#{no} was not found in the batch.")
+    if st.button(
+        f"🗑  Remove #{no} from this batch",
+        key=f"review_rm_btn::{csv_path.name}::{no}",
+        help=(
+            "Deletes this question from the CSV in one click. Remaining "
+            "questions keep their original numbers (gaps are fine). Can't be "
+            "undone here, but you can regenerate the batch."
+        ),
+    ):
+        if review.remove_question(csv_path, no):
+            # Stay in this slot so the NEXT question slides into view; clamp
+            # against the now-shorter batch. The note up top names what went.
+            st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
+            st.session_state["_review_last_removed"] = no
+            st.rerun()
+        else:
+            st.warning(f"#{no} was not found in the batch.")
 
 
 # --- page: Ranges -----------------------------------------------------------
