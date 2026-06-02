@@ -138,14 +138,22 @@ USAGE_LOG_PATH = (
     Path(__file__).resolve().parent.parent / "test_output" / "usage_log.jsonl"
 )
 
-# Dedup set: job IDs we've already appended to the usage log. Module-
-# level (not session_state) because the same job can be observed by
-# multiple browser tabs and the fragment re-renders once a second;
-# we want at-most-once-per-process logging without racing the worker.
-# Memory: one short uuid per completed real-API batch, so even at 1000
-# batches/day this is < 50 KB. No eviction policy needed for the
-# admin-panel's typical multi-hour process lifetime.
-_LOGGED_JOB_IDS: set[str] = set()
+@st.cache_resource
+def _logged_job_ids() -> set[str]:
+    """Job ids already appended to the usage log -- for at-most-once logging.
+
+    MUST be a ``cache_resource`` singleton, NOT a bare module-level set.
+    Streamlit re-executes app.py's module body on every *full* rerun (any
+    widget toggle), so ``_LOGGED_JOB_IDS = set()`` as a plain global reset to
+    empty on each interaction -- and ``_maybe_log_completed_job`` then
+    re-appended the still-displayed completed batch's cost every time, which
+    is the "lifetime spend jumps a dollar when I change difficulty" bug.
+    ``cache_resource`` lives in the server process and survives reruns -- the
+    same persistence the jobs registry (an *imported* module) gets for free.
+    It resets on a server restart, which is correct: the completed job is
+    gone then too, so there's nothing left to re-log.
+    """
+    return set()
 
 # Where the prompt-editor page writes Layer 6 system-prompt overrides. The
 # pipeline checks for this file on every generation call -- a saved edit
@@ -1863,9 +1871,10 @@ def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) ->
     Dry-runs (``model_used == ""``) are dropped by
     :func:`usage.append_log_entry`.
     """
-    if job.id in _LOGGED_JOB_IDS:
+    logged = _logged_job_ids()
+    if job.id in logged:
         return
-    _LOGGED_JOB_IDS.add(job.id)
+    logged.add(job.id)
     if not result.model_used:
         return
     cost = usage.compute_cost_usd(
