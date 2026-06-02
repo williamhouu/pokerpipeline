@@ -163,6 +163,42 @@ def test_remove_review_only(tmp_path: Path) -> None:
     review.remove_review(csv_path, 1)
 
 
+# --- update_explanation (edit one cell in place) ---------------------------
+def test_update_explanation_rewrites_only_that_cell(tmp_path: Path) -> None:
+    import csv
+    csv_path = tmp_path / "b.csv"
+    fields = ["No", "User Cards", "Answer Explanation", "ev_gap_bb"]
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows([
+            {"No": "1", "User Cards": "A-spades, K-spades",
+             "Answer Explanation": "old one", "ev_gap_bb": "0.40"},
+            {"No": "2", "User Cards": "7-hearts, 5-clubs",
+             "Answer Explanation": "old two", "ev_gap_bb": "0.10"},
+        ])
+    assert review.update_explanation(csv_path, 2, "edited TWO") is True
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    # Only #2's explanation changed; other cells + column order intact.
+    assert rows[0]["Answer Explanation"] == "old one"
+    assert rows[1]["Answer Explanation"] == "edited TWO"
+    assert rows[1]["ev_gap_bb"] == "0.10"
+    assert list(rows[0].keys()) == fields
+
+
+def test_update_explanation_missing_no_returns_false(tmp_path: Path) -> None:
+    import csv
+    csv_path = tmp_path / "b.csv"
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["No", "Answer Explanation"])
+        writer.writeheader()
+        writer.writerow({"No": "1", "Answer Explanation": "x"})
+    assert review.update_explanation(csv_path, 99, "y") is False
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        assert list(csv.DictReader(fh))[0]["Answer Explanation"] == "x"
+
+
 # --- batch meta sidecar (prompt tag + per-spot inputs) ---------------------
 def test_batch_meta_path_is_next_to_csv(tmp_path: Path) -> None:
     csv = tmp_path / "batch_20260601.csv"

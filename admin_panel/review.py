@@ -157,6 +157,40 @@ def remove_question(csv_path: Path, no: str | int) -> bool:
     return True
 
 
+def update_explanation(csv_path: Path, no: str | int, new_text: str) -> bool:
+    """Overwrite one question's ``Answer Explanation`` in a batch CSV, in place.
+
+    Mirrors :func:`remove_question`: rewrites with the stdlib csv module
+    (utf-8-sig, exact column order preserved). Only the matched row's
+    ``Answer Explanation`` cell changes -- every other cell, every other
+    row, and the column order are untouched -- so the file on disk stays
+    the full, directly-downloadable batch with the edit baked in.
+
+    Returns True iff a row with that ``No`` was found and updated.
+    """
+    if not csv_path.is_file():
+        return False
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+    if "Answer Explanation" not in fieldnames:
+        return False
+    found = False
+    for row in rows:
+        if str(row.get("No")) == str(no):
+            row["Answer Explanation"] = new_text
+            found = True
+            break
+    if not found:
+        return False
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return True
+
+
 def batch_meta_path(csv_path: Path) -> Path:
     """Path to the prompt/inputs metadata sidecar for a batch CSV."""
     return csv_path.with_suffix(".meta.json")
@@ -258,4 +292,5 @@ __all__ = [
     "review_sidecar_path",
     "save_review",
     "summarize",
+    "update_explanation",
 ]

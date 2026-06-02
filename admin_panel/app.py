@@ -2519,6 +2519,16 @@ def render_review_page() -> None:
     else:
         st.caption("🧪 Prompt: _no metadata for this batch_")
 
+    # Download the whole batch -- including any Answer Explanation edits,
+    # which are written straight into this CSV on disk when saved below.
+    st.download_button(
+        "⬇  Download this batch (CSV)",
+        data=csv_path.read_bytes(),
+        file_name=csv_path.name,
+        mime="text/csv",
+        help="The full batch CSV, with any explanation edits you've saved baked in.",
+    )
+
     st.divider()
 
     # --- per-file navigation state ---
@@ -2580,8 +2590,29 @@ def render_review_page() -> None:
             if opt:
                 st.markdown(("✅ " if opt == correct else "▫️ ") + opt)
 
-        st.markdown("**Answer Explanation**")
-        st.info(_md_lines(_cell(row, "Answer Explanation")))
+        st.markdown("**Answer Explanation** _(editable — saves into the CSV)_")
+        _orig_expl = _cell(row, "Answer Explanation")
+        _edited_expl = st.text_area(
+            "Answer Explanation",
+            value=_orig_expl,
+            key=f"review_expl::{csv_path.name}::{no}",
+            height=200,
+            label_visibility="collapsed",
+        )
+        if st.button(
+            "💾  Save explanation edit",
+            key=f"save_expl::{csv_path.name}::{no}",
+            disabled=(_edited_expl == _orig_expl),
+            help="Writes the edited text back into this batch's CSV on disk.",
+        ):
+            if review.update_explanation(csv_path, no, _edited_expl):
+                st.toast(f"Saved explanation for #{no}")
+                st.rerun()
+            else:
+                st.warning(f"Couldn't update #{no} (not found in the batch).")
+        # Rendered preview (suit emojis etc.) of the current saved text.
+        with st.expander("Preview (rendered)", expanded=False):
+            st.info(_md_lines(_orig_expl))
 
         st.markdown(
             f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}"
