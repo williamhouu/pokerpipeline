@@ -2022,6 +2022,7 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f"worthy spots available: **{result.worthy_spots_available}**, "
             f"rejected by difficulty/EV filters: "
             f"**{result.difficulty_filtered_out}**, "
+            f"skipped as unconverged nodes: **{result.noise_filtered_out}**, "
             f"failures: **{len(result.failures)}**. "
             "Try a wider difficulty band, the Mixed preset, or a wider "
             "worthiness window."
@@ -2031,12 +2032,16 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f", {result.difficulty_filtered_out} rejected by difficulty/EV "
             f"filters" if result.difficulty_filtered_out else ""
         )
+        _noise_note = (
+            f", {result.noise_filtered_out} skipped as unconverged solver "
+            f"nodes" if result.noise_filtered_out else ""
+        )
         st.success(
             f"Wrote **{result.questions_written}** questions to "
             f"`{result.output_path}` "
             f"(attempted {result.questions_attempted}, "
             f"{result.worthy_spots_available} worthy spots available"
-            f"{_band_note})."
+            f"{_band_note}{_noise_note})."
         )
         # When the run delivered fewer than requested, say so plainly and
         # break down WHERE the shortfall went -- pre-LLM filter rejections
@@ -2051,6 +2056,12 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
                     f"**{result.worthy_spots_available}** worthy spots were "
                     "rejected by your difficulty-band / EV-gap filters "
                     "(before any LLM call -- no spend)"
+                )
+            if result.noise_filtered_out:
+                _why_bits.append(
+                    f"**{result.noise_filtered_out}** were skipped as "
+                    "unconverged solver nodes (AA folding a jam / premium "
+                    "inversions -- the noisy multiway tail)"
                 )
             if result.failures:
                 _why_bits.append(

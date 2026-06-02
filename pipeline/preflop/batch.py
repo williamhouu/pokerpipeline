@@ -206,6 +206,11 @@ class BatchResult:
     # preset that starves the batch shows up here.
     difficulty_filtered_out: int = 0
 
+    # How many worthy spots were skipped by the convergence guard --
+    # unconverged solver nodes (AA folding preflop / premium-pair inversions),
+    # typically the near-zero-reach multiway 5-bet/jam lines. UI feedback.
+    noise_filtered_out: int = 0
+
     # How many questions the caller asked for (the total_questions arg). The
     # run writes fewer when the worthy pool runs out after filtering; the UI
     # compares this to questions_written to explain any shortfall.
@@ -322,6 +327,61 @@ def collect_worthy_spots(
             if evaluation.is_worthy:
                 out.append((spot, evaluation))
     return out
+
+
+# --- convergence guard ------------------------------------------------------
+# AA must CONTINUE (call/raise/jam) ~100% of the time preflop in cash (no
+# ICM) -- it never folds and is never under-allocated. So an AA continue
+# frequency below ~1 marks an unconverged node (the canary). Premium pairs
+# must also continue in strength order facing the same action.
+_AA_CONTINUE_NOISE_TOL = 0.02
+_PREMIUM_MONOTONIC_TOL = 0.10
+
+
+def node_is_unconverged(node: PreflopDecisionNode) -> bool:
+    """True if a node's solver strategy is detectably non-GTO (unconverged).
+
+    These show up on near-zero-reach lines (deep multiway 5-bet/jam pots) the
+    solver never converged, and they produce nonsense questions. Two clean
+    tells:
+
+    * **AA canary** -- AA's total continue frequency (sum across every
+      non-fold action) must be ~100%: AA never folds preflop in cash, and a
+      converged node always allocates it fully. An AA continue meaningfully
+      below 1 means the node is garbage (AA folding *or* simply
+      under-allocated, both of which happen on these unconverged jam nodes).
+      This alone catches ~88% of the noisy deep-multiway jam tail.
+    * **Premium-pair monotonicity** -- facing the same action AA must
+      continue at least as often as KK, and KK at least as often as QQ; an
+      inversion (a stronger pair continuing LESS) is unconverged.
+
+    Deliberately does NOT flag KK/QQ folding on its own -- those can rarely be
+    legitimate folds in extreme multiway AA-heavy all-in spots, so they aren't
+    a clean signal.
+    """
+    non_fold = [
+        o for o in node.actions if o.action_type is not PreflopActionType.FOLD
+    ]
+    if not non_fold:
+        return False  # nothing but fold -> no continue strategy to check
+    from pipeline.preflop_ranges import parse_range_file  # noqa: PLC0415
+
+    # Sum each premium's continue frequency across all non-fold actions.
+    cont = {"AA": 0.0, "KK": 0.0, "QQ": 0.0}
+    for opt in non_fold:
+        try:
+            weights = parse_range_file(opt.range_file.path)
+        except (OSError, ValueError):
+            return False  # unreadable -> don't guess; leave it to other filters
+        for hand in cont:
+            cont[hand] += weights.get(hand, 0.0)
+
+    if cont["AA"] < 1.0 - _AA_CONTINUE_NOISE_TOL:
+        return True
+    return (
+        cont["AA"] < cont["KK"] - _PREMIUM_MONOTONIC_TOL
+        or cont["KK"] < cont["QQ"] - _PREMIUM_MONOTONIC_TOL
+    )
 
 
 # --- the entry point --------------------------------------------------------
@@ -486,11 +546,28 @@ def generate_preflop_batch(
     # we committed an LLM call to (post-filter).
     attempted = 0
     difficulty_filtered_out = 0
+    # Spots skipped by the convergence guard (unconverged solver nodes --
+    # AA folding preflop / premium-pair inversions). Cached per node so each
+    # node is only checked once even though many hands share it.
+    noise_filtered_out = 0
+    _node_noise: dict[str, bool] = {}
     # ``_evaluation`` carried the pre-facts freq-only difficulty; we
     # discard it and recompute the canonical 4-axis rating below.
     for spot, _evaluation in worthy:
         if len(rows) >= total_questions:
             break
+        # --- convergence guard (skip unconverged solver nodes) -----------
+        # Near-zero-reach multiway jam lines the solver never converged
+        # produce nonsense (AA folding a jam, premium inversions). Skip the
+        # whole node before any equity sim / LLM spend. Cached per node.
+        nid = spot.node.node_id
+        is_bad = _node_noise.get(nid)
+        if is_bad is None:
+            is_bad = node_is_unconverged(spot.node)
+            _node_noise[nid] = is_bad
+        if is_bad:
+            noise_filtered_out += 1
+            continue
         # --- facts + canonical difficulty (no API spend yet) -------------
         # compute_difficulty blends freq + EV gap + archetype/concept +
         # hand class (with EV-weight redistribution when the EV engine
@@ -631,6 +708,7 @@ def generate_preflop_batch(
         worthy_spots_available=len(worthy),
         nodes_after_filter=len(filtered_nodes),
         difficulty_filtered_out=difficulty_filtered_out,
+        noise_filtered_out=noise_filtered_out,
         requested_questions=total_questions,
         total_input_tokens=usage_totals["input"],
         total_output_tokens=usage_totals["output"],

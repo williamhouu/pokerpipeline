@@ -622,5 +622,38 @@ def test_no_rows_writes_no_meta(tmp_path: Path) -> None:
     assert not out.with_suffix(".meta.json").exists()
 
 
+def test_node_is_unconverged_guard_against_real_pack() -> None:
+    """Convergence guard: a clean RFI node passes, but the deep multiway jam
+    tail (AA folding / premium inversions) is overwhelmingly flagged."""
+    ranges = Path(__file__).resolve().parent.parent / "ranges"
+    if not ranges.is_dir():
+        pytest.skip("ranges/ not present locally")
+    from pipeline.preflop.batch import node_is_unconverged
+    from pipeline.preflop.grammars.types import PreflopActionType as PT
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+    from pipeline.preflop.pack import clear_registry, discover_packs
+
+    clear_registry()
+    packs = discover_packs(ranges)
+    if not packs:
+        pytest.skip("Ryan pack not present under ranges/")
+    nodes = enumerate_nodes(packs)
+    # A clean UTG RFI node (first to act) is converged -> not flagged.
+    utg = next(n for n in nodes if n.actor == "UTG" and len(n.history_before) == 0)
+    assert node_is_unconverged(utg) is False
+    # The deep multiway facing-jam tail is unconverged -> the guard fires on
+    # the large majority of it (we measured ~88% AA-folding).
+    jam = [
+        n
+        for n in nodes
+        if n.actor == "UTG"
+        and any(a.action_type is PT.ALL_IN for a in n.history_before)
+        and len(n.history_before) >= 6
+    ]
+    assert jam, "expected deep multiway jam nodes in the pack"
+    flagged = sum(1 for n in jam if node_is_unconverged(n))
+    assert flagged > 0.5 * len(jam)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
