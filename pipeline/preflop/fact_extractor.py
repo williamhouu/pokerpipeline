@@ -327,9 +327,16 @@ def extract_facts(
     """
     villain = identify_villain(spot.node)
     if villain is None:
-        # First-to-act spot: hero is opening or facing only folds. No
-        # specific villain range to characterize. Still a valid spot.
-        return PreflopFacts(spot=spot)
+        # First-to-act spot: hero is opening or facing only folds. There's
+        # no specific villain range to characterize, but we STILL classify
+        # the archetype (open_for_value / fold_outranged) -- otherwise opens
+        # get a blank archetype, which starves both the LLM's strategic
+        # frame and the "Preflop Hand Selection" skill. classify_archetype
+        # handles villain=None (its open/fold branch). (June 2026 fix: this
+        # branch used to return early without an archetype.)
+        return PreflopFacts(
+            spot=spot, archetype=classify_archetype(spot, None, None)
+        )
 
     try:
         villain_path = construct_villain_range_path(spot.node, villain, pack)
