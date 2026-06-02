@@ -247,7 +247,7 @@ def test_column_structure() -> None:
              (May 2026.)
       * 40: - difficulty_bumps (always empty -- BUMP_RULES unpopulated)
              - hand_class (duplicated User Cards on preflop); Notes
-             moved to before ev_gap_bb. (June 2026.)
+             moved to right after concept_tags. (June 2026.)
     """
     row = build_preflop_row(
         _facing_open_facts(),

@@ -62,11 +62,12 @@ CSV_COLUMNS = [
     "skills",
     # Ryan-feedback Fix 3 (Apr 2026): "fold: 10%, call: 60%, raise: 20%, all-in: 10%".
     "action_frequencies",
-    # Provenance string -- moved here (right before ev_gap_bb) June 2026.
-    "Notes",
     "ev_gap_bb",
     # Raw computational tags (5-10/question) -- the LLM-input + retrieval key.
     "concept_tags",
+    # Provenance string -- sits right after concept_tags. (June 2026:
+    # moved here per the "Notes right behind the concept tags" ask.)
+    "Notes",
     # Hero-vs-villain seat matchup, e.g. "BB_vs_BTN" (or just the hero
     # seat on open spots with no villain). Was the old "Relative
     # Position" value before that column was repurposed to IP/OOP.

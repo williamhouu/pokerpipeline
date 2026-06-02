@@ -62,7 +62,7 @@ def test_column_structure():
              `ranges` column, which is a strict superset).
       * 40 = -difficulty_bumps (always empty -- BUMP_RULES unpopulated)
              -hand_class (duplicated User Cards on preflop); Notes moved
-             to sit right before ev_gap_bb. (June 2026.)
+             to sit right after concept_tags. (June 2026.)
     """
     assert len(CSV_COLUMNS) == 40
     assert "hand_class" not in CSV_COLUMNS
@@ -73,25 +73,24 @@ def test_column_structure():
     assert "ranges" in CSV_COLUMNS
     # tag_1/2/3 are gone.
     assert "tag_1" not in CSV_COLUMNS
-    # Cluster after Difficulty Rating: skills, action_frequencies, then
-    # Notes (moved here June 2026), then ev_gap_bb.
+    # Cluster after Difficulty Rating: skills, action_frequencies, ev_gap_bb,
+    # concept_tags.
     diff_i = CSV_COLUMNS.index("Difficulty Rating")
     assert CSV_COLUMNS[diff_i + 1:diff_i + 5] == [
-        "skills", "action_frequencies", "Notes", "ev_gap_bb"]
-    # Position Matchup right after concept_tags; ranges right after it.
-    # The QA/provenance cluster follows the strategic frame:
+        "skills", "action_frequencies", "ev_gap_bb", "concept_tags"]
+    # Notes sits right after concept_tags (June 2026), then Position Matchup,
+    # then ranges. The QA/provenance cluster follows the strategic frame:
     # archetype -> board_texture -> solver_reference -> validation_status.
-    assert CSV_COLUMNS[CSV_COLUMNS.index("concept_tags") + 1] == "Position Matchup"
+    assert CSV_COLUMNS[CSV_COLUMNS.index("concept_tags") + 1] == "Notes"
+    assert CSV_COLUMNS[CSV_COLUMNS.index("Notes") + 1] == "Position Matchup"
     assert CSV_COLUMNS[CSV_COLUMNS.index("Position Matchup") + 1] == "ranges"
     arch_i = CSV_COLUMNS.index("archetype")
     assert CSV_COLUMNS[arch_i:arch_i + 4] == [
         "archetype", "board_texture", "solver_reference", "validation_status"]
     # The four difficulty diagnostic axes close out the row (hand_class +
-    # difficulty_bumps dropped June 2026; Notes moved up before ev_gap_bb).
+    # difficulty_bumps dropped June 2026).
     assert CSV_COLUMNS[-4:] == [
         "easy_freq", "easy_ev", "easy_concept", "easy_hand"]
-    # Notes now sits right before ev_gap_bb.
-    assert CSV_COLUMNS[CSV_COLUMNS.index("ev_gap_bb") - 1] == "Notes"
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
