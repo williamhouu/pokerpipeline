@@ -206,6 +206,11 @@ class BatchResult:
     # preset that starves the batch shows up here.
     difficulty_filtered_out: int = 0
 
+    # How many questions the caller asked for (the total_questions arg). The
+    # run writes fewer when the worthy pool runs out after filtering; the UI
+    # compares this to questions_written to explain any shortfall.
+    requested_questions: int = 0
+
     # Token-usage totals across every Anthropic call in the batch.
     # Populated only when the LLM is actually invoked (dry-run leaves
     # these at 0). The admin panel multiplies these by per-model
@@ -440,6 +445,7 @@ def generate_preflop_batch(
             failures=[],
             worthy_spots_available=0,
             nodes_after_filter=len(filtered_nodes),
+            requested_questions=total_questions,
         )
     # Randomise order so the difficulty-band / EV-gap filter doesn't bias
     # toward whichever nodes happen to enumerate first; we then walk the
@@ -625,6 +631,7 @@ def generate_preflop_batch(
         worthy_spots_available=len(worthy),
         nodes_after_filter=len(filtered_nodes),
         difficulty_filtered_out=difficulty_filtered_out,
+        requested_questions=total_questions,
         total_input_tokens=usage_totals["input"],
         total_output_tokens=usage_totals["output"],
         total_cache_creation_tokens=usage_totals["cache_creation"],

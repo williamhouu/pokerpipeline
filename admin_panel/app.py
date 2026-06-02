@@ -2038,6 +2038,33 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f"{result.worthy_spots_available} worthy spots available"
             f"{_band_note})."
         )
+        # When the run delivered fewer than requested, say so plainly and
+        # break down WHERE the shortfall went -- pre-LLM filter rejections
+        # (no spend) vs post-LLM validation failures -- so it's never a
+        # mystery why "asked for 15, got 11".
+        _short = result.requested_questions - result.questions_written
+        if result.requested_questions and _short > 0:
+            _why_bits = []
+            if result.difficulty_filtered_out:
+                _why_bits.append(
+                    f"**{result.difficulty_filtered_out}** of the "
+                    f"**{result.worthy_spots_available}** worthy spots were "
+                    "rejected by your difficulty-band / EV-gap filters "
+                    "(before any LLM call -- no spend)"
+                )
+            if result.failures:
+                _why_bits.append(
+                    f"**{len(result.failures)}** failed validation after the "
+                    "retry budget (shown below)"
+                )
+            _why = "; ".join(_why_bits) or "the worthy-spot pool was exhausted"
+            st.warning(
+                f"⚠️ You asked for **{result.requested_questions}** but "
+                f"**{result.questions_written}** qualified. {_why}. To get "
+                "more: widen the difficulty band (or use **Mixed**), lower "
+                "the **min EV gap**, or broaden the position / action-context "
+                "filters."
+            )
 
     if result.failures:
         _render_preflop_failures(result.failures)
