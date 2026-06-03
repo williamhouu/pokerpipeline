@@ -26,23 +26,45 @@ on a real node). **Do not re-crack this — it's solved.**
   connectedness/wrap, nut-flush, danglers, tunable strength) — exhaustively
   audited over all 270,725 combos.
 - `pipeline/plo/concept_tags.py` — 27 hand-structure tags (exact; same audit).
-- `pipeline/plo/hand_order.py` (+ `data/monker_hand_order.txt`) — the `.rng`
-  index→hand map; `scripts/plo_hand_order_audit.py` reproduces the validation.
-- `pipeline/plo/pack.py` — `read_rng` (a node's range: hands with p>0 + ev in
-  small blinds) and `parse_node_path` (filename → action sequence; seats
-  `LJ,HJ,CO,BU,SB,BB`; tokens `0`/`1`/`3`/`40100`). Verified on the real pack
-  (LJ opens 19.8%; top-EV opens are AAQQ/AAJJ double-suited).
+- `pipeline/plo/hand_order.py` (+ `data/monker_hand_order.txt`,
+  `data/monker_combo_multiplicity.txt`) — the `.rng` index→hand map, and each
+  hand's concrete-combo count (`combo_multiplicity`, sums to 270,725; baked by
+  `scripts/plo_combo_multiplicity_gen.py`). `scripts/plo_hand_order_audit.py`
+  reproduces the hand-order validation.
+- `pipeline/plo/pack.py` — `read_rng` / `read_rng_values` (a node's per-hand p
+  and ev in small blinds; `read_rng_values` keeps the p=0 rows for their
+  counterfactual EV) and `parse_node_path` (filename → action sequence; seats
+  `LJ,HJ,CO,BU,SB,BB`; tokens `0`/`1`/`3`/`40100`).
+- `pipeline/plo/node_enumerator.py` — `enumerate_plo_nodes(pack)` groups sibling
+  action-files into decision nodes (**6,785** on the real pack). Filenames only,
+  no content reads.
+- `pipeline/plo/spot_sampler.py` — `sample_plo_spot(node, hero_index)` →
+  `PloSpot`: Monker's `p` is JOINT (presence-weighted, like NLHE Pio) so it
+  normalises to the conditional strategy; and Monker stores per-action EV for
+  every hand, so every spot — raise spots included — carries a real `ev_gap_sb`
+  (no EV engine needed).
+- `pipeline/plo/fact_extractor.py` — `extract_plo_facts(spot, pack)` →
+  `PloFacts`: hero hand class, villain identity + combo-weighted range stats,
+  17 archetypes (value/light via hand STRENGTH, since PLO equities run close),
+  `ev_gap_bb` (free from the solver), and hero-vs-range + (cached, node-level)
+  range-vs-range equity. ~1s/spot amortized.
 
 **Next (assembly — mirrors the NLHE preflop pipeline, keep the "LLM never
-thinks about poker" boundary):**
-1. **Node enumeration** — group an actor's sibling action-files at a decision
-   point; derive each hand's conditional strategy (raise/call/fold freqs) from
-   its `p` across those files. Analog of `pipeline/preflop/node_enumerator.py` +
-   `spot_sampler.py`.
-2. **`PloFacts`** — equity + hand model + archetype + blockers per spot.
-3. **Tags / archetypes / difficulty / skills** — wire the built hand tags; add
-   the facts-relative tags, the PLO difficulty axes, and the skill mapper.
-4. **Layer 6** — PLO gold examples + voice → prose.
+thinks about poker" boundary). These are tuning-heavy → refine against graded
+output:**
+1. **Blockers** — DEFERRED. PLO nut-blockers (blocking villain's AA / nut flush
+   / nut straight, redraws, freerolls) are far richer than a card-removal count
+   and deserve their own design pass. `PloFacts.blockers` is empty for now.
+2. **Concept tags** — `compute_plo_concept_tags(facts)`: wire the built
+   `compute_plo_hand_tags` + add the ~28 facts-relative tags (position /
+   decision / equity / range) the `concept_tags.py` docstring catalogs.
+3. **Difficulty** — port the NLHE 4-axis framework; the EV axis is now free
+   (real `ev_gap_bb` from the pack, raise spots included).
+4. **Skill mapper** — strict, spot-level; maps the built hand tags + archetypes.
+5. **Layer 6** — PLO gold examples + voice → prose.
+6. **Render + wire** — action history / app-table / format writer for 4 cards +
+   pot-limit sizes (no range-display column), batch orchestrator, then the
+   admin-panel game-type selector (UI last).
 
 **PLO skills catalog (designed with Zach):**
 - *A — carry-over preflop decisions:* Preflop Hand Selection, 3-Betting, Facing
