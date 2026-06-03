@@ -28,6 +28,7 @@ from pathlib import Path
 from pipeline.cards import RANK_VALUE, SUITS
 
 _ORDER_FILE = Path(__file__).parent / "data" / "monker_hand_order.txt"
+_MULTIPLICITY_FILE = Path(__file__).parent / "data" / "monker_combo_multiplicity.txt"
 HAND_COUNT = 16432
 
 
@@ -43,6 +44,32 @@ def hand_order() -> tuple[str, ...]:
         msg = f"expected {HAND_COUNT} hands in {_ORDER_FILE.name}, got {len(labels)}"
         raise ValueError(msg)
     return labels
+
+
+@lru_cache(maxsize=1)
+def combo_multiplicities() -> tuple[int, ...]:
+    """Concrete-combo count for each `.rng` index, parallel to :func:`hand_order`.
+
+    Element ``i`` is how many distinct concrete 4-card combos the suit-iso hand
+    ``hand_order()[i]`` represents (rainbow 4-distinct = 24, quad aces = 1,
+    double-suited in between). Sums to C(52,4) = 270,725. Loaded from
+    ``data/monker_combo_multiplicity.txt`` (baked because deriving it enumerates
+    all 270,725 combos -- see ``scripts/plo_combo_multiplicity_gen.py``).
+    """
+    counts = tuple(
+        int(line)
+        for line in _MULTIPLICITY_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+    if len(counts) != HAND_COUNT:
+        msg = f"expected {HAND_COUNT} multiplicities, got {len(counts)}"
+        raise ValueError(msg)
+    return counts
+
+
+def combo_multiplicity(index: int) -> int:
+    """How many concrete 4-card combos the hand at a `.rng` index represents."""
+    return combo_multiplicities()[index]
 
 
 def monker_label(index: int) -> str:
