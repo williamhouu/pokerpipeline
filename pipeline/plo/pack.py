@@ -42,11 +42,17 @@ class RngEntry:
     ev: float   # expected value, in small blinds
 
 
-def read_rng(path: Path) -> list[RngEntry]:
-    """The hands present (``p`` > 0) at the node stored in ``path``.
+def read_rng_values(path: Path) -> list[tuple[float, float]]:
+    """Every hand's ``(p, ev)`` at the node stored in ``path``, by index.
 
-    Returns them in hand-order index order. Raises ``ValueError`` if the file
-    does not have the expected ``2 x 16,432`` lines.
+    Returns a list of length :data:`HAND_COUNT`; element ``i`` is the
+    ``(p, ev_sb)`` pair for ``hand_order()[i]``. ``ev`` is in small blinds.
+
+    Unlike :func:`read_rng`, hands with ``p == 0`` are **kept**: Monker stores,
+    per hand, the EV of *every* action including the ones the hand never takes
+    (its counterfactual value), and that is exactly what is needed to measure
+    how costly the alternative actions are (the EV gap). Raises ``ValueError``
+    if the file does not have the expected ``2 x 16,432`` lines.
     """
     lines = [ln for ln in path.read_text(encoding="utf-8").split("\n") if ln]
     if len(lines) != 2 * HAND_COUNT:
@@ -56,16 +62,28 @@ def read_rng(path: Path) -> list[RngEntry]:
         )
         raise ValueError(msg)
 
-    order = hand_order()
-    entries: list[RngEntry] = []
+    values: list[tuple[float, float]] = []
     for i in range(HAND_COUNT):
         p_str, _, ev_str = lines[2 * i + 1].partition(";")
-        p = float(p_str)
-        if p <= 0.0:
-            continue
         ev = float(ev_str) / 1000.0 if ev_str else 0.0
-        entries.append(RngEntry(index=i, label=order[i], p=p, ev=ev))
-    return entries
+        values.append((float(p_str), ev))
+    return values
+
+
+def read_rng(path: Path) -> list[RngEntry]:
+    """The hands present (``p`` > 0) at the node stored in ``path``.
+
+    Returns them in hand-order index order. Raises ``ValueError`` if the file
+    does not have the expected ``2 x 16,432`` lines. For the full per-index
+    ``(p, ev)`` table (including the zero-weight hands' counterfactual EVs) use
+    :func:`read_rng_values`.
+    """
+    order = hand_order()
+    return [
+        RngEntry(index=i, label=order[i], p=p, ev=ev)
+        for i, (p, ev) in enumerate(read_rng_values(path))
+        if p > 0.0
+    ]
 
 
 # --- decoding a node's filename ------------------------------------------
