@@ -4,10 +4,10 @@ Working notes on the MonkerSolver/MonkerViewer `.rng` format, as used by the
 purchased **PLO 6max 100bb (Rake 5%, 1bb cap)** pack. This is the input the
 PLO pack parser (`pipeline/plo/pack.py`, not yet written) must read.
 
-Status: **the format is ~90% cracked and validated; one piece — the exact
-hand *enumeration order* — is still open** (see §5). Everything else below is
-confirmed against the data, analytic combinatorics, and two independent
-open-source reference parsers.
+Status: **fully cracked and validated.** The hand order — the one hard piece —
+was resolved authoritatively from the MonkerViewer jar (§5). Every claim below
+is confirmed against the data, analytic combinatorics, the decompiled viewer,
+and a strategic sanity check on a real node.
 
 ## 1. Where the data lives
 
@@ -79,39 +79,34 @@ distribution exactly:
 Example: `0.0.0.0.0.rng` = everyone folds to the BB / the initial node;
 `40100.40100.3.rng` = raise, raise, jam.
 
-## 5. OPEN: the hand enumeration order
+## 5. Hand enumeration order — SOLVED (index → `q.k`)
 
-The remaining unknown. The pattern text is **not** a self-contained hand label:
-there are only **394 distinct patterns for 16,432 hands** (bare `????` appears
-550×), so the true hand identity is the **position in a fixed enumeration**, and
-the pattern is a lossy delta/checkpoint annotation.
+**The `.rng` reader never needs to decode the pattern lines.** MonkerViewer's
+own parser (`TreeFile.initFreqs`, decompiled) reads only the *payload* lines,
+keyed by position, and its display code (`q.d()`) maps a stored position `i` to
+a hand via `Client.a.b(i) == q.k.get(i)`. So:
 
-What the data shows (so reconstruction can be validated):
-- It is **not** per-slot carry-over (gives 26 distinct hands, not 16,432).
-- It is **not** separable by suit-class (rainbow-only carry also fails).
-- It is a **recursive tree-delta**: consecutive entries share a rank *prefix*
-  and vary the suffix card + its suit together. Example block (positions shown):
+> **The i-th payload in a `.rng` file is the hand `hand_order()[i]`.**
 
-  ```
-  4573  2345     {2,3,4,5} rainbow
-  4574  (26)34   {2,3,4,6} 2-6 suited
-  4575  2349     {2,3,4,9} rainbow
-  4576  (2T)34   {2,3,4,T} 2-T suited
-  ...
-  ```
-  Fully-specified "anchor" hands (62 of them, 0 wildcards) act as resync
-  checkpoints; ranks are shown only periodically (≈ every 4th value).
+`q.k` is a fixed 16,432-entry list hardcoded in `monkerviewer-1.4.jar`
+(concatenation of `Client.j.a + Client.j.b + Client.i.a + R.k`, ending `AAAA …
+KKKK`). It is extracted to **`pipeline/plo/data/monker_hand_order.txt`** and
+loaded by **`pipeline/plo/hand_order.py`**.
 
-**Validation gate (no guessing):** any candidate ordering must satisfy *all*
-62 fully-specified anchors + every partially-shown rank/suit across all 16,432
-entries *and* be a bijection onto the 16,432 canonical hands. That over-
-determines the answer — a wrong order cannot pass.
+The pattern lines (`????`, `(2?)??`, …) are a **separate decorative annotation,
+in a different order, that the viewer ignores** — which is exactly why decoding
+them *as* the hand order kept failing (only 394 distinct patterns; a lossy
+tree-delta). They are not used.
 
-**Plan to close it:** extract the authoritative order from the reference
-decoder (the `monkerviewer-1.4.jar`, Java — runs on this Mac), bake it in as a
-verified 16,432-entry lookup table, and build the parser on top. Reversing the
-proprietary tree serialization by inspection is deliberately avoided — too easy
-to be subtly wrong.
+Notation in `q.k`: ranks `23456789TJQKA`; parens group same-suit cards (`AAKK`
+rainbow, `(AK)(AK)` double-suited, `AA(2A)` = the 2 suited to one ace).
+
+**Validated three independent ways** (`scripts/plo_hand_order_audit.py`):
+1. MonkerViewer's own display code maps index → `q.k`.
+2. **Bijection:** the 16,432 entries canonicalize to *exactly* the full set of
+   suit-isomorphic PLO hands (enumerated from all 270,725 combos).
+3. **Strategy:** on `40100.rng` (LJ open-raise), AAKK-ds / JT98-ds open 100% and
+   rainbow trash (2233, K723) folds 100% — i.e. the map reads correct poker.
 
 ## 6. References
 
@@ -119,3 +114,6 @@ to be subtly wrong.
   importer (confirms the `p;ev*1000` payload; NLHE hand labels only).
 - [OwenQian/MonkerConverter](https://github.com/OwenQian/MonkerConverter) —
   filename action-token decoding + seat order.
+- `monkerviewer-1.4.jar` (decompiled with CFR) — the authoritative source for
+  the hand order (`Client.q.k` / `Client.a.b`) and the payload parser
+  (`TreeFile.initFreqs`).
