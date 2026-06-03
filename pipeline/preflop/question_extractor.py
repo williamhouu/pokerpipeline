@@ -43,6 +43,14 @@ MIN_TOP_FREQUENCY = 0.55  # below: no clear best answer to teach
 MAX_TOP_FREQUENCY = 0.95  # above: the answer is too obvious
 MIN_PRESENCE = 0.01  # below: hand doesn't actually reach the node
 
+# A dominant action at 90-95% reads as "mostly" but sits just under the
+# 95% "always" label boundary (frequency_to_verb_prefix /
+# options._PURE_STRATEGY_THRESHOLD). A player with the right read can pick
+# the "always" option and still be marked wrong -- a labelling trap, not a
+# strategy test. The Generate page excludes this band by default; see
+# effective_max_frequency. Tune alongside MAX_TOP_FREQUENCY.
+AMBIGUOUS_BAND_FLOOR = 0.90
+
 # Difficulty-bounds + freq-axis constants. Kept here so the pre-facts
 # freq-only ESTIMATE in :class:`PreflopQuestionEvaluation` doesn't
 # depend on the full pipeline.preflop.difficulty module (which needs
@@ -112,6 +120,21 @@ def is_question_worthy(
         return False
     frequency = top_action_frequency(spot)
     return min_frequency <= frequency <= max_frequency
+
+
+def effective_max_frequency(
+    slider_max: float, *, exclude_ambiguous_band: bool
+) -> float:
+    """The worthiness ceiling to actually use, given the ambiguous-band toggle.
+
+    When ``exclude_ambiguous_band`` is True, caps the ceiling at
+    :data:`AMBIGUOUS_BAND_FLOOR` (0.90) so the 90-95% "mostly-but-feels-
+    like-always" band is filtered out before any LLM spend. A no-op when
+    the caller's ceiling is already at or below 0.90.
+    """
+    if exclude_ambiguous_band:
+        return min(slider_max, AMBIGUOUS_BAND_FLOOR)
+    return slider_max
 
 
 @dataclass(frozen=True)

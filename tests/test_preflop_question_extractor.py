@@ -11,11 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.node_enumerator import PreflopDecisionNode  # noqa: E402
 from pipeline.preflop.question_extractor import (  # noqa: E402
+    AMBIGUOUS_BAND_FLOOR,
     MAX_TOP_FREQUENCY,
     MIN_PRESENCE,
     MIN_TOP_FREQUENCY,
     PreflopQuestionEvaluation,
     difficulty_score,
+    effective_max_frequency,
     evaluate_spot,
     is_question_worthy,
     top_action_frequency,
@@ -220,7 +222,36 @@ def test_evaluate_spot_passes_overrides():
     assert ev.is_worthy is False
 
 
+# --- effective_max_frequency (90-95% ambiguous band toggle) ---------------
+def test_effective_max_frequency_excludes_band_by_default():
+    """With the toggle on, a 95% ceiling drops to the 90% band floor."""
+    assert effective_max_frequency(0.95, exclude_ambiguous_band=True) == 0.90
+
+
+def test_effective_max_frequency_passthrough_when_off():
+    """Toggle off: the slider ceiling is used verbatim."""
+    assert effective_max_frequency(0.95, exclude_ambiguous_band=False) == 0.95
+
+
+def test_effective_max_frequency_noop_below_floor():
+    """A ceiling already at/below 0.90 is unchanged even with the toggle on
+    (a 'Hard' preset capped at 70% must not be raised to 90%)."""
+    assert effective_max_frequency(0.70, exclude_ambiguous_band=True) == 0.70
+    assert effective_max_frequency(0.90, exclude_ambiguous_band=True) == 0.90
+
+
+def test_excluding_band_makes_92pct_spot_unworthy():
+    """End-to-end: a 92% spot is worthy at the default 95% ceiling but
+    NOT once the ambiguous-band exclusion lowers the ceiling to 90%."""
+    spot = _spot({"Raise": 0.92, "Fold": 0.08})
+    assert is_question_worthy(spot, max_frequency=0.95) is True
+    capped = effective_max_frequency(0.95, exclude_ambiguous_band=True)
+    assert is_question_worthy(spot, max_frequency=capped) is False
+
+
 # --- constants sanity ------------------------------------------------------
 def test_default_constants_are_sensible():
     assert 0.0 < MIN_TOP_FREQUENCY < MAX_TOP_FREQUENCY < 1.0
     assert 0.0 < MIN_PRESENCE < 1.0
+    # The ambiguous band sits just under the 95% "always" label line.
+    assert MIN_TOP_FREQUENCY < AMBIGUOUS_BAND_FLOOR < MAX_TOP_FREQUENCY

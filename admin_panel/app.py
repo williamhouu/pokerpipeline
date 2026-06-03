@@ -116,6 +116,9 @@ from pipeline.preflop.pack import (  # noqa: E402
 from pipeline.preflop.pack import (  # noqa: E402
     clear_registry as clear_preflop_registry,
 )
+from pipeline.preflop.question_extractor import (  # noqa: E402
+    effective_max_frequency,
+)
 from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E402
 
 # Map admin-panel model-radio labels to Anthropic API model identifiers.
@@ -1118,6 +1121,18 @@ def _render_generate_page_preflop() -> None:
             key="preflop_worthiness_slider",
             help="Below 55% = no clear best answer to teach; 100% = trivial.",
         )
+        exclude_ambiguous_band = st.checkbox(
+            "Exclude ambiguous 90–95% band (recommended)",
+            value=True,
+            key="preflop_exclude_ambiguous_band",
+            help=(
+                "Spots where the solver takes one action 90–95% of the time "
+                "read as \"mostly\" but sit just under the 95% \"always\" "
+                "line, so a player with the right read can still pick "
+                "\"always\" and be marked wrong. On by default: caps the "
+                "effective ceiling at 90%. Uncheck to allow 90–95% spots in."
+            ),
+        )
         min_ev_gap = st.slider(
             "Minimum EV gap (bb) — 0 = off",
             min_value=0.0,
@@ -1136,10 +1151,17 @@ def _render_generate_page_preflop() -> None:
     # a preset (the preset moves the difficulty band; worthiness + EV-gap are
     # separate gates, shown here so all three are always visible).
     _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
+    _eff_freq_high = min(freq_high, 90) if exclude_ambiguous_band else freq_high
+    _band_note = (
+        "  ·  90–95% band excluded"
+        if exclude_ambiguous_band and freq_high > 90
+        else ""
+    )
     st.info(
         f"**Numbers in effect for this batch** — difficulty rating "
         f"**{band_low}–{band_high}**  ·  worthiness frequency "
-        f"**{freq_low}–{freq_high}%**  ·  EV-gap gate **{_ev_txt}**.  "
+        f"**{freq_low}–{_eff_freq_high}%**{_band_note}  ·  EV-gap gate "
+        f"**{_ev_txt}**.  "
         "Presets move the difficulty band; the worthiness window + EV-gap "
         "are separate gates you set in Advanced filters above."
     )
@@ -1377,7 +1399,10 @@ def _render_generate_page_preflop() -> None:
             action_contexts=list(action_contexts),
             player_counts=list(player_counts),
             freq_min=freq_low / 100.0,
-            freq_max=freq_high / 100.0,
+            freq_max=effective_max_frequency(
+                freq_high / 100.0,
+                exclude_ambiguous_band=exclude_ambiguous_band,
+            ),
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
