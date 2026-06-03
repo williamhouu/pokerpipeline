@@ -1,8 +1,66 @@
 # PLO Port Assessment — can we reuse this pipeline for Pot-Limit Omaha?
 
-**Status:** exploratory (June 2026). The NLHE preflop pipeline is live; PLO is a
-prospective *second product*. This captures the viability analysis so the
-decision can continue across sessions.
+**Status:** **build underway (June 2026).** The viability question is settled —
+the PLO port is happening, and its whole *foundation* is built, tested, and
+committed (see "Build status" below). The original assessment is kept further
+down for context. The NLHE preflop pipeline remains live + hardened.
+
+## Build status — June 2026 (read this first)
+
+**Decisions locked:** same repo + same admin panel with a game-type selector
+(NLHE/PLO), **not** a separate site or a separate git branch; **range display
+dropped** for PLO (generation only). Code lives in `pipeline/plo/`; the pack
+lives in `plo_ranges/` (gitignored, 3.8 GB).
+
+**The proprietary Monker `.rng` format is fully reverse-engineered + validated**
+— full spec in [`plo_rng_format.md`](plo_rng_format.md). The purchased pack is
+`PLO 6max 100bb (rake 5% / 1bb cap)`; its authoritative 16,432-hand order was
+extracted from the decompiled MonkerViewer jar and validated three ways (the
+jar's own code · a bijection onto the canonical PLO hand set · strategy sanity
+on a real node). **Do not re-crack this — it's solved.**
+
+**Built + committed (all tested, ruff + mypy clean):**
+- `pipeline/plo/equity.py` — 4-card "best 2-of-4 + 3-of-5" equity evaluator
+  (reuses the NLHE 5-card ranker; no new dependency).
+- `pipeline/plo/hand_model.py` — `classify_plo_hand` (suit pattern, pairing,
+  connectedness/wrap, nut-flush, danglers, tunable strength) — exhaustively
+  audited over all 270,725 combos.
+- `pipeline/plo/concept_tags.py` — 27 hand-structure tags (exact; same audit).
+- `pipeline/plo/hand_order.py` (+ `data/monker_hand_order.txt`) — the `.rng`
+  index→hand map; `scripts/plo_hand_order_audit.py` reproduces the validation.
+- `pipeline/plo/pack.py` — `read_rng` (a node's range: hands with p>0 + ev in
+  small blinds) and `parse_node_path` (filename → action sequence; seats
+  `LJ,HJ,CO,BU,SB,BB`; tokens `0`/`1`/`3`/`40100`). Verified on the real pack
+  (LJ opens 19.8%; top-EV opens are AAQQ/AAJJ double-suited).
+
+**Next (assembly — mirrors the NLHE preflop pipeline, keep the "LLM never
+thinks about poker" boundary):**
+1. **Node enumeration** — group an actor's sibling action-files at a decision
+   point; derive each hand's conditional strategy (raise/call/fold freqs) from
+   its `p` across those files. Analog of `pipeline/preflop/node_enumerator.py` +
+   `spot_sampler.py`.
+2. **`PloFacts`** — equity + hand model + archetype + blockers per spot.
+3. **Tags / archetypes / difficulty / skills** — wire the built hand tags; add
+   the facts-relative tags, the PLO difficulty axes, and the skill mapper.
+4. **Layer 6** — PLO gold examples + voice → prose.
+
+**PLO skills catalog (designed with Zach):**
+- *A — carry-over preflop decisions:* Preflop Hand Selection, 3-Betting, Facing
+  a 3-Bet, 4-Betting, Facing a 4-Bet, Squeezing, Facing a Squeeze, Blind
+  Defense, Blind vs Blind, Pot Odds, In/Out of Position, Multiway Pot Strategy.
+- *B — PLO hand-reading (the new edge):* **Suitedness** (one master skill),
+  Rundowns & Connectivity, Dangler Awareness, Nut-Flush Awareness, Big-Pair
+  Construction (AAxx/KKxx with support), **Nuttedness & Non-Nut Traps** (one
+  master skill — *not* split into flush/straight/set).
+- *C — math / dynamics:* Reverse Implied Odds, Pot-Limit Bet Sizing. ("Equity
+  Runs Close" was cut.)
+- *D — postflop (later):* Wrap/Draw Strategy, Nut Blockers & Card Removal, Set
+  Mining & Redraws, C-Betting, Bluff Catching, Pot Control.
+
+The skill mapper must be spot-level (strict, ~2–4 skills/question) so it needs
+the facts layer; the hand-reading skills map onto the already-built concept tags.
+
+---
 
 ## TL;DR
 
