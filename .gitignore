@@ -13,6 +13,10 @@ solves/
 # Layout + scenario→file mappings are documented in docs/ryan_range_pack_index.md.
 ranges/
 
+# PLO preflop chart pack — same deal as ranges/ (large, local-only). Lands
+# here once purchased; the pipeline.plo parser reads it.
+plo_ranges/
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]
