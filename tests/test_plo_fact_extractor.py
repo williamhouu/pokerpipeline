@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import sys
 from pathlib import Path
 
@@ -254,3 +255,64 @@ def test_extract_facts_missing_villain_file_degrades_gracefully(tmp_path):
     facts = extract_plo_facts(sample_plo_spot(node, HERO), pack)
     assert facts.villain_stats is None  # file missing -> graceful
     assert facts.archetype  # archetype still classified
+
+
+# --- equity chunk ---------------------------------------------------------
+def _facing_open_pack(tmp_path: Path) -> PloPack:
+    # LJ opens a spread of hands; HJ faces with fold / call(hero) / 3-bet files.
+    villain = {i: (1.0, 2.0) for i in (0, 200, 400, 800, 1600, 3200, 6400, 9000)}
+    _write_rng(tmp_path / "40100.rng", villain)
+    _write_rng(tmp_path / "40100.0.rng", {500: (1.0, -7.0), 600: (1.0, -7.0)})
+    _write_rng(tmp_path / "40100.1.rng", {HERO: (1.0, 1.0), 700: (1.0, 0.5)})
+    _write_rng(tmp_path / "40100.40100.rng", {900: (1.0, 2.0)})
+    return PloPack(root=tmp_path, label="t")
+
+
+def _hj_node(pack: PloPack):
+    return next(n for n in enumerate_plo_nodes(pack) if n.actor == "HJ")
+
+
+def test_equity_computed_for_facing_open(tmp_path):
+    pack = _facing_open_pack(tmp_path)
+    facts = extract_plo_facts(
+        sample_plo_spot(_hj_node(pack), HERO),
+        pack,
+        equity_runouts=8,
+        rng=random.Random(1),
+    )
+    assert facts.hero_equity_vs_villain is not None
+    assert 0.0 <= facts.hero_equity_vs_villain <= 1.0
+    assert facts.hero_equity_runouts_used == 8  # noqa: PLR2004
+    assert facts.hero_range_equity_vs_villain is not None
+    assert 0.0 <= facts.hero_range_equity_vs_villain <= 1.0
+
+
+def test_compute_equity_false_skips_monte_carlo(tmp_path):
+    pack = _facing_open_pack(tmp_path)
+    facts = extract_plo_facts(
+        sample_plo_spot(_hj_node(pack), HERO), pack, compute_equity=False
+    )
+    assert facts.hero_equity_vs_villain is None
+    assert facts.hero_range_equity_vs_villain is None
+    assert facts.hero_equity_runouts_used == 0
+    assert facts.villain_stats is not None  # structural facts still computed
+
+
+def test_equity_is_deterministic_with_a_seed(tmp_path):
+    pack = _facing_open_pack(tmp_path)
+    spot = sample_plo_spot(_hj_node(pack), HERO)
+    a = extract_plo_facts(spot, pack, equity_runouts=8, rng=random.Random(7))
+    b = extract_plo_facts(spot, pack, equity_runouts=8, rng=random.Random(7))
+    assert a.hero_equity_vs_villain == b.hero_equity_vs_villain
+    assert a.hero_range_equity_vs_villain == b.hero_range_equity_vs_villain
+
+
+def test_open_spot_has_no_equity(tmp_path):
+    _write_rng(tmp_path / "0.rng", {HERO: (0.0, -1.0)})
+    _write_rng(tmp_path / "40100.rng", {HERO: (1.0, 5.0)})
+    pack = PloPack(root=tmp_path, label="t")
+    node = next(n for n in enumerate_plo_nodes(pack) if n.actor == "LJ")
+    facts = extract_plo_facts(
+        sample_plo_spot(node, HERO), pack, rng=random.Random(1)
+    )
+    assert facts.hero_equity_vs_villain is None  # no villain -> no equity
