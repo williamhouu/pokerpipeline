@@ -58,6 +58,27 @@ def _verb(action: PloAction) -> str:
     return action.action.value.replace("_", "")
 
 
+def action_label(action: PloAction) -> str:
+    """Stable, human-readable label for an action, e.g. ``'Raise 100%'``.
+
+    Unique within a node (one file per distinct action), so it doubles as the
+    key in a spot's ``action_frequencies`` / ``ev_by_action`` dicts. Raise
+    sizes are pot-relative (``'Raise 100%'`` = a pot-sized raise). Shared by
+    :attr:`PloActionOption.label` and the fact extractor (which labels the
+    villain's action).
+    """
+    t = action.action
+    if t is PloActionType.RAISE:
+        return f"Raise {action.raise_pct:g}%"
+    if t is PloActionType.MIN_RAISE:
+        return "Min-raise"
+    if t is PloActionType.ALL_IN:
+        return "All-in"
+    if t is PloActionType.CALL:
+        return "Call"
+    return "Fold"
+
+
 @dataclass(frozen=True)
 class PloActionOption:
     """One action available at a PLO decision node.
@@ -84,16 +105,7 @@ class PloActionOption:
         Raise sizes are pot-relative (``'Raise 100%'`` = a pot-sized raise),
         matching the NLHE convention.
         """
-        t = self.action.action
-        if t is PloActionType.RAISE:
-            return f"Raise {self.action.raise_pct:g}%"
-        if t is PloActionType.MIN_RAISE:
-            return "Min-raise"
-        if t is PloActionType.ALL_IN:
-            return "All-in"
-        if t is PloActionType.CALL:
-            return "Call"
-        return "Fold"
+        return action_label(self.action)
 
 
 @dataclass(frozen=True)
