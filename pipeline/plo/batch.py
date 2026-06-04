@@ -33,10 +33,19 @@ from pipeline.plo.explanation_generator import (
 from pipeline.plo.fact_extractor import extract_plo_facts
 from pipeline.plo.format_writer import build_plo_row, write_plo_csv
 from pipeline.plo.hand_order import HAND_COUNT
-from pipeline.plo.node_enumerator import PloDecisionNode, enumerate_plo_nodes
+from pipeline.plo.node_enumerator import (
+    PloDecisionNode,
+    enumerate_plo_nodes,
+    plo_active_player_count,
+    plo_node_action_context,
+)
 from pipeline.plo.options import build_options
 from pipeline.plo.pack import PloActionType, PloPack
-from pipeline.plo.question_extractor import is_question_worthy
+from pipeline.plo.question_extractor import (
+    MAX_TOP_FREQUENCY,
+    MIN_TOP_FREQUENCY,
+    is_question_worthy,
+)
 from pipeline.plo.spot_sampler import PloSpot, sample_plo_spot
 
 logger = logging.getLogger(__name__)
@@ -57,6 +66,7 @@ class PloBatchResult:
     explanations_written: int = 0
     explanations_failed: int = 0
     difficulty_filtered_out: int = 0
+    ev_gap_filtered_out: int = 0
 
     @property
     def shortfall(self) -> int:
@@ -64,16 +74,18 @@ class PloBatchResult:
         return max(0, self.questions_requested - self.questions_written)
 
 
-def _active_players(node: PloDecisionNode) -> int:
-    seats = {a.seat for a in node.history_before if a.action is not PloActionType.FOLD}
-    seats.add(node.actor)
-    return len(seats)
-
-
-def _first_worthy_spot(node: PloDecisionNode, rng: random.Random) -> PloSpot | None:
+def _first_worthy_spot(
+    node: PloDecisionNode,
+    rng: random.Random,
+    *,
+    min_frequency: float = MIN_TOP_FREQUENCY,
+    max_frequency: float = MAX_TOP_FREQUENCY,
+) -> PloSpot | None:
     for index in rng.sample(range(HAND_COUNT), k=min(_WORTHY_TRIES, HAND_COUNT)):
         spot = sample_plo_spot(node, index)
-        if spot.presence >= _MIN_PRESENCE and is_question_worthy(spot):
+        if spot.presence >= _MIN_PRESENCE and is_question_worthy(
+            spot, min_frequency=min_frequency, max_frequency=max_frequency
+        ):
             return spot
     return None
 
@@ -86,6 +98,11 @@ def generate_plo_batch(
     hero_positions: list[str] | None = None,
     max_prior_raises: int | None = 2,
     max_active_players: int | None = 3,
+    action_contexts: list[str] | None = None,
+    player_counts: list[int] | None = None,
+    min_frequency: float = MIN_TOP_FREQUENCY,
+    max_frequency: float = MAX_TOP_FREQUENCY,
+    min_ev_gap_bb: float | None = None,
     compute_equity: bool = True,
     answer_style: str = "auto",
     seed: int = 0,
@@ -108,6 +125,14 @@ def generate_plo_batch(
     Equity is computed per kept spot when ``compute_equity`` (the ~1s/spot cost;
     it only enriches the equity/range concept tags).
 
+    Node filters (all optional, all AND-combined): ``hero_positions``,
+    ``action_contexts`` (the :data:`PLO_ACTION_CONTEXTS` buckets), and
+    ``player_counts`` mirror the NLHE Generate page; ``max_prior_raises`` /
+    ``max_active_players`` are the coarse clean-line caps. Spot filters:
+    ``min_frequency`` / ``max_frequency`` set the worthiness window, and
+    ``min_ev_gap_bb`` drops near-coinflip spots (reported in
+    ``ev_gap_filtered_out``).
+
     When ``generate_explanations`` is True, Layer 6 (the LLM) fills the
     ``Answer Explanation`` column per spot; otherwise it is left blank (the
     deterministic path, no API key needed). A failed explanation never drops the
@@ -116,6 +141,8 @@ def generate_plo_batch(
     """
     nodes = enumerate_plo_nodes(pack)
     rng = random.Random(seed)
+    ctx_set = set(action_contexts) if action_contexts else None
+    pc_set = set(player_counts) if player_counts else None
     candidates = [
         n
         for n in nodes
@@ -124,7 +151,12 @@ def generate_plo_batch(
             max_prior_raises is None
             or sum(1 for a in n.history_before if a.action in _AGGRESSIVE) <= max_prior_raises
         )
-        and (max_active_players is None or _active_players(n) <= max_active_players)
+        and (
+            max_active_players is None
+            or plo_active_player_count(n) <= max_active_players
+        )
+        and (ctx_set is None or plo_node_action_context(n) in ctx_set)
+        and (pc_set is None or plo_active_player_count(n) in pc_set)
     ]
     rng.shuffle(candidates)
 
@@ -133,16 +165,28 @@ def generate_plo_batch(
     explanations_written = 0
     explanations_failed = 0
     difficulty_filtered_out = 0
+    ev_gap_filtered_out = 0
     for node in candidates:
         if len(rows) >= total_questions:
             break
         scanned += 1
-        spot = _first_worthy_spot(node, rng)
+        spot = _first_worthy_spot(
+            node, rng, min_frequency=min_frequency, max_frequency=max_frequency
+        )
         if spot is None:
             continue
         facts = extract_plo_facts(
             spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
         )
+        # EV-gap quality gate (PLO has a real ev_gap on every spot, raises
+        # included), applied BEFORE the paid LLM call -- mirrors the NLHE gate.
+        if (
+            min_ev_gap_bb is not None
+            and facts.ev_gap_bb is not None
+            and facts.ev_gap_bb < min_ev_gap_bb
+        ):
+            ev_gap_filtered_out += 1
+            continue
         # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
         # spots cost no API spend -- the same gate the NLHE Generate page uses.
         difficulty = compute_plo_difficulty(facts)
@@ -195,6 +239,7 @@ def generate_plo_batch(
         explanations_written=explanations_written,
         explanations_failed=explanations_failed,
         difficulty_filtered_out=difficulty_filtered_out,
+        ev_gap_filtered_out=ev_gap_filtered_out,
     )
 
 

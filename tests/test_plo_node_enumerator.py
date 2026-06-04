@@ -8,10 +8,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.plo.node_enumerator import (  # noqa: E402
+    PLO_ACTION_CONTEXTS,
+    PloDecisionNode,
     enumerate_plo_nodes,
     enumerate_plo_nodes_by_actor,
+    plo_active_player_count,
+    plo_node_action_context,
 )
-from pipeline.plo.pack import PloActionType, PloPack  # noqa: E402
+from pipeline.plo.pack import PloAction, PloActionType, PloPack  # noqa: E402
 
 F = PloActionType.FOLD
 C = PloActionType.CALL
@@ -117,3 +121,62 @@ def test_squeeze_node_actor_is_last_raiser(tmp_path):
     assert len(nodes) == 1
     assert nodes[0].actor == "BB"
     assert nodes[0].history_stem == "40100.1.1.1.1"
+
+
+# --- action-context + player-count categorization -------------------------
+def _act(seat: str, atype: PloActionType, pct: int | None = None) -> PloAction:
+    return PloAction(seat=seat, action=atype, raise_pct=pct)
+
+
+def _node_with(actor: str, *history: PloAction) -> PloDecisionNode:
+    return PloDecisionNode(
+        actor=actor, history_before=tuple(history), actions=(), history_stem=""
+    )
+
+
+def test_action_context_opening():
+    assert plo_node_action_context(_node_with("LJ")) == "Opening"
+
+
+def test_action_context_facing_single_raise():
+    node = _node_with("HJ", _act("LJ", R, 100))
+    assert plo_node_action_context(node) == "Facing single raise"
+
+
+def test_action_context_facing_3bet():
+    node = _node_with("LJ", _act("LJ", R, 100), _act("BB", R, 100))
+    assert plo_node_action_context(node) == "Facing 3-bet"
+
+
+def test_action_context_facing_4bet_plus():
+    node = _node_with(
+        "BB", _act("LJ", R, 100), _act("BB", R, 100), _act("LJ", R, 100)
+    )
+    assert plo_node_action_context(node) == "Facing 4-bet+"
+
+
+def test_action_context_all_in_counts_as_a_raise():
+    node = _node_with("BB", _act("LJ", J))
+    assert plo_node_action_context(node) == "Facing single raise"
+
+
+def test_action_context_after_calls_is_squeeze():
+    # A raise then a call before hero acts = a squeeze / after-call(s) spot.
+    node = _node_with("BB", _act("LJ", R, 100), _act("CO", C))
+    assert plo_node_action_context(node) == "After call(s)"
+
+
+def test_all_contexts_are_in_the_catalog(tmp_path):
+    for node in enumerate_plo_nodes(_two_node_pack(tmp_path)):
+        assert plo_node_action_context(node) in PLO_ACTION_CONTEXTS
+
+
+def test_active_player_count_counts_non_folders_plus_hero():
+    # LJ raises, HJ folds (excluded), CO calls; hero is BB -> {LJ, CO, BB}.
+    node = _node_with("BB", _act("LJ", R, 100), _act("HJ", F), _act("CO", C))
+    assert plo_active_player_count(node) == 3  # noqa: PLR2004
+
+
+def test_active_player_count_open_node_is_heads_up_floor():
+    # First in: only hero is "in" so far.
+    assert plo_active_player_count(_node_with("LJ")) == 1

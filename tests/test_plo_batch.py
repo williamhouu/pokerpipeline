@@ -96,6 +96,64 @@ def test_batch_difficulty_band_filters_out_of_band_spots(tmp_path):
     assert result.difficulty_filtered_out >= 1
 
 
+def test_batch_action_context_filter(tmp_path):
+    pack = _clean_hj_pack(tmp_path)  # the only node is HJ facing a single raise
+    out = tmp_path / "batch.csv"
+    # Asking for opens excludes it; the matching context keeps it.
+    assert (
+        generate_plo_batch(
+            pack,
+            output_path=out,
+            total_questions=1,
+            seed=0,
+            compute_equity=False,
+            action_contexts=["Opening"],
+        ).questions_written
+        == 0
+    )
+    assert (
+        generate_plo_batch(
+            pack,
+            output_path=out,
+            total_questions=1,
+            seed=0,
+            compute_equity=False,
+            action_contexts=["Facing single raise"],
+        ).questions_written
+        == 1
+    )
+
+
+def test_batch_ev_gap_gate_filters_coinflips(tmp_path):
+    pack = _clean_hj_pack(tmp_path)  # every action has equal EV -> a 0 EV gap
+    out = tmp_path / "batch.csv"
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        min_ev_gap_bb=0.5,
+    )
+    assert result.questions_written == 0
+    assert result.ev_gap_filtered_out >= 1
+
+
+def test_batch_frequency_window_threads_through(tmp_path):
+    pack = _clean_hj_pack(tmp_path)  # the dominant action sits at 70%
+    out = tmp_path / "batch.csv"
+    # Require >= 95% dominance: the 70% spot no longer clears the window.
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        min_frequency=0.95,
+    )
+    assert result.questions_written == 0
+
+
 def test_batch_fills_explanations_with_a_client(tmp_path):
     pack = _clean_hj_pack(tmp_path)
     out = tmp_path / "batch.csv"

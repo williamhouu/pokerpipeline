@@ -221,3 +221,65 @@ def enumerate_plo_nodes_by_actor(
     for node in enumerate_plo_nodes(pack):
         by_actor[node.actor].append(node)
     return {actor: tuple(ns) for actor, ns in by_actor.items()}
+
+
+# --- node categorization (for the Generate page's filters) ------------------
+_AGGRESSIVE = frozenset(
+    {PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN}
+)
+
+#: The action-context buckets, in escalation order. Mirrors the NLHE
+#: ``pipeline.preflop.batch.ACTION_CONTEXTS`` so the two Generate pages offer
+#: the same "Action faced" choices.
+PLO_ACTION_CONTEXTS: tuple[str, ...] = (
+    "Opening",
+    "Facing single raise",
+    "Facing 3-bet",
+    "Facing 4-bet+",
+    "After call(s)",
+)
+
+
+def plo_node_action_context(node: PloDecisionNode) -> str:
+    """Categorize a node by the action hero is facing.
+
+    One of :data:`PLO_ACTION_CONTEXTS`. Port of
+    :func:`pipeline.preflop.batch.node_action_context`:
+
+      * ``"Opening"``             -- no prior raise in the history
+      * ``"After call(s)"``       -- a prior raise AND a call afterwards
+                                     (a squeeze / over-limp spot)
+      * ``"Facing single raise"`` -- exactly one prior raise
+      * ``"Facing 3-bet"``        -- exactly two prior raises
+      * ``"Facing 4-bet+"``       -- three or more prior raises
+    """
+    n_raises = sum(1 for a in node.history_before if a.action in _AGGRESSIVE)
+    n_calls = sum(
+        1 for a in node.history_before if a.action is PloActionType.CALL
+    )
+    if n_raises == 0:
+        return "Opening"
+    if n_calls > 0:
+        return "After call(s)"
+    if n_raises == 1:
+        return "Facing single raise"
+    if n_raises == 2:  # noqa: PLR2004
+        return "Facing 3-bet"
+    return "Facing 4-bet+"
+
+
+def plo_active_player_count(node: PloDecisionNode) -> int:
+    """Players still in the pot at this decision (incl. hero).
+
+    Unique non-fold seats in the history plus the actor: 2 = heads-up,
+    3 = three-way, etc. Port of
+    :func:`pipeline.preflop.batch.active_player_count`; lets the Generate
+    page ask for clean 3-/4-way spots instead of the deep multiway tail.
+    """
+    seats = {
+        a.seat
+        for a in node.history_before
+        if a.action is not PloActionType.FOLD
+    }
+    seats.add(node.actor)
+    return len(seats)
