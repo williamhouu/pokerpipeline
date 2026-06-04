@@ -1,0 +1,206 @@
+"""Layer 8 for PLO: assemble one CSV row (and write the CSV).
+
+build_plo_row turns a populated PloFacts -- plus the deterministic options +
+(eventually) the LLM explanation + the difficulty result -- into a dict keyed by
+:data:`PLO_CSV_COLUMNS`. Ports :mod:`pipeline.preflop.format_writer`, with two
+differences:
+
+* **No ``ranges`` column.** PLO range *display* was dropped, so
+  ``PLO_CSV_COLUMNS`` is the shared schema minus ``ranges`` (39 columns).
+* **Decoupled from Layer 6.** The four options + correct answer are passed in
+  (computed by :mod:`pipeline.plo.options`); the explanation is a plain string
+  defaulting to ``""`` -- so a full CSV row is producible today, before the LLM
+  prose layer exists. When Layer 6 lands the batch just passes its text.
+
+Every other column is computed from the facts the analytical layers already
+produce (difficulty, concept tags, skills, archetype, ev_gap_bb), and the
+table-state + Question columns reuse the resolved pot-limit amounts so the chip
+tokens, the prose, and the pot never disagree.
+"""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+
+from pipeline.format_writer import CSV_COLUMNS
+from pipeline.plo.action_history import format_plo_action_history, format_plo_context
+from pipeline.plo.app_table_format import build_plo_app_table_columns
+from pipeline.plo.difficulty import PloDifficultyResult
+from pipeline.plo.fact_extractor import PloFacts
+from pipeline.plo.options import canonicalize_strategy
+from pipeline.plo.pack import PloActionType
+from pipeline.plo.position import hero_relative_position
+from pipeline.plo.skill_tagger import compute_plo_skills
+from pipeline.plo.spot_tags import compute_plo_concept_tags
+
+# The PLO schema = the shared template minus the dropped range-display column.
+PLO_CSV_COLUMNS: tuple[str, ...] = tuple(c for c in CSV_COLUMNS if c != "ranges")
+
+_AGGRESSIVE = {PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN}
+_PREFLOP_POT_TYPE: dict[int, str] = {
+    0: "Limped pot",
+    1: "Single raise pot",
+    2: "Three bet pot",
+    3: "Four bet pot",
+}
+_GAME_FORMAT_PROSE: dict[str, str] = {"cash": "Cash", "tournament": "Tournament"}
+_PERCENT = 100
+_HEADS_UP_MAX = 2
+_MAX_OPTIONS = 4
+
+
+def _format_action_frequencies(strategy: dict[str, float]) -> str:
+    """``{label: freq}`` -> ``"Call: 60%, Raise: 30%, Fold: 10%"``.
+
+    Integer percents via the largest-remainder method so they sum to exactly
+    100 (naive rounding shows totals like 99 or 101). Empty / all-zero -> "".
+    """
+    if not strategy or sum(strategy.values()) <= 0:
+        return ""
+    by_freq = sorted(strategy.items(), key=lambda kv: -kv[1])
+    floors = [(label, int(v * _PERCENT), (v * _PERCENT) % 1) for label, v in by_freq]
+    deficit = _PERCENT - sum(floor for _, floor, _ in floors)
+    bumps = {
+        i
+        for i, _ in sorted(enumerate(floors), key=lambda kv: -kv[1][2])[: max(deficit, 0)]
+    }
+    return ", ".join(
+        f"{label}: {floor + (1 if i in bumps else 0)}%"
+        for i, (label, floor, _) in enumerate(floors)
+    )
+
+
+def _active_count(facts: PloFacts) -> int:
+    seats = {
+        a.seat
+        for a in facts.spot.node.history_before
+        if a.action is not PloActionType.FOLD
+    }
+    seats.add(facts.spot.node.actor)
+    return len(seats)
+
+
+def _pot_type(facts: PloFacts) -> str:
+    raises = sum(1 for a in facts.spot.node.history_before if a.action in _AGGRESSIVE)
+    if facts.spot.dominant_action.startswith(("Raise", "Min-raise", "All-in")):
+        raises += 1
+    return _PREFLOP_POT_TYPE.get(raises, "Multi-raised pot")
+
+
+def _position_matchup(facts: PloFacts) -> str:
+    hero = facts.spot.node.actor
+    if facts.villain_stats is None:
+        return hero
+    return f"{hero}_vs_{facts.villain_stats.seat}"
+
+
+def _solver_reference(facts: PloFacts, pack_label: str) -> str:
+    return f"{pack_label}/{facts.spot.node.actor}/{facts.spot.node.node_id}"
+
+
+def build_plo_row(
+    facts: PloFacts,
+    *,
+    difficulty: PloDifficultyResult,
+    options: list[str],
+    correct_answer: str,
+    explanation: str = "",
+    number: int,
+    pack_label: str = "plo_6max_100bb",
+    stakes_bb_dollars: float = 1.0,
+    live_or_online: str = "Online",
+    game_format: str = "cash",
+    display_in_bb: bool = False,
+    stack_bb: float = 100.0,
+    validation_status: str = "draft",
+) -> dict[str, str]:
+    """Build one PLO CSV row (a dict keyed by :data:`PLO_CSV_COLUMNS`).
+
+    ``options`` / ``correct_answer`` come from :func:`pipeline.plo.options.
+    build_options`; ``explanation`` is the Layer 6 text (``""`` until it exists).
+    Every column is filled.
+    """
+    table = build_plo_app_table_columns(
+        facts,
+        stakes_bb_dollars=stakes_bb_dollars,
+        game_format=game_format,
+        display_in_bb=display_in_bb,
+        stack_bb=stack_bb,
+    )
+    opts = [*options[:_MAX_OPTIONS], *([""] * (_MAX_OPTIONS - len(options)))]
+    ev_gap = facts.ev_gap_bb
+
+    row = {
+        "No": str(number),
+        "User Seat": table["user_seat"],
+        "User Cards": table["user_cards"],
+        "Cards on Table": table["cards_on_table"],
+        "Table Size": table["table_size"],
+        "Default Stack": table["default_stack"],
+        "Seats": table["seats"],
+        "POT": table["pot"],
+        "Context": format_plo_context(
+            stakes_bb_dollars=stakes_bb_dollars,
+            stack_bb=stack_bb,
+            game_format=game_format,
+            display_in_bb=display_in_bb,
+            live_or_online=live_or_online,
+        ),
+        "Question": format_plo_action_history(
+            facts,
+            stakes_bb_dollars=stakes_bb_dollars,
+            game_format=game_format,
+            display_in_bb=display_in_bb,
+            stack_bb=stack_bb,
+        ),
+        "Question Type": "Hand Scenario Question.",
+        "Hand Stage": "Preflop",
+        "option 1": opts[0],
+        "option 2": opts[1],
+        "option 3": opts[2],
+        "option 4": opts[3],
+        "Correct Answer": correct_answer,
+        "Answer Explanation": explanation,
+        "Cash/Tourney": _GAME_FORMAT_PROSE.get(game_format, game_format.capitalize()),
+        "Live or Online": live_or_online,
+        "Relative Position": hero_relative_position(facts),
+        "Preflop Pot Type": _pot_type(facts),
+        "Pot Participant": "Heads-Up" if _active_count(facts) <= _HEADS_UP_MAX else "Multi-Way",
+        "Stack Depth": "Standard Stack",
+        "Difficulty Rating": str(difficulty.score),
+        "skills": ", ".join(compute_plo_skills(facts)),
+        "action_frequencies": _format_action_frequencies(canonicalize_strategy(facts)),
+        "ev_gap_bb": f"{ev_gap:.2f}" if ev_gap is not None else "",
+        "concept_tags": ", ".join(compute_plo_concept_tags(facts)),
+        "Notes": "Auto-generated by poker-pipeline (PLO preflop path).",
+        "Position Matchup": _position_matchup(facts),
+        "archetype": facts.archetype,
+        "board_texture": "",
+        "solver_reference": _solver_reference(facts, pack_label),
+        "validation_status": validation_status,
+        "easy_freq": f"{difficulty.easy_freq:.3f}",
+        "easy_ev": f"{difficulty.easy_ev:.3f}" if difficulty.ev_available else "",
+        "easy_concept": f"{difficulty.easy_concept:.3f}",
+        "easy_hand": f"{difficulty.easy_hand:.3f}",
+    }
+    # Defensive: guarantee exact schema coverage (every column, no extras).
+    missing = set(PLO_CSV_COLUMNS) - set(row)
+    if missing:
+        msg = f"build_plo_row missing columns: {sorted(missing)}"
+        raise AssertionError(msg)
+    return {col: row[col] for col in PLO_CSV_COLUMNS}
+
+
+def write_plo_csv(rows: list[dict[str, str]], path: Path | str) -> int:
+    """Write rows to ``path`` with the PLO header. Returns the row count."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(PLO_CSV_COLUMNS))
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+__all__ = ["PLO_CSV_COLUMNS", "build_plo_row", "write_plo_csv"]
