@@ -55,6 +55,11 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pipeline.plo.node_enumerator import PloDecisionNode
+    from pipeline.plo.pack import PloPack
 
 # Add the repo root to sys.path so `from pipeline...` imports work when
 # Streamlit invokes this script directly. Streamlit's default sys.path
@@ -3769,6 +3774,131 @@ def render_concept_tags_page() -> None:
 
 
 # --- page: Skills ----------------------------------------------------------
+@st.cache_resource(show_spinner="Loading PLO pack…")
+def _plo_pack_and_nodes(
+    pack_dir: str,
+) -> tuple[PloPack, tuple[PloDecisionNode, ...]]:
+    """Discover the PLO pack + enumerate its nodes once per pack dir (cached)."""
+    from admin_panel import plo_preview  # noqa: PLC0415
+
+    return plo_preview.load_pack_and_nodes(Path(pack_dir))
+
+
+def render_plo_preview_page() -> None:
+    """Read-only sanity-check view of the new PLO pipeline.
+
+    Samples worthy PLO spots from the pack and shows everything the
+    deterministic pipeline computes for them -- options, correct answer,
+    difficulty, EV gap, equity, concept tags, skills. No LLM, no CSV: the
+    written explanation (Layer 6) isn't built yet, so it's deliberately absent.
+    """
+    from admin_panel import plo_preview  # noqa: PLC0415
+
+    st.title("PLO Preview — pipeline check (read-only)")
+    st.info(
+        "This is the new **Pot-Limit Omaha** pipeline. It's analysis-only so "
+        "far: every field below is computed deterministically from the solver "
+        "pack (the LLM never picks options or strategy). The written "
+        "**explanation** (Layer 6) isn't built yet — that's the next phase — so "
+        "it's absent here. Use this page to eyeball that the spots, options, "
+        "difficulty, tags and skills look right."
+    )
+
+    pack_dir = st.text_input(
+        "PLO pack folder", value="plo_ranges", help="Folder holding the `.rng` files."
+    )
+    try:
+        pack, nodes = _plo_pack_and_nodes(pack_dir)
+    except FileNotFoundError:
+        st.error(
+            f"No PLO pack (`.rng` files) found under `{pack_dir}/`. The 3.8 GB "
+            "pack is gitignored — point this at the extracted "
+            "`plo_ranges/` folder on this machine."
+        )
+        return
+    st.success(f"Loaded **{len(nodes):,}** decision nodes from `{pack.label}`.")
+
+    c1, c2, c3 = st.columns(3)
+    count = c1.slider("How many spots", min_value=3, max_value=20, value=8)
+    seed = c2.number_input("Random seed", min_value=0, value=0, step=1)
+    style = c3.selectbox("Answer style", options=["auto", "basic", "gto"])
+    positions = st.multiselect(
+        "Hero positions (blank = any)",
+        options=["LJ", "HJ", "CO", "BU", "SB", "BB"],
+        default=[],
+    )
+    spot_type = st.radio(
+        "Lines to sample",
+        options=[
+            "Clean — opens, single-raised & HU/3-way 3-bet pots (recommended)",
+            "All — includes the noisy deep-multiway 4-bet+/jam tail",
+        ],
+        index=0,
+        help=(
+            "Monker's deep multiway 4-bet+/jam lines are largely unconverged "
+            "(absurd EV gaps, inverted ranges) — the same tail the NLHE "
+            "convergence guard skips. The clean default keeps the preview on the "
+            "verified-good lines."
+        ),
+    )
+    clean_only = spot_type.startswith("Clean")
+    compute_eq = st.checkbox(
+        "Compute hand equity vs villain range (~1s per spot)", value=False
+    )
+
+    if not st.button("🎲 Preview spots", type="primary"):
+        return
+
+    with st.spinner("Sampling worthy PLO spots…"):
+        rows = plo_preview.build_preview_rows(
+            pack,
+            nodes,
+            count=int(count),
+            seed=int(seed),
+            hero_positions=positions or None,
+            max_prior_raises=2 if clean_only else None,
+            max_active_players=3 if clean_only else None,
+            compute_equity=compute_eq,
+            answer_style=style,
+        )
+    if not rows:
+        st.warning(
+            "No worthy spots found with those filters (worthy = dominant action "
+            "55–95%). Try different positions or another seed."
+        )
+        return
+
+    st.caption(
+        f"{len(rows)} worthy spots — the dominant action sits in the teachable "
+        "55–95% window."
+    )
+    for i, r in enumerate(rows, start=1):
+        header = f"#{i}  {r.cards}  ·  {r.position} ({r.relative_position})"
+        if r.archetype:
+            header += f"  ·  {r.archetype}"
+        with st.expander(header, expanded=True):
+            st.markdown(f"**{r.action_line}**")
+            opts = "  ·  ".join(
+                f"✅ **{o}**" if o == r.correct_answer else o for o in r.options
+            )
+            st.markdown(f"Options:  {opts}")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Difficulty", r.difficulty)
+            m2.metric(
+                "Top freq", f"{r.dominant_freq:.0%}", help=f"action: {r.dominant_action}"
+            )
+            m3.metric(
+                "EV gap",
+                f"{r.ev_gap_bb:.2f} bb" if r.ev_gap_bb is not None else "—",
+            )
+            m4.metric(
+                "Hand equity",
+                f"{r.equity:.0%}" if r.equity is not None else "— (toggle on)",
+            )
+            st.caption("**Skills:** " + (", ".join(r.skills) or "—"))
+            st.caption("**Concept tags:** " + (", ".join(r.concept_tags) or "—"))
+
+
 def render_skills_page() -> None:
     """Reference catalog for the 42 user-facing skills.
 
@@ -3903,7 +4033,7 @@ def main() -> None:
     page = st.sidebar.radio(
         "Page",
         options=["Files", "Generate", "Review", "Ranges", "History", "Browse",
-                 "Prompt", "Compare", "Skills", "Concept Tags"],
+                 "Prompt", "Compare", "Skills", "Concept Tags", "PLO Preview"],
         index=0,
         key="nav_page",
     )
@@ -3983,6 +4113,8 @@ def main() -> None:
         render_skills_page()
     elif page == "Concept Tags":
         render_concept_tags_page()
+    elif page == "PLO Preview":
+        render_plo_preview_page()
 
 
 @st.fragment(run_every=1.0)
