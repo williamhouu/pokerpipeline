@@ -3846,7 +3846,39 @@ def render_plo_preview_page() -> None:
         "Compute hand equity vs villain range (~1s per spot)", value=False
     )
 
-    if not st.button("🎲 Preview spots", type="primary"):
+    col_preview, col_csv = st.columns(2)
+    preview_clicked = col_preview.button("🎲 Preview spots", type="primary")
+    csv_clicked = col_csv.button("⬇️ Generate CSV")
+
+    if csv_clicked:
+        from pipeline.plo.batch import generate_plo_batch  # noqa: PLC0415
+
+        out_path = Path("test_output/plo_batches/admin_preview.csv")
+        with st.spinner(f"Generating {int(count)} PLO questions…"):
+            result = generate_plo_batch(
+                pack,
+                output_path=out_path,
+                total_questions=int(count),
+                seed=int(seed),
+                hero_positions=positions or None,
+                max_prior_raises=2 if clean_only else None,
+                max_active_players=3 if clean_only else None,
+                compute_equity=compute_eq,
+                answer_style=style,
+            )
+        msg = f"Generated **{result.questions_written}** questions"
+        if result.shortfall:
+            msg += f" ({result.shortfall} short of {int(count)} — widen the filters)"
+        st.success(msg + ". Every column is filled except the explanation (Layer 6).")
+        st.download_button(
+            "Download plo_questions.csv",
+            data=out_path.read_bytes(),
+            file_name="plo_questions.csv",
+            mime="text/csv",
+        )
+        return
+
+    if not preview_clicked:
         return
 
     with st.spinner("Sampling worthy PLO spots…"):
