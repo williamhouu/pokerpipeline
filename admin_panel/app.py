@@ -3809,6 +3809,35 @@ def _render_plo_pack_loader() -> tuple[PloPack, tuple[PloDecisionNode, ...]] | N
         return None
 
 
+def _render_plo_difficulty_explainer() -> None:
+    """Popover body: how the PLO 4-axis difficulty rating is computed."""
+    from pipeline.plo.difficulty import (  # noqa: PLC0415
+        W_CONCEPT,
+        W_EV,
+        W_FREQ,
+        W_HAND,
+    )
+
+    st.markdown(
+        "PLO difficulty is the **same 4-axis score as Hold'em**, computed "
+        "from solver facts (never the LLM). Each axis is an *ease* in [0, 1] "
+        "(0 = hardest, 1 = easiest):\n\n"
+        f"- **Frequency** (weight {W_FREQ:.0%}) — how dominant the correct "
+        "action is. 55% = hardest, 100% = trivial.\n"
+        f"- **EV gap** (weight {W_EV:.0%}) — bb between the best and 2nd-best "
+        "action. 0 bb = a coinflip (hard), 3 bb+ = obvious. Free from the "
+        "pack for every PLO spot, raises included.\n"
+        f"- **Concept** (weight {W_CONCEPT:.0%}) — the archetype + concept "
+        "tags (a clear fold is easy, a thin squeeze is hard).\n"
+        f"- **Hand** (weight {W_HAND:.0%}) — hand-class strength (premiums and "
+        "clear trash are easy, marginal shapes are hard).\n\n"
+        f"Then `easy = {W_FREQ:.2f}·freq + {W_EV:.2f}·ev + {W_CONCEPT:.2f}·"
+        f"concept + {W_HAND:.2f}·hand` and `difficulty = round(3000 − "
+        "easy·2500)`, clipped to **400–3200**. When EV is unavailable its "
+        "weight redistributes across the other three axes."
+    )
+
+
 def render_plo_generate_page() -> None:
     """Generate Pot-Limit Omaha question batches, the same way as Hold'em.
 
@@ -3833,48 +3862,235 @@ def render_plo_generate_page() -> None:
     pack, nodes = loaded
     st.success(f"Loaded **{len(nodes):,}** decision nodes from `{pack.label}`.")
 
-    c1, c2, c3 = st.columns(3)
-    count = c1.slider("Questions", min_value=3, max_value=60, value=10)
-    seed = c2.number_input("Random seed", min_value=0, value=0, step=1)
-    style = c3.selectbox("Answer style", options=["auto", "basic", "gto"])
+    from pipeline.plo.node_enumerator import (  # noqa: PLC0415
+        PLO_ACTION_CONTEXTS,
+        plo_active_player_count,
+        plo_node_action_context,
+    )
+    from pipeline.plo.question_extractor import (  # noqa: PLC0415
+        effective_max_frequency,
+    )
 
+    # --- 1. Hero context: position + action faced + players in pot ---
+    st.subheader("1. Hero context")
+    hc1, hc2 = st.columns(2)
+    with hc1:
+        positions = st.multiselect(
+            "Hero positions (blank = any)",
+            options=["LJ", "HJ", "CO", "BU", "SB", "BB"],
+            default=[],
+            help="Which seats hero is in. Empty = all positions.",
+        )
+    with hc2:
+        action_contexts = st.multiselect(
+            "Action faced",
+            options=list(PLO_ACTION_CONTEXTS),
+            default=["Opening", "Facing single raise", "Facing 3-bet"],
+            help="What hero is responding to. Empty = all. The clean default "
+            "skips the noisy deep-multiway 4-bet+ tail.",
+        )
+        player_counts = st.multiselect(
+            "Players in the pot",
+            options=[1, 2, 3, 4, 5, 6],
+            default=[1, 2, 3],
+            format_func=lambda n: (
+                "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
+            ),
+            help="How many players are still in at hero's decision. The clean "
+            "default (1-3) avoids Monker's unconverged deep-multiway tail.",
+        )
+
+    # Live count of matching nodes (filenames only -- cheap), like Hold'em.
+    _ctx = set(action_contexts) if action_contexts else None
+    _pc = set(player_counts) if player_counts else None
+    _pos = set(positions) if positions else None
+    _matching = sum(
+        1
+        for n in nodes
+        if (_pos is None or n.actor in _pos)
+        and (_ctx is None or plo_node_action_context(n) in _ctx)
+        and (_pc is None or plo_active_player_count(n) in _pc)
+    )
+    st.caption(
+        f"**{_matching:,}** decision nodes match these filters "
+        f"(of {len(nodes):,} total)."
+    )
+    if "Facing 4-bet+" in (action_contexts or []) or any(
+        p >= 4 for p in (player_counts or [])  # noqa: PLR2004
+    ):
+        st.warning(
+            "Heads up: 4-bet+ lines and 4-way+ pots include Monker's largely "
+            "UNCONVERGED deep-multiway tail (absurd EV gaps, inverted ranges)."
+        )
+
+    st.divider()
+
+    # --- 2. Difficulty (same 4-axis rating + gates as Hold'em) ---
+    st.subheader("2. Difficulty")
+    with st.popover("ℹ️  How is the Difficulty Rating calculated?"):
+        _render_plo_difficulty_explainer()
     preset = st.radio(
-        "Difficulty", options=[*_PLO_DIFFICULTY_BANDS, "Custom"], index=3, horizontal=True
+        "Preset",
+        options=[*_PLO_DIFFICULTY_BANDS, "Custom"],
+        index=3,
+        horizontal=True,
+        key="plo_difficulty_preset",
     )
     if preset == "Custom":
-        lo, hi = st.slider("Difficulty band", 400, 3200, (400, 3200))
+        lo, hi = st.slider("Difficulty rating band", 400, 3200, (400, 3200), step=50)
     else:
         lo, hi = _PLO_DIFFICULTY_BANDS[preset]
-        st.caption(f"Difficulty band: {lo} to {hi} (computed 4-axis rating).")
+        st.caption(f"Difficulty band: **{lo}–{hi}** (computed 4-axis rating).")
 
-    positions = st.multiselect(
-        "Hero positions (blank = any)",
-        options=["LJ", "HJ", "CO", "BU", "SB", "BB"],
-        default=[],
+    with st.expander(
+        "Advanced filters (worthiness window · EV-gap gate)", expanded=False
+    ):
+        st.caption(
+            "The frequency window gates whether a decision is teachable at all "
+            "(the 55-95% sweet spot). The EV-gap gate drops near-coinflip spots."
+        )
+        freq_low, freq_high = st.slider(
+            "Solver frequency worthiness window (%)",
+            min_value=50,
+            max_value=100,
+            value=(55, 95),
+            key="plo_worthiness_slider",
+            help="Below 55% = no clear best answer; 100% = trivial.",
+        )
+        exclude_ambiguous = st.checkbox(
+            "Exclude ambiguous 90-95% band (recommended)",
+            value=True,
+            key="plo_exclude_ambiguous",
+            help="Spots at 90-95% read as 'mostly' but sit just under the 95% "
+            "'always' line, so the right read can still be marked wrong. "
+            "On = caps the effective ceiling at 90%.",
+        )
+        min_ev_gap = st.slider(
+            "Minimum EV gap (bb) — 0 = off",
+            min_value=0.0,
+            max_value=3.0,
+            value=0.0,
+            step=0.05,
+            key="plo_min_ev_gap",
+            help="Drops spots whose EV gap to the 2nd-best action is below "
+            "this. PLO has a real EV gap on every spot, raises included.",
+        )
+    eff_max_freq = effective_max_frequency(
+        freq_high / 100.0, exclude_ambiguous_band=exclude_ambiguous
     )
-    clean_only = st.radio(
-        "Lines to sample",
-        options=[
-            "Clean: opens, single-raised, HU/3-way 3-bet pots (recommended)",
-            "All: includes the noisy deep-multiway 4-bet+/jam tail",
-        ],
-        index=0,
-        help=(
-            "Monker's deep multiway 4-bet+/jam lines are largely unconverged "
-            "(absurd EV gaps, inverted ranges). The clean default keeps the "
-            "batch on the verified-good lines."
-        ),
-    ).startswith("Clean")
+    _eff_high_pct = round(eff_max_freq * 100)
+    _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
+    _band_note = (
+        "  ·  90-95% band excluded"
+        if exclude_ambiguous and freq_high > 90  # noqa: PLR2004
+        else ""
+    )
+    st.info(
+        f"**Numbers in effect** — difficulty **{lo}–{hi}**  ·  worthiness "
+        f"**{freq_low}–{_eff_high_pct}%**{_band_note}  ·  EV-gap gate "
+        f"**{_ev_txt}**."
+    )
 
-    m1, m2 = st.columns(2)
-    model = m1.selectbox("Model", options=_PLO_MODELS, help="Sonnet is ~5x cheaper than Opus.")
-    temperature = m2.slider(
-        "Temperature", 0.0, 1.0, 0.6, 0.05,
-        help="Higher means more varied prose. 0.6 is a good start with no examples.",
+    st.divider()
+
+    # --- 3. Answer option style (same as Hold'em; Sizing N/A for pot-limit) ---
+    st.subheader("3. Answer option style")
+    _style_labels = {
+        "Basic (Fold / Call / 3-bet)": "basic",
+        "GTO (Always / Mostly spectrum)": "gto",
+        "Auto-pick (Basic when dominant, GTO when mixed)": "auto",
+    }
+    style = _style_labels[
+        st.radio(
+            "Style",
+            options=list(_style_labels),
+            index=2,
+            key="plo_answer_style",
+            help="**Basic** = bare action labels. **GTO** = the Always/Mostly "
+            "spectrum that surfaces mixed strategies. **Auto-pick** = Basic for "
+            "dominant-action spots, GTO for mixed. (There is no Sizing style: "
+            "every PLO raise is pot-sized.)",
+        )
+    ]
+
+    st.divider()
+
+    # --- 4. Batch size + output ---
+    st.subheader("4. Batch size + output")
+    bo1, bo2, bo3 = st.columns(3)
+    count = bo1.number_input(
+        "Questions",
+        min_value=1,
+        max_value=200,
+        value=12,
+        step=1,
+        help="How many questions to generate (spread across matching nodes).",
+    )
+    seed = bo2.number_input("Random seed", min_value=0, value=0, step=1)
+    display_in_bb = (
+        bo3.radio(
+            "Amounts",
+            options=["Dollars", "Big blinds"],
+            index=1,
+            horizontal=True,
+        )
+        == "Big blinds"
+    )
+    out_prefix = st.text_input(
+        "Output filename (prefix)",
+        value="plo_batch",
+        help="A timestamp is appended; every batch lands in its own file.",
+    )
+
+    st.divider()
+
+    # --- 5. Model + API settings ---
+    st.subheader("5. Model + API settings")
+    _model_names = {
+        "claude-sonnet-4-6": "Sonnet 4.6 (5x cheaper, faster)",
+        "claude-opus-4-7": "Opus 4.7 (highest fidelity)",
+    }
+    ms1, ms2 = st.columns(2)
+    model = ms1.selectbox(
+        "Model", options=_PLO_MODELS, format_func=lambda m: _model_names.get(m, m)
+    )
+    temperature = ms2.slider(
+        "Temperature",
+        0.0,
+        1.0,
+        0.6,
+        0.05,
+        help="Higher = more varied prose. 0.6 is a good start with no examples.",
     )
     compute_eq = st.checkbox(
-        "Compute hand equity (~1s/spot, enriches the equity/range tags)", value=True
+        "Compute hand equity for the explanation (~1s/spot; real generate only)",
+        value=False,
+        help="On = the LLM gets equity numbers to cite, at ~1s/spot (PLO "
+        "equity is ~60x heavier than Hold'em). Off = fast. The preview is "
+        "always equity-off for speed.",
     )
+    _cost_per_q = 0.08 if "sonnet" in model else 0.40
+    st.info(
+        f"**Estimated**: {int(count)} questions · "
+        f"~${int(count) * _cost_per_q:.2f} · {_matching:,} nodes available"
+    )
+
+    st.divider()
+
+    # --- 6. Prompt (read-only inspector) ---
+    st.subheader("6. Prompt")
+    from pipeline.plo.explanation_generator import (  # noqa: PLC0415
+        build_plo_system_prompt,
+    )
+
+    with st.expander("🔍 View the PLO prompt (exactly what the LLM is told)"):
+        st.caption(
+            "Read-only. Reuses the vetted Hold'em voice rules (only the two "
+            "169-class rules are adapted for 4-card PLO). Em dashes and "
+            "semicolons are guaranteed out by a deterministic strip on top of "
+            "the voice rule. Ships without few-shot examples by design."
+        )
+        st.code(build_plo_system_prompt(), language="markdown")
 
     st.divider()
     g1, g2 = st.columns(2)
@@ -3892,7 +4108,9 @@ def render_plo_generate_page() -> None:
                 "way as Hold'em, so set it there and restart the panel."
             )
             return
-        out_path = _PLO_BATCH_DIR / f"plo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        _PLO_BATCH_DIR.mkdir(parents=True, exist_ok=True)
+        _stem = (out_prefix or "plo_batch").removesuffix(".csv").strip() or "plo_batch"
+        out_path = _PLO_BATCH_DIR / f"{_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         acc = {"in": 0, "out": 0, "cc": 0, "cr": 0}
         model_seen = [model]
 
@@ -3910,12 +4128,18 @@ def render_plo_generate_page() -> None:
                 total_questions=int(count),
                 seed=int(seed),
                 hero_positions=positions or None,
-                max_prior_raises=2 if clean_only else None,
-                max_active_players=3 if clean_only else None,
+                action_contexts=action_contexts or None,
+                player_counts=player_counts or None,
+                max_prior_raises=None,
+                max_active_players=None,
+                min_frequency=freq_low / 100.0,
+                max_frequency=eff_max_freq,
+                min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
                 min_difficulty=lo,
                 max_difficulty=hi,
                 compute_equity=compute_eq,
                 answer_style=style,
+                display_in_bb=display_in_bb,
                 generate_explanations=True,
                 explanation_model=model,
                 explanation_temperature=temperature,
@@ -3953,8 +4177,9 @@ def render_plo_generate_page() -> None:
         if result.shortfall:
             st.warning(
                 f"{result.shortfall} short of {int(count)} "
-                f"({result.difficulty_filtered_out} difficulty-filtered). Widen "
-                "the band, positions, or lines."
+                f"({result.difficulty_filtered_out} difficulty-filtered, "
+                f"{result.ev_gap_filtered_out} EV-gap-filtered). Widen the "
+                "band, positions, action contexts, or worthiness window."
             )
         st.download_button(
             "Download CSV", out_path.read_bytes(), file_name=out_path.name, mime="text/csv"
@@ -3964,19 +4189,34 @@ def render_plo_generate_page() -> None:
 
     if not preview_clicked:
         return
-    with st.spinner("Sampling worthy PLO spots…"):
+    with st.spinner("Sampling worthy PLO spots… (reads range files; equity off for speed)"):
         rows = plo_preview.build_preview_rows(
-            pack, nodes,
-            count=int(count), seed=int(seed),
+            pack,
+            nodes,
+            count=int(count),
+            seed=int(seed),
             hero_positions=positions or None,
-            max_prior_raises=2 if clean_only else None,
-            max_active_players=3 if clean_only else None,
-            compute_equity=compute_eq, answer_style=style,
+            action_contexts=action_contexts or None,
+            player_counts=player_counts or None,
+            max_prior_raises=None,
+            max_active_players=None,
+            min_frequency=freq_low / 100.0,
+            max_frequency=eff_max_freq,
+            min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+            compute_equity=False,
+            answer_style=style,
+            display_in_bb=display_in_bb,
         )
     if not rows:
-        st.warning("No worthy spots with those filters. Try other positions/seed.")
+        st.warning(
+            "No worthy spots with those filters. Widen the positions, action "
+            "contexts, worthiness window, or try another seed."
+        )
         return
-    st.caption(f"{len(rows)} worthy spots (no explanations, free preview).")
+    st.caption(
+        f"{len(rows)} worthy spots (no explanations, free preview). The "
+        "action line below is the REAL Question text the CSV will carry."
+    )
     for i, r in enumerate(rows, start=1):
         header = f"#{i}  {r.cards}  ·  {r.position} ({r.relative_position})"
         if r.archetype:
@@ -3989,11 +4229,20 @@ def render_plo_generate_page() -> None:
                     f"✅ **{o}**" if o == r.correct_answer else o for o in r.options
                 )
             )
-            mc = st.columns(4)
+            if r.action_frequencies:
+                st.caption(
+                    "**Solver mix:** "
+                    + ", ".join(
+                        f"{lbl} {freq:.0%}" for lbl, freq in r.action_frequencies
+                    )
+                )
+            mc = st.columns(3)
             mc[0].metric("Difficulty", r.difficulty)
             mc[1].metric("Top freq", f"{r.dominant_freq:.0%}", help=r.dominant_action)
-            mc[2].metric("EV gap", f"{r.ev_gap_bb:.2f} bb" if r.ev_gap_bb is not None else "n/a")
-            mc[3].metric("Equity", f"{r.equity:.0%}" if r.equity is not None else "off")
+            mc[2].metric(
+                "EV gap",
+                f"{r.ev_gap_bb:.2f} bb" if r.ev_gap_bb is not None else "n/a",
+            )
             st.caption("**Skills:** " + (", ".join(r.skills) or "none"))
             st.caption("**Concept tags:** " + (", ".join(r.concept_tags) or "none"))
 
