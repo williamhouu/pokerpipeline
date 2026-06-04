@@ -48,23 +48,34 @@ on a real node). **Do not re-crack this — it's solved.**
   17 archetypes (value/light via hand STRENGTH, since PLO equities run close),
   `ev_gap_bb` (free from the solver), and hero-vs-range + (cached, node-level)
   range-vs-range equity. ~1s/spot amortized.
+- `pipeline/plo/spot_tags.py` — `compute_plo_concept_tags(facts)`: the
+  facts-relative tags (position / decision / strategy / equity / range / stack /
+  blockers) + the 27 hand-structure tags. Blockers are two simple nut-blocker
+  tags (an ace blocks villain AA; a suited ace is the nut-flush blocker), not a
+  combinatoric field. `concept_tags.py` stays pure (hand-only, 270k-audited).
+- `pipeline/plo/difficulty.py` — `compute_plo_difficulty(facts)`: the NLHE
+  4-axis rating ported. EV axis is reliably available (free from the pack); the
+  hand axis keys off the strength bucket.
+- `pipeline/plo/skill_tagger.py` — `compute_plo_skills(facts)`: strict,
+  preflop-only mapping onto the PLO skill catalog (carry-over decisions + the
+  hand-reading edge + math).
 
-**Next (assembly — mirrors the NLHE preflop pipeline, keep the "LLM never
-thinks about poker" boundary). These are tuning-heavy → refine against graded
-output:**
-1. **Blockers** — DEFERRED. PLO nut-blockers (blocking villain's AA / nut flush
-   / nut straight, redraws, freerolls) are far richer than a card-removal count
-   and deserve their own design pass. `PloFacts.blockers` is empty for now.
-2. **Concept tags** — `compute_plo_concept_tags(facts)`: wire the built
-   `compute_plo_hand_tags` + add the ~28 facts-relative tags (position /
-   decision / equity / range) the `concept_tags.py` docstring catalogs.
-3. **Difficulty** — port the NLHE 4-axis framework; the EV axis is now free
-   (real `ev_gap_bb` from the pack, raise spots included).
-4. **Skill mapper** — strict, spot-level; maps the built hand tags + archetypes.
-5. **Layer 6** — PLO gold examples + voice → prose.
-6. **Render + wire** — action history / app-table / format writer for 4 cards +
-   pot-limit sizes (no range-display column), batch orchestrator, then the
-   admin-panel game-type selector (UI last).
+So the analytical backbone is complete: **pack → nodes → spots → facts → tags →
+difficulty → skills**, all validated on the real pack.
+
+**Next — the OUTPUT / RENDER layer (the remaining phase; keep the "LLM never
+thinks about poker" boundary):**
+1. **Deterministic options builder** — the four answer options + correct answer
+   from the solver's strategy (binary action / frequency / sizing). Analog of
+   `pipeline/preflop/options.py`. Pure Python.
+2. **Action-history / app-table / format writer** — Context + Question prose, the
+   app's table-state columns, and the CSV row, for 4 cards + pot-limit sizes
+   (no range-display column -- display was dropped). Pure Python.
+3. **Layer 6 prose** — the `explanation_generator` fork: PLO gold examples +
+   voice → the answer explanation. The only LLM layer; needs gold-example
+   curation + voice decisions + an API key.
+4. **Batch orchestrator** — `generate_plo_batch(...)` + the (reused) worthiness
+   gate, then the admin-panel game-type selector (UI last).
 
 **PLO skills catalog (designed with Zach):**
 - *A — carry-over preflop decisions:* Preflop Hand Selection, 3-Betting, Facing
