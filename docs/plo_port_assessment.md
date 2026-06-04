@@ -60,22 +60,46 @@ on a real node). **Do not re-crack this — it's solved.**
   preflop-only mapping onto the PLO skill catalog (carry-over decisions + the
   hand-reading edge + math).
 
-So the analytical backbone is complete: **pack → nodes → spots → facts → tags →
-difficulty → skills**, all validated on the real pack.
+**The PLO pipeline is now COMPLETE end-to-end: pack → generate (with LLM
+explanations + cost tracking) → review → export**, the same experience as
+Hold'em. Everything below is built, tested, and committed.
 
-**Next — the OUTPUT / RENDER layer (the remaining phase; keep the "LLM never
-thinks about poker" boundary):**
-1. **Deterministic options builder** — the four answer options + correct answer
-   from the solver's strategy (binary action / frequency / sizing). Analog of
-   `pipeline/preflop/options.py`. Pure Python.
-2. **Action-history / app-table / format writer** — Context + Question prose, the
-   app's table-state columns, and the CSV row, for 4 cards + pot-limit sizes
-   (no range-display column -- display was dropped). Pure Python.
-3. **Layer 6 prose** — the `explanation_generator` fork: PLO gold examples +
-   voice → the answer explanation. The only LLM layer; needs gold-example
-   curation + voice decisions + an API key.
-4. **Batch orchestrator** — `generate_plo_batch(...)` + the (reused) worthiness
-   gate, then the admin-panel game-type selector (UI last).
+Output / render layer (all built):
+- `options.py` — the four answer options + correct answer, deterministic
+  (basic / gto / auto); raises canonicalise to bet-level verbs.
+- `question_extractor.py` — the 55-95% worthiness gate; `position.py` — IP/OOP.
+- `action_history.py` — Context + Question prose, plus `resolve_pot_limit`, a
+  pot-limit betting calculator (open 3.5bb, 3-bet 12bb, computed not looked up).
+- `app_table_format.py` — the app's table-state columns (4 cards, pot-limit
+  tokens), driven by the same resolved amounts.
+- `format_writer.py` — `PLO_CSV_COLUMNS` (the shared schema minus the dropped
+  `ranges` column, 39 cols) + `build_plo_row` + `write_plo_csv`.
+- `explanation_generator.py` — Layer 6. Reuses the vetted NLHE voice rules +
+  banned list (only the two 169-class rules adapted for 4-card PLO). **Ships
+  without few-shot examples** (the `gold_examples.py` seam is empty but wired);
+  **em dashes / semicolons are guaranteed out** by a deterministic strip on top
+  of the voice rule.
+- `batch.py` — `generate_plo_batch`: sample worthy → facts → options →
+  difficulty band filter → (optional) Layer 6 → CSV; reports shortfall +
+  difficulty-filtered + explanation counts.
+
+Admin panel (mirrors Hold'em):
+- **PLO Generate** — difficulty presets, position filter, clean-vs-all lines,
+  model (Sonnet/Opus) + temperature, equity toggle, free preview + real
+  generate. Uses the same API key and logs spend to the same `usage_log.jsonl`,
+  so cost tallies in the same sidebar lifetime metric. No range charts.
+- **PLO Review** — per-question grade / edit / remove / download (reuses
+  `admin_panel.review`).
+
+What's left (tuning + optional, not blocking a first batch):
+- **Read a first graded batch** (the brief's quality gate) and watch for
+  PLO-specific prose errors no validator catches yet (a non-nut flush called the
+  nuts, 2-of-4 confusion, equity mis-citation).
+- **Tune the archetype thresholds** -- `3bet_for_value` currently fires on
+  ~48%-equity hands (it keys off hand shape, not equity).
+- **Optional NLHE niceties** not ported: background-job runner (PLO generates
+  synchronously), prompt workshop, Compare A/B, and PLO Layer 7 validators
+  (NLHE's are stubbed too).
 
 **PLO skills catalog (designed with Zach):**
 - *A — carry-over preflop decisions:* Preflop Hand Selection, 3-Betting, Facing
