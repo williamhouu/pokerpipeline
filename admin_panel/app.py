@@ -3784,77 +3784,126 @@ def _plo_pack_and_nodes(
     return plo_preview.load_pack_and_nodes(Path(pack_dir))
 
 
-def render_plo_preview_page() -> None:
-    """Read-only sanity-check view of the new PLO pipeline.
+_PLO_BATCH_DIR = REPO_ROOT / "test_output" / "plo_batches"
+_PLO_DIFFICULTY_BANDS = {
+    "Easy": (400, 1300),
+    "Medium": (1300, 2100),
+    "Hard": (2100, 3200),
+    "Mixed": (400, 3200),
+}
+_PLO_MODELS = ["claude-sonnet-4-6", "claude-opus-4-7"]
 
-    Samples worthy PLO spots from the pack and shows everything the
-    deterministic pipeline computes for them -- options, correct answer,
-    difficulty, EV gap, equity, concept tags, skills. No LLM, no CSV: the
-    written explanation (Layer 6) isn't built yet, so it's deliberately absent.
-    """
-    from admin_panel import plo_preview  # noqa: PLC0415
 
-    st.title("PLO Preview — pipeline check (read-only)")
-    st.info(
-        "This is the new **Pot-Limit Omaha** pipeline. It's analysis-only so "
-        "far: every field below is computed deterministically from the solver "
-        "pack (the LLM never picks options or strategy). The written "
-        "**explanation** (Layer 6) isn't built yet — that's the next phase — so "
-        "it's absent here. Use this page to eyeball that the spots, options, "
-        "difficulty, tags and skills look right."
-    )
-
+def _render_plo_pack_loader() -> tuple[PloPack, tuple[PloDecisionNode, ...]] | None:
     pack_dir = st.text_input(
         "PLO pack folder", value="plo_ranges", help="Folder holding the `.rng` files."
     )
     try:
-        pack, nodes = _plo_pack_and_nodes(pack_dir)
+        return _plo_pack_and_nodes(pack_dir)
     except FileNotFoundError:
         st.error(
             f"No PLO pack (`.rng` files) found under `{pack_dir}/`. The 3.8 GB "
-            "pack is gitignored — point this at the extracted "
-            "`plo_ranges/` folder on this machine."
+            "pack is gitignored, so point this at the extracted `plo_ranges/` "
+            "folder on this machine."
         )
+        return None
+
+
+def render_plo_generate_page() -> None:
+    """Generate Pot-Limit Omaha question batches, the same way as Hold'em.
+
+    Mirrors the NLHE Generate page: difficulty presets, a model + temperature
+    choice, a free no-API preview, and a real run that writes LLM explanations
+    and logs its spend to the SAME lifetime metric in the sidebar. Range-chart
+    options are intentionally absent (PLO has no range display).
+    """
+    from admin_panel import plo_preview  # noqa: PLC0415
+
+    st.title("PLO Generate")
+    st.caption(
+        "Pot-Limit Omaha questions, generated the same way as Hold'em. Options, "
+        "difficulty, tags and skills are deterministic from the solver; only the "
+        "written explanation uses the LLM. Spend tallies in the sidebar lifetime "
+        "metric, same as Hold'em."
+    )
+
+    loaded = _render_plo_pack_loader()
+    if loaded is None:
         return
+    pack, nodes = loaded
     st.success(f"Loaded **{len(nodes):,}** decision nodes from `{pack.label}`.")
 
     c1, c2, c3 = st.columns(3)
-    count = c1.slider("How many spots", min_value=3, max_value=20, value=8)
+    count = c1.slider("Questions", min_value=3, max_value=60, value=10)
     seed = c2.number_input("Random seed", min_value=0, value=0, step=1)
     style = c3.selectbox("Answer style", options=["auto", "basic", "gto"])
+
+    preset = st.radio(
+        "Difficulty", options=[*_PLO_DIFFICULTY_BANDS, "Custom"], index=3, horizontal=True
+    )
+    if preset == "Custom":
+        lo, hi = st.slider("Difficulty band", 400, 3200, (400, 3200))
+    else:
+        lo, hi = _PLO_DIFFICULTY_BANDS[preset]
+        st.caption(f"Difficulty band: {lo} to {hi} (computed 4-axis rating).")
+
     positions = st.multiselect(
         "Hero positions (blank = any)",
         options=["LJ", "HJ", "CO", "BU", "SB", "BB"],
         default=[],
     )
-    spot_type = st.radio(
+    clean_only = st.radio(
         "Lines to sample",
         options=[
-            "Clean — opens, single-raised & HU/3-way 3-bet pots (recommended)",
-            "All — includes the noisy deep-multiway 4-bet+/jam tail",
+            "Clean: opens, single-raised, HU/3-way 3-bet pots (recommended)",
+            "All: includes the noisy deep-multiway 4-bet+/jam tail",
         ],
         index=0,
         help=(
             "Monker's deep multiway 4-bet+/jam lines are largely unconverged "
-            "(absurd EV gaps, inverted ranges) — the same tail the NLHE "
-            "convergence guard skips. The clean default keeps the preview on the "
-            "verified-good lines."
+            "(absurd EV gaps, inverted ranges). The clean default keeps the "
+            "batch on the verified-good lines."
         ),
+    ).startswith("Clean")
+
+    m1, m2 = st.columns(2)
+    model = m1.selectbox("Model", options=_PLO_MODELS, help="Sonnet is ~5x cheaper than Opus.")
+    temperature = m2.slider(
+        "Temperature", 0.0, 1.0, 0.6, 0.05,
+        help="Higher means more varied prose. 0.6 is a good start with no examples.",
     )
-    clean_only = spot_type.startswith("Clean")
     compute_eq = st.checkbox(
-        "Compute hand equity vs villain range (~1s per spot)", value=False
+        "Compute hand equity (~1s/spot, enriches the equity/range tags)", value=True
     )
 
-    col_preview, col_csv = st.columns(2)
-    preview_clicked = col_preview.button("🎲 Preview spots", type="primary")
-    csv_clicked = col_csv.button("⬇️ Generate CSV")
+    st.divider()
+    g1, g2 = st.columns(2)
+    preview_clicked = g1.button("🎲 Preview spots (no API, free)")
+    generate_clicked = g2.button("✍️ Generate with explanations (uses API)", type="primary")
 
-    if csv_clicked:
+    if generate_clicked:
+        import os  # noqa: PLC0415
+
         from pipeline.plo.batch import generate_plo_batch  # noqa: PLC0415
 
-        out_path = Path("test_output/plo_batches/admin_preview.csv")
-        with st.spinner(f"Generating {int(count)} PLO questions…"):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            st.error(
+                "No `ANTHROPIC_API_KEY` found. It's loaded from `.env` the same "
+                "way as Hold'em, so set it there and restart the panel."
+            )
+            return
+        out_path = _PLO_BATCH_DIR / f"plo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        acc = {"in": 0, "out": 0, "cc": 0, "cr": 0}
+        model_seen = [model]
+
+        def _usage_cb(mdl: str, in_t: int, out_t: int, cc: int, cr: int) -> None:
+            acc["in"] += in_t
+            acc["out"] += out_t
+            acc["cc"] += cc
+            acc["cr"] += cr
+            model_seen[0] = mdl
+
+        with st.spinner(f"Generating {int(count)} PLO questions with {model}…"):
             result = generate_plo_batch(
                 pack,
                 output_path=out_path,
@@ -3863,72 +3912,188 @@ def render_plo_preview_page() -> None:
                 hero_positions=positions or None,
                 max_prior_raises=2 if clean_only else None,
                 max_active_players=3 if clean_only else None,
+                min_difficulty=lo,
+                max_difficulty=hi,
                 compute_equity=compute_eq,
                 answer_style=style,
+                generate_explanations=True,
+                explanation_model=model,
+                explanation_temperature=temperature,
+                usage_callback=_usage_cb,
             )
-        msg = f"Generated **{result.questions_written}** questions"
-        if result.shortfall:
-            msg += f" ({result.shortfall} short of {int(count)} — widen the filters)"
-        st.success(msg + ". Every column is filled except the explanation (Layer 6).")
-        st.download_button(
-            "Download plo_questions.csv",
-            data=out_path.read_bytes(),
-            file_name="plo_questions.csv",
-            mime="text/csv",
+        cost = usage.compute_cost_usd(
+            model=model_seen[0],
+            input_tokens=acc["in"],
+            output_tokens=acc["out"],
+            cache_creation_tokens=acc["cc"],
+            cache_read_tokens=acc["cr"],
         )
+        usage.append_log_entry(
+            USAGE_LOG_PATH,
+            model=model_seen[0],
+            input_tokens=acc["in"],
+            output_tokens=acc["out"],
+            cache_creation_tokens=acc["cc"],
+            cache_read_tokens=acc["cr"],
+            cost_usd=cost,
+            questions_written=result.questions_written,
+            output_filename=out_path.name,
+        )
+        st.success(
+            f"Generated **{result.questions_written}/{int(count)}** questions to "
+            f"`{out_path.name}` ({result.explanations_written} explanations)."
+        )
+        st.info(
+            f"💰 This batch: **{usage.format_cost(cost)}** "
+            f"({acc['out']:,} output tokens). Tallied in the sidebar "
+            "lifetime spend."
+        )
+        if result.explanations_failed:
+            st.warning(f"{result.explanations_failed} explanations failed and shipped blank.")
+        if result.shortfall:
+            st.warning(
+                f"{result.shortfall} short of {int(count)} "
+                f"({result.difficulty_filtered_out} difficulty-filtered). Widen "
+                "the band, positions, or lines."
+            )
+        st.download_button(
+            "Download CSV", out_path.read_bytes(), file_name=out_path.name, mime="text/csv"
+        )
+        st.caption("Grade and edit these on the **PLO Review** page.")
         return
 
     if not preview_clicked:
         return
-
     with st.spinner("Sampling worthy PLO spots…"):
         rows = plo_preview.build_preview_rows(
-            pack,
-            nodes,
-            count=int(count),
-            seed=int(seed),
+            pack, nodes,
+            count=int(count), seed=int(seed),
             hero_positions=positions or None,
             max_prior_raises=2 if clean_only else None,
             max_active_players=3 if clean_only else None,
-            compute_equity=compute_eq,
-            answer_style=style,
+            compute_equity=compute_eq, answer_style=style,
         )
     if not rows:
-        st.warning(
-            "No worthy spots found with those filters (worthy = dominant action "
-            "55–95%). Try different positions or another seed."
-        )
+        st.warning("No worthy spots with those filters. Try other positions/seed.")
         return
-
-    st.caption(
-        f"{len(rows)} worthy spots — the dominant action sits in the teachable "
-        "55–95% window."
-    )
+    st.caption(f"{len(rows)} worthy spots (no explanations, free preview).")
     for i, r in enumerate(rows, start=1):
         header = f"#{i}  {r.cards}  ·  {r.position} ({r.relative_position})"
         if r.archetype:
             header += f"  ·  {r.archetype}"
         with st.expander(header, expanded=True):
             st.markdown(f"**{r.action_line}**")
-            opts = "  ·  ".join(
-                f"✅ **{o}**" if o == r.correct_answer else o for o in r.options
+            st.markdown(
+                "Options:  "
+                + "  ·  ".join(
+                    f"✅ **{o}**" if o == r.correct_answer else o for o in r.options
+                )
             )
-            st.markdown(f"Options:  {opts}")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Difficulty", r.difficulty)
-            m2.metric(
-                "Top freq", f"{r.dominant_freq:.0%}", help=f"action: {r.dominant_action}"
+            mc = st.columns(4)
+            mc[0].metric("Difficulty", r.difficulty)
+            mc[1].metric("Top freq", f"{r.dominant_freq:.0%}", help=r.dominant_action)
+            mc[2].metric("EV gap", f"{r.ev_gap_bb:.2f} bb" if r.ev_gap_bb is not None else "n/a")
+            mc[3].metric("Equity", f"{r.equity:.0%}" if r.equity is not None else "off")
+            st.caption("**Skills:** " + (", ".join(r.skills) or "none"))
+            st.caption("**Concept tags:** " + (", ".join(r.concept_tags) or "none"))
+
+
+def render_plo_review_page() -> None:
+    """Grade, edit, and prune PLO question batches (mirrors the NLHE Review page).
+
+    Reuses :mod:`admin_panel.review` (the grade sidecar + in-place CSV edits are
+    game-agnostic). No range-chart button, since PLO has no range display.
+    """
+    import csv as _csv  # noqa: PLC0415
+
+    st.title("PLO Review")
+    csvs = (
+        sorted(_PLO_BATCH_DIR.glob("plo_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if _PLO_BATCH_DIR.exists()
+        else []
+    )
+    if not csvs:
+        st.info("No PLO batches yet. Generate one on the **PLO Generate** page.")
+        return
+
+    # Pick by FILENAME (not position): any edit bumps mtime and reorders the list.
+    pick = st.selectbox("Batch", options=[p.name for p in csvs], key="plo_review_batch")
+    csv_path = _PLO_BATCH_DIR / pick
+    with csv_path.open(encoding="utf-8-sig") as handle:
+        questions = list(_csv.DictReader(handle))
+    if not questions:
+        st.warning("That batch is empty.")
+        return
+
+    reviews = review.load_reviews(csv_path)
+    summary = review.summarize([q.get("No") for q in questions], reviews)
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Questions", summary.total)
+    s2.metric("Approved", summary.approved)
+    s3.metric("Needs review", summary.needs_review)
+    s4.metric("Rejected", summary.rejected)
+    if summary.quality_pct is not None:
+        st.caption(f"Approved share of decided grades: **{summary.quality_pct:.0f}%**.")
+    st.download_button(
+        "Download this batch", csv_path.read_bytes(), file_name=pick, mime="text/csv"
+    )
+    st.divider()
+
+    grade_opts = ["ungraded", "approved", "needs_review", "rejected"]
+    for q in questions:
+        no = str(q.get("No"))
+        status = reviews.get(no, {}).get("status", "ungraded")
+        badge = {"approved": "✅", "needs_review": "🟠", "rejected": "❌"}.get(status, "·")
+        label = (
+            f"{badge} #{no}  {q.get('User Cards', '')}  ·  "
+            f"{q.get('archetype', '')}  ·  diff {q.get('Difficulty Rating', '')}"
+        )
+        with st.expander(label, expanded=False):
+            st.markdown(f"**Context:** {q.get('Context', '')}")
+            st.markdown(f"**Question:** {q.get('Question', '')}")
+            opts = [q.get(f"option {i}", "") for i in range(1, 5)]
+            st.markdown(
+                "Options:  "
+                + "  ·  ".join(
+                    f"✅ **{o}**" if o == q.get("Correct Answer") else o
+                    for o in opts if o
+                )
             )
-            m3.metric(
-                "EV gap",
-                f"{r.ev_gap_bb:.2f} bb" if r.ev_gap_bb is not None else "—",
+            new_expl = st.text_area(
+                "Answer Explanation (auto-saves)",
+                value=q.get("Answer Explanation", ""),
+                key=f"plo_expl_{pick}_{no}",
+                height=120,
             )
-            m4.metric(
-                "Hand equity",
-                f"{r.equity:.0%}" if r.equity is not None else "— (toggle on)",
+            if new_expl != q.get("Answer Explanation", ""):
+                review.update_explanation(csv_path, no, new_expl)
+                st.toast(f"Saved #{no} explanation")
+            st.caption("**Skills:** " + (q.get("skills", "") or "none"))
+            st.caption("**Concept tags:** " + (q.get("concept_tags", "") or "none"))
+
+            gcol, dcol, rcol = st.columns([3, 1, 1])
+            choice = gcol.radio(
+                "Grade",
+                options=grade_opts,
+                index=grade_opts.index(status) if status in grade_opts else 0,
+                key=f"plo_grade_{pick}_{no}",
+                horizontal=True,
             )
-            st.caption("**Skills:** " + (", ".join(r.skills) or "—"))
-            st.caption("**Concept tags:** " + (", ".join(r.concept_tags) or "—"))
+            if choice != status:
+                if choice == "ungraded":
+                    review.remove_review(csv_path, no)
+                else:
+                    review.save_review(csv_path, no, choice, "")
+                st.rerun()
+            new_diff = dcol.text_input(
+                "Difficulty", value=q.get("Difficulty Rating", ""), key=f"plo_diff_{pick}_{no}"
+            )
+            if new_diff != q.get("Difficulty Rating", "") and new_diff.strip().isdigit():
+                review.update_difficulty(csv_path, no, new_diff.strip())
+                st.toast(f"Saved #{no} difficulty")
+            if rcol.button("🗑 Remove", key=f"plo_rm_{pick}_{no}"):
+                review.remove_question(csv_path, no)
+                st.rerun()
 
 
 def render_skills_page() -> None:
@@ -4065,7 +4230,8 @@ def main() -> None:
     page = st.sidebar.radio(
         "Page",
         options=["Files", "Generate", "Review", "Ranges", "History", "Browse",
-                 "Prompt", "Compare", "Skills", "Concept Tags", "PLO Preview"],
+                 "Prompt", "Compare", "Skills", "Concept Tags",
+                 "PLO Generate", "PLO Review"],
         index=0,
         key="nav_page",
     )
@@ -4145,8 +4311,10 @@ def main() -> None:
         render_skills_page()
     elif page == "Concept Tags":
         render_concept_tags_page()
-    elif page == "PLO Preview":
-        render_plo_preview_page()
+    elif page == "PLO Generate":
+        render_plo_generate_page()
+    elif page == "PLO Review":
+        render_plo_review_page()
 
 
 @st.fragment(run_every=1.0)

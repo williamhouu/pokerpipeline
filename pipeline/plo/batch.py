@@ -26,7 +26,10 @@ from pipeline.explanation_generator import (
     ExplanationValidationError,
 )
 from pipeline.plo.difficulty import compute_plo_difficulty
-from pipeline.plo.explanation_generator import generate_plo_answer_explanation
+from pipeline.plo.explanation_generator import (
+    UsageCallback,
+    generate_plo_answer_explanation,
+)
 from pipeline.plo.fact_extractor import extract_plo_facts
 from pipeline.plo.format_writer import build_plo_row, write_plo_csv
 from pipeline.plo.hand_order import HAND_COUNT
@@ -53,6 +56,7 @@ class PloBatchResult:
     nodes_scanned: int
     explanations_written: int = 0
     explanations_failed: int = 0
+    difficulty_filtered_out: int = 0
 
     @property
     def shortfall(self) -> int:
@@ -90,10 +94,13 @@ def generate_plo_batch(
     display_in_bb: bool = False,
     stack_bb: float = 100.0,
     pack_label: str = "plo_6max_100bb",
+    min_difficulty: int = 0,
+    max_difficulty: int = 10_000,
     generate_explanations: bool = False,
     explanation_client: Any = None,
     explanation_model: str = DEFAULT_MODEL,
     explanation_temperature: float = DEFAULT_TEMPERATURE,
+    usage_callback: UsageCallback | None = None,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
 
@@ -125,6 +132,7 @@ def generate_plo_batch(
     scanned = 0
     explanations_written = 0
     explanations_failed = 0
+    difficulty_filtered_out = 0
     for node in candidates:
         if len(rows) >= total_questions:
             break
@@ -135,6 +143,12 @@ def generate_plo_batch(
         facts = extract_plo_facts(
             spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
         )
+        # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
+        # spots cost no API spend -- the same gate the NLHE Generate page uses.
+        difficulty = compute_plo_difficulty(facts)
+        if not min_difficulty <= difficulty.score <= max_difficulty:
+            difficulty_filtered_out += 1
+            continue
         options, correct = build_options(facts, style=answer_style)
 
         explanation = ""
@@ -147,6 +161,7 @@ def generate_plo_batch(
                     client=explanation_client,
                     model=explanation_model,
                     temperature=explanation_temperature,
+                    usage_callback=usage_callback,
                 )
                 explanation = generated.answer_explanation
                 explanations_written += 1
@@ -157,7 +172,7 @@ def generate_plo_batch(
         rows.append(
             build_plo_row(
                 facts,
-                difficulty=compute_plo_difficulty(facts),
+                difficulty=difficulty,
                 options=options,
                 correct_answer=correct,
                 explanation=explanation,
@@ -179,6 +194,7 @@ def generate_plo_batch(
         nodes_scanned=scanned,
         explanations_written=explanations_written,
         explanations_failed=explanations_failed,
+        difficulty_filtered_out=difficulty_filtered_out,
     )
 
 

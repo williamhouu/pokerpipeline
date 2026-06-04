@@ -79,6 +79,23 @@ class _MockClient:
         self.messages = _MockMessages()
 
 
+def test_batch_difficulty_band_filters_out_of_band_spots(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    # A band above the 3200 ceiling rejects every spot before any LLM call.
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        min_difficulty=3300,
+        max_difficulty=3400,
+    )
+    assert result.questions_written == 0
+    assert result.difficulty_filtered_out >= 1
+
+
 def test_batch_fills_explanations_with_a_client(tmp_path):
     pack = _clean_hj_pack(tmp_path)
     out = tmp_path / "batch.csv"
