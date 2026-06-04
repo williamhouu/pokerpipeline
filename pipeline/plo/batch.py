@@ -14,11 +14,19 @@ caps to include it.
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from pipeline.explanation_generator import (
+    DEFAULT_MODEL,
+    DEFAULT_TEMPERATURE,
+    ExplanationValidationError,
+)
 from pipeline.plo.difficulty import compute_plo_difficulty
+from pipeline.plo.explanation_generator import generate_plo_answer_explanation
 from pipeline.plo.fact_extractor import extract_plo_facts
 from pipeline.plo.format_writer import build_plo_row, write_plo_csv
 from pipeline.plo.hand_order import HAND_COUNT
@@ -27,6 +35,8 @@ from pipeline.plo.options import build_options
 from pipeline.plo.pack import PloActionType, PloPack
 from pipeline.plo.question_extractor import is_question_worthy
 from pipeline.plo.spot_sampler import PloSpot, sample_plo_spot
+
+logger = logging.getLogger(__name__)
 
 _AGGRESSIVE = {PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN}
 _MIN_PRESENCE = 0.5
@@ -41,6 +51,8 @@ class PloBatchResult:
     questions_written: int
     questions_requested: int
     nodes_scanned: int
+    explanations_written: int = 0
+    explanations_failed: int = 0
 
     @property
     def shortfall(self) -> int:
@@ -78,13 +90,22 @@ def generate_plo_batch(
     display_in_bb: bool = False,
     stack_bb: float = 100.0,
     pack_label: str = "plo_6max_100bb",
+    generate_explanations: bool = False,
+    explanation_client: Any = None,
+    explanation_model: str = DEFAULT_MODEL,
+    explanation_temperature: float = DEFAULT_TEMPERATURE,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
 
     One worthy spot per node (for variety) across a shuffled, filtered node set.
     Equity is computed per kept spot when ``compute_equity`` (the ~1s/spot cost;
-    it only enriches the equity/range concept tags). The explanation column is
-    left blank until Layer 6 exists.
+    it only enriches the equity/range concept tags).
+
+    When ``generate_explanations`` is True, Layer 6 (the LLM) fills the
+    ``Answer Explanation`` column per spot; otherwise it is left blank (the
+    deterministic path, no API key needed). A failed explanation never drops the
+    question -- the row still ships with a blank explanation and is counted in
+    ``explanations_failed``.
     """
     nodes = enumerate_plo_nodes(pack)
     rng = random.Random(seed)
@@ -102,6 +123,8 @@ def generate_plo_batch(
 
     rows: list[dict[str, str]] = []
     scanned = 0
+    explanations_written = 0
+    explanations_failed = 0
     for node in candidates:
         if len(rows) >= total_questions:
             break
@@ -113,12 +136,31 @@ def generate_plo_batch(
             spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
         )
         options, correct = build_options(facts, style=answer_style)
+
+        explanation = ""
+        if generate_explanations:
+            try:
+                generated = generate_plo_answer_explanation(
+                    facts,
+                    list(options),
+                    correct,
+                    client=explanation_client,
+                    model=explanation_model,
+                    temperature=explanation_temperature,
+                )
+                explanation = generated.answer_explanation
+                explanations_written += 1
+            except (ExplanationValidationError, OSError, KeyError) as exc:
+                explanations_failed += 1
+                logger.warning("Layer 6 failed for a spot, shipping blank: %s", exc)
+
         rows.append(
             build_plo_row(
                 facts,
                 difficulty=compute_plo_difficulty(facts),
                 options=options,
                 correct_answer=correct,
+                explanation=explanation,
                 number=len(rows) + 1,
                 pack_label=pack_label,
                 stakes_bb_dollars=stakes_bb_dollars,
@@ -135,6 +177,8 @@ def generate_plo_batch(
         questions_written=len(rows),
         questions_requested=total_questions,
         nodes_scanned=scanned,
+        explanations_written=explanations_written,
+        explanations_failed=explanations_failed,
     )
 
 

@@ -61,3 +61,38 @@ def test_batch_reports_shortfall(tmp_path):
     )
     assert result.questions_written == 1
     assert result.shortfall == 4  # noqa: PLR2004
+
+
+class _Resp:
+    def __init__(self, text: str) -> None:
+        self.content = [type("C", (), {"text": text})()]
+        self.usage = None
+
+
+class _MockMessages:
+    def create(self, **_kw: object) -> _Resp:
+        return _Resp('{"answer_explanation": "Call here. It plays well in position."}')
+
+
+class _MockClient:
+    def __init__(self) -> None:
+        self.messages = _MockMessages()
+
+
+def test_batch_fills_explanations_with_a_client(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        generate_explanations=True,
+        explanation_client=_MockClient(),
+    )
+    assert result.explanations_written == 1
+    assert result.explanations_failed == 0
+    with out.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["Answer Explanation"] == "Call here. It plays well in position."
