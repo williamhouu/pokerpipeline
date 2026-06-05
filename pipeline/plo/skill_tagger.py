@@ -20,7 +20,8 @@ Catalog (from docs/plo_port_assessment.md):
   * B -- PLO hand-reading (Suitedness, Rundowns & Connectivity, Dangler
     Awareness, Nut-Flush Awareness, Big-Pair Construction, Nuttedness & Non-Nut
     Traps).
-  * C -- math / dynamics (Reverse Implied Odds, Pot-Limit Bet Sizing).
+  * C -- math / dynamics (Implied Odds, Reverse Implied Odds, Pot-Limit Bet
+    Sizing).
   * D -- postflop skills: out of scope until a PLO postflop path exists.
 
 Thresholds / rule shapes are tunable; refine against graded output.
@@ -167,6 +168,11 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     "Nuttedness & Non-Nut Traps": lambda c: bool(c.tags & {"bare_ace", "low_cards"}),
 
     # --- C: math / dynamics ---
+    # Implied odds: calling a well-shaped speculative hand for the big pots you
+    # win when it connects. The call_for_implied_odds archetype IS this
+    # decision; matches the NLHE 'Implied Odds' skill. The positive counterpart
+    # to reverse implied odds (both fire on a trappy speculative call).
+    "Implied Odds": lambda c: c.archetype == "call_for_implied_odds",
     # Reverse implied odds: calling speculatively with a non-nut hand that can
     # make second-best hands (the classic PLO money-loser).
     "Reverse Implied Odds": lambda c: (
@@ -264,6 +270,11 @@ SKILL_META: dict[str, PloSkillMeta] = {
         "Hands that tend to make SECOND-best flushes or straights (a bare ace, all-low holdings).",
     ),
     # --- C: math / dynamics ---
+    "Implied Odds": PloSkillMeta(
+        CATEGORY_C,
+        "Calling a well-shaped speculative hand for the big pots you win when "
+        "it connects -- the positive counterpart to reverse implied odds.",
+    ),
     "Reverse Implied Odds": PloSkillMeta(
         CATEGORY_C, "Speculative calls with a non-nut hand that tends to make second-best hands."
     ),

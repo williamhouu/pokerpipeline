@@ -179,6 +179,31 @@ def test_reverse_implied_odds_on_speculative_nonnut_call():
     assert "Reverse Implied Odds" in skills
 
 
+def test_implied_odds_fires_on_speculative_call_and_pairs_with_reverse():
+    # A well-shaped speculative call fires Implied Odds, NOT Reverse.
+    good = compute_plo_skills(
+        _facts(
+            archetype="call_for_implied_odds",
+            hero_cards=DS_RUNDOWN,
+            history=(_act("LJ", R, 100),),
+            freqs={"Call": 1.0},
+        )
+    )
+    assert "Implied Odds" in good
+    assert "Reverse Implied Odds" not in good
+    # A trappy (non-nut) speculative call fires BOTH lenses, like NLHE.
+    trappy = compute_plo_skills(
+        _facts(
+            archetype="call_for_implied_odds",
+            hero_cards=BARE_ACE,
+            history=(_act("LJ", R, 100),),
+            freqs={"Call": 1.0},
+        )
+    )
+    assert "Implied Odds" in trappy
+    assert "Reverse Implied Odds" in trappy
+
+
 # --- strictness -----------------------------------------------------------
 def test_hand_reading_skills_gated_on_continuing():
     # A folded double-suited rundown is NOT testing suitedness / connectivity.
