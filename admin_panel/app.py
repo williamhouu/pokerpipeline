@@ -4283,8 +4283,10 @@ def render_plo_review_page() -> None:
     s4.metric("Rejected", summary.rejected)
     if summary.quality_pct is not None:
         st.caption(f"Approved share of decided grades: **{summary.quality_pct:.0f}%**.")
-    st.download_button(
-        "Download this batch", csv_path.read_bytes(), file_name=pick, mime="text/csv"
+    st.caption(
+        "Edit explanations and difficulty inline below (they auto-save to the "
+        "CSV). The **Download this batch** button is at the bottom and always "
+        "reflects your latest edits."
     )
     st.divider()
 
@@ -4297,7 +4299,7 @@ def render_plo_review_page() -> None:
             f"{badge} #{no}  {q.get('User Cards', '')}  ·  "
             f"{q.get('archetype', '')}  ·  diff {q.get('Difficulty Rating', '')}"
         )
-        with st.expander(label, expanded=False):
+        with st.expander(label, expanded=True):
             st.markdown(f"**Context:** {q.get('Context', '')}")
             st.markdown(f"**Question:** {q.get('Question', '')}")
             opts = [q.get(f"option {i}", "") for i in range(1, 5)]
@@ -4308,11 +4310,14 @@ def render_plo_review_page() -> None:
                     for o in opts if o
                 )
             )
+            freqs = q.get("action_frequencies", "")
+            if freqs:
+                st.caption(f"**Solver frequencies:** {freqs}")
             new_expl = st.text_area(
                 "Answer Explanation (auto-saves)",
                 value=q.get("Answer Explanation", ""),
                 key=f"plo_expl_{pick}_{no}",
-                height=120,
+                height=320,
             )
             if new_expl != q.get("Answer Explanation", ""):
                 review.update_explanation(csv_path, no, new_expl)
@@ -4343,6 +4348,19 @@ def render_plo_review_page() -> None:
             if rcol.button("🗑 Remove", key=f"plo_rm_{pick}_{no}"):
                 review.remove_question(csv_path, no)
                 st.rerun()
+
+    # Download AFTER the per-question loop: every inline edit above writes
+    # straight back to the CSV (review.update_explanation / update_difficulty),
+    # so reading the bytes here -- past all those writes in this same rerun --
+    # guarantees the downloaded file carries your latest edits.
+    st.divider()
+    st.download_button(
+        "⬇️  Download this batch (with your edits)",
+        csv_path.read_bytes(),
+        file_name=pick,
+        mime="text/csv",
+        type="primary",
+    )
 
 
 def render_skills_page() -> None:
