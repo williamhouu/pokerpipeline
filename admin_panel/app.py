@@ -4561,6 +4561,224 @@ def render_plo_prompt_page() -> None:
     )
 
 
+def render_plo_compare_page() -> None:
+    """Run two PLO prompts on the SAME spots and judge them side by side.
+
+    Mirrors the NLHE Compare page: ``generate_plo_batch`` twice with the same
+    seed (identical spots) at temperature 0, then join the two CSVs
+    spot-by-spot (:func:`compare.join_by_spot`, keyed on ``solver_reference`` +
+    ``User Cards``) and pick a winner per spot with a running tally. Reuses the
+    game-agnostic :mod:`admin_panel.compare` verbatim.
+    """
+    import os  # noqa: PLC0415
+
+    from pipeline.plo.batch import generate_plo_batch  # noqa: PLC0415
+    from pipeline.plo.node_enumerator import PLO_ACTION_CONTEXTS  # noqa: PLC0415
+
+    st.title("PLO Compare prompts (A/B)")
+    st.caption(
+        "Run two PLO prompts on the SAME spots (same hands, temperature 0) and "
+        "judge them side by side, so any difference is the prompt, not luck."
+    )
+
+    lib = _plo_prompt_library()
+    entries = lib.list()
+    if len(entries) < 2:  # noqa: PLR2004
+        st.warning("Create at least two prompts on the **PLO Prompt** page first.")
+        return
+    slugs = [e.slug for e in entries]
+    names = {e.slug: e.name for e in entries}
+
+    c1, c2 = st.columns(2)
+    with c1:
+        a_slug = st.selectbox(
+            "Prompt A", slugs, index=0, format_func=lambda s: names[s], key="plo_cmp_a"
+        )
+    with c2:
+        b_slug = st.selectbox(
+            "Prompt B", slugs, index=1, format_func=lambda s: names[s], key="plo_cmp_b"
+        )
+
+    # Spot filters -- applied IDENTICALLY to both prompts so the A/B stays fair.
+    f1, f2 = st.columns(2)
+    with f1:
+        contexts = st.multiselect(
+            "Action faced",
+            options=list(PLO_ACTION_CONTEXTS),
+            default=["Opening", "Facing single raise", "Facing 3-bet"],
+            key="plo_cmp_ctx",
+            help="Empty = all action types.",
+        )
+    with f2:
+        player_counts = st.multiselect(
+            "Players in the pot",
+            options=[1, 2, 3, 4, 5, 6],
+            default=[1, 2, 3],
+            format_func=lambda n: (
+                "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
+            ),
+            key="plo_cmp_pc",
+        )
+
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        n_spots = int(
+            st.number_input("Spots", min_value=1, max_value=25, value=5, key="plo_cmp_n")
+        )
+    with s2:
+        preset = st.radio(
+            "Difficulty",
+            options=[*_PLO_DIFFICULTY_BANDS],
+            index=3,
+            horizontal=True,
+            key="plo_cmp_diff",
+        )
+    with s3:
+        model = st.radio(
+            "Model",
+            options=_PLO_MODELS,
+            index=0,
+            format_func=lambda m: "Sonnet 4.6" if "sonnet" in m else "Opus 4.7",
+            key="plo_cmp_model",
+        )
+    band_low, band_high = _PLO_DIFFICULTY_BANDS[preset]
+    seed = int(
+        st.number_input("Seed", min_value=0, max_value=1_000_000, value=42, key="plo_cmp_seed")
+    )
+
+    same = a_slug == b_slug
+    if same:
+        st.info("Pick two different prompts to compare.")
+    if st.button("Run comparison", type="primary", disabled=same, key="plo_cmp_run"):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            st.error("ANTHROPIC_API_KEY is not set. Add it to `.env`, then retry.")
+            return
+        try:
+            pack, _nodes = _plo_pack_and_nodes("plo_ranges")
+        except FileNotFoundError:
+            st.error("No PLO pack under `plo_ranges/`. Load it on PLO Generate first.")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _PLO_BATCH_DIR.mkdir(parents=True, exist_ok=True)
+        out_a = _PLO_BATCH_DIR / f"compare_{ts}_A.csv"
+        out_b = _PLO_BATCH_DIR / f"compare_{ts}_B.csv"
+
+        def _run(out_path: Path, slug: str) -> None:
+            generate_plo_batch(
+                pack,
+                output_path=out_path,
+                total_questions=n_spots,
+                seed=seed,
+                action_contexts=contexts or None,
+                player_counts=player_counts or None,
+                max_prior_raises=None,
+                max_active_players=None,
+                min_difficulty=band_low,
+                max_difficulty=band_high,
+                compute_equity=False,
+                answer_style="auto",
+                generate_explanations=True,
+                explanation_model=model,
+                explanation_temperature=0.0,
+                explanation_system_prompt=lib.get_text(slug),
+            )
+
+        with st.status("Running both prompts on the same spots…", expanded=True) as status:
+            st.write(f"Prompt A — {names[a_slug]}")
+            _run(out_a, a_slug)
+            st.write(f"Prompt B — {names[b_slug]}")
+            _run(out_b, b_slug)
+            status.update(label="Comparison ready", state="complete")
+        st.session_state["plo_cmp_result"] = {
+            "a_csv": str(out_a),
+            "b_csv": str(out_b),
+            "a_name": names[a_slug],
+            "b_name": names[b_slug],
+        }
+        st.rerun()
+
+    result = st.session_state.get("plo_cmp_result")
+    if not result:
+        return
+    a_csv = Path(result["a_csv"])
+    b_csv = Path(result["b_csv"])
+    if not (a_csv.is_file() and b_csv.is_file()):
+        st.info("Run a comparison above to see results.")
+        return
+
+    df_a = pd.read_csv(a_csv, encoding="utf-8-sig", dtype=str).fillna("")
+    df_b = pd.read_csv(b_csv, encoding="utf-8-sig", dtype=str).fillna("")
+    rows_a = [{str(k): str(v) for k, v in r.items()} for r in df_a.to_dict("records")]
+    rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
+    pairs = compare.join_by_spot(rows_a, rows_b)
+    verdicts = compare.load_verdicts(a_csv)
+    counts = compare.tally(verdicts)
+
+    st.divider()
+    st.markdown(
+        f"### Tally — **{result['a_name']}** {counts['A']}  ·  "
+        f"**{result['b_name']}** {counts['B']}  ·  tie {counts['tie']}   "
+        f"({len(verdicts)}/{len(pairs)} judged)"
+    )
+    if not pairs:
+        st.warning("No shared spots to compare (did both runs produce rows?).")
+        return
+
+    opts = [f"{result['a_name']} better", "Tie", f"{result['b_name']} better"]
+    to_verdict = {opts[0]: "A", opts[1]: "tie", opts[2]: "B"}
+    from_verdict = {"A": opts[0], "tie": opts[1], "B": opts[2]}
+
+    for key, row_a, row_b in pairs:
+        with st.container(border=True):
+            if row_a.get("Context"):
+                st.caption(row_a["Context"])
+            st.markdown(_md_lines(row_a.get("Question", "")))
+            picks = ", ".join(
+                row_a.get(f"option {i}", "")
+                for i in (1, 2, 3, 4)
+                if row_a.get(f"option {i}", "")
+            )
+            st.caption(
+                f"Options: {picks}  ·  Correct: **{row_a.get('Correct Answer', '')}**"
+            )
+            if row_a.get("action_frequencies"):
+                st.markdown(f"**Solver frequencies:** {row_a['action_frequencies']}")
+            fact_bits: list[str] = []
+            for col, lbl in (
+                ("archetype", "archetype"),
+                ("ev_gap_bb", "EV gap"),
+                ("Difficulty Rating", "difficulty"),
+            ):
+                val = row_a.get(col, "")
+                if val:
+                    fact_bits.append(f"{lbl}: `{val}`")
+            if fact_bits:
+                st.caption(" · ".join(fact_bits))
+            if row_a.get("concept_tags"):
+                st.caption(f"concept tags: {row_a['concept_tags']}")
+            if row_a.get("skills"):
+                st.caption(f"skills: {row_a['skills']}")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**{result['a_name']}**")
+                st.info(_md_lines(row_a.get("Answer Explanation", "")))
+            with col_b:
+                st.markdown(f"**{result['b_name']}**")
+                st.info(_md_lines(row_b.get("Answer Explanation", "")))
+            cur = verdicts.get(key)
+            idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
+            choice = st.radio(
+                "Which is better?",
+                opts,
+                index=idx,
+                horizontal=True,
+                key=f"plo_cmp_v_{key}",
+            )
+            if choice is not None and to_verdict[choice] != cur:
+                compare.save_verdict(a_csv, key, to_verdict[choice])
+                st.rerun()
+
+
 def render_skills_page() -> None:
     """Reference catalog for the 42 user-facing skills.
 
@@ -4696,7 +4914,7 @@ def main() -> None:
         "Page",
         options=["Files", "Generate", "Review", "Ranges", "History", "Browse",
                  "Prompt", "Compare", "Skills", "Concept Tags",
-                 "PLO Generate", "PLO Review", "PLO Prompt"],
+                 "PLO Generate", "PLO Review", "PLO Prompt", "PLO Compare"],
         index=0,
         key="nav_page",
     )
@@ -4782,6 +5000,8 @@ def main() -> None:
         render_plo_review_page()
     elif page == "PLO Prompt":
         render_plo_prompt_page()
+    elif page == "PLO Compare":
+        render_plo_compare_page()
 
 
 @st.fragment(run_every=1.0)
