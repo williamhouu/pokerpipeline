@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from admin_panel.prompt_library import PromptLibrary
     from pipeline.plo.node_enumerator import PloDecisionNode
     from pipeline.plo.pack import PloPack
 
@@ -4077,20 +4078,39 @@ def render_plo_generate_page() -> None:
 
     st.divider()
 
-    # --- 6. Prompt (read-only inspector) ---
+    # --- 6. Prompt (pick which library prompt this batch runs on) ---
     st.subheader("6. Prompt")
     from pipeline.plo.explanation_generator import (  # noqa: PLC0415
         build_plo_system_prompt,
     )
 
-    with st.expander("🔍 View the PLO prompt (exactly what the LLM is told)"):
-        st.caption(
-            "Read-only. Reuses the vetted Hold'em voice rules (only the two "
-            "169-class rules are adapted for 4-card PLO). Em dashes and "
-            "semicolons are guaranteed out by a deterministic strip on top of "
-            "the voice rule. Ships without few-shot examples by design."
+    _plib = _plo_prompt_library()
+    _pentries = _plib.list()
+    _pactive = _plib.active_slug()
+    plo_prompt_text: str | None = None
+    plo_prompt_name = ""
+    if _pentries:
+        _pslugs = [e.slug for e in _pentries]
+        _pnames = {e.slug: e.name for e in _pentries}
+        if st.session_state.get("plo_gen_prompt_select") not in _pslugs:
+            st.session_state["plo_gen_prompt_select"] = _pactive or _pslugs[0]
+        _chosen = st.selectbox(
+            "Run this batch with prompt",
+            options=_pslugs,
+            format_func=lambda s: (
+                f"{_pnames[s]}  ★ active" if s == _pactive else _pnames[s]
+            ),
+            key="plo_gen_prompt_select",
+            help="Defaults to the ★ active prompt. Create / edit prompts on "
+            "the **PLO Prompt** page.",
         )
-        st.code(build_plo_system_prompt(), language="markdown")
+        _pe = _plib.get(_chosen)
+        plo_prompt_text = _pe.text
+        plo_prompt_name = _pe.name
+        _na = "" if _chosen == _pactive else "  ·  (not the active prompt)"
+        st.caption(f"**{plo_prompt_name}** · {len(plo_prompt_text):,} chars{_na}")
+    with st.expander("🔍 View this prompt (exactly what the LLM is told)"):
+        st.code(plo_prompt_text or build_plo_system_prompt(), language="markdown")
 
     st.divider()
     g1, g2 = st.columns(2)
@@ -4143,6 +4163,7 @@ def render_plo_generate_page() -> None:
                 generate_explanations=True,
                 explanation_model=model,
                 explanation_temperature=temperature,
+                explanation_system_prompt=plo_prompt_text,
                 usage_callback=_usage_cb,
             )
         cost = usage.compute_cost_usd(
@@ -4363,6 +4384,183 @@ def render_plo_review_page() -> None:
     )
 
 
+def _plo_prompt_library() -> PromptLibrary:
+    """The PLO prompt library (seeded from the built-in default on first use)."""
+    from admin_panel.prompt_library import PROMPTS_DIR, PromptLibrary  # noqa: PLC0415
+    from pipeline.plo.explanation_generator import (  # noqa: PLC0415
+        build_plo_system_prompt,
+    )
+
+    lib = PromptLibrary(base_dir=PROMPTS_DIR / "plo_library")
+    lib.ensure_seeded(build_plo_system_prompt)
+    return lib
+
+
+def render_plo_prompt_page() -> None:
+    """The PLO prompt library: create, edit, and switch Layer 6 PLO prompts.
+
+    Mirrors the NLHE Prompt page but for PLO -- the same game-agnostic
+    :class:`~admin_panel.prompt_library.PromptLibrary` pointed at a separate
+    ``plo_library/`` dir, seeded from ``build_plo_system_prompt()``. The ★
+    active prompt is the default for new PLO batches; PLO Generate + PLO
+    Compare can run any library prompt.
+    """
+    from pipeline.plo.explanation_generator import (  # noqa: PLC0415
+        build_plo_system_prompt,
+    )
+
+    st.title("PLO Prompt library")
+    st.caption(
+        "Create, name, and switch between the system prompts the PLO Layer 6 "
+        "sends to Claude. The ★ active prompt is the default for new PLO "
+        "batches; edits take effect on the next batch, no restart needed."
+    )
+
+    lib = _plo_prompt_library()
+
+    entries = lib.list()
+    with st.expander("➕  New prompt", expanded=not entries):
+        new_name = st.text_input("Name", key="plo_new_prompt_name")
+        seed_from = st.radio(
+            "Start from",
+            ["Built-in default", "Copy of active prompt", "Blank"],
+            horizontal=True,
+            key="plo_new_prompt_seed",
+            help="Built-in default gives you the FULL editable PLO prompt -- "
+            "voice rules, archetype frames, banned phrases, output rules. (The "
+            "SOLVER DATA block is assembled per question and isn't part of the "
+            "saved prompt.) Blank is a clean canvas.",
+        )
+        if st.button("Create prompt", type="primary", key="plo_create_prompt_btn"):
+            if not new_name.strip():
+                st.error("Give the prompt a name first.")
+            else:
+                if seed_from == "Built-in default":
+                    seed_text = build_plo_system_prompt()
+                elif seed_from == "Copy of active prompt":
+                    act = lib.active_entry()
+                    seed_text = act.text if act else build_plo_system_prompt()
+                else:
+                    seed_text = ""
+                created = lib.create(new_name, seed_text)
+                lib.set_active(created.slug)
+                st.session_state["plo_prompt_select"] = created.slug
+                st.success(f"Created '{created.name}' and made it active.")
+                st.rerun()
+
+    entries = lib.list()
+    if not entries:
+        st.info("No prompts yet -- create one above.")
+        return
+
+    active_slug = lib.active_slug()
+    slugs = [e.slug for e in entries]
+    name_by_slug = {e.slug: e.name for e in entries}
+    if st.session_state.get("plo_prompt_select") not in slugs:
+        st.session_state["plo_prompt_select"] = active_slug or slugs[0]
+
+    def _label(slug: str) -> str:
+        star = "  ★ active" if slug == active_slug else ""
+        return f"{name_by_slug[slug]}{star}"
+
+    sel = st.selectbox(
+        "Prompt", options=slugs, format_func=_label, key="plo_prompt_select"
+    )
+    entry = lib.get(sel)
+
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    with c1:
+        if sel == active_slug:
+            st.success("★ Active")
+        elif st.button("Set active", key="plo_set_active_btn", use_container_width=True):
+            lib.set_active(sel)
+            st.rerun()
+    with c2:
+        if st.button("Duplicate", key="plo_dup_btn", use_container_width=True):
+            dup = lib.duplicate(sel)
+            st.session_state["plo_prompt_select"] = dup.slug
+            st.rerun()
+    with c3:
+        if st.button(
+            "Delete",
+            key="plo_del_btn",
+            use_container_width=True,
+            disabled=len(entries) == 1,
+        ):
+            lib.delete(sel)
+            st.session_state.pop("plo_prompt_select", None)
+            st.rerun()
+    with c4:
+        updated = f" · updated {entry.updated_at[:10]}" if entry.updated_at else ""
+        st.caption(
+            f"{len(entry.text):,} chars · ~{len(entry.text) // 4:,} tokens{updated}"
+        )
+
+    m1, m2 = st.columns(2)
+    with m1:
+        new_title = st.text_input("Rename", value=entry.name, key=f"plo_rename_{sel}")
+        if st.button(
+            "Save name",
+            key=f"plo_renamebtn_{sel}",
+            disabled=(not new_title.strip() or new_title == entry.name),
+        ):
+            lib.rename(sel, new_title)
+            st.rerun()
+    with m2:
+        notes = st.text_input(
+            "Notes (what you're trying)", value=entry.notes, key=f"plo_notes_{sel}"
+        )
+        if st.button(
+            "Save notes", key=f"plo_notesbtn_{sel}", disabled=notes == entry.notes
+        ):
+            lib.update_notes(sel, notes)
+            st.rerun()
+
+    edited = st.text_area(
+        "System prompt",
+        value=entry.text,
+        height=520,
+        key=f"plo_prompt_edit_{sel}",
+        help="Edits are session-local until you click Save prompt.",
+    )
+    if edited != entry.text:
+        st.caption(
+            f"🔵 Unsaved edits ({len(edited) - len(entry.text):+,} chars vs. saved)."
+        )
+    if st.button(
+        "💾  Save prompt",
+        type="primary",
+        key=f"plo_save_{sel}",
+        disabled=(edited == entry.text),
+    ):
+        lib.update_text(sel, edited)
+        st.success("✅ Saved.")
+        st.rerun()
+
+    with st.expander("👁  Compare with built-in default"):
+        default_prompt = build_plo_system_prompt()
+        st.caption(
+            f"Built-in default: {len(default_prompt):,} chars  ·  this prompt: "
+            f"{len(entry.text):,} chars  ·  "
+            f"diff {len(entry.text) - len(default_prompt):+,}"
+        )
+        st.text_area(
+            "Built-in default (read-only)",
+            value=default_prompt,
+            height=320,
+            disabled=True,
+            key=f"plo_default_ro_{sel}",
+        )
+
+    st.divider()
+    st.caption(
+        "The ★ active prompt is the default on PLO Generate (you can pick any "
+        "per run). Test with a free preview/dry-run first -- a typo can break "
+        "the JSON output and waste a batch. The library is gitignored, so copy "
+        "prompts you want to keep somewhere safe."
+    )
+
+
 def render_skills_page() -> None:
     """Reference catalog for the 42 user-facing skills.
 
@@ -4498,7 +4696,7 @@ def main() -> None:
         "Page",
         options=["Files", "Generate", "Review", "Ranges", "History", "Browse",
                  "Prompt", "Compare", "Skills", "Concept Tags",
-                 "PLO Generate", "PLO Review"],
+                 "PLO Generate", "PLO Review", "PLO Prompt"],
         index=0,
         key="nav_page",
     )
@@ -4582,6 +4780,8 @@ def main() -> None:
         render_plo_generate_page()
     elif page == "PLO Review":
         render_plo_review_page()
+    elif page == "PLO Prompt":
+        render_plo_prompt_page()
 
 
 @st.fragment(run_every=1.0)
