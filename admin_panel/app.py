@@ -3874,6 +3874,16 @@ def render_plo_generate_page() -> None:
 
     # --- 1. Hero context: position + action faced + players in pot ---
     st.subheader("1. Hero context")
+    clean_only = st.toggle(
+        "🧹 Clean lines only (recommended)",
+        value=True,
+        key="plo_clean_only",
+        help="ON: restrict to the solver's CONVERGED lines -- opens, "
+        "single-raised pots, and heads-up / 3-way 3-bet pots (<=2 raises, <=3 "
+        "players). OFF: also include Monker's deep-multiway 4-bet+/jam tail, "
+        "which is largely UNCONVERGED (absurd EV gaps, inverted ranges like AA "
+        "folding a jam). Leave ON unless you specifically want the wild lines.",
+    )
     hc1, hc2 = st.columns(2)
     with hc1:
         positions = st.multiselect(
@@ -3887,8 +3897,8 @@ def render_plo_generate_page() -> None:
             "Action faced",
             options=list(PLO_ACTION_CONTEXTS),
             default=["Opening", "Facing single raise", "Facing 3-bet"],
-            help="What hero is responding to. Empty = all. The clean default "
-            "skips the noisy deep-multiway 4-bet+ tail.",
+            help="What hero is responding to. Empty = all. (With 'Clean lines "
+            "only' on, the 4-bet+ tail stays excluded even if selected.)",
         )
         player_counts = st.multiselect(
             "Players in the pot",
@@ -3897,11 +3907,14 @@ def render_plo_generate_page() -> None:
             format_func=lambda n: (
                 "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
             ),
-            help="How many players are still in at hero's decision. The clean "
-            "default (1-3) avoids Monker's unconverged deep-multiway tail.",
+            help="How many players are still in at hero's decision. (With "
+            "'Clean lines only' on, 4+ way stays excluded even if selected.)",
         )
 
     # Live count of matching nodes (filenames only -- cheap), like Hold'em.
+    # The clean-lines toggle caps raises (<=2, i.e. not 'Facing 4-bet+') and
+    # players (<=3), matching the max_prior_raises / max_active_players the
+    # batch + preview apply below.
     _ctx = set(action_contexts) if action_contexts else None
     _pc = set(player_counts) if player_counts else None
     _pos = set(positions) if positions else None
@@ -3911,17 +3924,23 @@ def render_plo_generate_page() -> None:
         if (_pos is None or n.actor in _pos)
         and (_ctx is None or plo_node_action_context(n) in _ctx)
         and (_pc is None or plo_active_player_count(n) in _pc)
+        and (
+            not clean_only
+            or (
+                plo_node_action_context(n) != "Facing 4-bet+"
+                and plo_active_player_count(n) <= 3  # noqa: PLR2004
+            )
+        )
     )
     st.caption(
         f"**{_matching:,}** decision nodes match these filters "
         f"(of {len(nodes):,} total)."
     )
-    if "Facing 4-bet+" in (action_contexts or []) or any(
-        p >= 4 for p in (player_counts or [])  # noqa: PLR2004
-    ):
+    if not clean_only:
         st.warning(
-            "Heads up: 4-bet+ lines and 4-way+ pots include Monker's largely "
-            "UNCONVERGED deep-multiway tail (absurd EV gaps, inverted ranges)."
+            "Clean lines OFF: this includes Monker's largely UNCONVERGED "
+            "deep-multiway 4-bet+/jam tail (absurd EV gaps, inverted ranges). "
+            "Good for exploration, not for production questions."
         )
 
     st.divider()
@@ -4179,8 +4198,8 @@ def render_plo_generate_page() -> None:
                 hero_positions=positions or None,
                 action_contexts=action_contexts or None,
                 player_counts=player_counts or None,
-                max_prior_raises=None,
-                max_active_players=None,
+                max_prior_raises=2 if clean_only else None,
+                max_active_players=3 if clean_only else None,
                 min_frequency=freq_low / 100.0,
                 max_frequency=eff_max_freq,
                 min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
@@ -4242,8 +4261,8 @@ def render_plo_generate_page() -> None:
             hero_positions=positions or None,
             action_contexts=action_contexts or None,
             player_counts=player_counts or None,
-            max_prior_raises=None,
-            max_active_players=None,
+            max_prior_raises=2 if clean_only else None,
+            max_active_players=3 if clean_only else None,
             min_frequency=freq_low / 100.0,
             max_frequency=eff_max_freq,
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
