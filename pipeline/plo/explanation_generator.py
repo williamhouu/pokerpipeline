@@ -99,6 +99,14 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     'big double-suited broadway hands"). Do not invent specific four-card '
     "holdings, and do not leave the range as a vague \"value hands\" with no "
     "shape.",
+    # 11. Clean final draft -- no "thinking out loud" / self-correction.
+    "Write a clean, final draft, as if already edited. Never think out loud or "
+    'revise yourself mid-sentence: do not use "actually", "wait", "I mean", or '
+    'a trailing "..." to fix a word you just wrote. State each fact once and '
+    "correctly. The SOLVER DATA your_hand field gives the exact four cards, so "
+    "get every card and suit right the first time. Do not narrate the hand "
+    'card-by-card ("connectivity from the ten down to the three"); name the '
+    "shape and the cards that matter, then move on.",
 )
 
 # Concise strategic frame per PLO archetype (one line the LLM reads fast).

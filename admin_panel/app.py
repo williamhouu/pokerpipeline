@@ -4117,6 +4117,35 @@ def render_plo_generate_page() -> None:
     preview_clicked = g1.button("🎲 Preview spots (no API, free)")
     generate_clicked = g2.button("✍️ Generate with explanations (uses API)", type="primary")
 
+    # Last completed batch, re-rendered after the post-generate rerun (the rerun
+    # lets the sidebar lifetime-spend pick up the new log entry).
+    _done = st.session_state.get("plo_gen_done")
+    if _done and not generate_clicked and not preview_clicked:
+        _dp = Path(_done["path"])
+        st.success(
+            f"Generated **{_done['written']}/{_done['requested']}** questions to "
+            f"`{_dp.name}` ({_done['explanations']} explanations)."
+        )
+        st.info(
+            f"💰 This batch: **{usage.format_cost(_done['cost'])}** "
+            f"({_done['out_tokens']:,} output tokens). Tallied in the sidebar "
+            "lifetime spend."
+        )
+        if _done["failed"]:
+            st.warning(f"{_done['failed']} explanations failed and shipped blank.")
+        if _done["shortfall"]:
+            st.warning(
+                f"{_done['shortfall']} short of {_done['requested']} "
+                f"({_done['difficulty_filtered']} difficulty-filtered, "
+                f"{_done['ev_filtered']} EV-gap-filtered). Widen the band, "
+                "positions, action contexts, or worthiness window."
+            )
+        if _dp.is_file():
+            st.download_button(
+                "Download CSV", _dp.read_bytes(), file_name=_dp.name, mime="text/csv"
+            )
+        st.caption("Grade and edit these on the **PLO Review** page.")
+
     if generate_clicked:
         import os  # noqa: PLC0415
 
@@ -4184,29 +4213,23 @@ def render_plo_generate_page() -> None:
             questions_written=result.questions_written,
             output_filename=out_path.name,
         )
-        st.success(
-            f"Generated **{result.questions_written}/{int(count)}** questions to "
-            f"`{out_path.name}` ({result.explanations_written} explanations)."
-        )
-        st.info(
-            f"💰 This batch: **{usage.format_cost(cost)}** "
-            f"({acc['out']:,} output tokens). Tallied in the sidebar "
-            "lifetime spend."
-        )
-        if result.explanations_failed:
-            st.warning(f"{result.explanations_failed} explanations failed and shipped blank.")
-        if result.shortfall:
-            st.warning(
-                f"{result.shortfall} short of {int(count)} "
-                f"({result.difficulty_filtered_out} difficulty-filtered, "
-                f"{result.ev_gap_filtered_out} EV-gap-filtered). Widen the "
-                "band, positions, action contexts, or worthiness window."
-            )
-        st.download_button(
-            "Download CSV", out_path.read_bytes(), file_name=out_path.name, mime="text/csv"
-        )
-        st.caption("Grade and edit these on the **PLO Review** page.")
-        return
+        st.session_state["plo_gen_done"] = {
+            "path": str(out_path),
+            "cost": cost,
+            "out_tokens": acc["out"],
+            "written": result.questions_written,
+            "requested": int(count),
+            "explanations": result.explanations_written,
+            "failed": result.explanations_failed,
+            "shortfall": result.shortfall,
+            "difficulty_filtered": result.difficulty_filtered_out,
+            "ev_filtered": result.ev_gap_filtered_out,
+        }
+        # Rerun so the sidebar's lifetime-spend metric -- rendered BEFORE this
+        # page on every run -- re-reads the log entry we just appended. Without
+        # it the new spend wouldn't show until the next interaction. The result
+        # is re-rendered from session_state above the buttons.
+        st.rerun()
 
     if not preview_clicked:
         return
