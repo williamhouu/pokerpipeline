@@ -11,7 +11,12 @@ from pipeline.plo.fact_extractor import PloFacts  # noqa: E402
 from pipeline.plo.hand_model import classify_plo_hand  # noqa: E402
 from pipeline.plo.node_enumerator import PloActionOption, PloDecisionNode  # noqa: E402
 from pipeline.plo.pack import PloAction, PloActionType  # noqa: E402
-from pipeline.plo.skill_tagger import compute_plo_skills  # noqa: E402
+from pipeline.plo.skill_tagger import (  # noqa: E402
+    SKILL_CATALOG,
+    SKILL_CATEGORIES,
+    SKILL_META,
+    compute_plo_skills,
+)
 from pipeline.plo.spot_sampler import PloSpot  # noqa: E402
 
 F = PloActionType.FOLD
@@ -208,4 +213,17 @@ def test_pot_limit_bet_sizing_needs_multiple_sizes():
     )
     assert "Pot-Limit Bet Sizing" in compute_plo_skills(
         _facts(archetype="3bet_for_value", hero_cards=AAKK_DS, history=(_act("LJ", R, 100),), actions=two_sizes)
+    )
+
+
+def test_skill_meta_covers_catalog_with_valid_categories():
+    # Every catalog skill has display metadata, and there are no orphans.
+    assert set(SKILL_META) == set(SKILL_CATALOG)
+    for name, m in SKILL_META.items():
+        assert m.description, name
+        assert m.category in SKILL_CATEGORIES, name
+    # Pot-Limit Bet Sizing is the one dormant (single-raise-size pack) skill.
+    assert SKILL_META["Pot-Limit Bet Sizing"].fires is False
+    assert all(
+        m.fires for name, m in SKILL_META.items() if name != "Pot-Limit Bet Sizing"
     )

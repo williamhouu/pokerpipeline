@@ -4835,11 +4835,15 @@ def render_skills_page() -> None:
 
     st.title("Skills — user-facing tag catalog")
     st.caption(
-        "The 42-skill catalog `pipeline.skill_tagger.SKILL_CATALOG` maps "
-        "the pipeline's computational outputs (archetype + concept tags + "
-        "scenario metadata) onto the labels the app surfaces to users. "
-        "Use this page to understand exactly why a skill fires on a "
-        "given spot."
+        "The labels the app surfaces to users, mapped from the pipeline's "
+        "computational outputs (archetype + concept tags + scenario metadata). "
+        "Two catalogs: **No-Limit Hold'em** below, then **PLO / Omaha** at the "
+        "bottom."
+    )
+    st.header("♠️  No-Limit Hold'em — 42 skills")
+    st.caption(
+        "`pipeline.skill_tagger.SKILL_CATALOG`. Use this to understand exactly "
+        "why a skill fires on a given Hold'em spot."
     )
 
     catalog = skill_tagger.SKILL_CATALOG
@@ -4935,6 +4939,40 @@ def render_skills_page() -> None:
             except (OSError, TypeError):
                 # Fallback for stripped or built-in callables.
                 st.caption("(source not available)")
+
+    # --- PLO / Omaha skills (separate catalog) ---
+    from pipeline.plo import skill_tagger as plo_skills  # noqa: PLC0415
+
+    st.divider()
+    st.header("🃏  PLO / Omaha — 21 skills")
+    st.caption(
+        "`pipeline.plo.skill_tagger.SKILL_CATALOG`. Preflop only (no PLO "
+        "postflop solves yet). Strict tagging: ~2-5 fire per question. Grouped "
+        "by category; ⏸ marks a skill that's wired but dormant on this "
+        "single-raise-size pack. Postflop skills (Wrap/Draw, Nut Blockers, Set "
+        "Mining, C-betting, Bluff-catching, Pot Control) are out of scope until "
+        "PLO postflop solves exist."
+    )
+    plo_catalog = plo_skills.SKILL_CATALOG
+    plo_meta = plo_skills.SKILL_META
+    for category in plo_skills.SKILL_CATEGORIES:
+        st.subheader(category)
+        for name in [n for n in plo_catalog if plo_meta[n].category == category]:
+            pm = plo_meta[name]
+            badge = "✅" if pm.fires else "⏸"
+            with st.expander(f"{badge}  **{name}**"):
+                st.markdown(f"**Trigger.** {pm.description}")
+                if not pm.fires:
+                    st.caption(
+                        "Wired but dormant on this pack -- needs a multi-raise-"
+                        "size tree to ever fire."
+                    )
+                try:
+                    src = inspect.getsource(plo_catalog[name]).strip().rstrip(",")
+                    st.markdown("**Rule source.**")
+                    st.code(src, language="python")
+                except (OSError, TypeError):
+                    st.caption("(source not available)")
 
 
 # --- main router ------------------------------------------------------------

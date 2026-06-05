@@ -182,6 +182,100 @@ SKILL_CATALOG: dict[str, SkillRule] = {
 }
 
 
+# --- display metadata (category + plain-English trigger) -------------------
+# Powers the admin Skills page's PLO section. Categories mirror the catalog's
+# A/B/C grouping (D = postflop is out of scope until PLO postflop solves exist).
+CATEGORY_A = "A -- Carry-over preflop decisions"
+CATEGORY_B = "B -- PLO hand-reading (the edge)"
+CATEGORY_C = "C -- Math / dynamics"
+
+#: Ordered (A->B->C) tuple of the category labels, for grouped display.
+SKILL_CATEGORIES: tuple[str, ...] = (CATEGORY_A, CATEGORY_B, CATEGORY_C)
+
+
+@dataclass(frozen=True)
+class PloSkillMeta:
+    """Display metadata for one PLO skill."""
+
+    category: str
+    description: str
+    fires: bool = True  # False = wired but dormant on this single-raise-size pack
+
+
+SKILL_META: dict[str, PloSkillMeta] = {
+    # --- A: carry-over preflop decisions ---
+    "Preflop Hand Selection": PloSkillMeta(
+        CATEGORY_A, "Opening or open-folding first in: which 4-card hands are worth playing."
+    ),
+    "3-Betting": PloSkillMeta(
+        CATEGORY_A, "Re-raising an open, for value or as a light / fold-equity 3-bet."
+    ),
+    "Facing a 3-Bet": PloSkillMeta(
+        CATEGORY_A, "Responding to a 3-bet of your open (call / 4-bet / fold), not a squeeze."
+    ),
+    "4-Betting": PloSkillMeta(
+        CATEGORY_A, "Re-raising a 3-bet, for value or light."
+    ),
+    "Facing a 4-Bet": PloSkillMeta(
+        CATEGORY_A, "Responding to a 4-bet of your 3-bet (call / jam / fold)."
+    ),
+    "Squeezing": PloSkillMeta(
+        CATEGORY_A, "Raising over an open plus one or more callers."
+    ),
+    "Facing a Squeeze": PloSkillMeta(
+        CATEGORY_A, "Responding to a squeeze after you opened or called."
+    ),
+    "Blind Defense": PloSkillMeta(
+        CATEGORY_A, "Defending the SB or BB against a raise (excludes blind-vs-blind)."
+    ),
+    "Blind vs. Blind Play": PloSkillMeta(
+        CATEGORY_A, "Small-blind-versus-big-blind confrontations."
+    ),
+    "Pot Odds": PloSkillMeta(
+        CATEGORY_A, "Call / fold decisions priced on pot odds, including calling an all-in."
+    ),
+    "In Position Play": PloSkillMeta(
+        CATEGORY_A, "Acting last postflop: late seats facing a raise, or the SB in a blind battle."
+    ),
+    "Out of Position Play": PloSkillMeta(
+        CATEGORY_A, "Acting first postflop: the blinds defending against a raise."
+    ),
+    "Multiway Pot Strategy": PloSkillMeta(
+        CATEGORY_A, "Three or more players still in at hero's decision."
+    ),
+    # --- B: PLO hand-reading (the edge) ---
+    "Suitedness": PloSkillMeta(
+        CATEGORY_B, "Value that leans on flush potential (double-suited), not on a big pair."
+    ),
+    "Rundowns & Connectivity": PloSkillMeta(
+        CATEGORY_B, "Connected / wrap hands that make straights and big draws."
+    ),
+    "Dangler Awareness": PloSkillMeta(
+        CATEGORY_B, "A card disconnected from the other three -- effectively a wasted card."
+    ),
+    "Nut-Flush Awareness": PloSkillMeta(
+        CATEGORY_B, "Holding nut-flush potential (a suited ace)."
+    ),
+    "Big-Pair Construction": PloSkillMeta(
+        CATEGORY_B, "AAxx / KKxx hands and how well their side cards support them."
+    ),
+    "Nuttedness & Non-Nut Traps": PloSkillMeta(
+        CATEGORY_B,
+        "Hands that tend to make SECOND-best flushes or straights (a bare ace, all-low holdings).",
+    ),
+    # --- C: math / dynamics ---
+    "Reverse Implied Odds": PloSkillMeta(
+        CATEGORY_C, "Speculative calls with a non-nut hand that tends to make second-best hands."
+    ),
+    "Pot-Limit Bet Sizing": PloSkillMeta(
+        CATEGORY_C,
+        "Choosing a raise size. Only a real decision on a multi-raise-size tree, so "
+        "dormant on this single-pot-sized-raise pack.",
+        fires=False,
+    ),
+}
+
+
 def compute_plo_skills(facts: PloFacts) -> list[str]:
     """The firing PLO skill names for a spot, in catalog order.
 
@@ -194,7 +288,10 @@ def compute_plo_skills(facts: PloFacts) -> list[str]:
 
 __all__ = [
     "SKILL_CATALOG",
+    "SKILL_CATEGORIES",
+    "SKILL_META",
     "PloSkillContext",
+    "PloSkillMeta",
     "SkillRule",
     "compute_plo_skills",
     "from_plo_facts",
