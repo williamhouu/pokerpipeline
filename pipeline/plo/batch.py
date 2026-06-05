@@ -117,6 +117,7 @@ def generate_plo_batch(
     explanation_client: Any = None,
     explanation_model: str = DEFAULT_MODEL,
     explanation_temperature: float = DEFAULT_TEMPERATURE,
+    explanation_system_prompt: str | None = None,
     usage_callback: UsageCallback | None = None,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
@@ -137,7 +138,9 @@ def generate_plo_batch(
     ``Answer Explanation`` column per spot; otherwise it is left blank (the
     deterministic path, no API key needed). A failed explanation never drops the
     question -- the row still ships with a blank explanation and is counted in
-    ``explanations_failed``.
+    ``explanations_failed``. ``explanation_system_prompt`` (when set) overrides
+    the built-in Layer 6 system prompt verbatim -- the admin prompt library +
+    Compare page pass an edited prompt here.
     """
     nodes = enumerate_plo_nodes(pack)
     rng = random.Random(seed)
@@ -203,6 +206,7 @@ def generate_plo_batch(
                     list(options),
                     correct,
                     client=explanation_client,
+                    system_prompt=explanation_system_prompt,
                     model=explanation_model,
                     temperature=explanation_temperature,
                     usage_callback=usage_callback,

@@ -171,3 +171,36 @@ def test_batch_fills_explanations_with_a_client(tmp_path):
     with out.open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["Answer Explanation"] == "Call here. It plays well in position."
+
+
+class _CapturingMessages:
+    def __init__(self) -> None:
+        self.systems: list[str] = []
+
+    def create(self, **kw: object) -> _Resp:
+        self.systems.append(str(kw.get("system", "")))
+        return _Resp('{"answer_explanation": "Call here. It plays well in position."}')
+
+
+class _CapturingClient:
+    def __init__(self) -> None:
+        self.messages = _CapturingMessages()
+
+
+def test_batch_threads_explanation_system_prompt(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    client = _CapturingClient()
+    custom = "CUSTOM PLO PROMPT for this A/B run."
+    generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        generate_explanations=True,
+        explanation_client=client,
+        explanation_system_prompt=custom,
+    )
+    # The edited prompt reached the LLM call verbatim.
+    assert client.messages.systems == [custom]

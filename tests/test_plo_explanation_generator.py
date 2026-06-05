@@ -145,3 +145,39 @@ def test_unparseable_response_raises_after_retries():
     client = _MockClient("not json at all", "still not json")
     with pytest.raises(ExplanationValidationError):
         generate_plo_answer_explanation(_facts(), ["Fold", "Call"], "Call", client=client, examples=(), max_retries=1)
+
+
+# --- system_prompt override (the prompt-library / Compare seam) ------------
+class _CapturingMessages:
+    """Records the ``system`` kwarg of each create() call."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.systems: list[str] = []
+
+    def create(self, **kw: object) -> _Resp:
+        self.systems.append(str(kw.get("system", "")))
+        return _Resp(self.text)
+
+
+class _CapturingClient:
+    def __init__(self, text: str) -> None:
+        self.messages = _CapturingMessages(text)
+
+
+def test_system_prompt_override_is_used_verbatim():
+    client = _CapturingClient(_json("Call. It plays well in position."))
+    custom = "CUSTOM PLO SYSTEM PROMPT -- edited in the admin panel."
+    generate_plo_answer_explanation(
+        _facts(), ["Fold", "Call"], "Call",
+        client=client, examples=(), system_prompt=custom,
+    )
+    assert client.messages.systems == [custom]
+
+
+def test_no_override_uses_built_in_system_prompt():
+    client = _CapturingClient(_json("Call. It plays well in position."))
+    generate_plo_answer_explanation(
+        _facts(), ["Fold", "Call"], "Call", client=client, examples=(),
+    )
+    assert client.messages.systems == [build_plo_system_prompt(examples=())]

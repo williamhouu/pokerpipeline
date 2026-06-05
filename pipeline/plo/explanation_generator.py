@@ -298,6 +298,7 @@ def generate_plo_answer_explanation(
     *,
     client: Any = None,
     examples: tuple[dict[str, Any], ...] | None = None,
+    system_prompt: str | None = None,
     model: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -310,6 +311,11 @@ def generate_plo_answer_explanation(
     answer and the LLM's prose (normalized so no em dash / semicolon survives).
     Pass a mock ``client`` in tests. ``examples=None`` loads the (currently
     empty) PLO gold pool; pass a tuple to override.
+
+    ``system_prompt`` overrides the built-in system prompt verbatim -- the
+    admin panel's prompt library passes an edited full prompt here (the same
+    seam as NLHE). When None, the built-in :func:`build_plo_system_prompt` is
+    used (with ``examples``).
 
     Raises ``ValueError`` if ``correct_answer`` not in ``options``, or
     ``ExplanationValidationError`` if every attempt fails validation.
@@ -324,7 +330,11 @@ def generate_plo_answer_explanation(
     if examples is None:
         examples = load_plo_gold_examples()
 
-    system = build_plo_system_prompt(examples=examples)
+    system = (
+        system_prompt
+        if system_prompt is not None
+        else build_plo_system_prompt(examples=examples)
+    )
     messages = [{"role": "user", "content": _build_user_prompt(facts, options, correct_answer)}]
     padded = (list(options) + ["", "", "", ""])[:4]
 
