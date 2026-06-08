@@ -4456,15 +4456,46 @@ def render_plo_review_page() -> None:
     )
 
 
-def _plo_prompt_library() -> PromptLibrary:
-    """The PLO prompt library (seeded from the built-in default on first use)."""
-    from admin_panel.prompt_library import PROMPTS_DIR, PromptLibrary  # noqa: PLC0415
+def _plo_override_path() -> Path:
+    """The persistent 'genuine default' file the active prompt syncs to."""
+    from admin_panel.prompt_library import PROMPTS_DIR  # noqa: PLC0415
+
+    return PROMPTS_DIR / "plo_system.txt"
+
+
+def _plo_default_prompt_text() -> str:
+    """The GENUINE PLO default: the saved override (your edits to the default)
+    if present, otherwise the factory prompt assembled from code. This is what
+    new library entries seed from."""
     from pipeline.plo.explanation_generator import (  # noqa: PLC0415
         build_plo_system_prompt,
     )
 
+    path = _plo_override_path()
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        if text.strip():
+            return text
+    return build_plo_system_prompt()
+
+
+def _plo_sync_default(text: str | None) -> None:
+    """Write the active prompt out as the genuine-default override, so editing
+    the built-in default actually updates the default everything resolves to
+    (and survives even if the library is wiped). No-op on empty text."""
+    if not text:
+        return
+    path = _plo_override_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _plo_prompt_library() -> PromptLibrary:
+    """The PLO prompt library, seeded from the genuine default (override-or-code)."""
+    from admin_panel.prompt_library import PROMPTS_DIR, PromptLibrary  # noqa: PLC0415
+
     lib = PromptLibrary(base_dir=PROMPTS_DIR / "plo_library")
-    lib.ensure_seeded(build_plo_system_prompt)
+    lib.ensure_seeded(_plo_default_prompt_text)
     return lib
 
 
@@ -4562,6 +4593,7 @@ def render_plo_prompt_page() -> None:
                     seed_text = ""
                 created = lib.create(new_name, seed_text)
                 lib.set_active(created.slug)
+                _plo_sync_default(lib.active_text())  # new active = the default
                 st.session_state["_plo_prompt_pending"] = created.slug
                 st.success(f"Created '{created.name}' and made it active.")
                 st.rerun()
@@ -4597,6 +4629,7 @@ def render_plo_prompt_page() -> None:
             st.success("★ Active")
         elif st.button("Set active", key="plo_set_active_btn", use_container_width=True):
             lib.set_active(sel)
+            _plo_sync_default(lib.active_text())  # new active = the default
             st.rerun()
     with c2:
         if st.button("Duplicate", key="plo_dup_btn", use_container_width=True):
@@ -4613,6 +4646,7 @@ def render_plo_prompt_page() -> None:
             lib.delete(sel)
             # Don't touch the widget key here (it's already instantiated); the
             # guard above re-selects a survivor on the rerun.
+            _plo_sync_default(lib.active_text())  # the active may have changed
             st.rerun()
     with c4:
         updated = f" · updated {entry.updated_at[:10]}" if entry.updated_at else ""
@@ -4658,32 +4692,41 @@ def render_plo_prompt_page() -> None:
         disabled=(edited == entry.text),
     ):
         lib.update_text(sel, edited)
-        st.success("✅ Saved.")
+        _plo_sync_default(lib.active_text())
+        extra = (
+            "  This is the active default, so the genuine default is now updated "
+            "everywhere."
+            if sel == active_slug
+            else ""
+        )
+        st.success("✅ Saved." + extra)
         st.rerun()
 
-    # The library freezes a snapshot when an entry is created, so updates to
-    # the built-in default IN CODE (new voice rules etc.) don't reach a saved
-    # entry until you pull them in here.
-    _builtin = build_plo_system_prompt()
-    _matches_builtin = entry.text == _builtin
+    # The GENUINE default is your active entry (synced to plo_system.txt, so
+    # editing + saving it updates the default everything resolves to). The
+    # 'factory default' is the original prompt assembled in code -- this button
+    # only reverts to it if you want to discard customisations / a stale entry.
+    _factory = build_plo_system_prompt()
+    _matches_factory = entry.text == _factory
     rc1, rc2 = st.columns([1, 2])
     with rc1:
         if st.button(
-            "🔄  Reset to built-in default",
+            "↩️  Reset to factory default",
             key=f"plo_reset_{sel}",
-            disabled=_matches_builtin,
+            disabled=_matches_factory,
             use_container_width=True,
         ):
-            lib.update_text(sel, _builtin)
-            st.success("✅ Reset to the current built-in default.")
+            lib.update_text(sel, _factory)
+            _plo_sync_default(lib.active_text())
+            st.success("✅ Reset to the factory default.")
             st.rerun()
     with rc2:
-        if _matches_builtin:
-            st.caption("✅ Matches the current built-in default (from code).")
+        if _matches_factory:
+            st.caption("This entry matches the factory default (the code prompt).")
         else:
             st.caption(
-                "⚠️ This entry is behind the current built-in default in code "
-                "(updated rules, or your own edits). Reset to pull the latest."
+                "Differs from the factory default -- your edits (kept as the "
+                "genuine default), or a newer code prompt. Reset to discard."
             )
 
     with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
@@ -4722,15 +4765,15 @@ def render_plo_prompt_page() -> None:
             )
             st.code(build_plo_user_prompt(s_facts, s_options, s_correct))
 
-    with st.expander("👁  Compare with built-in default"):
+    with st.expander("👁  Compare with factory default (the code prompt)"):
         default_prompt = build_plo_system_prompt()
         st.caption(
-            f"Built-in default: {len(default_prompt):,} chars  ·  this prompt: "
+            f"Factory default: {len(default_prompt):,} chars  ·  this prompt: "
             f"{len(entry.text):,} chars  ·  "
             f"diff {len(entry.text) - len(default_prompt):+,}"
         )
         st.text_area(
-            "Built-in default (read-only)",
+            "Factory default (read-only)",
             value=default_prompt,
             height=320,
             disabled=True,
