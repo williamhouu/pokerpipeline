@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.plo.fact_extractor import PloFacts  # noqa: E402
+from pipeline.plo.fact_extractor import PloFacts, PloVillainStats  # noqa: E402
 from pipeline.plo.hand_model import classify_plo_hand  # noqa: E402
 from pipeline.plo.node_enumerator import PloActionOption, PloDecisionNode  # noqa: E402
 from pipeline.plo.pack import PloAction, PloActionType  # noqa: E402
@@ -41,6 +41,7 @@ def _facts(
     actor: str = "HJ",
     freqs: dict[str, float] | None = None,
     actions: tuple[PloActionOption, ...] = (),
+    with_villain: bool = False,
 ) -> PloFacts:
     node = PloDecisionNode(
         actor=actor, history_before=history, actions=actions, history_stem=""
@@ -53,8 +54,21 @@ def _facts(
         action_frequencies=freqs or {"Raise 100%": 1.0},
         presence=1.0,
     )
+    villain = (
+        PloVillainStats(
+            seat="LJ",
+            action_label="Raise 100%",
+            weighted_combo_count=1.0,
+            pct_of_dealt_hands=18.0,
+        )
+        if with_villain
+        else None
+    )
     return PloFacts(
-        spot=spot, hand_class=classify_plo_hand(hero_cards), archetype=archetype
+        spot=spot,
+        hand_class=classify_plo_hand(hero_cards),
+        archetype=archetype,
+        villain_stats=villain,
     )
 
 
@@ -202,6 +216,34 @@ def test_implied_odds_fires_on_speculative_call_and_pairs_with_reverse():
     )
     assert "Implied Odds" in trappy
     assert "Reverse Implied Odds" in trappy
+
+
+def test_nut_blockers_fire_on_aggressive_spot_with_a_blocker():
+    # 3-betting AAxx (an ace blocks AA, a suited ace blocks the nut flush)
+    # vs a villain -> Nut Blockers fires.
+    assert "Nut Blockers & Card Removal" in compute_plo_skills(
+        _facts(
+            archetype="3bet_for_value",
+            hero_cards=AAKK_DS,
+            history=(_act("LJ", R, 100),),
+            freqs={"Raise 100%": 1.0},
+            with_villain=True,
+        )
+    )
+    # An open (no villain to block) -> does NOT fire.
+    assert "Nut Blockers & Card Removal" not in compute_plo_skills(
+        _facts(archetype="open_for_value", hero_cards=AAKK_DS, actor="LJ")
+    )
+    # A passive call (not aggressive) with the same blocker -> does NOT fire.
+    assert "Nut Blockers & Card Removal" not in compute_plo_skills(
+        _facts(
+            archetype="call_for_value",
+            hero_cards=AAKK_DS,
+            history=(_act("LJ", R, 100),),
+            freqs={"Call": 1.0},
+            with_villain=True,
+        )
+    )
 
 
 # --- strictness -----------------------------------------------------------

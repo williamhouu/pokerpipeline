@@ -4944,7 +4944,7 @@ def render_skills_page() -> None:
     from pipeline.plo import skill_tagger as plo_skills  # noqa: PLC0415
 
     st.divider()
-    st.header("🃏  PLO / Omaha — 22 skills")
+    st.header("🃏  PLO / Omaha — 23 skills")
     st.caption(
         "`pipeline.plo.skill_tagger.SKILL_CATALOG`. Preflop only (no PLO "
         "postflop solves yet). Strict tagging: ~2-5 fire per question. Grouped "

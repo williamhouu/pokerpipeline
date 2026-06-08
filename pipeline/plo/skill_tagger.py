@@ -19,7 +19,7 @@ Catalog (from docs/plo_port_assessment.md):
     facing them, blind play, pot odds, position, multiway).
   * B -- PLO hand-reading (Suitedness, Rundowns & Connectivity, Dangler
     Awareness, Nut-Flush Awareness, Big-Pair Construction, Nuttedness & Non-Nut
-    Traps).
+    Traps, Nut Blockers & Card Removal).
   * C -- math / dynamics (Implied Odds, Reverse Implied Odds, Pot-Limit Bet
     Sizing).
   * D -- postflop skills: out of scope until a PLO postflop path exists.
@@ -166,6 +166,15 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     # Non-nut traps: a bare ace (no nut-flush potential) or an all-low holding
     # that makes non-nut flushes / straights.
     "Nuttedness & Non-Nut Traps": lambda c: bool(c.tags & {"bare_ace", "low_cards"}),
+    # Nut blockers: an ace blocks villain's AA, a suited ace blocks the nut
+    # flush -- the card-removal that justifies aggression (a 3-bet/4-bet/squeeze
+    # leaning on blockers). Gated to aggressive spots so it fires when the
+    # blocker is the REASON for the bet, not on every hand that holds an ace.
+    # (The blocks_villain_* tags already require a villain, so opens never fire.)
+    "Nut Blockers & Card Removal": lambda c: (
+        c.dominant_is_aggressive
+        and bool(c.tags & {"blocks_villain_value", "blocks_villain_nut_flush"})
+    ),
 
     # --- C: math / dynamics ---
     # Implied odds: calling a well-shaped speculative hand for the big pots you
@@ -268,6 +277,12 @@ SKILL_META: dict[str, PloSkillMeta] = {
     "Nuttedness & Non-Nut Traps": PloSkillMeta(
         CATEGORY_B,
         "Hands that tend to make SECOND-best flushes or straights (a bare ace, all-low holdings).",
+    ),
+    "Nut Blockers & Card Removal": PloSkillMeta(
+        CATEGORY_B,
+        "Using your cards to remove villain's strong combos -- an ace blocks "
+        "AA, a suited ace blocks the nut flush -- to justify a 3-bet / 4-bet / "
+        "squeeze.",
     ),
     # --- C: math / dynamics ---
     "Implied Odds": PloSkillMeta(
