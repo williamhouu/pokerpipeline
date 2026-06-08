@@ -4253,6 +4253,8 @@ def render_plo_generate_page() -> None:
             "difficulty_filtered": result.difficulty_filtered_out,
             "ev_filtered": result.ev_gap_filtered_out,
         }
+        # So the PLO Review page auto-selects this batch when you switch to it.
+        st.session_state["_plo_review_jump"] = out_path.name
         # Rerun so the sidebar's lifetime-spend metric -- rendered BEFORE this
         # page on every run -- re-reads the log entry we just appended. Without
         # it the new spend wouldn't show until the next interaction. The result
@@ -4328,8 +4330,20 @@ def render_plo_review_page() -> None:
     import csv as _csv  # noqa: PLC0415
 
     st.title("PLO Review")
+    # ALL batch CSVs (any filename prefix the user chose on Generate), newest
+    # first -- but NOT the Compare A/B artifacts (compare_*.csv), which are
+    # graded on the Compare page. Globbing "plo_*.csv" used to hide any batch
+    # the user named with a custom prefix.
     csvs = (
-        sorted(_PLO_BATCH_DIR.glob("plo_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        sorted(
+            (
+                p
+                for p in _PLO_BATCH_DIR.glob("*.csv")
+                if not p.name.startswith("compare_")
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
         if _PLO_BATCH_DIR.exists()
         else []
     )
@@ -4337,8 +4351,15 @@ def render_plo_review_page() -> None:
         st.info("No PLO batches yet. Generate one on the **PLO Generate** page.")
         return
 
+    # Jump to a just-generated batch (set on the Generate page) BEFORE the
+    # selectbox is instantiated. One-shot: pop it so normal selection persists.
+    names = [p.name for p in csvs]
+    jump = st.session_state.pop("_plo_review_jump", None)
+    if jump in names:
+        st.session_state["plo_review_batch"] = jump
+
     # Pick by FILENAME (not position): any edit bumps mtime and reorders the list.
-    pick = st.selectbox("Batch", options=[p.name for p in csvs], key="plo_review_batch")
+    pick = st.selectbox("Batch", options=names, key="plo_review_batch")
     csv_path = _PLO_BATCH_DIR / pick
     with csv_path.open(encoding="utf-8-sig") as handle:
         questions = list(_csv.DictReader(handle))
