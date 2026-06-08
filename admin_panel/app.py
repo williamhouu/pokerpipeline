@@ -3487,7 +3487,7 @@ def render_prompt_page() -> None:
                 created = lib.create(new_name, seed_text)
                 lib.set_active(created.slug)
                 _sync_legacy_override()
-                st.session_state["prompt_select"] = created.slug
+                st.session_state["_prompt_pending"] = created.slug
                 st.success(f"Created '{created.name}' and made it active.")
                 st.rerun()
 
@@ -3501,6 +3501,10 @@ def render_prompt_page() -> None:
     name_by_slug = {e.slug: e.name for e in entries}
 
     # Keep the selection valid across create / delete reruns.
+    # Apply a pending selection (Create / Duplicate) BEFORE the selectbox is
+    # instantiated -- Streamlit forbids writing a widget key after the widget.
+    if "_prompt_pending" in st.session_state:
+        st.session_state["prompt_select"] = st.session_state.pop("_prompt_pending")
     if st.session_state.get("prompt_select") not in slugs:
         st.session_state["prompt_select"] = active_slug or slugs[0]
 
@@ -3523,7 +3527,7 @@ def render_prompt_page() -> None:
     with c2:
         if st.button("Duplicate", key="dup_btn", use_container_width=True):
             dup = lib.duplicate(sel)
-            st.session_state["prompt_select"] = dup.slug
+            st.session_state["_prompt_pending"] = dup.slug
             st.success(f"Duplicated as '{dup.name}'.")
             st.rerun()
     with c3:
@@ -3534,7 +3538,8 @@ def render_prompt_page() -> None:
             disabled=len(entries) == 1,
         ):
             lib.delete(sel)
-            st.session_state.pop("prompt_select", None)
+            # Don't touch the widget key (already instantiated); the guard
+            # above re-selects a survivor on the rerun.
             _sync_legacy_override()
             st.rerun()
     with c4:
@@ -3964,7 +3969,7 @@ def render_plo_generate_page() -> None:
         st.caption(f"Difficulty band: **{lo}–{hi}** (computed 4-axis rating).")
 
     with st.expander(
-        "Advanced filters (worthiness window · EV-gap gate)", expanded=False
+        "Advanced filters (worthiness window · EV-gap gate)", expanded=True
     ):
         st.caption(
             "The frequency window gates whether a decision is teachable at all "
@@ -3974,13 +3979,13 @@ def render_plo_generate_page() -> None:
             "Solver frequency worthiness window (%)",
             min_value=50,
             max_value=100,
-            value=(55, 95),
+            value=(60, 99),
             key="plo_worthiness_slider",
             help="Below 55% = no clear best answer; 100% = trivial.",
         )
         exclude_ambiguous = st.checkbox(
             "Exclude ambiguous 90-95% band (recommended)",
-            value=True,
+            value=False,
             key="plo_exclude_ambiguous",
             help="Spots at 90-95% read as 'mostly' but sit just under the 95% "
             "'always' line, so the right read can still be marked wrong. "
@@ -4025,7 +4030,7 @@ def render_plo_generate_page() -> None:
         st.radio(
             "Style",
             options=list(_style_labels),
-            index=2,
+            index=1,  # default to GTO (Always / Mostly)
             key="plo_answer_style",
             help="**Basic** = bare action labels. **GTO** = the Always/Mostly "
             "spectrum that surfaces mixed strategies. **Auto-pick** = Basic for "
@@ -4536,7 +4541,7 @@ def render_plo_prompt_page() -> None:
                     seed_text = ""
                 created = lib.create(new_name, seed_text)
                 lib.set_active(created.slug)
-                st.session_state["plo_prompt_select"] = created.slug
+                st.session_state["_plo_prompt_pending"] = created.slug
                 st.success(f"Created '{created.name}' and made it active.")
                 st.rerun()
 
@@ -4548,6 +4553,11 @@ def render_plo_prompt_page() -> None:
     active_slug = lib.active_slug()
     slugs = [e.slug for e in entries]
     name_by_slug = {e.slug: e.name for e in entries}
+    # Apply a pending selection (set by Create / Duplicate) BEFORE the selectbox
+    # is instantiated -- Streamlit forbids writing a widget's session_state key
+    # after the widget exists, which is what crashed Duplicate.
+    if "_plo_prompt_pending" in st.session_state:
+        st.session_state["plo_prompt_select"] = st.session_state.pop("_plo_prompt_pending")
     if st.session_state.get("plo_prompt_select") not in slugs:
         st.session_state["plo_prompt_select"] = active_slug or slugs[0]
 
@@ -4570,7 +4580,7 @@ def render_plo_prompt_page() -> None:
     with c2:
         if st.button("Duplicate", key="plo_dup_btn", use_container_width=True):
             dup = lib.duplicate(sel)
-            st.session_state["plo_prompt_select"] = dup.slug
+            st.session_state["_plo_prompt_pending"] = dup.slug
             st.rerun()
     with c3:
         if st.button(
@@ -4580,7 +4590,8 @@ def render_plo_prompt_page() -> None:
             disabled=len(entries) == 1,
         ):
             lib.delete(sel)
-            st.session_state.pop("plo_prompt_select", None)
+            # Don't touch the widget key here (it's already instantiated); the
+            # guard above re-selects a survivor on the rerun.
             st.rerun()
     with c4:
         updated = f" · updated {entry.updated_at[:10]}" if entry.updated_at else ""
@@ -4630,14 +4641,20 @@ def render_plo_prompt_page() -> None:
         st.rerun()
 
     with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
-        st.caption(
-            "Exactly what the model receives for one question. The **SYSTEM "
-            "prompt** is the editable text above (voice rules, archetype frames, "
-            "banned phrases, output format). The per-question **SOLVER DATA** "
-            "block -- the hand, its shape, equity, the action strategy, "
-            "archetype, concept tags -- is assembled fresh for EVERY question "
-            "and sent as the USER message. **That's where each hand's data "
-            "goes**, and it is NOT part of the saved prompt."
+        st.info(
+            "**How the two parts fit together.** Each question is ONE API call "
+            "that contains BOTH parts:\n\n"
+            "1. **SYSTEM prompt** — the standing rules (the editable text above): "
+            "how to write, how to frame each archetype, what's banned, the output "
+            "format. **Identical for every question**, so it's prompt-cached and "
+            "cheap to repeat.\n"
+            "2. **USER message** — the facts for ONE specific hand (the SOLVER "
+            "DATA block). **Changes every question.**\n\n"
+            "Claude reads the SYSTEM prompt for the *style and rules*, then the "
+            "USER message for *this hand's data*, and writes the explanation. "
+            "Think of #1 as the coaching style-guide and #2 as the specific spot "
+            "to write about. Only #1 is saved/edited here; #2 is built "
+            "automatically from the solver for each hand."
         )
         sample = _plo_preview_sample_spot()
         if sample is None:
