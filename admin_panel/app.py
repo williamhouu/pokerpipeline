@@ -4072,7 +4072,10 @@ def render_plo_generate_page() -> None:
     }
     ms1, ms2 = st.columns(2)
     model = ms1.selectbox(
-        "Model", options=_PLO_MODELS, format_func=lambda m: _model_names.get(m, m)
+        "Model",
+        options=_PLO_MODELS,
+        index=_PLO_MODELS.index("claude-opus-4-7"),  # default to Opus 4.7
+        format_func=lambda m: _model_names.get(m, m),
     )
     temperature = ms2.slider(
         "Temperature",
@@ -4084,10 +4087,10 @@ def render_plo_generate_page() -> None:
     )
     compute_eq = st.checkbox(
         "Compute hand equity for the explanation (~1s/spot; real generate only)",
-        value=False,
+        value=True,
         help="On = the LLM gets equity numbers to cite, at ~1s/spot (PLO "
         "equity is ~60x heavier than Hold'em). Off = fast. The preview is "
-        "always equity-off for speed.",
+        "always equity-off for speed regardless of this.",
     )
     _cost_per_q = 0.08 if "sonnet" in model else 0.40
     st.info(
