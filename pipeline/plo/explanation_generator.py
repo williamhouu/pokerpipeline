@@ -260,6 +260,33 @@ def _banned_present(text: str) -> list[str]:
     return [p for p in _BANNED_PHRASES if p.lower() in low]
 
 
+# A specific card named in prose (rank + suit emoji) that isn't one of hero's
+# four is a fabrication -- e.g. "K<heart>" when the hand holds K<diamond>. PLO
+# suits are load-bearing (double-suited), so the LLM occasionally misstates one;
+# this deterministic audit rejects it and forces a corrective retry. (NLHE
+# rarely hits this: its hands abstract to a suit-light 2-card class like "KQo".)
+_PROSE_SUIT = {"♠": "s", "♥": "h", "❤": "h", "♦": "d", "♣": "c"}
+_PROSE_CARD_RE = re.compile(r"([2-9TJQKA])\s?([♠♥❤♦♣])")
+
+
+def _fabricated_cards(prose: str, hero_cards: tuple[str, ...]) -> list[str]:
+    """Specific cards named in ``prose`` that aren't among hero's four.
+
+    Only flags explicit ``<rank><suit-emoji>`` mentions (the voice-rule form);
+    vague references ("your ace", "the king") are never flagged, so there are
+    no false positives. Preflop there is no board and villain's range is named
+    by type, so every concrete card should be one of hero's own.
+    """
+    held = {(c[0].upper(), c[1].lower()) for c in hero_cards}
+    out: list[str] = []
+    for rank, suit_char in _PROSE_CARD_RE.findall(prose):
+        suit = _PROSE_SUIT.get(suit_char)
+        token = f"{rank}{suit_char}"
+        if suit is not None and (rank.upper(), suit) not in held and token not in out:
+            out.append(token)
+    return out
+
+
 def _parse(text: str) -> str:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     if not cleaned.startswith("{"):
@@ -365,6 +392,15 @@ def generate_plo_answer_explanation(
             banned = _banned_present(prose)
             if banned:
                 msg = f"used banned phrase(s): {banned}"
+                raise ExplanationValidationError(msg)
+            fabricated = _fabricated_cards(prose, facts.spot.hero_cards)
+            if fabricated:
+                hand = " ".join(format_card(c) for c in facts.spot.hero_cards)
+                msg = (
+                    f"named card(s) not in your hand: {', '.join(fabricated)}. "
+                    f"Your exact hand is {hand} -- use only those four cards, "
+                    "and prefer describing the shape over reciting cards."
+                )
                 raise ExplanationValidationError(msg)
             return GeneratedExplanation(
                 option_1=padded[0],

@@ -183,3 +183,37 @@ def test_no_override_uses_built_in_system_prompt():
         _facts(), ["Fold", "Call"], "Call", client=client, examples=(),
     )
     assert client.messages.systems == [build_plo_system_prompt(examples=())]
+
+
+# --- card-fabrication audit (the wrong-suit guard) -------------------------
+def test_fabricated_card_triggers_a_retry():
+    # Hand is A♠ K♠ A♥ K♥; the first attempt invents a K♦ (wrong suit).
+    client = _MockClient(
+        _json("Call. Your K♦ blocks his aces and the shape plays well."),
+        _json("Call. Your kings block his aces and the shape plays well."),
+    )
+    result = generate_plo_answer_explanation(
+        _facts(), ["Fold", "Call"], "Call", client=client, examples=()
+    )
+    assert "♦" not in result.answer_explanation  # the invented suit is gone
+    assert "kings" in result.answer_explanation.lower()
+
+
+def test_fabricated_card_after_all_retries_raises():
+    client = _MockClient(
+        _json("Call. Your K♦ is great."),  # K♦ not in hand
+        _json("Call. Your Q♣ is great."),  # Q♣ also not in hand
+    )
+    with pytest.raises(ExplanationValidationError, match="not in your hand"):
+        generate_plo_answer_explanation(
+            _facts(), ["Fold", "Call"], "Call", client=client, examples=(), max_retries=1
+        )
+
+
+def test_real_held_card_mention_passes():
+    # A♠ IS in the hand -> not flagged.
+    client = _MockClient(_json("Call. Your A♠ is the nut blocker here."))
+    result = generate_plo_answer_explanation(
+        _facts(), ["Fold", "Call"], "Call", client=client, examples=()
+    )
+    assert "A♠" in result.answer_explanation
