@@ -39,7 +39,7 @@ from pipeline.explanation_generator import (
     GeneratedExplanation,
     call_messages_create,
 )
-from pipeline.plo.action_history import format_plo_action_history
+from pipeline.plo.action_history import format_plo_action_history, resolve_pot_limit
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.gold_examples import load_plo_gold_examples
 from pipeline.plo.options import canonicalize_strategy
@@ -71,8 +71,11 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "DATA action_strategy is the GTO baseline, so do not call the GTO line 'a "
     "fold' or claim the solver mixes an action it shows at 0%.",
     "Be as long as the spot genuinely needs and no longer. Lead tight and get "
-    "to the point, but if a spot has real nuance, take the room. Do not pad to "
-    "hit a length, and do not cram a complex spot into one line.",
+    "to the point, but if a spot has real nuance, take the room and break it "
+    "into a few short paragraphs, separated by a blank line, where that helps "
+    "the reader. A one-idea answer can be one paragraph; a layered one reads "
+    "better split up. Do not pad to hit a length, and do not cram a complex "
+    "spot into one line.",
     # 5. ADAPTED for PLO: 4-card hands have no 169-class label; positions use BU.
     "Name things concretely: positions by abbreviation (LJ, HJ, CO, BU, SB, "
     "BB), and your hand by its SHAPE (a double-suited rundown, aces with a "
@@ -115,6 +118,16 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "factor: mention it briefly if at all, never as the main reason, and do "
     "not claim a single suited card meaningfully cuts into his range before any "
     "board has come.",
+    # 13. Say only what drives THIS spot; vary the shape so they aren't clones.
+    "Explain only what actually drives THIS decision. Lead with the single "
+    "biggest reason (the strategic_frame), then add a second factor ONLY when "
+    "the data makes it material here -- position when it changes the play, nut "
+    "potential or reverse implied odds on a non-nut hand, the price and pot "
+    "odds on a call, blockers on an aggressive line, a range-vs-range edge when "
+    "the equities show one. Do not run a fixed checklist, and do not mention a "
+    "factor that does not move this spot. Two questions of the same type should "
+    "not read the same: vary your opening sentence and the order you make "
+    "points.",
 )
 
 # Concise strategic frame per PLO archetype (one line the LLM reads fast).
@@ -189,6 +202,27 @@ def _pct(value: float | None) -> int | None:
     return None if value is None else round(value * _PERCENT)
 
 
+_VILLAIN_RAISE_VERBS = frozenset({"open", "3-bet", "4-bet", "5-bet", "raise"})
+
+
+def _villain_action_phrase(facts: PloFacts) -> str:
+    """Villain's action in plain bb terms ('3-bets to 12bb', 'moves all-in for
+    100bb') -- so the LLM never reads the internal 'Raise 100%' label (a
+    pot-sized raise) as a frequency."""
+    if facts.villain_stats is None:
+        return ""
+    actions, _pot = resolve_pot_limit(facts.spot.node.history_before)
+    seat = facts.villain_stats.seat
+    for act in reversed(actions):
+        if act.seat != seat:
+            continue
+        if act.verb == "all-in":
+            return f"moves all-in for {(act.to_bb or 0):g}bb"
+        if act.verb in _VILLAIN_RAISE_VERBS:
+            return f"{act.verb}s to {(act.to_bb or 0):g}bb"
+    return facts.villain_stats.action_label
+
+
 def build_solver_data(
     facts: PloFacts,
     options: list[str],
@@ -234,7 +268,7 @@ def build_solver_data(
     if villain is not None:
         data["villain"] = {
             "seat": villain.seat,
-            "action": villain.action_label,
+            "action": _villain_action_phrase(facts),
             "range_pct_of_all_hands": round(villain.pct_of_dealt_hands),
         }
     if include_skills:

@@ -88,11 +88,14 @@ def test_system_prompt_has_rules_and_bans_em_dash():
     assert "VOICE RULES" in prompt
     assert "Never use an em dash" in prompt
     assert "BANNED PHRASES" in prompt
-    assert len(VOICE_RULES_PLO) == 12  # noqa: PLR2004
+    assert len(VOICE_RULES_PLO) == 13  # noqa: PLR2004
     # The clean-final-draft rule (kills the self-correction artifact).
     assert any("clean, final draft" in r for r in VOICE_RULES_PLO)
     # The preflop blocker-framing rule (card removal, not flush math).
     assert any("blockers as preflop CARD REMOVAL" in r for r in VOICE_RULES_PLO)
+    # Paragraphs + say-only-what-drives-the-spot.
+    assert any("short paragraphs" in r for r in VOICE_RULES_PLO)
+    assert any("only what actually drives" in r for r in VOICE_RULES_PLO)
 
 
 def test_examples_seam_injects_when_provided():
@@ -228,3 +231,12 @@ def test_include_skills_adds_field_only_when_on():
     data = build_solver_data(f, ["Fold", "Call"], "Call", include_skills=True)
     assert isinstance(data.get("skills_this_spot_tests"), list)
     assert data["skills_this_spot_tests"]  # non-empty on a real spot
+
+
+def test_villain_action_is_a_bb_size_not_a_percent():
+    # _facts() villain is the LJ opener -> a clear 'opens to 3.5bb', never the
+    # internal 'Raise 100%' which reads like a frequency.
+    data = build_solver_data(_facts(), ["Fold", "Call"], "Call")
+    action = data["villain"]["action"]
+    assert "100%" not in action
+    assert action == "opens to 3.5bb"
