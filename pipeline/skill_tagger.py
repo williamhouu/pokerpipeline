@@ -332,8 +332,15 @@ SKILL_CATALOG: dict[str, SkillRule] = {
         c.archetype == "call_for_implied_odds"
         or "implied_odds_call" in c.concept_tags
     ),
+    # Postflop: the dedicated reverse_implied_odds_call tag. Preflop: a
+    # DOMINATED, weak-OFFSUIT hand (an offsuit broadway / weak ace) that makes
+    # second-best top pairs. unconnected_offsuit structurally excludes pairs
+    # (set-miners have GOOD implied odds) and suited hands (nut-flush / nut
+    # draws) -- the opposite of reverse implied odds -- so this can't misfire
+    # on them. Needs equity (dominated), so it only fires when there's a villain.
     "Reverse Implied Odds": lambda c: (
         "reverse_implied_odds_call" in c.concept_tags
+        or ("dominated" in c.concept_tags and "unconnected_offsuit" in c.concept_tags)
     ),
     "Minimum Defense Frequency (MDF)": lambda c: (
         "mdf_defense_threshold" in c.concept_tags
@@ -624,10 +631,11 @@ SKILL_META: dict[str, SkillMeta] = {
         "direct pot odds, expecting future-street value when hitting.",
     ),
     "Reverse Implied Odds": SkillMeta(
-        "Math & Theory", _POSTFLOP,
-        "Fires on the postflop `reverse_implied_odds_call` tag -- "
-        "hero's hand might lose more when it 'hits' than it gains "
-        "(dominated draws etc.).",
+        "Math & Theory", _PREFLOP,
+        "Preflop: a dominated, weak-OFFSUIT hand (offsuit broadway / weak "
+        "ace) that makes second-best top pairs -- `dominated` + "
+        "`unconnected_offsuit`, which excludes set-mining pairs and nut-draw "
+        "suited hands. Also the postflop `reverse_implied_odds_call` tag.",
     ),
     "Minimum Defense Frequency (MDF)": SkillMeta(
         "Math & Theory", _POSTFLOP,

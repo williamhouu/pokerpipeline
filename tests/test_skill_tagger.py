@@ -268,9 +268,30 @@ def test_implied_odds_fires_on_archetype_or_postflop_tag() -> None:
 
 
 def test_reverse_implied_odds() -> None:
+    # Postflop: the dedicated tag.
     assert _has(
         "Reverse Implied Odds",
         _ctx(path="postflop", concept_tags=frozenset({"reverse_implied_odds_call"})),
+    )
+    # Preflop: a dominated, weak-OFFSUIT hand (offsuit broadway / weak ace).
+    assert _has(
+        "Reverse Implied Odds",
+        _ctx(concept_tags=frozenset({"dominated", "unconnected_offsuit"})),
+    )
+    # A dominated PAIR is a set-miner (good implied odds) -> does NOT fire.
+    assert not _has(
+        "Reverse Implied Odds",
+        _ctx(concept_tags=frozenset({"dominated", "small_pair"})),
+    )
+    # A dominated SUITED hand has nut-draw potential -> does NOT fire.
+    assert not _has(
+        "Reverse Implied Odds",
+        _ctx(concept_tags=frozenset({"dominated", "suited_ace"})),
+    )
+    # Weak offsuit but NOT dominated (decent equity) -> does NOT fire.
+    assert not _has(
+        "Reverse Implied Odds",
+        _ctx(concept_tags=frozenset({"unconnected_offsuit"})),
     )
 
 
