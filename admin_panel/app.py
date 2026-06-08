@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from admin_panel.prompt_library import PromptLibrary
+    from pipeline.plo.fact_extractor import PloFacts
     from pipeline.plo.node_enumerator import PloDecisionNode
     from pipeline.plo.pack import PloPack
 
@@ -4441,6 +4442,52 @@ def _plo_prompt_library() -> PromptLibrary:
     return lib
 
 
+@st.cache_resource(show_spinner="Building a sample PLO spot…")
+def _plo_preview_sample_spot(
+    pack_dir: str = "plo_ranges",
+) -> tuple[PloFacts, list[str], str] | None:
+    """A representative ``(facts, options, correct)`` for the prompt preview.
+
+    Samples one clean, worthy spot from the pack with equity computed, so the
+    preview shows the same SOLVER DATA a real generate would. Cached (one ~1s
+    equity sim). Returns None if the pack isn't present.
+    """
+    import random  # noqa: PLC0415
+
+    from pipeline.plo.fact_extractor import extract_plo_facts  # noqa: PLC0415
+    from pipeline.plo.hand_order import HAND_COUNT  # noqa: PLC0415
+    from pipeline.plo.node_enumerator import (  # noqa: PLC0415
+        plo_active_player_count,
+        plo_node_action_context,
+    )
+    from pipeline.plo.options import build_options  # noqa: PLC0415
+    from pipeline.plo.question_extractor import is_question_worthy  # noqa: PLC0415
+    from pipeline.plo.spot_sampler import sample_plo_spot  # noqa: PLC0415
+
+    try:
+        pack, nodes = _plo_pack_and_nodes(pack_dir)
+    except FileNotFoundError:
+        return None
+    rng = random.Random(7)
+    candidates = [
+        n
+        for n in nodes
+        if plo_node_action_context(n) in {"Facing single raise", "Facing 3-bet"}
+        and plo_active_player_count(n) <= 3  # noqa: PLR2004
+    ]
+    rng.shuffle(candidates)
+    for node in candidates[:40]:
+        for idx in rng.sample(range(HAND_COUNT), k=min(300, HAND_COUNT)):
+            spot = sample_plo_spot(node, idx)
+            if spot.presence >= 0.5 and is_question_worthy(spot):  # noqa: PLR2004
+                facts = extract_plo_facts(
+                    spot, pack, compute_equity=True, rng=random.Random(7)
+                )
+                options, correct = build_options(facts, style="auto")
+                return facts, options, correct
+    return None
+
+
 def render_plo_prompt_page() -> None:
     """The PLO prompt library: create, edit, and switch Layer 6 PLO prompts.
 
@@ -4581,6 +4628,36 @@ def render_plo_prompt_page() -> None:
         lib.update_text(sel, edited)
         st.success("✅ Saved.")
         st.rerun()
+
+    with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
+        st.caption(
+            "Exactly what the model receives for one question. The **SYSTEM "
+            "prompt** is the editable text above (voice rules, archetype frames, "
+            "banned phrases, output format). The per-question **SOLVER DATA** "
+            "block -- the hand, its shape, equity, the action strategy, "
+            "archetype, concept tags -- is assembled fresh for EVERY question "
+            "and sent as the USER message. **That's where each hand's data "
+            "goes**, and it is NOT part of the saved prompt."
+        )
+        sample = _plo_preview_sample_spot()
+        if sample is None:
+            st.caption(
+                "(Couldn't build a sample spot -- is the PLO pack present under "
+                "`plo_ranges/`?)"
+            )
+        else:
+            from pipeline.plo.explanation_generator import (  # noqa: PLC0415
+                build_plo_user_prompt,
+            )
+
+            s_facts, s_options, s_correct = sample
+            st.markdown("**1. SYSTEM prompt** (the editable text above)")
+            st.code(edited or build_plo_system_prompt(), language="markdown")
+            st.markdown(
+                "**2. USER message** -- the per-question SOLVER DATA block + the "
+                "ask. This is where the hand's data is injected:"
+            )
+            st.code(build_plo_user_prompt(s_facts, s_options, s_correct))
 
     with st.expander("👁  Compare with built-in default"):
         default_prompt = build_plo_system_prompt()

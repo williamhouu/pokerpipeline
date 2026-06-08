@@ -230,9 +230,15 @@ def build_solver_data(
     return data
 
 
-def _build_user_prompt(
+def build_plo_user_prompt(
     facts: PloFacts, options: list[str], correct_answer: str
 ) -> str:
+    """The per-question USER message: the SOLVER DATA block + the ask.
+
+    This is exactly what the LLM receives for one spot (the system prompt is
+    separate). Public so the admin Prompt page can show it -- the live path and
+    the preview build the prompt the same way, so they can't drift.
+    """
     block = json.dumps(build_solver_data(facts, options, correct_answer), indent=2)
     return (
         f"SOLVER DATA:\n{block}\n\n"
@@ -378,7 +384,7 @@ def generate_plo_answer_explanation(
         if system_prompt is not None
         else build_plo_system_prompt(examples=examples)
     )
-    messages = [{"role": "user", "content": _build_user_prompt(facts, options, correct_answer)}]
+    messages = [{"role": "user", "content": build_plo_user_prompt(facts, options, correct_answer)}]
     padded = (list(options) + ["", "", "", ""])[:4]
 
     last_error = ""
@@ -444,6 +450,7 @@ __all__ = [
     "PLO_ARCHETYPE_GUIDANCE",
     "VOICE_RULES_PLO",
     "build_plo_system_prompt",
+    "build_plo_user_prompt",
     "build_solver_data",
     "generate_plo_answer_explanation",
 ]
