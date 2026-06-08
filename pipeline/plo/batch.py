@@ -118,6 +118,7 @@ def generate_plo_batch(
     explanation_model: str = DEFAULT_MODEL,
     explanation_temperature: float = DEFAULT_TEMPERATURE,
     explanation_system_prompt: str | None = None,
+    explanation_include_skills: bool = False,
     usage_callback: UsageCallback | None = None,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
@@ -209,6 +210,7 @@ def generate_plo_batch(
                     system_prompt=explanation_system_prompt,
                     model=explanation_model,
                     temperature=explanation_temperature,
+                    include_skills=explanation_include_skills,
                     usage_callback=usage_callback,
                 )
                 explanation = generated.answer_explanation

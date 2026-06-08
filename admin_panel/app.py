@@ -4735,28 +4735,65 @@ def render_plo_compare_page() -> None:
     from pipeline.plo.batch import generate_plo_batch  # noqa: PLC0415
     from pipeline.plo.node_enumerator import PLO_ACTION_CONTEXTS  # noqa: PLC0415
 
-    st.title("PLO Compare prompts (A/B)")
+    st.title("PLO Compare (A/B)")
     st.caption(
-        "Run two PLO prompts on the SAME spots (same hands, temperature 0) and "
-        "judge them side by side, so any difference is the prompt, not luck."
+        "A/B two variants on the SAME spots (same hands, temperature 0) and "
+        "judge them side by side, so any difference is the variant, not luck. "
+        "Compare two prompts, or one prompt with vs without the tagged skills "
+        "in the data block."
     )
 
     lib = _plo_prompt_library()
     entries = lib.list()
-    if len(entries) < 2:  # noqa: PLR2004
-        st.warning("Create at least two prompts on the **PLO Prompt** page first.")
+    if not entries:
+        st.warning("No prompts yet -- create one on the **PLO Prompt** page.")
         return
     slugs = [e.slug for e in entries]
     names = {e.slug: e.name for e in entries}
+    active = lib.active_slug()
 
-    c1, c2 = st.columns(2)
-    with c1:
-        a_slug = st.selectbox(
-            "Prompt A", slugs, index=0, format_func=lambda s: names[s], key="plo_cmp_a"
+    cmp_mode = st.radio(
+        "What to compare",
+        options=["Two prompts", "Skills in the data (same prompt, off vs on)"],
+        key="plo_cmp_mode",
+        help="'Two prompts' A/Bs two system prompts on the same spots. 'Skills "
+        "in the data' runs ONE prompt twice -- the only difference is whether "
+        "the tagged skills are injected into the SOLVER DATA -- so you can test "
+        "head-to-head whether naming the skills helps the prose.",
+    )
+    run_disabled = False
+    # (slug, include_skills, display_name) for each side.
+    if cmp_mode.startswith("Two"):
+        if len(slugs) < 2:  # noqa: PLR2004
+            st.info("Create a second prompt on the **PLO Prompt** page to A/B two prompts.")
+            return
+        c1, c2 = st.columns(2)
+        with c1:
+            a_slug = st.selectbox(
+                "Prompt A", slugs, index=0, format_func=lambda s: names[s], key="plo_cmp_a"
+            )
+        with c2:
+            b_slug = st.selectbox(
+                "Prompt B", slugs, index=1, format_func=lambda s: names[s], key="plo_cmp_b"
+            )
+        a_cfg = (a_slug, False, names[a_slug])
+        b_cfg = (b_slug, False, names[b_slug])
+        if a_slug == b_slug:
+            st.info("Pick two different prompts to compare.")
+            run_disabled = True
+    else:
+        one_slug = st.selectbox(
+            "Prompt (used for both sides)",
+            slugs,
+            index=slugs.index(active) if active in slugs else 0,
+            format_func=lambda s: names[s],
+            key="plo_cmp_one",
         )
-    with c2:
-        b_slug = st.selectbox(
-            "Prompt B", slugs, index=1, format_func=lambda s: names[s], key="plo_cmp_b"
+        a_cfg = (one_slug, False, "No skills")
+        b_cfg = (one_slug, True, "With skills")
+        st.caption(
+            "Both sides use the same prompt. **A** omits the tagged skills from "
+            "the SOLVER DATA; **B** adds them as `skills_this_spot_tests`."
         )
 
     # Spot filters -- applied IDENTICALLY to both prompts so the A/B stays fair.
@@ -4806,10 +4843,7 @@ def render_plo_compare_page() -> None:
         st.number_input("Seed", min_value=0, max_value=1_000_000, value=42, key="plo_cmp_seed")
     )
 
-    same = a_slug == b_slug
-    if same:
-        st.info("Pick two different prompts to compare.")
-    if st.button("Run comparison", type="primary", disabled=same, key="plo_cmp_run"):
+    if st.button("Run comparison", type="primary", disabled=run_disabled, key="plo_cmp_run"):
         if not os.environ.get("ANTHROPIC_API_KEY"):
             st.error("ANTHROPIC_API_KEY is not set. Add it to `.env`, then retry.")
             return
@@ -4823,7 +4857,7 @@ def render_plo_compare_page() -> None:
         out_a = _PLO_BATCH_DIR / f"compare_{ts}_A.csv"
         out_b = _PLO_BATCH_DIR / f"compare_{ts}_B.csv"
 
-        def _run(out_path: Path, slug: str) -> None:
+        def _run(out_path: Path, slug: str, include_skills: bool) -> None:
             generate_plo_batch(
                 pack,
                 output_path=out_path,
@@ -4841,19 +4875,20 @@ def render_plo_compare_page() -> None:
                 explanation_model=model,
                 explanation_temperature=0.0,
                 explanation_system_prompt=lib.get_text(slug),
+                explanation_include_skills=include_skills,
             )
 
-        with st.status("Running both prompts on the same spots…", expanded=True) as status:
-            st.write(f"Prompt A — {names[a_slug]}")
-            _run(out_a, a_slug)
-            st.write(f"Prompt B — {names[b_slug]}")
-            _run(out_b, b_slug)
+        with st.status("Running both sides on the same spots…", expanded=True) as status:
+            st.write(f"A — {a_cfg[2]}")
+            _run(out_a, a_cfg[0], a_cfg[1])
+            st.write(f"B — {b_cfg[2]}")
+            _run(out_b, b_cfg[0], b_cfg[1])
             status.update(label="Comparison ready", state="complete")
         st.session_state["plo_cmp_result"] = {
             "a_csv": str(out_a),
             "b_csv": str(out_b),
-            "a_name": names[a_slug],
-            "b_name": names[b_slug],
+            "a_name": a_cfg[2],
+            "b_name": b_cfg[2],
         }
         st.rerun()
 

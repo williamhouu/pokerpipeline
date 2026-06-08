@@ -190,9 +190,19 @@ def _pct(value: float | None) -> int | None:
 
 
 def build_solver_data(
-    facts: PloFacts, options: list[str], correct_answer: str
+    facts: PloFacts,
+    options: list[str],
+    correct_answer: str,
+    *,
+    include_skills: bool = False,
 ) -> dict[str, Any]:
-    """The SOLVER DATA block fed to the LLM -- the facts behind the decision."""
+    """The SOLVER DATA block fed to the LLM -- the facts behind the decision.
+
+    ``include_skills`` adds the tagged user-facing skills as a
+    ``skills_this_spot_tests`` field -- OFF by default; it exists so the admin
+    Compare page can A/B "does naming the skills help the prose?" head-to-head.
+    """
+    from pipeline.plo.skill_tagger import compute_plo_skills  # noqa: PLC0415
     hand = facts.hand_class
     villain = facts.villain_stats
     data: dict[str, Any] = {
@@ -227,19 +237,29 @@ def build_solver_data(
             "action": villain.action_label,
             "range_pct_of_all_hands": round(villain.pct_of_dealt_hands),
         }
+    if include_skills:
+        data["skills_this_spot_tests"] = compute_plo_skills(facts)
     return data
 
 
 def build_plo_user_prompt(
-    facts: PloFacts, options: list[str], correct_answer: str
+    facts: PloFacts,
+    options: list[str],
+    correct_answer: str,
+    *,
+    include_skills: bool = False,
 ) -> str:
     """The per-question USER message: the SOLVER DATA block + the ask.
 
     This is exactly what the LLM receives for one spot (the system prompt is
     separate). Public so the admin Prompt page can show it -- the live path and
     the preview build the prompt the same way, so they can't drift.
+    ``include_skills`` adds the tagged skills to the data (Compare A/B seam).
     """
-    block = json.dumps(build_solver_data(facts, options, correct_answer), indent=2)
+    block = json.dumps(
+        build_solver_data(facts, options, correct_answer, include_skills=include_skills),
+        indent=2,
+    )
     return (
         f"SOLVER DATA:\n{block}\n\n"
         f'Write the answer_explanation justifying why "{correct_answer}" is the '
@@ -352,6 +372,7 @@ def generate_plo_answer_explanation(
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 1,
+    include_skills: bool = False,
     usage_callback: UsageCallback | None = None,
 ) -> GeneratedExplanation:
     """Generate the answer_explanation prose for one PLO spot.
@@ -384,7 +405,14 @@ def generate_plo_answer_explanation(
         if system_prompt is not None
         else build_plo_system_prompt(examples=examples)
     )
-    messages = [{"role": "user", "content": build_plo_user_prompt(facts, options, correct_answer)}]
+    messages = [
+        {
+            "role": "user",
+            "content": build_plo_user_prompt(
+                facts, options, correct_answer, include_skills=include_skills
+            ),
+        }
+    ]
     padded = (list(options) + ["", "", "", ""])[:4]
 
     last_error = ""

@@ -219,3 +219,12 @@ def test_real_held_card_mention_passes():
         _facts(), ["Fold", "Call"], "Call", client=client, examples=()
     )
     assert "A♠" in result.answer_explanation
+
+
+# --- include_skills (the Compare A/B seam) ---------------------------------
+def test_include_skills_adds_field_only_when_on():
+    f = _facts()
+    assert "skills_this_spot_tests" not in build_solver_data(f, ["Fold", "Call"], "Call")
+    data = build_solver_data(f, ["Fold", "Call"], "Call", include_skills=True)
+    assert isinstance(data.get("skills_this_spot_tests"), list)
+    assert data["skills_this_spot_tests"]  # non-empty on a real spot
