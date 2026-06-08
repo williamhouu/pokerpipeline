@@ -4661,6 +4661,31 @@ def render_plo_prompt_page() -> None:
         st.success("✅ Saved.")
         st.rerun()
 
+    # The library freezes a snapshot when an entry is created, so updates to
+    # the built-in default IN CODE (new voice rules etc.) don't reach a saved
+    # entry until you pull them in here.
+    _builtin = build_plo_system_prompt()
+    _matches_builtin = entry.text == _builtin
+    rc1, rc2 = st.columns([1, 2])
+    with rc1:
+        if st.button(
+            "🔄  Reset to built-in default",
+            key=f"plo_reset_{sel}",
+            disabled=_matches_builtin,
+            use_container_width=True,
+        ):
+            lib.update_text(sel, _builtin)
+            st.success("✅ Reset to the current built-in default.")
+            st.rerun()
+    with rc2:
+        if _matches_builtin:
+            st.caption("✅ Matches the current built-in default (from code).")
+        else:
+            st.caption(
+                "⚠️ This entry is behind the current built-in default in code "
+                "(updated rules, or your own edits). Reset to pull the latest."
+            )
+
     with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
         st.info(
             "**How the two parts fit together.** Each question is ONE API call "
