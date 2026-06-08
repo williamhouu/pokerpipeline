@@ -107,6 +107,14 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "get every card and suit right the first time. Do not narrate the hand "
     'card-by-card ("connectivity from the ten down to the three"); name the '
     "shape and the cards that matter, then move on.",
+    # 12. Frame blockers correctly for a PREFLOP decision.
+    "Frame blockers as preflop CARD REMOVAL. An ace mainly removes villain's "
+    "AA and other premium aces, shrinking his value range -- that is the "
+    "point, and you do not need to name the ace's suit to make it. A suited "
+    "ace also blocks the nut flush, but preflop that is a minor, secondary "
+    "factor: mention it briefly if at all, never as the main reason, and do "
+    "not claim a single suited card meaningfully cuts into his range before any "
+    "board has come.",
 )
 
 # Concise strategic frame per PLO archetype (one line the LLM reads fast).
