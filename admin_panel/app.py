@@ -4083,7 +4083,27 @@ def render_plo_generate_page() -> None:
         step=1,
         help="How many questions to generate (spread across matching nodes).",
     )
-    seed = bo2.number_input("Random seed", min_value=0, value=0, step=1)
+    # Fresh spots every run by default. The old bare "Random seed" input
+    # defaulted to 0 -- a FIXED seed, so every batch reproduced the identical
+    # spots (same nodes, same hands, same order). Pin only for a repeatable
+    # test set (e.g. prompt comparisons).
+    _pin_plo_seed = bo2.toggle(
+        "Pin a fixed test set",
+        key="plo_gen_pin_seed",
+        help="Off (default): every batch draws fresh random spots. On: the "
+        "seed below reproduces the identical spots each run — useful when "
+        "comparing prompts on the same hands.",
+    )
+    _plo_seed_input = bo2.number_input(
+        "Test-set seed",
+        min_value=0,
+        max_value=1_000_000,
+        value=42,
+        step=1,
+        key="plo_gen_seed_val",
+        disabled=not _pin_plo_seed,
+    )
+    seed: int | None = int(_plo_seed_input) if _pin_plo_seed else None
     display_in_bb = (
         bo3.radio(
             "Amounts",
@@ -4248,7 +4268,7 @@ def render_plo_generate_page() -> None:
                 pack,
                 output_path=out_path,
                 total_questions=int(count),
-                seed=int(seed),
+                seed=seed,
                 hero_positions=positions or None,
                 action_contexts=action_contexts or None,
                 player_counts=player_counts or None,
@@ -4315,7 +4335,7 @@ def render_plo_generate_page() -> None:
             pack,
             nodes,
             count=int(count),
-            seed=int(seed),
+            seed=seed,
             hero_positions=positions or None,
             action_contexts=action_contexts or None,
             player_counts=player_counts or None,

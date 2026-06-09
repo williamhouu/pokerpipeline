@@ -105,7 +105,7 @@ def build_preview_rows(
     nodes: tuple[PloDecisionNode, ...],
     *,
     count: int = 8,
-    seed: int = 0,
+    seed: int | None = 0,
     hero_positions: list[str] | None = None,
     max_prior_raises: int | None = 2,
     max_active_players: int | None = 3,

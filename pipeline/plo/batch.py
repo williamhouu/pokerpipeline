@@ -113,7 +113,7 @@ def generate_plo_batch(
     min_ev_gap_bb: float | None = None,
     compute_equity: bool = True,
     answer_style: str = "auto",
-    seed: int = 0,
+    seed: int | None = 0,
     stakes_bb_dollars: float = 1.0,
     game_format: str = "cash",
     display_in_bb: bool = False,
@@ -144,6 +144,11 @@ def generate_plo_batch(
     "mostly-feels-like-always" trap) without capping the ceiling, so a 100%
     max still admits the pure 95-100% spots. ``min_ev_gap_bb`` drops
     near-coinflip spots (reported in ``ev_gap_filtered_out``).
+
+    ``seed`` controls spot sampling: an int reproduces the identical batch
+    (same nodes, hands, order); ``None`` seeds from fresh OS entropy so every
+    run draws different spots -- the admin Generate page passes ``None``
+    unless the user pins a test set.
 
     When ``generate_explanations`` is True, Layer 6 (the LLM) fills the
     ``Answer Explanation`` column per spot; otherwise it is left blank (the

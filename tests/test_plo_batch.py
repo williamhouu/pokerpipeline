@@ -232,3 +232,17 @@ def test_batch_threads_explanation_system_prompt(tmp_path):
     )
     # The edited prompt reached the LLM call verbatim.
     assert client.messages.systems == [custom]
+
+
+def test_seed_none_draws_fresh_spots_without_crashing(tmp_path):
+    # seed=None seeds the RNG from OS entropy (the Generate page's default,
+    # so batches stop repeating the identical spots). Smoke: runs end to end.
+    pack = _clean_hj_pack(tmp_path)
+    result = generate_plo_batch(
+        pack,
+        output_path=tmp_path / "batch.csv",
+        total_questions=1,
+        seed=None,
+        compute_equity=False,
+    )
+    assert result.questions_written == 1
