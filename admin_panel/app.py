@@ -5004,9 +5004,9 @@ def render_plo_compare_page() -> None:
             )
         a_cfg = (a_slug, False, names[a_slug])
         b_cfg = (b_slug, False, names[b_slug])
-        if a_slug == b_slug:
-            st.info("Pick two different prompts to compare.")
-            run_disabled = True
+        # NOTE: same prompt on both sides is allowed -- paired with two
+        # different models below it's the model-vs-model A/B. The
+        # identical-sides guard lives after the model pickers.
     else:
         one_slug = st.selectbox(
             "Prompt (used for both sides)",
@@ -5057,14 +5057,25 @@ def render_plo_compare_page() -> None:
             key="plo_cmp_diff",
         )
     with s3:
-        model = st.radio(
-            "Model",
+        # Per-side models: same cost as a single-model compare (still two
+        # batches) and it unlocks model-vs-model A/B -- same spots, same
+        # prompt, e.g. Fable 5 vs Opus 4.7.
+        _short_model = lambda m: _PLO_MODEL_NAMES.get(m, str(m)).split(" (")[0]  # noqa: E731
+        model_a = st.selectbox(
+            "Model A",
             options=_PLO_MODELS,
-            index=0,  # Fable 5 -- compare with the model you ship with
-            format_func=lambda m: _PLO_MODEL_NAMES.get(m, str(m)).split(" (")[0],
-            key="plo_cmp_model",
+            index=0,
+            format_func=_short_model,
+            key="plo_cmp_model_a",
         )
-        if "fable" in model:
+        model_b = st.selectbox(
+            "Model B",
+            options=_PLO_MODELS,
+            index=0,
+            format_func=_short_model,
+            key="plo_cmp_model_b",
+        )
+        if "fable" in model_a or "fable" in model_b:
             st.caption(
                 "Fable 5 has no temperature control, so A/B runs may vary "
                 "slightly in wording between reruns."
@@ -5073,6 +5084,23 @@ def render_plo_compare_page() -> None:
     seed = int(
         st.number_input("Seed", min_value=0, max_value=1_000_000, value=42, key="plo_cmp_seed")
     )
+
+    # Side-identity checks, now that both the prompts/skills AND the models
+    # are chosen. Identical sides = pointless (same output twice); two
+    # variables at once = a confounded verdict.
+    _sides_differ_in_content = a_cfg[0] != b_cfg[0] or a_cfg[1] != b_cfg[1]
+    if not _sides_differ_in_content and model_a == model_b:
+        st.info(
+            "Pick two different prompts, or two different models — identical "
+            "sides would generate the same thing twice."
+        )
+        run_disabled = True
+    elif _sides_differ_in_content and model_a != model_b:
+        st.warning(
+            "Both the prompt and the model differ between sides, so a verdict "
+            "won't tell you which one caused the difference. For a clean test, "
+            "vary one at a time."
+        )
 
     if st.button("Run comparison", type="primary", disabled=run_disabled, key="plo_cmp_run"):
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -5088,7 +5116,9 @@ def render_plo_compare_page() -> None:
         out_a = _PLO_BATCH_DIR / f"compare_{ts}_A.csv"
         out_b = _PLO_BATCH_DIR / f"compare_{ts}_B.csv"
 
-        def _run(out_path: Path, slug: str, include_skills: bool) -> None:
+        def _run(
+            out_path: Path, slug: str, include_skills: bool, run_model: str
+        ) -> None:
             generate_plo_batch(
                 pack,
                 output_path=out_path,
@@ -5103,23 +5133,29 @@ def render_plo_compare_page() -> None:
                 compute_equity=False,
                 answer_style="auto",
                 generate_explanations=True,
-                explanation_model=model,
+                explanation_model=run_model,
                 explanation_temperature=0.0,
                 explanation_system_prompt=lib.get_text(slug),
                 explanation_include_skills=include_skills,
             )
 
+        # When the models differ, bake the model into each side's label so
+        # the tally + verdict buttons say exactly what they're crediting.
+        _models_differ = model_a != model_b
+        a_label = a_cfg[2] + (f" · {_short_model(model_a)}" if _models_differ else "")
+        b_label = b_cfg[2] + (f" · {_short_model(model_b)}" if _models_differ else "")
+
         with st.status("Running both sides on the same spots…", expanded=True) as status:
-            st.write(f"A — {a_cfg[2]}")
-            _run(out_a, a_cfg[0], a_cfg[1])
-            st.write(f"B — {b_cfg[2]}")
-            _run(out_b, b_cfg[0], b_cfg[1])
+            st.write(f"A — {a_label}")
+            _run(out_a, a_cfg[0], a_cfg[1], model_a)
+            st.write(f"B — {b_label}")
+            _run(out_b, b_cfg[0], b_cfg[1], model_b)
             status.update(label="Comparison ready", state="complete")
         st.session_state["plo_cmp_result"] = {
             "a_csv": str(out_a),
             "b_csv": str(out_b),
-            "a_name": a_cfg[2],
-            "b_name": b_cfg[2],
+            "a_name": a_label,
+            "b_name": b_label,
         }
         st.rerun()
 
