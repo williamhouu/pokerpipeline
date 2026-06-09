@@ -84,8 +84,13 @@ def _first_worthy_spot(
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
     exclude_ambiguous_band: bool = False,
+    exclude_indices: set[int] | frozenset[int] = frozenset(),
 ) -> PloSpot | None:
+    """A worthy spot at this node, skipping hands already drawn this batch
+    (``exclude_indices``) so repeat visits to a node yield a NEW hand."""
     for index in rng.sample(range(HAND_COUNT), k=min(_WORTHY_TRIES, HAND_COUNT)):
+        if index in exclude_indices:
+            continue
         spot = sample_plo_spot(node, index)
         if spot.presence >= _MIN_PRESENCE and is_question_worthy(
             spot,
@@ -131,7 +136,10 @@ def generate_plo_batch(
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
 
-    One worthy spot per node (for variety) across a shuffled, filtered node set.
+    Spots are drawn round-robin across a shuffled, filtered node set: one new
+    hand per node per pass, so situations spread first and a node contributes
+    multiple (always different) hands only when the batch is bigger than the
+    node pool.
     Equity is computed per kept spot when ``compute_equity`` (the ~1s/spot cost;
     it only enriches the equity/range concept tags).
 
@@ -186,78 +194,99 @@ def generate_plo_batch(
     explanation_failure_reasons: list[str] = []
     difficulty_filtered_out = 0
     ev_gap_filtered_out = 0
-    for node in candidates:
-        if len(rows) >= total_questions:
-            break
-        scanned += 1
-        spot = _first_worthy_spot(
-            node,
-            rng,
-            min_frequency=min_frequency,
-            max_frequency=max_frequency,
-            exclude_ambiguous_band=exclude_ambiguous_band,
-        )
-        if spot is None:
-            continue
-        facts = extract_plo_facts(
-            spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
-        )
-        # EV-gap quality gate (PLO has a real ev_gap on every spot, raises
-        # included), applied BEFORE the paid LLM call -- mirrors the NLHE gate.
-        if (
-            min_ev_gap_bb is not None
-            and facts.ev_gap_bb is not None
-            and facts.ev_gap_bb < min_ev_gap_bb
-        ):
-            ev_gap_filtered_out += 1
-            continue
-        # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
-        # spots cost no API spend -- the same gate the NLHE Generate page uses.
-        difficulty = compute_plo_difficulty(facts)
-        if not min_difficulty <= difficulty.score <= max_difficulty:
-            difficulty_filtered_out += 1
-            continue
-        options, correct = build_options(facts, style=answer_style)
-
-        explanation = ""
-        if generate_explanations:
-            try:
-                generated = generate_plo_answer_explanation(
-                    facts,
-                    list(options),
-                    correct,
-                    client=explanation_client,
-                    system_prompt=explanation_system_prompt,
-                    model=explanation_model,
-                    temperature=explanation_temperature,
-                    include_skills=explanation_include_skills,
-                    usage_callback=usage_callback,
-                )
-                explanation = generated.answer_explanation
-                explanations_written += 1
-            except (ExplanationValidationError, OSError, KeyError) as exc:
-                explanations_failed += 1
-                cards = " ".join(spot.hero_cards)
-                explanation_failure_reasons.append(
-                    f"{type(exc).__name__} ({cards}): {exc}"
-                )
-                logger.warning("Layer 6 failed for a spot, shipping blank: %s", exc)
-
-        rows.append(
-            build_plo_row(
-                facts,
-                difficulty=difficulty,
-                options=options,
-                correct_answer=correct,
-                explanation=explanation,
-                number=len(rows) + 1,
-                pack_label=pack_label,
-                stakes_bb_dollars=stakes_bb_dollars,
-                game_format=game_format,
-                display_in_bb=display_in_bb,
-                stack_bb=stack_bb,
+    # Round-robin passes over the (shuffled) nodes: each pass draws at most
+    # one NEW hand per node, so a node contributes its 2nd question only
+    # after every node has had the chance to contribute a 1st. A batch
+    # larger than the node pool tops up with extra hands per node instead
+    # of capping at one-question-per-node; a batch smaller than the pool
+    # still spreads across distinct situations. ``drawn`` tracks the hands
+    # already sampled per node this batch (including filtered-out ones, so
+    # a rejected hand isn't redrawn forever); the loop ends when a full
+    # pass draws nothing new.
+    drawn: dict[str, set[int]] = {}
+    while len(rows) < total_questions:
+        drew_this_pass = False
+        for node in candidates:
+            if len(rows) >= total_questions:
+                break
+            scanned += 1
+            spot = _first_worthy_spot(
+                node,
+                rng,
+                min_frequency=min_frequency,
+                max_frequency=max_frequency,
+                exclude_ambiguous_band=exclude_ambiguous_band,
+                exclude_indices=drawn.setdefault(node.node_id, set()),
             )
-        )
+            if spot is None:
+                continue
+            drawn[node.node_id].add(spot.hero_index)
+            drew_this_pass = True
+            facts = extract_plo_facts(
+                spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
+            )
+            # EV-gap quality gate (PLO has a real ev_gap on every spot, raises
+            # included), applied BEFORE the paid LLM call -- mirrors the NLHE
+            # gate.
+            if (
+                min_ev_gap_bb is not None
+                and facts.ev_gap_bb is not None
+                and facts.ev_gap_bb < min_ev_gap_bb
+            ):
+                ev_gap_filtered_out += 1
+                continue
+            # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
+            # spots cost no API spend -- the same gate the NLHE Generate page
+            # uses.
+            difficulty = compute_plo_difficulty(facts)
+            if not min_difficulty <= difficulty.score <= max_difficulty:
+                difficulty_filtered_out += 1
+                continue
+            options, correct = build_options(facts, style=answer_style)
+
+            explanation = ""
+            if generate_explanations:
+                try:
+                    generated = generate_plo_answer_explanation(
+                        facts,
+                        list(options),
+                        correct,
+                        client=explanation_client,
+                        system_prompt=explanation_system_prompt,
+                        model=explanation_model,
+                        temperature=explanation_temperature,
+                        include_skills=explanation_include_skills,
+                        usage_callback=usage_callback,
+                    )
+                    explanation = generated.answer_explanation
+                    explanations_written += 1
+                except (ExplanationValidationError, OSError, KeyError) as exc:
+                    explanations_failed += 1
+                    cards = " ".join(spot.hero_cards)
+                    explanation_failure_reasons.append(
+                        f"{type(exc).__name__} ({cards}): {exc}"
+                    )
+                    logger.warning(
+                        "Layer 6 failed for a spot, shipping blank: %s", exc
+                    )
+
+            rows.append(
+                build_plo_row(
+                    facts,
+                    difficulty=difficulty,
+                    options=options,
+                    correct_answer=correct,
+                    explanation=explanation,
+                    number=len(rows) + 1,
+                    pack_label=pack_label,
+                    stakes_bb_dollars=stakes_bb_dollars,
+                    game_format=game_format,
+                    display_in_bb=display_in_bb,
+                    stack_bb=stack_bb,
+                )
+            )
+        if not drew_this_pass:
+            break  # every node is out of new worthy hands
 
     output_path = Path(output_path)
     write_plo_csv(rows, output_path)

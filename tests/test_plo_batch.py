@@ -53,14 +53,46 @@ def test_batch_writes_a_complete_csv(tmp_path):
     assert "ranges" not in rows[0]
 
 
-def test_batch_reports_shortfall(tmp_path):
-    pack = _clean_hj_pack(tmp_path)  # only one node -> one question max
+def test_single_node_contributes_multiple_distinct_hands(tmp_path):
+    # A node is no longer capped at one question per batch: when the batch is
+    # bigger than the node pool, repeat passes draw NEW hands from the same
+    # node (never the same hand twice).
+    pack = _clean_hj_pack(tmp_path)  # one node, every hand worthy
     out = tmp_path / "batch.csv"
     result = generate_plo_batch(
         pack, output_path=out, total_questions=5, seed=0, compute_equity=False
     )
-    assert result.questions_written == 1
-    assert result.shortfall == 4  # noqa: PLR2004
+    assert result.questions_written == 5  # noqa: PLR2004
+    assert result.shortfall == 0
+    with out.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    hands = [r["User Cards"] for r in rows]
+    assert len(set(hands)) == 5  # noqa: PLR2004  # all different hands
+
+
+def test_round_robin_spreads_across_nodes_before_repeating(tmp_path):
+    # Two nodes, two questions -> one from EACH node (situations spread
+    # first), never two hands from one node while the other sits unused.
+    root = tmp_path / "pack"
+    root.mkdir()
+    # Node A: HJ facing the LJ open.
+    _write_rng(root / "40100.0.rng", 0.0)
+    _write_rng(root / "40100.1.rng", 0.7)
+    _write_rng(root / "40100.40100.rng", 0.3)
+    # Node B: CO facing the LJ open after HJ folds.
+    _write_rng(root / "40100.0.0.rng", 0.0)
+    _write_rng(root / "40100.0.1.rng", 0.7)
+    _write_rng(root / "40100.0.40100.rng", 0.3)
+    pack = PloPack(root=root, label="test")
+    out = tmp_path / "batch.csv"
+    result = generate_plo_batch(
+        pack, output_path=out, total_questions=2, seed=0, compute_equity=False
+    )
+    assert result.questions_written == 2  # noqa: PLR2004
+    with out.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    node_refs = {r["solver_reference"].rsplit("/", 1)[-1] for r in rows}
+    assert len(node_refs) == 2  # noqa: PLR2004  # one question per node
 
 
 class _Resp:
