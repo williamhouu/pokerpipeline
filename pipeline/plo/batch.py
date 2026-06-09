@@ -80,11 +80,15 @@ def _first_worthy_spot(
     *,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    exclude_ambiguous_band: bool = False,
 ) -> PloSpot | None:
     for index in rng.sample(range(HAND_COUNT), k=min(_WORTHY_TRIES, HAND_COUNT)):
         spot = sample_plo_spot(node, index)
         if spot.presence >= _MIN_PRESENCE and is_question_worthy(
-            spot, min_frequency=min_frequency, max_frequency=max_frequency
+            spot,
+            min_frequency=min_frequency,
+            max_frequency=max_frequency,
+            exclude_ambiguous_band=exclude_ambiguous_band,
         ):
             return spot
     return None
@@ -102,6 +106,7 @@ def generate_plo_batch(
     player_counts: list[int] | None = None,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    exclude_ambiguous_band: bool = False,
     min_ev_gap_bb: float | None = None,
     compute_equity: bool = True,
     answer_style: str = "auto",
@@ -132,8 +137,10 @@ def generate_plo_batch(
     ``player_counts`` mirror the NLHE Generate page; ``max_prior_raises`` /
     ``max_active_players`` are the coarse clean-line caps. Spot filters:
     ``min_frequency`` / ``max_frequency`` set the worthiness window, and
-    ``min_ev_gap_bb`` drops near-coinflip spots (reported in
-    ``ev_gap_filtered_out``).
+    ``exclude_ambiguous_band`` punches a hole at 90-95% within it (the
+    "mostly-feels-like-always" trap) without capping the ceiling, so a 100%
+    max still admits the pure 95-100% spots. ``min_ev_gap_bb`` drops
+    near-coinflip spots (reported in ``ev_gap_filtered_out``).
 
     When ``generate_explanations`` is True, Layer 6 (the LLM) fills the
     ``Answer Explanation`` column per spot; otherwise it is left blank (the
@@ -175,7 +182,11 @@ def generate_plo_batch(
             break
         scanned += 1
         spot = _first_worthy_spot(
-            node, rng, min_frequency=min_frequency, max_frequency=max_frequency
+            node,
+            rng,
+            min_frequency=min_frequency,
+            max_frequency=max_frequency,
+            exclude_ambiguous_band=exclude_ambiguous_band,
         )
         if spot is None:
             continue

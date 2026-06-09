@@ -11,14 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.node_enumerator import PreflopDecisionNode  # noqa: E402
 from pipeline.preflop.question_extractor import (  # noqa: E402
+    AMBIGUOUS_BAND_CEILING,
     AMBIGUOUS_BAND_FLOOR,
     MAX_TOP_FREQUENCY,
     MIN_PRESENCE,
     MIN_TOP_FREQUENCY,
     PreflopQuestionEvaluation,
     difficulty_score,
-    effective_max_frequency,
     evaluate_spot,
+    in_ambiguous_band,
     is_question_worthy,
     top_action_frequency,
     total_presence,
@@ -222,31 +223,31 @@ def test_evaluate_spot_passes_overrides():
     assert ev.is_worthy is False
 
 
-# --- effective_max_frequency (90-95% ambiguous band toggle) ---------------
-def test_effective_max_frequency_excludes_band_by_default():
-    """With the toggle on, a 95% ceiling drops to the 90% band floor."""
-    assert effective_max_frequency(0.95, exclude_ambiguous_band=True) == 0.90
-
-
-def test_effective_max_frequency_passthrough_when_off():
-    """Toggle off: the slider ceiling is used verbatim."""
-    assert effective_max_frequency(0.95, exclude_ambiguous_band=False) == 0.95
-
-
-def test_effective_max_frequency_noop_below_floor():
-    """A ceiling already at/below 0.90 is unchanged even with the toggle on
-    (a 'Hard' preset capped at 70% must not be raised to 90%)."""
-    assert effective_max_frequency(0.70, exclude_ambiguous_band=True) == 0.70
-    assert effective_max_frequency(0.90, exclude_ambiguous_band=True) == 0.90
+# --- ambiguous-band exclusion (a 90-95% HOLE, not a ceiling cap) -----------
+def test_in_ambiguous_band_boundaries():
+    assert not in_ambiguous_band(AMBIGUOUS_BAND_FLOOR - 0.001)
+    assert in_ambiguous_band(AMBIGUOUS_BAND_FLOOR)
+    assert in_ambiguous_band(AMBIGUOUS_BAND_CEILING - 0.001)
+    assert not in_ambiguous_band(AMBIGUOUS_BAND_CEILING)  # 95% is a clear "Always"
 
 
 def test_excluding_band_makes_92pct_spot_unworthy():
-    """End-to-end: a 92% spot is worthy at the default 95% ceiling but
-    NOT once the ambiguous-band exclusion lowers the ceiling to 90%."""
+    """A 92% spot is worthy by frequency, but dropped by the band exclusion."""
     spot = _spot({"Raise": 0.92, "Fold": 0.08})
     assert is_question_worthy(spot, max_frequency=0.95) is True
-    capped = effective_max_frequency(0.95, exclude_ambiguous_band=True)
-    assert is_question_worthy(spot, max_frequency=capped) is False
+    assert (
+        is_question_worthy(spot, max_frequency=0.95, exclude_ambiguous_band=True)
+        is False
+    )
+
+
+def test_band_exclusion_is_a_hole_keeps_pure_spots():
+    """The exclusion punches a hole at 90-95% but KEEPS pure 95-100% spots
+    when the window's max reaches them -- not a ceiling cap at 90%."""
+    pure = _spot({"Raise": 0.97, "Fold": 0.03})
+    band = _spot({"Raise": 0.92, "Fold": 0.08})
+    assert is_question_worthy(pure, max_frequency=1.0, exclude_ambiguous_band=True) is True
+    assert is_question_worthy(band, max_frequency=1.0, exclude_ambiguous_band=True) is False
 
 
 # --- constants sanity ------------------------------------------------------

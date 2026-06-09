@@ -84,13 +84,17 @@ def _first_worthy_spot(
     tries: int = _DEFAULT_WORTHY_TRIES,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    exclude_ambiguous_band: bool = False,
 ) -> PloSpot | None:
     """A worthy spot at this node, found by random-sampling hands (cheap --
     worthiness reads only the spot, no facts/equity)."""
     for index in rng.sample(range(HAND_COUNT), k=min(tries, HAND_COUNT)):
         spot = sample_plo_spot(node, index)
         if spot.presence >= _MIN_PRESENCE and is_question_worthy(
-            spot, min_frequency=min_frequency, max_frequency=max_frequency
+            spot,
+            min_frequency=min_frequency,
+            max_frequency=max_frequency,
+            exclude_ambiguous_band=exclude_ambiguous_band,
         ):
             return spot
     return None
@@ -109,6 +113,7 @@ def build_preview_rows(
     player_counts: list[int] | None = None,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    exclude_ambiguous_band: bool = False,
     min_ev_gap_bb: float | None = None,
     compute_equity: bool = False,
     answer_style: str = "auto",
@@ -153,7 +158,11 @@ def build_preview_rows(
     rows: list[PloPreviewRow] = []
     for node in candidates[:max_nodes_scanned]:
         spot = _first_worthy_spot(
-            node, rng, min_frequency=min_frequency, max_frequency=max_frequency
+            node,
+            rng,
+            min_frequency=min_frequency,
+            max_frequency=max_frequency,
+            exclude_ambiguous_band=exclude_ambiguous_band,
         )
         if spot is None:
             continue

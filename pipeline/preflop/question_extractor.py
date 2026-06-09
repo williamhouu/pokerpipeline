@@ -47,9 +47,12 @@ MIN_PRESENCE = 0.01  # below: hand doesn't actually reach the node
 # 95% "always" label boundary (frequency_to_verb_prefix /
 # options._PURE_STRATEGY_THRESHOLD). A player with the right read can pick
 # the "always" option and still be marked wrong -- a labelling trap, not a
-# strategy test. The Generate page excludes this band by default; see
-# effective_max_frequency. Tune alongside MAX_TOP_FREQUENCY.
+# strategy test. The Generate page excludes this band by default. The
+# exclusion is a HOLE at [FLOOR, CEILING) within the window, NOT a ceiling
+# cap, so a genuinely-pure 95-100% spot still qualifies when the window
+# reaches it. Tune alongside MAX_TOP_FREQUENCY.
 AMBIGUOUS_BAND_FLOOR = 0.90
+AMBIGUOUS_BAND_CEILING = 0.95
 
 # Difficulty-bounds + freq-axis constants. Kept here so the pre-facts
 # freq-only ESTIMATE in :class:`PreflopQuestionEvaluation` doesn't
@@ -102,39 +105,40 @@ def difficulty_score(spot: PreflopSpot) -> int:
     return round(max(_DIFFICULTY_FLOOR, min(_DIFFICULTY_CEILING, score)))
 
 
+def in_ambiguous_band(frequency: float) -> bool:
+    """True if a dominant-action frequency sits in the 90-95% trap band."""
+    return AMBIGUOUS_BAND_FLOOR <= frequency < AMBIGUOUS_BAND_CEILING
+
+
 def is_question_worthy(
     spot: PreflopSpot,
     *,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
     min_presence: float = MIN_PRESENCE,
+    exclude_ambiguous_band: bool = False,
 ) -> bool:
     """True if the spot passes the presence filter AND the frequency window.
 
-    Both windows inclusive at both ends. Override the thresholds via
-    keyword args -- the admin panel's difficulty preset / custom slider
-    passes through to ``min_frequency`` / ``max_frequency``, e.g. "Hard"
-    preset -> (0.55, 0.70); "Easy" preset -> (0.85, 0.95).
+    The frequency window is inclusive at both ends. When
+    ``exclude_ambiguous_band`` is True, the 90-95% band is additionally
+    removed as a HOLE in the window (see :data:`AMBIGUOUS_BAND_FLOOR` /
+    :data:`AMBIGUOUS_BAND_CEILING`): a 90-95% spot reads as "mostly" but
+    sits just under the 0.95 "always" line, a labelling trap. Punching a
+    hole (rather than capping the ceiling at 90%) means a genuinely-pure
+    95-100% spot still qualifies when the window's max reaches it -- e.g. a
+    100% slider yields 55-90% PLUS 95-100%, skipping only the trap.
+
+    Override the thresholds via keyword args -- the admin panel's difficulty
+    preset / custom slider passes through to ``min_frequency`` /
+    ``max_frequency``.
     """
     if total_presence(spot) < min_presence:
         return False
     frequency = top_action_frequency(spot)
-    return min_frequency <= frequency <= max_frequency
-
-
-def effective_max_frequency(
-    slider_max: float, *, exclude_ambiguous_band: bool
-) -> float:
-    """The worthiness ceiling to actually use, given the ambiguous-band toggle.
-
-    When ``exclude_ambiguous_band`` is True, caps the ceiling at
-    :data:`AMBIGUOUS_BAND_FLOOR` (0.90) so the 90-95% "mostly-but-feels-
-    like-always" band is filtered out before any LLM spend. A no-op when
-    the caller's ceiling is already at or below 0.90.
-    """
-    if exclude_ambiguous_band:
-        return min(slider_max, AMBIGUOUS_BAND_FLOOR)
-    return slider_max
+    if not (min_frequency <= frequency <= max_frequency):
+        return False
+    return not (exclude_ambiguous_band and in_ambiguous_band(frequency))
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,7 @@ def evaluate_spot(
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
     min_presence: float = MIN_PRESENCE,
+    exclude_ambiguous_band: bool = False,
 ) -> PreflopQuestionEvaluation:
     """Run the filter + the difficulty rating, return the full verdict."""
     return PreflopQuestionEvaluation(
@@ -166,6 +171,7 @@ def evaluate_spot(
             min_frequency=min_frequency,
             max_frequency=max_frequency,
             min_presence=min_presence,
+            exclude_ambiguous_band=exclude_ambiguous_band,
         ),
         top_action_frequency=top_action_frequency(spot),
         total_presence=total_presence(spot),

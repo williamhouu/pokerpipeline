@@ -326,6 +326,7 @@ def collect_worthy_spots(
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
     min_presence: float = MIN_PRESENCE,
+    exclude_ambiguous_band: bool = False,
 ) -> list[tuple[PreflopSpot, PreflopQuestionEvaluation]]:
     """Enumerate every (node, hand class) spot and keep the worthy ones.
 
@@ -346,6 +347,7 @@ def collect_worthy_spots(
                 min_frequency=min_frequency,
                 max_frequency=max_frequency,
                 min_presence=min_presence,
+                exclude_ambiguous_band=exclude_ambiguous_band,
             )
             if evaluation.is_worthy:
                 out.append((spot, evaluation))
@@ -418,6 +420,7 @@ def generate_preflop_batch(
     player_counts: Iterable[int] | None = None,
     min_frequency: float = MIN_TOP_FREQUENCY,
     max_frequency: float = MAX_TOP_FREQUENCY,
+    exclude_ambiguous_band: bool = False,
     min_difficulty: int = DIFFICULTY_MIN,
     max_difficulty: int = DIFFICULTY_MAX,
     min_ev_gap_bb: float | None = None,
@@ -519,6 +522,7 @@ def generate_preflop_batch(
         filtered_nodes,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
+        exclude_ambiguous_band=exclude_ambiguous_band,
     )
 
     # 4. Nothing worthy -> empty result.

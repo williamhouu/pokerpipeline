@@ -123,9 +123,6 @@ from pipeline.preflop.pack import (  # noqa: E402
 from pipeline.preflop.pack import (  # noqa: E402
     clear_registry as clear_preflop_registry,
 )
-from pipeline.preflop.question_extractor import (  # noqa: E402
-    effective_max_frequency,
-)
 from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E402
 
 # Map admin-panel model-radio labels to Anthropic API model identifiers.
@@ -1158,7 +1155,6 @@ def _render_generate_page_preflop() -> None:
     # a preset (the preset moves the difficulty band; worthiness + EV-gap are
     # separate gates, shown here so all three are always visible).
     _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
-    _eff_freq_high = min(freq_high, 90) if exclude_ambiguous_band else freq_high
     _band_note = (
         "  ·  90–95% band excluded"
         if exclude_ambiguous_band and freq_high > 90
@@ -1167,7 +1163,7 @@ def _render_generate_page_preflop() -> None:
     st.info(
         f"**Numbers in effect for this batch** — difficulty rating "
         f"**{band_low}–{band_high}**  ·  worthiness frequency "
-        f"**{freq_low}–{_eff_freq_high}%**{_band_note}  ·  EV-gap gate "
+        f"**{freq_low}–{freq_high}%**{_band_note}  ·  EV-gap gate "
         f"**{_ev_txt}**.  "
         "Presets move the difficulty band; the worthiness window + EV-gap "
         "are separate gates you set in Advanced filters above."
@@ -1406,10 +1402,8 @@ def _render_generate_page_preflop() -> None:
             action_contexts=list(action_contexts),
             player_counts=list(player_counts),
             freq_min=freq_low / 100.0,
-            freq_max=effective_max_frequency(
-                freq_high / 100.0,
-                exclude_ambiguous_band=exclude_ambiguous_band,
-            ),
+            freq_max=freq_high / 100.0,
+            exclude_ambiguous_band=exclude_ambiguous_band,
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
@@ -1434,6 +1428,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     player_counts: list[int],
     freq_min: float,
     freq_max: float,
+    exclude_ambiguous_band: bool,
     min_difficulty: int,
     max_difficulty: int,
     min_ev_gap_bb: float | None,
@@ -1501,6 +1496,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             player_counts=player_counts,
             min_frequency=freq_min,
             max_frequency=freq_max,
+            exclude_ambiguous_band=exclude_ambiguous_band,
             min_difficulty=min_difficulty,
             max_difficulty=max_difficulty,
             min_ev_gap_bb=min_ev_gap_bb,
@@ -3885,9 +3881,6 @@ def render_plo_generate_page() -> None:
         plo_active_player_count,
         plo_node_action_context,
     )
-    from pipeline.plo.question_extractor import (  # noqa: PLC0415
-        effective_max_frequency,
-    )
 
     # --- 1. Hero context: position + action faced + players in pot ---
     st.subheader("1. Hero context")
@@ -4012,10 +4005,7 @@ def render_plo_generate_page() -> None:
             help="Drops spots whose EV gap to the 2nd-best action is below "
             "this. PLO has a real EV gap on every spot, raises included.",
         )
-    eff_max_freq = effective_max_frequency(
-        freq_high / 100.0, exclude_ambiguous_band=exclude_ambiguous
-    )
-    _eff_high_pct = round(eff_max_freq * 100)
+    _max_freq = freq_high / 100.0
     _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
     _band_note = (
         "  ·  90-95% band excluded"
@@ -4024,7 +4014,7 @@ def render_plo_generate_page() -> None:
     )
     st.info(
         f"**Numbers in effect** — difficulty **{lo}–{hi}**  ·  worthiness "
-        f"**{freq_low}–{_eff_high_pct}%**{_band_note}  ·  EV-gap gate "
+        f"**{freq_low}–{freq_high}%**{_band_note}  ·  EV-gap gate "
         f"**{_ev_txt}**."
     )
 
@@ -4221,7 +4211,8 @@ def render_plo_generate_page() -> None:
                 max_prior_raises=2 if clean_only else None,
                 max_active_players=3 if clean_only else None,
                 min_frequency=freq_low / 100.0,
-                max_frequency=eff_max_freq,
+                max_frequency=_max_freq,
+                exclude_ambiguous_band=exclude_ambiguous,
                 min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
                 min_difficulty=lo,
                 max_difficulty=hi,
@@ -4286,7 +4277,8 @@ def render_plo_generate_page() -> None:
             max_prior_raises=2 if clean_only else None,
             max_active_players=3 if clean_only else None,
             min_frequency=freq_low / 100.0,
-            max_frequency=eff_max_freq,
+            max_frequency=_max_freq,
+            exclude_ambiguous_band=exclude_ambiguous,
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
             compute_equity=False,
             answer_style=style,

@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.plo.node_enumerator import PloDecisionNode  # noqa: E402
 from pipeline.plo.question_extractor import (  # noqa: E402
-    effective_max_frequency,
     evaluate_spot,
+    in_ambiguous_band,
     is_question_worthy,
 )
 from pipeline.plo.spot_sampler import PloSpot  # noqa: E402
@@ -46,11 +46,24 @@ def test_unworthy_when_no_presence():
     assert not is_question_worthy(_spot(freqs={"Call": 0.7, "Fold": 0.3}, presence=0.005))
 
 
-def test_effective_max_frequency_band_toggle():
-    assert effective_max_frequency(0.95, exclude_ambiguous_band=True) == pytest.approx(0.90)
-    assert effective_max_frequency(0.95, exclude_ambiguous_band=False) == pytest.approx(0.95)
-    # No-op when the ceiling is already below the band floor.
-    assert effective_max_frequency(0.70, exclude_ambiguous_band=True) == pytest.approx(0.70)
+def test_in_ambiguous_band_boundaries():
+    assert not in_ambiguous_band(0.899)
+    assert in_ambiguous_band(0.90)
+    assert in_ambiguous_band(0.949)
+    assert not in_ambiguous_band(0.95)  # 95% is a clear "Always", not a trap
+
+
+def test_ambiguous_band_is_a_hole_not_a_ceiling_cap():
+    # The exclusion removes 90-95% but KEEPS pure 95-100% spots when the
+    # window's max reaches them -- punching a hole, not capping the ceiling.
+    band = _spot(freqs={"Call": 0.92, "Fold": 0.08})
+    pure = _spot(freqs={"Call": 0.97, "Fold": 0.03})
+    # max 100%, ambiguous band excluded:
+    assert not is_question_worthy(band, max_frequency=1.0, exclude_ambiguous_band=True)
+    assert is_question_worthy(pure, max_frequency=1.0, exclude_ambiguous_band=True)
+    # Without the exclusion, both are in-window.
+    assert is_question_worthy(band, max_frequency=1.0, exclude_ambiguous_band=False)
+    assert is_question_worthy(pure, max_frequency=1.0, exclude_ambiguous_band=False)
 
 
 def test_difficulty_estimate_spans_the_freq_axis():
