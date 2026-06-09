@@ -4485,6 +4485,44 @@ def render_plo_review_page() -> None:
         type="primary",
     )
 
+    # --- cross-batch approved pool -----------------------------------------
+    # Every question graded "approved", gathered from EVERY batch's sidecar
+    # into one downloadable set. Derived live from the grades (not a separate
+    # stored file), so it's always in sync: approving adds, un-approving drops.
+    st.divider()
+    st.subheader("✅ Approved questions (all batches)")
+    appr_fields, appr_rows = review.collect_approved_rows(_PLO_BATCH_DIR)
+    if not appr_rows:
+        st.caption(
+            "No approved questions yet. Grade questions **approved** above and "
+            "they collect here across every batch."
+        )
+    else:
+        st.caption(
+            f"**{len(appr_rows)}** approved across all batches (deduped by spot). "
+            "Updates live as you grade."
+        )
+        preview_cols = [
+            c
+            for c in ("User Cards", "Correct Answer", "archetype", "Difficulty Rating")
+            if c in appr_fields
+        ]
+        if preview_cols:
+            st.dataframe(
+                pd.DataFrame(
+                    [{c: r.get(c, "") for c in preview_cols} for r in appr_rows]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+        st.download_button(
+            "⬇️  Download approved questions (CSV)",
+            review.approved_rows_to_csv(appr_fields, appr_rows),
+            file_name="plo_approved_all_batches.csv",
+            mime="text/csv",
+            type="primary",
+        )
+
 
 def _plo_override_path() -> Path:
     """The persistent 'genuine default' file the active prompt syncs to."""

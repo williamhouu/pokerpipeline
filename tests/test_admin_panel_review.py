@@ -6,6 +6,7 @@ sidecar round-trip, the progress summary, and the defensive parsing.
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
@@ -303,3 +304,69 @@ def test_assembled_prompt_orders_system_gold_then_live() -> None:
     out = review.assembled_prompt(meta, question)
     assert "SYSTEM PROMPT" in out
     assert out.index("SYSTEXT") < out.index("GOLDTEXT") < out.index("LIVETEXT")
+
+
+# --- collect_approved_rows / approved_rows_to_csv --------------------------
+_COLS = ["No", "User Cards", "solver_reference", "Correct Answer"]
+
+
+def _write_batch(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_COLS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_collect_approved_empty_when_dir_absent(tmp_path: Path) -> None:
+    fields, rows = review.collect_approved_rows(tmp_path / "nope")
+    assert (fields, rows) == ([], [])
+
+
+def test_collect_approved_only_approved_rows(tmp_path: Path) -> None:
+    b = tmp_path / "plo_20260601_120000.csv"
+    _write_batch(
+        b,
+        [
+            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"},
+            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2", "Correct Answer": "Fold"},
+            {"No": "3", "User Cards": "Q,Q", "solver_reference": "p/BB/n3", "Correct Answer": "Call"},
+        ],
+    )
+    review.save_review(b, 1, "approved", "")
+    review.save_review(b, 2, "rejected", "")
+    # No 3 left ungraded.
+    fields, rows = review.collect_approved_rows(tmp_path)
+    assert fields == _COLS
+    assert [r["No"] for r in rows] == ["1"]
+
+
+def test_collect_approved_dedupes_across_batches(tmp_path: Path) -> None:
+    spot = {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+    older = tmp_path / "plo_20260601_120000.csv"
+    newer = tmp_path / "plo_20260602_120000.csv"
+    _write_batch(older, [spot])
+    _write_batch(newer, [spot])
+    review.save_review(older, 1, "approved", "")
+    review.save_review(newer, 1, "approved", "")
+    _, rows = review.collect_approved_rows(tmp_path)
+    assert len(rows) == 1  # same (solver_reference, User Cards) -> one copy
+
+
+def test_collect_approved_excludes_compare_artifacts(tmp_path: Path) -> None:
+    cmp = tmp_path / "compare_20260601_A.csv"
+    _write_batch(cmp, [
+        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+    ])
+    review.save_review(cmp, 1, "approved", "")
+    _, rows = review.collect_approved_rows(tmp_path)
+    assert rows == []
+
+
+def test_approved_rows_to_csv_round_trips(tmp_path: Path) -> None:
+    rows = [
+        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check", "extra": "ignored"},
+    ]
+    text = review.approved_rows_to_csv(_COLS, rows)
+    parsed = list(csv.DictReader(text.splitlines()))
+    assert parsed[0]["User Cards"] == "A,A"
+    assert "extra" not in parsed[0]  # keys outside fieldnames are dropped

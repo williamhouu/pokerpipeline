@@ -12,6 +12,7 @@ sidecar maps ``str(No) -> {"status": ..., "note": ...}``.
 from __future__ import annotations
 
 import csv
+import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,6 +212,76 @@ def update_difficulty(csv_path: Path, no: str | int, new_value: str) -> bool:
     return _update_cell(csv_path, no, "Difficulty Rating", new_value)
 
 
+def collect_approved_rows(
+    batch_dir: Path, *, exclude_prefix: str = "compare_"
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Every row graded ``approved``, gathered across all batches in a dir.
+
+    Scans each batch CSV under ``batch_dir`` (excluding ``compare_*`` A/B
+    artifacts) together with its ``.review.json`` sidecar, keeps the rows whose
+    ``No`` is graded ``approved``, and dedupes across batches by
+    ``(solver_reference, User Cards)`` so the same spot approved in two batches
+    appears once. Batches are scanned newest-first (by mtime), so the most
+    recent copy of a duplicated spot wins.
+
+    The grades are the single source of truth -- nothing is moved or copied on
+    disk -- so this view always reflects the latest approvals and an un-approve
+    drops the row automatically.
+
+    Returns ``(fieldnames, rows)`` ready to serialize as one CSV;
+    ``fieldnames`` is the column order of the first contributing batch. Returns
+    ``([], [])`` when the dir is absent or nothing is approved.
+    """
+    if not batch_dir.is_dir():
+        return [], []
+    csvs = sorted(
+        (p for p in batch_dir.glob("*.csv") if not p.name.startswith(exclude_prefix)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    seen: set[tuple[str, str]] = set()
+    fieldnames: list[str] = []
+    out_rows: list[dict[str, str]] = []
+    for csv_path in csvs:
+        reviews = load_reviews(csv_path)
+        if not any(g.get("status") == "approved" for g in reviews.values()):
+            continue  # cheap skip: no approvals in this batch
+        try:
+            with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+                reader = csv.DictReader(fh)
+                cols = list(reader.fieldnames or [])
+                rows = list(reader)
+        except OSError:
+            continue
+        if cols and not fieldnames:
+            fieldnames = cols
+        for row in rows:
+            grade = reviews.get(str(row.get("No", "")))
+            if not grade or grade.get("status") != "approved":
+                continue
+            key = (row.get("solver_reference", ""), row.get("User Cards", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            out_rows.append(row)
+    return fieldnames, out_rows
+
+
+def approved_rows_to_csv(fieldnames: list[str], rows: list[dict[str, str]]) -> str:
+    """Serialize approved rows to a CSV string (header + rows).
+
+    Uses ``fieldnames`` for column order; keys outside it are dropped and
+    missing cells are blank, so rows from a slightly different schema still
+    write cleanly. Returns just a header when ``rows`` is empty.
+    """
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({col: row.get(col, "") for col in fieldnames})
+    return buf.getvalue()
+
+
 def batch_meta_path(csv_path: Path) -> Path:
     """Path to the prompt/inputs metadata sidecar for a batch CSV."""
     return csv_path.with_suffix(".meta.json")
@@ -301,8 +372,10 @@ def range_player_count(ranges_json: str) -> int:
 __all__ = [
     "REVIEW_STATUSES",
     "ReviewSummary",
+    "approved_rows_to_csv",
     "assembled_prompt",
     "batch_meta_path",
+    "collect_approved_rows",
     "load_batch_meta",
     "load_reviews",
     "meta_question_for",
