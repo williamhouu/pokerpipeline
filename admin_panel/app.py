@@ -4162,6 +4162,17 @@ def render_plo_generate_page() -> None:
         )
         if _done["failed"]:
             st.warning(f"{_done['failed']} explanations failed and shipped blank.")
+            _reasons = _done.get("failure_reasons") or []
+            if _reasons:
+                with st.expander("Why did they fail?"):
+                    for _r in _reasons:
+                        st.markdown(f"- {_r}")
+                    st.caption(
+                        "Most are the Layer 6 validators (e.g. a card-fabrication "
+                        "guard rejecting a card not in the hand, or a banned em "
+                        "dash / semicolon) firing on both the attempt and its one "
+                        "retry. Regenerate, or edit the prompt to address the cause."
+                    )
         if _done["shortfall"]:
             st.warning(
                 f"{_done['shortfall']} short of {_done['requested']} "
@@ -4251,6 +4262,7 @@ def render_plo_generate_page() -> None:
             "requested": int(count),
             "explanations": result.explanations_written,
             "failed": result.explanations_failed,
+            "failure_reasons": list(result.explanation_failure_reasons),
             "shortfall": result.shortfall,
             "difficulty_filtered": result.difficulty_filtered_out,
             "ev_filtered": result.ev_gap_filtered_out,

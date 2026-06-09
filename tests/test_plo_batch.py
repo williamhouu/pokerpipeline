@@ -173,6 +173,34 @@ def test_batch_fills_explanations_with_a_client(tmp_path):
     assert rows[0]["Answer Explanation"] == "Call here. It plays well in position."
 
 
+class _JunkMessages:
+    def create(self, **_kw: object) -> _Resp:
+        return _Resp("this is not json at all")  # fails validation every attempt
+
+
+class _JunkClient:
+    def __init__(self) -> None:
+        self.messages = _JunkMessages()
+
+
+def test_batch_records_explanation_failure_reasons(tmp_path):
+    # A response that never validates ships blank AND records a reason, so the
+    # UI can show WHY instead of just a count.
+    pack = _clean_hj_pack(tmp_path)
+    result = generate_plo_batch(
+        pack,
+        output_path=tmp_path / "batch.csv",
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        generate_explanations=True,
+        explanation_client=_JunkClient(),
+    )
+    assert result.explanations_failed == 1
+    assert len(result.explanation_failure_reasons) == 1
+    assert "ExplanationValidationError" in result.explanation_failure_reasons[0]
+
+
 class _CapturingMessages:
     def __init__(self) -> None:
         self.systems: list[str] = []

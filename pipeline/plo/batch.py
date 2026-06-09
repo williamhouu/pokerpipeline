@@ -67,6 +67,9 @@ class PloBatchResult:
     explanations_failed: int = 0
     difficulty_filtered_out: int = 0
     ev_gap_filtered_out: int = 0
+    # Human-readable reason per failed explanation (e.g. the validation error),
+    # so the UI can show WHY a row shipped blank instead of just a count.
+    explanation_failure_reasons: tuple[str, ...] = ()
 
     @property
     def shortfall(self) -> int:
@@ -175,6 +178,7 @@ def generate_plo_batch(
     scanned = 0
     explanations_written = 0
     explanations_failed = 0
+    explanation_failure_reasons: list[str] = []
     difficulty_filtered_out = 0
     ev_gap_filtered_out = 0
     for node in candidates:
@@ -228,6 +232,10 @@ def generate_plo_batch(
                 explanations_written += 1
             except (ExplanationValidationError, OSError, KeyError) as exc:
                 explanations_failed += 1
+                cards = " ".join(spot.hero_cards)
+                explanation_failure_reasons.append(
+                    f"{type(exc).__name__} ({cards}): {exc}"
+                )
                 logger.warning("Layer 6 failed for a spot, shipping blank: %s", exc)
 
         rows.append(
@@ -255,6 +263,7 @@ def generate_plo_batch(
         nodes_scanned=scanned,
         explanations_written=explanations_written,
         explanations_failed=explanations_failed,
+        explanation_failure_reasons=tuple(explanation_failure_reasons),
         difficulty_filtered_out=difficulty_filtered_out,
         ev_gap_filtered_out=ev_gap_filtered_out,
     )
