@@ -322,8 +322,12 @@ def classify_plo_archetype(
         elif seen_raise and a.action is PloActionType.CALL:
             n_callers_after_raise += 1
 
-    # First-in: hero is opening or folding the button-... no villain yet.
+    # No raise faced. Only the BB can reach here without a bet to call -- they
+    # posted the blind, so a limped/checked-around pot leaves them a CHECK, not
+    # an open-fold. Everyone else here is genuinely first-in (open / open-fold).
     if villain_action is None:
+        if spot.node.actor == "BB" and dominant is PloActionType.CALL:
+            return "bb_check"
         if dominant in (PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN):
             return "open_for_value"
         return "open_fold"

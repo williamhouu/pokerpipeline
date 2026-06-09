@@ -500,8 +500,13 @@ def classify_archetype(
         elif seen_raise and a.action_type is PreflopActionType.CALL:
             n_callers_after_raise += 1
 
-    # No villain = hero is first to act with a raising option.
+    # No villain faced. Only the BB can reach here without a bet to call -- they
+    # posted the blind, so a limped/checked-around pot leaves them a CHECK (the
+    # pack still files it under "Call"), not an open-fold. Everyone else here is
+    # genuinely first-in with a raising option.
     if villain is None:
+        if spot.node.actor == "BB" and dominant == "Call":
+            return "bb_check"
         if "Raise" in dominant:
             return "open_for_value"
         if "AllIn" in dominant:

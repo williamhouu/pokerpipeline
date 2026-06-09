@@ -367,11 +367,13 @@ def _spot_with(
     dominant_action: str,
     frequencies: dict[str, float],
     history: tuple[ParsedAction, ...] = (),
+    *,
+    actor: str = "BTN",
 ) -> PreflopSpot:
     """Build a PreflopSpot with rigged values for archetype testing."""
     node = PreflopDecisionNode(
         pack_id="t",
-        actor="BTN",
+        actor=actor,
         history_before=history,
         actions=(),
     )
@@ -401,6 +403,29 @@ def test_archetype_open_for_value_no_villain():
     assert (
         classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
         == "open_for_value"
+    )
+
+
+def test_archetype_bb_check_in_limped_pot():
+    """BB facing a limp (SB completed, no raise) -> bb_check, not open/fold.
+
+    No raise in the history means identify_villain returns None; the BB's
+    dominant 'Call' is really a check (nothing to call).
+    """
+    history = (ParsedAction("SB", PreflopActionType.CALL),)
+    spot = _spot_with("Call", {"Call": 0.95, "Raise 100%": 0.05}, history, actor="BB")
+    assert (
+        classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
+        == "bb_check"
+    )
+
+
+def test_archetype_bb_check_is_bb_only():
+    """A non-BB first-in with a dominant non-raise never gets bb_check."""
+    spot = _spot_with("Fold", {"Fold": 1.0, "Raise 60%": 0.0}, actor="CO")
+    assert (
+        classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
+        != "bb_check"
     )
 
 

@@ -149,7 +149,33 @@ def _hero_raise_level(facts: PreflopFacts) -> int:
     )
 
 
-def canonicalize_action_label(label: str, *, raise_level: int) -> str:
+def is_check_spot(facts: PreflopFacts) -> bool:
+    """True when hero faces no bet and the no-raise action is a *check*.
+
+    Preflop the BB has already posted the big blind, so when the action
+    reaches them with no raise outstanding (everyone folded or
+    limped/completed), the to-call is 0: their only options are to check
+    or to raise -- never to "call". The Ryan pack still files the no-raise
+    action under the ``"Call"`` label, so we relabel it ``"Check"`` for the
+    player-facing options, the correct answer, and the SOLVER DATA block.
+
+    Only the BB can ever check preflop (the SB still owes the blind
+    difference, which makes their no-raise action a genuine
+    completion/call), so the guard keys off ``actor == "BB"`` with no
+    raise/all-in in the history.
+    """
+    node = facts.spot.node
+    if node.actor != "BB":
+        return False
+    return not any(
+        a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+        for a in node.history_before
+    )
+
+
+def canonicalize_action_label(
+    label: str, *, raise_level: int, check_spot: bool = False
+) -> str:
     """Convert a Pio action label into a player-facing option string.
 
     The Ryan pack labels actions as ``"Fold"``, ``"Call"``, ``"AllIn"``,
@@ -162,14 +188,19 @@ def canonicalize_action_label(label: str, *, raise_level: int) -> str:
         label: The Pio action label.
         raise_level: How many raises hero's option would be the (n)-th
             of (1 = open, 2 = 3-bet, 3 = 4-bet, 4 = 5-bet).
+        check_spot: When ``True`` (see :func:`is_check_spot`), hero is the
+            BB facing no bet, so the ``"Call"`` label becomes ``"Check"``.
 
     Returns:
-        ``"Fold"`` / ``"Call"`` / ``"All-in"`` / verb-by-level for raises.
+        ``"Fold"`` / ``"Call"`` (or ``"Check"`` in a check spot) /
+        ``"All-in"`` / verb-by-level for raises.
     """
     if label.startswith("Raise"):
         return _RAISE_LEVEL_OPTION_VERB.get(raise_level, "Raise")
     if label == "AllIn":
         return "All-in"
+    if check_spot and label == "Call":
+        return "Check"
     return label  # Fold / Call / Check
 
 
@@ -183,11 +214,19 @@ def canonicalize_strategy(
     into a single ``"Raise"``/``"3-bet"``/etc entry whose frequency is
     the sum of the originals. For single-raise-size spots (the common
     case) this is a 1:1 relabeling.
+
+    In a check spot (hero is the BB facing no bet, see
+    :func:`is_check_spot`) the no-raise ``"Call"`` entry is relabeled
+    ``"Check"`` so every downstream surface -- options, correct answer,
+    SOLVER DATA, the CSV, validators -- agrees on "Check".
     """
     raise_level = _hero_raise_level(facts)
+    check_spot = is_check_spot(facts)
     out: dict[str, float] = {}
     for raw_label, freq in facts.spot.action_frequencies.items():
-        canon = canonicalize_action_label(raw_label, raise_level=raise_level)
+        canon = canonicalize_action_label(
+            raw_label, raise_level=raise_level, check_spot=check_spot
+        )
         out[canon] = out.get(canon, 0.0) + freq
     return out
 
@@ -197,6 +236,7 @@ def _canonical_dominant(facts: PreflopFacts) -> str:
     return canonicalize_action_label(
         facts.spot.dominant_action,
         raise_level=_hero_raise_level(facts),
+        check_spot=is_check_spot(facts),
     )
 
 
@@ -438,4 +478,5 @@ __all__ = [
     "build_options_gto",
     "canonicalize_action_label",
     "canonicalize_strategy",
+    "is_check_spot",
 ]

@@ -30,6 +30,7 @@ from pipeline.preflop.options import (  # noqa: E402
     build_options_gto,
     canonicalize_action_label,
     canonicalize_strategy,
+    is_check_spot,
 )
 from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402
 
@@ -541,6 +542,87 @@ def test_options_never_empty() -> None:
             options, _correct = build_options(facts, style=style)
             assert len(options) >= 1, (style, strategy)
             assert len(options) <= 4, (style, strategy, options)
+
+
+# --- check spots (BB closing a limped pot: "Call" must read "Check") --------
+def _limped_bb(action_frequencies: dict[str, float]) -> PreflopFacts:
+    """BB facing a limp (SB completed, no raise) -- a check spot."""
+    return _facts_with_strategy(
+        action_frequencies,
+        actor="BB",
+        history=(ParsedAction("SB", PreflopActionType.CALL, None),),
+    )
+
+
+def test_canonicalize_action_label_check_spot_flag() -> None:
+    """The check_spot flag relabels Call -> Check; nothing else changes."""
+    assert canonicalize_action_label("Call", raise_level=1, check_spot=True) == "Check"
+    assert canonicalize_action_label("Call", raise_level=1, check_spot=False) == "Call"
+    assert canonicalize_action_label("Fold", raise_level=1, check_spot=True) == "Fold"
+    assert (
+        canonicalize_action_label("Raise 60%", raise_level=1, check_spot=True) == "Raise"
+    )
+
+
+def test_is_check_spot_only_for_bb_with_no_raise() -> None:
+    # BB facing a limp -> check spot.
+    assert is_check_spot(_limped_bb({"Call": 0.95, "Raise 60%": 0.05}))
+    # BB facing a raise -> a real call, not a check.
+    assert not is_check_spot(
+        _facts_with_strategy(
+            {"Call": 0.6, "Fold": 0.4},
+            actor="BB",
+            history=(ParsedAction("BTN", PreflopActionType.RAISE, 60.0),),
+        )
+    )
+    # Non-BB with no raise -> not a check spot (only the BB checks preflop).
+    assert not is_check_spot(
+        _facts_with_strategy({"Call": 0.9, "Raise 60%": 0.1}, actor="SB")
+    )
+
+
+def test_check_spot_canonicalizes_call_to_check() -> None:
+    canon = canonicalize_strategy(_limped_bb({"Call": 0.95, "Raise 60%": 0.05}))
+    assert canon == {"Check": 0.95, "Raise": 0.05}
+    assert "Call" not in canon
+
+
+def test_check_spot_basic_answer_is_check() -> None:
+    options, correct = build_options(
+        _limped_bb({"Call": 0.95, "Raise 60%": 0.05}), style="basic"
+    )
+    assert correct == "Check"
+    assert "Check" in options
+    assert "Call" not in options
+
+
+def test_check_spot_gto_always_check_not_call() -> None:
+    # Near-pure check -> "Always Check" (was the buggy "Always Call").
+    options, correct = build_options(
+        _limped_bb({"Call": 0.97, "Raise 60%": 0.03}), style="gto"
+    )
+    assert correct == "Always Check"
+    assert "Always Check" in options
+    assert not any("Call" in opt for opt in options)
+
+
+def test_bb_facing_raise_still_calls() -> None:
+    facts = _facts_with_strategy(
+        {"Call": 0.6, "Fold": 0.4},
+        actor="BB",
+        history=(ParsedAction("BTN", PreflopActionType.RAISE, 60.0),),
+    )
+    canon = canonicalize_strategy(facts)
+    assert "Call" in canon
+    assert "Check" not in canon
+
+
+def test_non_bb_no_raise_still_calls() -> None:
+    canon = canonicalize_strategy(
+        _facts_with_strategy({"Call": 0.9, "Raise 60%": 0.1}, actor="SB")
+    )
+    assert "Call" in canon
+    assert "Check" not in canon
 
 
 if __name__ == "__main__":

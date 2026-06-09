@@ -119,6 +119,9 @@ _EV_GAP_FULL_CREDIT_BB: float = 3.0
 ARCHETYPE_BASE_EASE: dict[str, float] = {
     "open_for_value":         1.00,
     "fold_outranged":         1.00,
+    # Checking the option in a limped/unraised pot (the BB facing no bet) is a
+    # near-trivial decision -- you check almost everything, raise a few hands.
+    "bb_check":               0.95,
     # Folding a clearly-dominated hand is about as trivial as poker gets,
     # so this sits near the top (was 0.70, which left obvious junk-folds
     # mis-rated as medium). fold_pot_odds stays lower: folding despite

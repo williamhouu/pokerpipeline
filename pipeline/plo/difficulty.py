@@ -56,6 +56,7 @@ _EV_GAP_FULL_CREDIT_BB: float = 3.0  # gaps beyond 3 bb add no more easiness
 ARCHETYPE_BASE_EASE: dict[str, float] = {
     "open_for_value": 1.00,
     "open_fold": 1.00,
+    "bb_check": 0.95,  # checking the option in a limped pot -- near-trivial
     "fold_dominated": 0.95,
     "fold_pot_odds": 0.60,
     "call_for_value": 0.60,

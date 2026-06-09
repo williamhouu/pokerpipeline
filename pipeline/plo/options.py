@@ -82,14 +82,40 @@ def _hero_raise_level(facts: PloFacts) -> int:
     )
 
 
-def canonicalize_action_label(label: str, *, raise_level: int) -> str:
+def is_check_spot(facts: PloFacts) -> bool:
+    """True when hero faces no bet and the no-raise action is a *check*.
+
+    Preflop the BB has already posted the big blind, so when the action reaches
+    them with no raise outstanding (everyone folded or limped/completed), the
+    to-call is 0: their only options are to check or to raise -- never to
+    "call". The solver still files the no-raise action under the ``"Call"``
+    label (the pack's call token), so we relabel it ``"Check"`` for the
+    player-facing options, the correct answer, and the SOLVER DATA block.
+
+    Only the BB can ever check preflop (the SB still owes the blind difference,
+    which makes their no-raise action a genuine completion/call), so the guard
+    keys off ``actor == "BB"`` with no raise/all-in in the history.
+    """
+    node = facts.spot.node
+    if node.actor != "BB":
+        return False
+    return not any(a.action in _AGGRESSIVE for a in node.history_before)
+
+
+def canonicalize_action_label(
+    label: str, *, raise_level: int, check_spot: bool = False
+) -> str:
     """Convert a node action label into a player-facing option string.
 
     ``"Raise 100%"`` / ``"Min-raise"`` -> the bet-level verb (Raise / 3-bet /
-    4-bet / 5-bet); ``"All-in"`` stays; ``"Fold"`` / ``"Call"`` stay.
+    4-bet / 5-bet); ``"All-in"`` stays; ``"Fold"`` stays. ``"Call"`` stays --
+    except in a check spot (``check_spot=True``, see :func:`is_check_spot`),
+    where the BB faces no bet and ``"Call"`` becomes ``"Check"``.
     """
     if label.startswith("Raise") or label == "Min-raise":
         return _RAISE_LEVEL_OPTION_VERB.get(raise_level, "Raise")
+    if check_spot and label == "Call":
+        return "Check"
     return label  # Fold / Call / All-in
 
 
@@ -97,16 +123,21 @@ def canonicalize_strategy(facts: PloFacts) -> dict[str, float]:
     """``{canonical_label: freq}`` summing duplicate labels (e.g. two raise
     sizes collapsing into one ``"3-bet"`` entry)."""
     raise_level = _hero_raise_level(facts)
+    check_spot = is_check_spot(facts)
     out: dict[str, float] = {}
     for raw_label, freq in facts.spot.action_frequencies.items():
-        canon = canonicalize_action_label(raw_label, raise_level=raise_level)
+        canon = canonicalize_action_label(
+            raw_label, raise_level=raise_level, check_spot=check_spot
+        )
         out[canon] = out.get(canon, 0.0) + freq
     return out
 
 
 def _canonical_dominant(facts: PloFacts) -> str:
     return canonicalize_action_label(
-        facts.spot.dominant_action, raise_level=_hero_raise_level(facts)
+        facts.spot.dominant_action,
+        raise_level=_hero_raise_level(facts),
+        check_spot=is_check_spot(facts),
     )
 
 
@@ -233,4 +264,5 @@ __all__ = [
     "build_options_gto",
     "canonicalize_action_label",
     "canonicalize_strategy",
+    "is_check_spot",
 ]

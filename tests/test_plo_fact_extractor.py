@@ -48,6 +48,7 @@ def _spot(
     dominant: tuple[PloActionType, int | None],
     hero_cards: tuple[str, str, str, str],
     presence: float = 1.0,
+    actor: str = "HE",
 ) -> PloSpot:
     """A minimal PloSpot for archetype unit tests (no pack files needed)."""
     opts = tuple(
@@ -55,7 +56,7 @@ def _spot(
         for at, pct in options
     )
     node = PloDecisionNode(
-        actor="HE", history_before=history, actions=opts, history_stem=""
+        actor=actor, history_before=history, actions=opts, history_stem=""
     )
     dom_label = action_label(_act("HE", *dominant))
     freqs = {
@@ -127,6 +128,43 @@ def test_open_for_value_and_open_fold():
     fold_spot = _spot(history=(), options=opts, dominant=(F, None), hero_cards=TRASH_CARDS)
     assert _classify(raise_spot, None) == "open_for_value"
     assert _classify(fold_spot, None) == "open_fold"
+
+
+def test_bb_check_in_limped_pot():
+    # BB facing a limp (SB completed, no raise): the no-raise action is a
+    # CHECK, not an open-fold. No aggression in history -> villain is None.
+    spot = _spot(
+        history=(_act("SB", C),),
+        options=((C, None), (R, 100)),
+        dominant=(C, None),
+        hero_cards=TRASH_CARDS,
+        actor="BB",
+    )
+    assert _classify(spot, None) == "bb_check"
+
+
+def test_bb_raise_over_limp_is_not_bb_check():
+    # Raising over a limp is not a check; only a dominant no-raise action is.
+    spot = _spot(
+        history=(_act("SB", C),),
+        options=((C, None), (R, 100)),
+        dominant=(R, 100),
+        hero_cards=VALUE_CARDS,
+        actor="BB",
+    )
+    assert _classify(spot, None) != "bb_check"
+
+
+def test_non_bb_no_raise_is_not_bb_check():
+    # bb_check is BB-only; a non-BB first-in never gets it.
+    spot = _spot(
+        history=(),
+        options=((F, None), (R, 100)),
+        dominant=(F, None),
+        hero_cards=TRASH_CARDS,
+        actor="CO",
+    )
+    assert _classify(spot, None) != "bb_check"
 
 
 def test_3bet_value_vs_bluff():
