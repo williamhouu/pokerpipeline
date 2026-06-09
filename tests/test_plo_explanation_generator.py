@@ -240,3 +240,17 @@ def test_villain_action_is_a_bb_size_not_a_percent():
     action = data["villain"]["action"]
     assert "100%" not in action
     assert action == "opens to 3.5bb"
+
+
+def test_extract_text_skips_thinking_blocks():
+    # Fable 5 / adaptive thinking: the response starts with thinking block(s)
+    # (no .text attribute) before the text block. _extract_text must scan,
+    # not take content[0].
+    from types import SimpleNamespace
+
+    from pipeline.plo.explanation_generator import _extract_text
+
+    thinking = SimpleNamespace(type="thinking", thinking="...")
+    text = SimpleNamespace(type="text", text='{"answer_explanation": "Call."}')
+    response = SimpleNamespace(content=[thinking, text])
+    assert _extract_text(response) == '{"answer_explanation": "Call."}'

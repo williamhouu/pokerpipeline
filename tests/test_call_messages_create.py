@@ -120,3 +120,59 @@ def test_return_value_passes_through() -> None:
         messages=[],
     )
     assert result is sentinel
+
+
+# --- Fable 5 (claude-fable-5) ----------------------------------------------
+def test_fable_drops_temperature_and_adds_quality_config() -> None:
+    """Fable 5 rejects `temperature` (400) and gets the maximum-quality
+    config automatically: adaptive thinking + effort max, with a raised
+    max_tokens floor so thinking has room inside the output budget."""
+    client, calls = _record_only_client()
+    call_messages_create(
+        client,
+        model="claude-fable-5",
+        max_tokens=2000,
+        temperature=0.6,
+        system=[{"type": "text", "text": "sys"}],
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert len(calls) == 1
+    kw = calls[0]
+    assert "temperature" not in kw
+    assert kw["thinking"] == {"type": "adaptive"}
+    assert kw["output_config"] == {"effort": "max"}
+    assert kw["max_tokens"] >= 16000  # noqa: PLR2004
+
+
+def test_fable_respects_a_larger_caller_max_tokens() -> None:
+    """The floor only raises max_tokens, never lowers a caller's value."""
+    client, calls = _record_only_client()
+    call_messages_create(
+        client,
+        model="claude-fable-5",
+        max_tokens=32000,
+        temperature=0.0,
+        system=[],
+        messages=[{"role": "user", "content": "x"}],
+    )
+    assert calls[0]["max_tokens"] == 32000  # noqa: PLR2004
+
+
+def test_non_fable_models_get_no_thinking_or_output_config() -> None:
+    """Opus/Sonnet calls are unchanged: no thinking/output_config keys (an
+    explicit thinking param would change behavior; omitting is valid
+    everywhere)."""
+    client, calls = _record_only_client()
+    for model in ("claude-opus-4-7", "claude-sonnet-4-6"):
+        call_messages_create(
+            client,
+            model=model,
+            max_tokens=1500,
+            temperature=0.3,
+            system=[],
+            messages=[{"role": "user", "content": "x"}],
+        )
+    for kw in calls:
+        assert "thinking" not in kw
+        assert "output_config" not in kw
+        assert kw["max_tokens"] == 1500  # noqa: PLR2004

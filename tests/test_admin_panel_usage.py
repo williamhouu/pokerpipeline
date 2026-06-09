@@ -26,13 +26,24 @@ def test_cost_sonnet_basic() -> None:
 
 
 def test_cost_opus_basic() -> None:
-    """1M input + 1M output on Opus 4.7 = $15 + $75 = $90."""
+    """1M input + 1M output on Opus 4.7 = $5 + $25 = $30 (the $15/$75 the
+    table used to carry was the Opus-4.1-era price, corrected June 2026)."""
     cost = usage.compute_cost_usd(
         model="claude-opus-4-7",
         input_tokens=1_000_000,
         output_tokens=1_000_000,
     )
-    assert cost == pytest.approx(90.0)
+    assert cost == pytest.approx(30.0)
+
+
+def test_cost_fable_basic() -> None:
+    """1M input + 1M output on Fable 5 = $10 + $50 = $60 (2x Opus)."""
+    cost = usage.compute_cost_usd(
+        model="claude-fable-5",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+    )
+    assert cost == pytest.approx(60.0)
 
 
 def test_cost_with_cache_tokens_sonnet() -> None:

@@ -376,9 +376,12 @@ def _parse(text: str) -> str:
 
 
 def _extract_text(response: Any) -> str:
+    """The first TEXT block's text. Scans the content list rather than taking
+    ``content[0]``: with adaptive thinking (Fable 5) the response starts with
+    thinking block(s) -- which have no ``.text`` -- before the text block."""
     content = getattr(response, "content", None)
-    if content:
-        text = getattr(content[0], "text", None)
+    for block in content or ():
+        text = getattr(block, "text", None)
         if isinstance(text, str) and text.strip():
             return text
     raise ExplanationValidationError(f"no text in LLM response: {response!r}")

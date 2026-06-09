@@ -127,10 +127,21 @@ from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E40
 
 # Map admin-panel model-radio labels to Anthropic API model identifiers.
 # Display strings stay human-readable; the API call needs the ID string.
+# Fable 5 first = the default everywhere (highest-quality explanations:
+# adaptive thinking + max effort are applied automatically by the pipeline).
 _MODEL_LABEL_TO_API: dict[str, str] = {
-    "Opus 4.7 (highest fidelity)": "claude-opus-4-7",
-    "Sonnet 4.6 (5× cheaper, faster)": "claude-sonnet-4-6",
+    "Fable 5 (best quality, 2× Opus price)": "claude-fable-5",
+    "Opus 4.7 (high fidelity)": "claude-opus-4-7",
+    "Sonnet 4.6 (cheapest, fastest)": "claude-sonnet-4-6",
 }
+
+# One-line note shown wherever Fable 5 is selectable: it has no temperature
+# control (the pipeline drops the param) and self-manages its reasoning.
+_FABLE_NOTE = (
+    "Fable 5 ignores the temperature setting (the API removed it) and runs "
+    "with adaptive thinking at max effort automatically — the "
+    "highest-quality configuration."
+)
 
 # Where preflop generation writes its CSV output. Sibling of test_output/
 # tier1_consolidated.csv but kept in its own subdir so the Browse page's
@@ -870,11 +881,13 @@ def render_generate_page() -> None:
     with col1:
         model = st.radio(
             "Model",
-            options=["Opus 4.7 (highest fidelity)", "Sonnet 4.6 (5× cheaper, faster)"],
+            options=list(_MODEL_LABEL_TO_API),
             index=0,
-            help="Use Sonnet 4.6 for experimentation, Opus 4.7 for batches "
-            "you'll ship.",
+            help="Fable 5 for the highest-quality explanations (the default), "
+            "Opus 4.7 at half the price, Sonnet 4.6 for cheap experimentation.",
         )
+        if "Fable" in model:
+            st.caption(_FABLE_NOTE)
     with col2:
         batch_size = st.selectbox(
             "Questions per API call",
@@ -889,8 +902,14 @@ def render_generate_page() -> None:
             help="Show what would be generated without spending API tokens.",
         )
 
-    # Estimated cost
-    est_cost_per_q = 0.40 if model.startswith("Opus") else 0.08
+    # Estimated cost (rough per-question figures by model tier; Fable 5 is
+    # 2x Opus list price plus thinking tokens).
+    if "Fable" in model:
+        est_cost_per_q = 0.45
+    elif model.startswith("Opus"):
+        est_cost_per_q = 0.15
+    else:
+        est_cost_per_q = 0.08
     est_total_cost = total * est_cost_per_q if total else 0
     est_minutes = total * 0.5 / max(batch_size, 1) if total else 0
 
@@ -1241,13 +1260,12 @@ def _render_generate_page_preflop() -> None:
     with col1:
         _model = st.radio(
             "Model",
-            options=[
-                "Opus 4.7 (highest fidelity)",
-                "Sonnet 4.6 (5× cheaper, faster)",
-            ],
-            index=0,
+            options=list(_MODEL_LABEL_TO_API),
+            index=0,  # Fable 5 -- highest-quality explanations by default
             key="preflop_model",
         )
+        if "Fable" in _model:
+            st.caption(_FABLE_NOTE)
     with col2:
         _batch_size = st.selectbox(
             "Questions per API call",
@@ -1261,8 +1279,9 @@ def _render_generate_page_preflop() -> None:
             key="preflop_dry_run",
         )
 
-    # Cost estimate
-    cost_per_q = 0.40 if "Opus" in _model else 0.08
+    # Cost estimate (rough per-question by model tier; Fable 5 is 2x Opus
+    # list price plus thinking tokens).
+    cost_per_q = 0.45 if "Fable" in _model else (0.15 if "Opus" in _model else 0.08)
     est_cost = total * cost_per_q
     st.info(
         f"**Estimated**: {total} questions · ~${est_cost:.2f} · "
@@ -3211,8 +3230,14 @@ def render_compare_page() -> None:
         )
     with s3:
         model_label = st.radio(
-            "Model", options=list(_MODEL_LABEL_TO_API), index=1, key="cmp_model"
+            "Model", options=list(_MODEL_LABEL_TO_API), index=0, key="cmp_model",
+            help="Compare with the model you'll ship with so verdicts carry over.",
         )
+        if "Fable" in model_label:
+            st.caption(
+                "Fable 5 has no temperature control, so 'deterministic' runs "
+                "may still vary slightly in wording."
+            )
     band_low, band_high = difficulty_bands[preset]
     s4, s5 = st.columns(2)
     with s4:
@@ -3641,8 +3666,8 @@ def render_prompt_page() -> None:
 - **The built-in default encodes hard-won lessons** -- 10 voice rules,
   banned phrases, archetype framing, the May 2026 Ryan-feedback fixes.
   Treat big rewrites as research, not casual editing.
-- **Iterate cheap.** Experiment on Sonnet 4.6 (~5× cheaper) and only
-  validate the winners on Opus 4.7.
+- **Iterate cheap.** Experiment on Sonnet 4.6 (the cheap tier) and only
+  validate the winners on Fable 5 (the production model).
 - **The library is gitignored** -- copy prompts you want to keep across
   machines somewhere safe.
         """
@@ -3794,7 +3819,12 @@ _PLO_DIFFICULTY_BANDS = {
     "Hard": (2100, 3200),
     "Mixed": (400, 3200),
 }
-_PLO_MODELS = ["claude-sonnet-4-6", "claude-opus-4-7"]
+_PLO_MODELS = ["claude-fable-5", "claude-opus-4-7", "claude-sonnet-4-6"]
+_PLO_MODEL_NAMES = {
+    "claude-fable-5": "Fable 5 (best quality, 2x Opus price)",
+    "claude-opus-4-7": "Opus 4.7 (high fidelity)",
+    "claude-sonnet-4-6": "Sonnet 4.6 (cheapest, fastest)",
+}
 
 
 def _render_plo_pack_loader() -> tuple[PloPack, tuple[PloDecisionNode, ...]] | None:
@@ -4073,25 +4103,26 @@ def render_plo_generate_page() -> None:
 
     # --- 5. Model + API settings ---
     st.subheader("5. Model + API settings")
-    _model_names = {
-        "claude-sonnet-4-6": "Sonnet 4.6 (5x cheaper, faster)",
-        "claude-opus-4-7": "Opus 4.7 (highest fidelity)",
-    }
     ms1, ms2 = st.columns(2)
     model = ms1.selectbox(
         "Model",
         options=_PLO_MODELS,
-        index=_PLO_MODELS.index("claude-opus-4-7"),  # default to Opus 4.7
-        format_func=lambda m: _model_names.get(m, m),
+        index=_PLO_MODELS.index("claude-fable-5"),  # default to the best model
+        format_func=lambda m: _PLO_MODEL_NAMES.get(m, m),
     )
+    _is_fable = "fable" in model
     temperature = ms2.slider(
         "Temperature",
         0.0,
         1.0,
         0.6,
         0.05,
-        help="Higher = more varied prose. 0.6 is a good start with no examples.",
+        disabled=_is_fable,
+        help="Higher = more varied prose. 0.6 is a good start with no "
+        "examples. Fable 5 has no temperature control (ignored).",
     )
+    if _is_fable:
+        st.caption(_FABLE_NOTE)
     compute_eq = st.checkbox(
         "Compute hand equity for the explanation (~1s/spot; real generate only)",
         value=True,
@@ -4099,7 +4130,9 @@ def render_plo_generate_page() -> None:
         "equity is ~60x heavier than Hold'em). Off = fast. The preview is "
         "always equity-off for speed regardless of this.",
     )
-    _cost_per_q = 0.08 if "sonnet" in model else 0.40
+    # Rough per-question estimates by model tier (Fable 5 = 2x Opus list
+    # price plus thinking tokens).
+    _cost_per_q = 0.45 if "fable" in model else (0.15 if "opus" in model else 0.08)
     st.info(
         f"**Estimated**: {int(count)} questions · "
         f"~${int(count) * _cost_per_q:.2f} · {_matching:,} nodes available"
@@ -5007,10 +5040,15 @@ def render_plo_compare_page() -> None:
         model = st.radio(
             "Model",
             options=_PLO_MODELS,
-            index=0,
-            format_func=lambda m: "Sonnet 4.6" if "sonnet" in m else "Opus 4.7",
+            index=0,  # Fable 5 -- compare with the model you ship with
+            format_func=lambda m: _PLO_MODEL_NAMES.get(m, str(m)).split(" (")[0],
             key="plo_cmp_model",
         )
+        if "fable" in model:
+            st.caption(
+                "Fable 5 has no temperature control, so A/B runs may vary "
+                "slightly in wording between reruns."
+            )
     band_low, band_high = _PLO_DIFFICULTY_BANDS[preset]
     seed = int(
         st.number_input("Seed", min_value=0, max_value=1_000_000, value=42, key="plo_cmp_seed")
