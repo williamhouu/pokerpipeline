@@ -374,6 +374,56 @@ def test_collect_approved_can_exclude_by_prefix(tmp_path: Path) -> None:
     assert rows == []
 
 
+def test_collect_approved_sources_returns_provenance(tmp_path: Path) -> None:
+    b = tmp_path / "plo_20260601_120000.csv"
+    _write_batch(
+        b,
+        [
+            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"},
+            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2", "Correct Answer": "Fold"},
+        ],
+    )
+    review.save_review(b, 1, "approved", "")
+    sources = review.collect_approved_sources(tmp_path)
+    assert len(sources) == 1
+    csv_path, no, row = sources[0]
+    assert csv_path == b
+    assert no == "1"
+    assert row["User Cards"] == "A,A"
+
+
+def test_clear_all_approved_removes_approved_only(tmp_path: Path) -> None:
+    b = tmp_path / "plo_20260601_120000.csv"
+    _write_batch(
+        b,
+        [
+            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"},
+            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2", "Correct Answer": "Fold"},
+        ],
+    )
+    review.save_review(b, 1, "approved", "")
+    review.save_review(b, 2, "rejected", "")
+    cleared = review.clear_all_approved(tmp_path)
+    assert cleared == 1
+    assert review.collect_approved_rows(tmp_path) == ([], [])
+    # The rejected grade is untouched.
+    assert review.load_reviews(b)["2"]["status"] == "rejected"
+
+
+def test_clear_all_approved_clears_duplicate_spots_in_every_batch(tmp_path: Path) -> None:
+    # A spot approved in two batches dedupes to one in the pool, but clear-all
+    # must un-approve BOTH so it can't reappear.
+    spot = {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+    older = tmp_path / "plo_20260601_120000.csv"
+    newer = tmp_path / "plo_20260602_120000.csv"
+    _write_batch(older, [spot])
+    _write_batch(newer, [spot])
+    review.save_review(older, 1, "approved", "")
+    review.save_review(newer, 1, "approved", "")
+    assert review.clear_all_approved(tmp_path) == 2
+    assert review.collect_approved_rows(tmp_path) == ([], [])
+
+
 def test_approved_rows_to_csv_round_trips(tmp_path: Path) -> None:
     rows = [
         {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check", "extra": "ignored"},

@@ -212,31 +212,17 @@ def update_difficulty(csv_path: Path, no: str | int, new_value: str) -> bool:
     return _update_cell(csv_path, no, "Difficulty Rating", new_value)
 
 
-def collect_approved_rows(
-    batch_dir: Path, *, exclude_prefix: str | None = None
-) -> tuple[list[str], list[dict[str, str]]]:
-    """Every row graded ``approved``, gathered across all batches in a dir.
+def _scan_approved(
+    batch_dir: Path, exclude_prefix: str | None
+) -> tuple[list[str], list[tuple[Path, str, dict[str, str]]]]:
+    """``(fieldnames, [(csv_path, No, row), ...])`` for every approved row.
 
-    Scans each CSV under ``batch_dir`` together with its ``.review.json``
-    sidecar, keeps the rows whose ``No`` is graded ``approved``, and dedupes
-    across batches by ``(solver_reference, User Cards)`` so the same spot
-    approved in two places appears once. Batches are scanned newest-first (by
-    mtime), so the most recent copy of a duplicated spot wins.
-
-    This includes ``compare_*`` A/B artifacts: a question can be finalized from
-    the Compare page (which marks the chosen variant's row ``approved`` in that
-    compare CSV's sidecar), and those finalizations belong in the same pool as
-    Review-page approvals. Only rows actually graded ``approved`` surface, so
-    un-judged compare runs contribute nothing. Pass ``exclude_prefix`` to skip a
-    filename family if ever needed.
-
-    The grades are the single source of truth -- nothing is moved or copied on
-    disk -- so this view always reflects the latest approvals and an un-approve
-    drops the row automatically.
-
-    Returns ``(fieldnames, rows)`` ready to serialize as one CSV;
-    ``fieldnames`` is the column order of the first contributing batch. Returns
-    ``([], [])`` when the dir is absent or nothing is approved.
+    Scans each CSV under ``batch_dir`` + its ``.review.json`` sidecar, keeps
+    rows graded ``approved``, and dedupes across batches by ``(solver_reference,
+    User Cards)`` so a spot approved in two places appears once (newest batch by
+    mtime wins). ``fieldnames`` is the column order of the first contributing
+    batch. The shared core behind the public collectors; the ``(csv_path, No)``
+    provenance lets the Review page delete an individual approved row.
     """
     if not batch_dir.is_dir():
         return [], []
@@ -251,7 +237,7 @@ def collect_approved_rows(
     )
     seen: set[tuple[str, str]] = set()
     fieldnames: list[str] = []
-    out_rows: list[dict[str, str]] = []
+    out: list[tuple[Path, str, dict[str, str]]] = []
     for csv_path in csvs:
         reviews = load_reviews(csv_path)
         if not any(g.get("status") == "approved" for g in reviews.values()):
@@ -266,15 +252,69 @@ def collect_approved_rows(
         if cols and not fieldnames:
             fieldnames = cols
         for row in rows:
-            grade = reviews.get(str(row.get("No", "")))
+            no = str(row.get("No", ""))
+            grade = reviews.get(no)
             if not grade or grade.get("status") != "approved":
                 continue
             key = (row.get("solver_reference", ""), row.get("User Cards", ""))
             if key in seen:
                 continue
             seen.add(key)
-            out_rows.append(row)
-    return fieldnames, out_rows
+            out.append((csv_path, no, row))
+    return fieldnames, out
+
+
+def collect_approved_rows(
+    batch_dir: Path, *, exclude_prefix: str | None = None
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Every row graded ``approved``, gathered across all batches in a dir.
+
+    Dedupes across batches by ``(solver_reference, User Cards)`` (newest wins),
+    and includes ``compare_*`` A/B artifacts: a question finalized on the
+    Compare page is marked ``approved`` in that compare CSV's sidecar and
+    belongs in the same pool as Review-page approvals. Only rows actually graded
+    ``approved`` surface. Pass ``exclude_prefix`` to skip a filename family.
+
+    The grades are the single source of truth -- nothing is moved on disk -- so
+    this view always reflects the latest approvals and an un-approve (or
+    :func:`clear_all_approved`) drops rows automatically. Returns
+    ``(fieldnames, rows)`` ready to serialize as one CSV.
+    """
+    fieldnames, sources = _scan_approved(batch_dir, exclude_prefix)
+    return fieldnames, [row for _csv, _no, row in sources]
+
+
+def collect_approved_sources(
+    batch_dir: Path, *, exclude_prefix: str | None = None
+) -> list[tuple[Path, str, dict[str, str]]]:
+    """Like :func:`collect_approved_rows`, but each row paired with its source
+    ``(csv_path, No, row)`` so a single approved question can be un-approved in
+    place (the Review page's per-row delete)."""
+    return _scan_approved(batch_dir, exclude_prefix)[1]
+
+
+def clear_all_approved(
+    batch_dir: Path, *, exclude_prefix: str | None = None
+) -> int:
+    """Un-approve EVERY approved row across all batches; return the count.
+
+    Removes the ``approved`` grade from each sidecar (not deduped -- so a spot
+    approved in two batches is cleared in both, and won't reappear). Used by the
+    Review page's "Clear all approved" after a finalized set has been exported.
+    Other grades (rejected / needs_review) are untouched.
+    """
+    if not batch_dir.is_dir():
+        return 0
+    cleared = 0
+    for csv_path in batch_dir.glob("*.csv"):
+        if exclude_prefix and csv_path.name.startswith(exclude_prefix):
+            continue
+        reviews = load_reviews(csv_path)
+        for no, grade in list(reviews.items()):
+            if grade.get("status") == "approved":
+                remove_review(csv_path, no)
+                cleared += 1
+    return cleared
 
 
 def approved_rows_to_csv(fieldnames: list[str], rows: list[dict[str, str]]) -> str:
@@ -385,7 +425,9 @@ __all__ = [
     "approved_rows_to_csv",
     "assembled_prompt",
     "batch_meta_path",
+    "clear_all_approved",
     "collect_approved_rows",
+    "collect_approved_sources",
     "load_batch_meta",
     "load_reviews",
     "meta_question_for",

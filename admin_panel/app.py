@@ -4494,37 +4494,59 @@ def render_plo_review_page() -> None:
     # stored file), so it's always in sync: approving adds, un-approving drops.
     st.divider()
     st.subheader("✅ Approved questions (all batches)")
-    appr_fields, appr_rows = review.collect_approved_rows(_PLO_BATCH_DIR)
-    if not appr_rows:
+    approved_sources = review.collect_approved_sources(_PLO_BATCH_DIR)
+    if not approved_sources:
         st.caption(
-            "No approved questions yet. Grade questions **approved** above and "
-            "they collect here across every batch."
+            "No approved questions yet. Grade questions **approved** above (or "
+            "finalize on the Compare page) and they collect here across batches."
         )
     else:
+        appr_rows = [row for _csv, _no, row in approved_sources]
+        appr_fields = list(appr_rows[0].keys())  # DictReader preserves column order
         st.caption(
             f"**{len(appr_rows)}** approved across all batches (deduped by spot). "
             "Updates live as you grade."
         )
-        preview_cols = [
-            c
-            for c in ("User Cards", "Correct Answer", "archetype", "Difficulty Rating")
-            if c in appr_fields
-        ]
-        if preview_cols:
-            st.dataframe(
-                pd.DataFrame(
-                    [{c: r.get(c, "") for c in preview_cols} for r in appr_rows]
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
-        st.download_button(
-            "⬇️  Download approved questions (CSV)",
+        dcol, ccol = st.columns([3, 2])
+        dcol.download_button(
+            "⬇️  Download approved (CSV)",
             review.approved_rows_to_csv(appr_fields, appr_rows),
             file_name="plo_approved_all_batches.csv",
             mime="text/csv",
             type="primary",
+            use_container_width=True,
         )
+        # Clear-all is destructive (un-approves everything), so confirm in 2 steps.
+        if st.session_state.get("plo_confirm_clear_approved"):
+            if ccol.button(
+                f"⚠️ Confirm: clear all {len(appr_rows)}",
+                key="plo_clear_approved_confirm",
+                use_container_width=True,
+            ):
+                n = review.clear_all_approved(_PLO_BATCH_DIR)
+                st.session_state["plo_confirm_clear_approved"] = False
+                st.toast(f"Cleared {n} approved question(s)")
+                st.rerun()
+        elif ccol.button(
+            "🧹 Clear all approved", key="plo_clear_approved", use_container_width=True
+        ):
+            st.session_state["plo_confirm_clear_approved"] = True
+            st.rerun()
+
+        with st.expander("🗑  Remove individual questions"):
+            for csv_path, no, row in approved_sources:
+                rcol, xcol = st.columns([10, 1])
+                rcol.markdown(
+                    f"**{row.get('User Cards', '')}**  ·  "
+                    f"{row.get('Correct Answer', '')}  ·  "
+                    f"`{row.get('archetype', '')}`  ·  diff "
+                    f"{row.get('Difficulty Rating', '')}"
+                )
+                if xcol.button(
+                    "🗑", key=f"plo_appr_del_{csv_path.name}_{no}", help="Un-approve"
+                ):
+                    review.remove_review(csv_path, no)
+                    st.rerun()
 
 
 def _plo_override_path() -> Path:
