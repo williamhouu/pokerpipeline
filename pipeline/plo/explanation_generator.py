@@ -119,15 +119,7 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "factor: mention it briefly if at all, never as the main reason, and do "
     "not claim a single suited card meaningfully cuts into his range before any "
     "board has come.",
-    # 13. Get flush nuttedness right from the data, never guess it.
-    "Take flush nuttedness from the flush_potential field, never invent it. "
-    "Only an ACE-high flush is the nut flush. A king-high flush is the SECOND "
-    "nut (it becomes the nut only when the ace of that suit is on the board), a "
-    "queen-high is the third nut, and anything lower is a weak, non-nut flush. "
-    "Never call a non-ace flush 'the nut flush' or 'the nut diamond/club/etc', "
-    "and never name a card you do not hold (do not invoke the ace of a suit you "
-    "only hold the king in).",
-    # 14. Say only what drives THIS spot; vary the shape so they aren't clones.
+    # 13. Say only what drives THIS spot; vary the shape so they aren't clones.
     "Explain only what actually drives THIS decision. Lead with the single "
     "biggest reason (the strategic_frame), then add a second factor ONLY when "
     "the data makes it material here -- position when it changes the play, nut "
