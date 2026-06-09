@@ -213,16 +213,22 @@ def update_difficulty(csv_path: Path, no: str | int, new_value: str) -> bool:
 
 
 def collect_approved_rows(
-    batch_dir: Path, *, exclude_prefix: str = "compare_"
+    batch_dir: Path, *, exclude_prefix: str | None = None
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Every row graded ``approved``, gathered across all batches in a dir.
 
-    Scans each batch CSV under ``batch_dir`` (excluding ``compare_*`` A/B
-    artifacts) together with its ``.review.json`` sidecar, keeps the rows whose
-    ``No`` is graded ``approved``, and dedupes across batches by
-    ``(solver_reference, User Cards)`` so the same spot approved in two batches
-    appears once. Batches are scanned newest-first (by mtime), so the most
-    recent copy of a duplicated spot wins.
+    Scans each CSV under ``batch_dir`` together with its ``.review.json``
+    sidecar, keeps the rows whose ``No`` is graded ``approved``, and dedupes
+    across batches by ``(solver_reference, User Cards)`` so the same spot
+    approved in two places appears once. Batches are scanned newest-first (by
+    mtime), so the most recent copy of a duplicated spot wins.
+
+    This includes ``compare_*`` A/B artifacts: a question can be finalized from
+    the Compare page (which marks the chosen variant's row ``approved`` in that
+    compare CSV's sidecar), and those finalizations belong in the same pool as
+    Review-page approvals. Only rows actually graded ``approved`` surface, so
+    un-judged compare runs contribute nothing. Pass ``exclude_prefix`` to skip a
+    filename family if ever needed.
 
     The grades are the single source of truth -- nothing is moved or copied on
     disk -- so this view always reflects the latest approvals and an un-approve
@@ -235,7 +241,11 @@ def collect_approved_rows(
     if not batch_dir.is_dir():
         return [], []
     csvs = sorted(
-        (p for p in batch_dir.glob("*.csv") if not p.name.startswith(exclude_prefix)),
+        (
+            p
+            for p in batch_dir.glob("*.csv")
+            if not (exclude_prefix and p.name.startswith(exclude_prefix))
+        ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )

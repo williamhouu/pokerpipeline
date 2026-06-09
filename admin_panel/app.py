@@ -5059,6 +5059,12 @@ def render_plo_compare_page() -> None:
     to_verdict = {opts[0]: "A", opts[1]: "tie", opts[2]: "B"}
     from_verdict = {"A": opts[0], "tie": opts[1], "B": opts[2]}
 
+    # Finalize grades live in each compare CSV's own .review.json sidecar (the
+    # same store the Review page uses), so a question finalized here flows into
+    # the shared cross-batch "Approved questions" pool. Loaded once per rerun.
+    reviews_a = review.load_reviews(a_csv)
+    reviews_b = review.load_reviews(b_csv)
+
     for key, row_a, row_b in pairs:
         with st.container(border=True):
             if row_a.get("Context"):
@@ -5108,6 +5114,60 @@ def render_plo_compare_page() -> None:
             if choice is not None and to_verdict[choice] != cur:
                 compare.save_verdict(a_csv, key, to_verdict[choice])
                 st.rerun()
+
+            # --- finalize: save the chosen explanation to the approved pool ---
+            no_a, no_b = str(row_a.get("No", "")), str(row_b.get("No", ""))
+            fin_a = reviews_a.get(no_a, {}).get("status") == "approved"
+            fin_b = reviews_b.get(no_b, {}).get("status") == "approved"
+            fcol_a, fcol_b = st.columns(2)
+            if fcol_a.button(
+                "Save A to finalized",
+                key=f"plo_cmp_fin_a_{key}",
+                disabled=fin_a,
+                use_container_width=True,
+            ):
+                # Exclusive: finalizing one variant un-finalizes the other.
+                review.save_review(a_csv, no_a, "approved", "finalized from compare")
+                review.remove_review(b_csv, no_b)
+                st.rerun()
+            if fcol_b.button(
+                "Save B to finalized",
+                key=f"plo_cmp_fin_b_{key}",
+                disabled=fin_b,
+                use_container_width=True,
+            ):
+                review.save_review(b_csv, no_b, "approved", "finalized from compare")
+                review.remove_review(a_csv, no_a)
+                st.rerun()
+            if fin_a or fin_b:
+                which = result["a_name"] if fin_a else result["b_name"]
+                st.caption(f"✅ Saved to finalized using **{which}**.")
+                if st.button("Remove from finalized", key=f"plo_cmp_unfin_{key}"):
+                    review.remove_review(a_csv, no_a)
+                    review.remove_review(b_csv, no_b)
+                    st.rerun()
+
+    # --- download the shared finalized pool (same set as the Review page) -----
+    st.divider()
+    fin_fields, fin_rows = review.collect_approved_rows(_PLO_BATCH_DIR)
+    if fin_rows:
+        st.download_button(
+            f"⬇️  Download finalized questions (CSV) — {len(fin_rows)} total",
+            review.approved_rows_to_csv(fin_fields, fin_rows),
+            file_name="plo_approved_all_batches.csv",
+            mime="text/csv",
+            type="primary",
+            key="plo_cmp_download_finalized",
+        )
+        st.caption(
+            "Every question you save to finalized here or approve on the Review "
+            "page, across all batches, deduped by spot."
+        )
+    else:
+        st.caption(
+            "Save questions to finalized above (or approve them on the Review "
+            "page) to build your downloadable set."
+        )
 
 
 def render_skills_page() -> None:

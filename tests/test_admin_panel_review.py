@@ -352,13 +352,25 @@ def test_collect_approved_dedupes_across_batches(tmp_path: Path) -> None:
     assert len(rows) == 1  # same (solver_reference, User Cards) -> one copy
 
 
-def test_collect_approved_excludes_compare_artifacts(tmp_path: Path) -> None:
+def test_collect_approved_includes_compare_when_approved(tmp_path: Path) -> None:
+    # A question finalized on the Compare page (a compare_*.csv) feeds the
+    # SAME pool as Review-page approvals.
     cmp = tmp_path / "compare_20260601_A.csv"
     _write_batch(cmp, [
         {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
     ])
     review.save_review(cmp, 1, "approved", "")
     _, rows = review.collect_approved_rows(tmp_path)
+    assert [r["No"] for r in rows] == ["1"]
+
+
+def test_collect_approved_can_exclude_by_prefix(tmp_path: Path) -> None:
+    cmp = tmp_path / "compare_20260601_A.csv"
+    _write_batch(cmp, [
+        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+    ])
+    review.save_review(cmp, 1, "approved", "")
+    _, rows = review.collect_approved_rows(tmp_path, exclude_prefix="compare_")
     assert rows == []
 
 
