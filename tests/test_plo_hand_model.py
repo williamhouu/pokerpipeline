@@ -14,11 +14,47 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.plo.hand_model import classify_plo_hand  # noqa: E402
+from pipeline.plo.hand_model import (  # noqa: E402
+    classify_plo_hand,
+    describe_flush_potential,
+    flush_suits,
+)
 
 
 def _c(hand: str):
     return classify_plo_hand(hand)
+
+
+# --- flush nut-ranking -----------------------------------------------------
+def test_king_high_flush_is_second_nut_not_nut():
+    # The reported bug: K-high diamond flush must read "second-nut", not "nut".
+    suits = {f.suit: f for f in flush_suits("8c Qc Td Kd")}
+    assert suits["d"].high_rank == "K"
+    assert suits["d"].nut_label == "second-nut"
+    assert suits["d"].is_nut is False
+    assert suits["c"].nut_label == "third-nut"  # Q-high clubs
+    assert (
+        describe_flush_potential("8c Qc Td Kd")
+        == "diamonds K-high (second-nut flush), clubs Q-high (third-nut flush)"
+    )
+
+
+def test_ace_high_flush_is_the_nut():
+    (f,) = flush_suits("Ad Kd 7c 2s")
+    assert f.suit_word == "diamonds"
+    assert f.nut_label == "nut"
+    assert f.is_nut is True
+
+
+def test_low_flush_is_weak():
+    suits = {f.suit: f for f in flush_suits("3c Tc 6d Kd")}
+    assert suits["c"].nut_label == "weak"  # T-high clubs
+    assert suits["d"].nut_label == "second-nut"  # K-high diamonds
+
+
+def test_rainbow_hand_has_no_flush_potential():
+    assert flush_suits("As Kh Qd Jc") == ()
+    assert describe_flush_potential("As Kh Qd Jc") == "none (no two cards share a suit)"
 
 
 # --- suit patterns --------------------------------------------------------

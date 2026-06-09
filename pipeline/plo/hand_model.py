@@ -25,7 +25,14 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from pipeline.cards import BROADWAY, card_suit, parse_card, rank_value
+from pipeline.cards import (
+    BROADWAY,
+    RANK_VALUE,
+    card_rank,
+    card_suit,
+    parse_card,
+    rank_value,
+)
 
 _PLO_HAND_LEN = 4
 
@@ -349,4 +356,74 @@ def classify_plo_hand(hand: object) -> PloHandClass:
         wrap_potential=wrap_potential,
         strength=strength,
         descriptor=descriptor,
+    )
+
+
+# --- flush nut-ranking (deterministic; feeds the Layer 6 SOLVER DATA) ------
+_SUIT_CHAR_WORD = {"c": "clubs", "d": "diamonds", "h": "hearts", "s": "spades"}
+# Label for a flush whose HIGHEST card is this rank. Ace = the nut flush, king =
+# second-nut (it becomes the nut when the ace of that suit is on the board),
+# queen = third, jack = fourth; anything lower is a weak (non-nut) flush.
+_FLUSH_NUT_LABEL: dict[str, str] = {
+    "A": "nut",
+    "K": "second-nut",
+    "Q": "third-nut",
+    "J": "fourth-nut",
+}
+
+
+@dataclass(frozen=True)
+class FlushSuit:
+    """A suit hero holds 2+ cards in, and how nutted its flush would be."""
+
+    suit: str  # 'd'
+    suit_word: str  # 'diamonds'
+    high_rank: str  # 'K'
+    nut_label: str  # 'second-nut' (or 'weak' below the jack)
+    is_nut: bool  # True only for an ace-high (true nut) flush
+
+
+def flush_suits(hand: object) -> tuple[FlushSuit, ...]:
+    """Each suit hero holds 2+ cards in, with its flush's nut ranking.
+
+    A PLO flush uses two hole cards, so only a suit with 2+ of hero's cards has
+    flush potential. The ranking keys off the highest held card: ace = the nut
+    flush, king = second-nut, queen = third, jack = fourth, lower = weak.
+    Returned high-card first. A rainbow / single-suited-with-no-pair hand may
+    return an empty tuple (no two cards share a suit).
+    """
+    cards = _normalize(hand)
+    by_suit: dict[str, list[str]] = {}
+    for card in cards:
+        by_suit.setdefault(card_suit(card), []).append(card)
+    out: list[FlushSuit] = []
+    for suit, suit_cards in by_suit.items():
+        if len(suit_cards) < 2:  # noqa: PLR2004 -- a flush needs two hole cards
+            continue
+        high_rank = card_rank(max(suit_cards, key=rank_value))
+        out.append(
+            FlushSuit(
+                suit=suit,
+                suit_word=_SUIT_CHAR_WORD[suit],
+                high_rank=high_rank,
+                nut_label=_FLUSH_NUT_LABEL.get(high_rank, "weak"),
+                is_nut=high_rank == "A",
+            )
+        )
+    return tuple(sorted(out, key=lambda f: RANK_VALUE[f.high_rank], reverse=True))
+
+
+def describe_flush_potential(hand: object) -> str:
+    """One-line flush nut-ranking for the SOLVER DATA block.
+
+    E.g. ``"diamonds K-high (second-nut flush), clubs T-high (weak flush)"`` or
+    ``"none (no two cards share a suit)"``. So Layer 6 reports the real ranking
+    instead of guessing -- a king-high flush is the SECOND nut, never "the nut
+    flush".
+    """
+    suits = flush_suits(hand)
+    if not suits:
+        return "none (no two cards share a suit)"
+    return ", ".join(
+        f"{f.suit_word} {f.high_rank}-high ({f.nut_label} flush)" for f in suits
     )

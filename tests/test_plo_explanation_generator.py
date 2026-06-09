@@ -88,11 +88,13 @@ def test_system_prompt_has_rules_and_bans_em_dash():
     assert "VOICE RULES" in prompt
     assert "Never use an em dash" in prompt
     assert "BANNED PHRASES" in prompt
-    assert len(VOICE_RULES_PLO) == 13  # noqa: PLR2004
+    assert len(VOICE_RULES_PLO) == 14  # noqa: PLR2004
     # The clean-final-draft rule (kills the self-correction artifact).
     assert any("clean, final draft" in r for r in VOICE_RULES_PLO)
     # The preflop blocker-framing rule (card removal, not flush math).
     assert any("blockers as preflop CARD REMOVAL" in r for r in VOICE_RULES_PLO)
+    # The flush nut-ranking rule (king-high is the SECOND nut, not the nut).
+    assert any("Only an ACE-high flush is the nut flush" in r for r in VOICE_RULES_PLO)
     # Paragraphs + say-only-what-drives-the-spot.
     assert any("short paragraphs" in r for r in VOICE_RULES_PLO)
     assert any("only what actually drives" in r for r in VOICE_RULES_PLO)
