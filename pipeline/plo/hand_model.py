@@ -427,3 +427,45 @@ def describe_flush_potential(hand: object) -> str:
     return ", ".join(
         f"{f.suit_word} {f.high_rank}-high ({f.nut_label} flush)" for f in suits
     )
+
+
+# --- card redundancy (trips / quads in hand; feeds the SOLVER DATA) ---------
+_RANK_WORD_PLURAL = {
+    14: "aces", 13: "kings", 12: "queens", 11: "jacks", 10: "tens",
+    9: "nines", 8: "eights", 7: "sevens", 6: "sixes", 5: "fives",
+    4: "fours", 3: "threes", 2: "deuces",
+}
+
+
+def describe_card_redundancy(hand: object) -> str | None:
+    """Deterministic redundant-card count for trips/quads hands, or ``None``.
+
+    A PLO hand uses exactly two hole cards, so a pair is the most that
+    duplicated ranks can ever contribute. Three of a rank = exactly ONE
+    redundant card (the pair uses two; the third adds no new two-card combo
+    and only removes the hand's own set/full-house outs). Four of a rank =
+    two redundant cards and no set outs at all. Stated here so Layer 6
+    reports the count instead of doing the arithmetic itself (which produced
+    "two of your three aces are dead" / "the fourth ace" style miscounts).
+    Returns ``None`` for hands with no triplicated rank -- omit from the data
+    block rather than stating a non-fact.
+    """
+    cards = _normalize(hand)
+    rank_counts = Counter(rank_value(c) for c in cards)
+    for rank, count in rank_counts.items():
+        word = _RANK_WORD_PLURAL[rank]
+        singular = word[:-1] if rank != 6 else "six"  # "sixes" -> "six"
+        if count == 3:  # noqa: PLR2004
+            return (
+                f"you hold three {word} but a pair is the most two hole cards "
+                f"can make, so exactly ONE of the three is redundant dead "
+                f"weight. The hand plays as a bare pair of {word}, and only "
+                f"one {singular} is left in the deck for sets or full houses."
+            )
+        if count == 4:  # noqa: PLR2004
+            return (
+                f"you hold all four {word}: two are pure dead weight (a pair "
+                f"is the most two hole cards can make), and no {singular} "
+                f"remains in the deck -- this hand can never flop a set."
+            )
+    return None

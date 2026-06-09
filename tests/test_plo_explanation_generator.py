@@ -254,3 +254,18 @@ def test_extract_text_skips_thinking_blocks():
     text = SimpleNamespace(type="text", text='{"answer_explanation": "Call."}')
     response = SimpleNamespace(content=[thinking, text])
     assert _extract_text(response) == '{"answer_explanation": "Call."}'
+
+
+def test_solver_data_carries_card_redundancy_for_trips_only():
+    # AAA9 (the reported miscount hand) -> the deterministic fact is in the
+    # data block; a normal AAKK hand -> the key is absent entirely.
+    facts = _facts()
+    data = build_solver_data(facts, ["Fold", "Call"], "Fold")
+    assert "card_redundancy" not in data  # AKAK: one pair per rank only
+
+    import dataclasses
+
+    trips_spot = dataclasses.replace(facts.spot, hero_cards=("9c", "Ad", "Ah", "As"))
+    trips_facts = dataclasses.replace(facts, spot=trips_spot)
+    data = build_solver_data(trips_facts, ["Fold", "Call"], "Fold")
+    assert "ONE of the three is redundant" in data["card_redundancy"]

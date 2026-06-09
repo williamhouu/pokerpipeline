@@ -42,7 +42,7 @@ from pipeline.explanation_generator import (
 from pipeline.plo.action_history import format_plo_action_history, resolve_pot_limit
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.gold_examples import load_plo_gold_examples
-from pipeline.plo.hand_model import describe_flush_potential
+from pipeline.plo.hand_model import describe_card_redundancy, describe_flush_potential
 from pipeline.plo.options import canonicalize_strategy
 from pipeline.plo.position import hero_relative_position
 from pipeline.plo.spot_tags import compute_plo_concept_tags
@@ -246,6 +246,9 @@ def build_solver_data(
         "your_hand": " ".join(format_card(c) for c in facts.spot.hero_cards),
         "your_hand_shape": f"{hand.descriptor} ({hand.strength})",
         "flush_potential": describe_flush_potential(facts.spot.hero_cards),
+        # Deterministic redundant-card count for trips/quads hands (the LLM
+        # miscounts when left to do this arithmetic itself). Inserted below
+        # only when it applies.
         "your_position": hero_relative_position(facts).lower(),
         "options": options,
         "correct_action": correct_answer,
@@ -262,6 +265,9 @@ def build_solver_data(
             round(facts.ev_gap_bb, 2) if facts.ev_gap_bb is not None else None
         ),
     }
+    redundancy = describe_card_redundancy(facts.spot.hero_cards)
+    if redundancy is not None:
+        data["card_redundancy"] = redundancy
     eq = _pct(facts.hero_equity_vs_villain)
     if eq is not None:
         data["your_hand_equity_vs_villain_range_pct"] = eq

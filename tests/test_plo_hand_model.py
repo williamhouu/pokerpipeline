@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.plo.hand_model import (  # noqa: E402
     classify_plo_hand,
+    describe_card_redundancy,
     describe_flush_potential,
     flush_suits,
 )
@@ -219,3 +220,37 @@ def test_rejects_wrong_card_count():
 def test_rejects_duplicate_cards():
     with pytest.raises(ValueError, match="duplicate"):
         classify_plo_hand("AsAsKhQd")
+
+
+# --- card redundancy (trips/quads -> deterministic dead-card count) ---------
+def test_trips_aces_has_exactly_one_redundant_ace():
+    # The reported bug hand: 9c Ad Ah As. The LLM claimed "two of your three
+    # aces are doing nothing" and invented a "fourth ace" -- the truth is the
+    # AA pair uses two, so exactly ONE ace is redundant.
+    text = describe_card_redundancy("9c Ad Ah As")
+    assert text is not None
+    assert "three aces" in text
+    assert "ONE of the three is redundant" in text
+    assert "bare pair of aces" in text
+    assert "fourth" not in text
+
+
+def test_quads_have_two_dead_cards_and_no_set_outs():
+    text = describe_card_redundancy("Ac Ad Ah As")
+    assert text is not None
+    assert "all four aces" in text
+    assert "two are pure dead weight" in text
+    assert "never flop a set" in text
+
+
+def test_trips_sixes_pluralization():
+    text = describe_card_redundancy("6c 6d 6h Ks")
+    assert text is not None
+    assert "three sixes" in text
+    assert "only one six is left in the deck" in text
+
+
+def test_no_redundancy_for_pairs_or_unpaired():
+    assert describe_card_redundancy("Ac Ad 9h 9s") is None  # two pair
+    assert describe_card_redundancy("Ac Ad Kh 9s") is None  # one pair
+    assert describe_card_redundancy("Ac Kd Qh Js") is None  # unpaired
