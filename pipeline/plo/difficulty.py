@@ -1,14 +1,22 @@
-"""PLO preflop difficulty rating (4-axis weighted sum).
+"""PLO preflop difficulty rating (3-axis weighted sum; EV axis dropped).
 
 Ports the NLHE algorithm (:mod:`pipeline.preflop.difficulty`) to PLO. Same
-shape -- four [0, 1] "ease" axes (1 = easy, 0 = hard) blended by fixed weights,
-then mapped to a 400-3200 score -- with PLO-specific tables and two structural
-differences:
+shape -- [0, 1] "ease" axes (1 = easy, 0 = hard) blended by fixed weights, then
+mapped to a 400-3200 score -- with PLO-specific tables and two differences:
 
-1. **The EV axis is reliably available.** Monker stores per-action EV, so every
-   spot carries a real ``ev_gap_bb`` (raise spots included). The NLHE code had
-   to redistribute the EV weight on raise spots; here that path is a rare
-   fallback (only a degenerate single-action node lacks a gap).
+1. **No EV axis.** NLHE blends a fourth ``easy_ev`` axis, but PLO drops it
+   (June 2026). The reason is structural, not a magnitude quirk: a *worthy*
+   spot is mixed-frequency (55-90%) by definition, and a spot mixes precisely
+   because its top actions are near-equal in EV. So within the worthiness
+   window the solver EV gap is ~0 almost everywhere (mean ~0.06 bb) AND
+   redundant with the frequency axis -- it carried no independent signal and
+   just shoved every score upward ~350-500 points, which made the "Easy" tier
+   unreachable for PLO (no worthy spot rated below ~1420). ``ev_gap_bb`` is
+   still computed and kept for the ``easy_ev`` CSV diagnostic and the separate
+   ``min_ev_gap_bb`` worthiness gate; it simply no longer feeds the rating.
+   It could be reintroduced if the spot pool ever spans more EV-separated
+   decisions, or if rescaled to PLO's compressed magnitude (full credit near
+   ~0.5 bb, not 3 bb) -- see the diagnostic data we still emit.
 2. **The hand axis keys off the hand's strength bucket** (premium / strong /
    medium / marginal / weak / trash) rather than matching hand-class tags --
    the PLO hand model already produces that categorical key.
@@ -16,17 +24,17 @@ differences:
 ::
 
     easy_freq    = (dominant_freq - 0.55) / 0.45,          clip [0, 1]
-    easy_ev      = ev_gap_bb / 3.0,                         clip [0, 1]
     easy_concept = ARCHETYPE_BASE_EASE[archetype]
                  + sum(CONCEPT_TAG_MODIFIERS[tag] firing),  clip [0.05, 1.0]
     easy_hand    = HAND_STRENGTH_EASE[hand_class.strength]
 
-    easy = 0.40*easy_freq + 0.30*easy_ev + 0.20*easy_concept + 0.10*easy_hand
+    easy = 0.57*easy_freq + 0.29*easy_concept + 0.14*easy_hand
     difficulty = round(clip(3000 - easy*2500, 400, 3200))
 
 All weights / tables are tunable starting values; refine against graded output.
 :func:`compute_plo_difficulty` returns the score plus the per-axis breakdown for
-the CSV diagnostic columns.
+the CSV diagnostic columns (``easy_ev`` included, for analysis even though it no
+longer affects the score).
 """
 
 from __future__ import annotations
@@ -36,18 +44,19 @@ from dataclasses import dataclass
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.spot_tags import compute_plo_concept_tags
 
-# === axis weights (sum to 1.0) =============================================
-W_FREQ: float = 0.40
-W_EV: float = 0.30
-W_CONCEPT: float = 0.20
-W_HAND: float = 0.10
-assert abs((W_FREQ + W_EV + W_CONCEPT + W_HAND) - 1.0) < 1e-9
+# === axis weights (sum to 1.0; 3 axes -- EV dropped, see module docstring) ==
+# These are the old freq / concept / hand split (4 : 2 : 1) renormalised after
+# removing the 0.30 EV weight, so their relative balance is unchanged.
+W_FREQ: float = 0.57
+W_CONCEPT: float = 0.29
+W_HAND: float = 0.14
+assert abs((W_FREQ + W_CONCEPT + W_HAND) - 1.0) < 1e-9
 
 # === axis 1: freq ==========================================================
 _FREQ_FLOOR: float = 0.55  # worthiness floor -> easy_freq 0
 _FREQ_SPAN: float = 0.45  # 1.00 - 0.55 -> easy_freq 1
 
-# === axis 2: EV gap ========================================================
+# === EV gap (diagnostic only -- NOT a difficulty axis; see module docstring) =
 _EV_GAP_FULL_CREDIT_BB: float = 3.0  # gaps beyond 3 bb add no more easiness
 
 # === axis 3: concept =======================================================
@@ -130,22 +139,23 @@ def _clip01(x: float) -> float:
 def compute_plo_difficulty(facts: PloFacts) -> PloDifficultyResult:
     """Compute the PLO difficulty rating with its per-axis breakdown.
 
-    Reads ``facts.ev_gap_bb`` (free from the solver). When it is ``None`` -- only
-    a degenerate single-action node -- the EV weight is redistributed across the
-    other three axes so the blend stays a valid weighted average.
+    Three axes (freq / concept / hand); the EV axis is intentionally NOT part of
+    the blend (see the module docstring for why). ``easy_ev`` and ``ev_available``
+    are still computed and returned, but only for the CSV diagnostic and possible
+    future re-introduction -- they do not affect ``score``.
     """
     # axis 1: freq
     easy_freq = _clip01((facts.spot.dominant_frequency - _FREQ_FLOOR) / _FREQ_SPAN)
 
-    # axis 2: EV gap
+    # EV gap -- DIAGNOSTIC ONLY, not blended into the score (module docstring).
     ev_gap_bb = facts.ev_gap_bb
     ev_available = ev_gap_bb is not None
     easy_ev = _clip01(ev_gap_bb / _EV_GAP_FULL_CREDIT_BB) if ev_gap_bb is not None else 0.0
 
-    # axes 3 + 4 need the firing concept tags
+    # axes 2 + 3 need the firing concept tags
     firing = set(compute_plo_concept_tags(facts))
 
-    # axis 3: concept
+    # axis 2: concept
     base = ARCHETYPE_BASE_EASE.get(facts.archetype or "unclassified", _CONCEPT_BASE_DEFAULT)
     is_fold = facts.spot.dominant_action.startswith("Fold")
     tag_delta = 0.0
@@ -156,24 +166,11 @@ def compute_plo_difficulty(facts: PloFacts) -> PloDifficultyResult:
         tag_delta += mod
     easy_concept = _clip(base + tag_delta, _CONCEPT_EASE_MIN, _CONCEPT_EASE_MAX)
 
-    # axis 4: hand strength
+    # axis 3: hand strength
     easy_hand = HAND_STRENGTH_EASE.get(facts.hand_class.strength, _HAND_DEFAULT_EASE)
 
-    # weighted sum (redistribute EV weight when the gap is unavailable)
-    if ev_available:
-        easy_blend = (
-            W_FREQ * easy_freq
-            + W_EV * easy_ev
-            + W_CONCEPT * easy_concept
-            + W_HAND * easy_hand
-        )
-    else:
-        scale = 1.0 / (W_FREQ + W_CONCEPT + W_HAND)
-        easy_blend = (
-            (W_FREQ * scale) * easy_freq
-            + (W_CONCEPT * scale) * easy_concept
-            + (W_HAND * scale) * easy_hand
-        )
+    # weighted sum over the three live axes (weights already sum to 1.0)
+    easy_blend = W_FREQ * easy_freq + W_CONCEPT * easy_concept + W_HAND * easy_hand
 
     score = round(_clip(_LINEAR_CEILING - easy_blend * _LINEAR_SPAN, _HARD_FLOOR, _HARD_CEILING))
     return PloDifficultyResult(
@@ -193,7 +190,6 @@ __all__ = [
     "HAND_STRENGTH_EASE",
     "PloDifficultyResult",
     "W_CONCEPT",
-    "W_EV",
     "W_FREQ",
     "W_HAND",
     "compute_plo_difficulty",

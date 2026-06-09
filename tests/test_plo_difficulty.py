@@ -1,4 +1,4 @@
-"""Tests for pipeline.plo.difficulty (4-axis PLO difficulty rating)."""
+"""Tests for pipeline.plo.difficulty (3-axis PLO difficulty rating; EV dropped)."""
 
 from __future__ import annotations
 
@@ -93,8 +93,9 @@ def test_ev_gap_is_free_from_the_pack():
     assert result.easy_ev == pytest.approx(2.5 / 3.0)
 
 
-def test_single_action_node_redistributes_ev_weight():
-    # One action -> no EV gap -> ev_available False, EV weight redistributed.
+def test_single_action_node_has_no_ev_gap():
+    # One action -> no EV gap -> ev_available False, easy_ev 0.0. EV is not in
+    # the blend anyway, so this only affects the diagnostic fields.
     facts = _facts(
         freqs={"Fold": 1.0},
         ev_by_action={"Fold": -7.0},
@@ -105,8 +106,27 @@ def test_single_action_node_redistributes_ev_weight():
     result = compute_plo_difficulty(facts)
     assert not result.ev_available
     assert result.easy_ev == 0.0
-    # Blend is still a valid weighted average of the remaining three axes.
+    # The 3-axis blend stays a valid weighted average.
     assert 0.0 <= result.easy_blend <= 1.0
+
+
+def test_ev_gap_does_not_affect_score():
+    # The EV axis was dropped from the PLO blend (June 2026): it is a diagnostic
+    # only. Two spots identical but for the EV gap get the SAME difficulty score,
+    # even though their easy_ev diagnostic differs.
+    base = dict(
+        freqs={"Raise 100%": 0.7, "Call": 0.3},
+        archetype="3bet_for_value",
+        hero_cards=PREMIUM,
+    )
+    small_gap = compute_plo_difficulty(
+        _facts(**base, ev_by_action={"Raise 100%": 0.1, "Call": 0.0})
+    )
+    big_gap = compute_plo_difficulty(
+        _facts(**base, ev_by_action={"Raise 100%": 10.0, "Call": 0.0})
+    )
+    assert small_gap.easy_ev != big_gap.easy_ev  # the diagnostic differs
+    assert small_gap.score == big_gap.score  # but the score does not
 
 
 def test_score_stays_within_hard_bounds():

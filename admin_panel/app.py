@@ -3817,31 +3817,42 @@ def _render_plo_pack_loader() -> tuple[PloPack, tuple[PloDecisionNode, ...]] | N
 
 
 def _render_plo_difficulty_explainer() -> None:
-    """Popover body: how the PLO 4-axis difficulty rating is computed."""
+    """Popover body: how the PLO 3-axis difficulty rating is computed."""
     from pipeline.plo.difficulty import (  # noqa: PLC0415
         W_CONCEPT,
-        W_EV,
         W_FREQ,
         W_HAND,
     )
 
     st.markdown(
-        "PLO difficulty is the **same 4-axis score as Hold'em**, computed "
-        "from solver facts (never the LLM). Each axis is an *ease* in [0, 1] "
-        "(0 = hardest, 1 = easiest):\n\n"
+        "PLO difficulty is a **3-axis score** computed from solver facts "
+        "(never the LLM). Each axis is an *ease* in [0, 1] (0 = hardest, "
+        "1 = easiest):\n\n"
         f"- **Frequency** (weight {W_FREQ:.0%}) — how dominant the correct "
         "action is. 55% = hardest, 100% = trivial.\n"
-        f"- **EV gap** (weight {W_EV:.0%}) — bb between the best and 2nd-best "
-        "action. 0 bb = a coinflip (hard), 3 bb+ = obvious. Free from the "
-        "pack for every PLO spot, raises included.\n"
         f"- **Concept** (weight {W_CONCEPT:.0%}) — the archetype + concept "
         "tags (a clear fold is easy, a thin squeeze is hard).\n"
         f"- **Hand** (weight {W_HAND:.0%}) — hand-class strength (premiums and "
         "clear trash are easy, marginal shapes are hard).\n\n"
-        f"Then `easy = {W_FREQ:.2f}·freq + {W_EV:.2f}·ev + {W_CONCEPT:.2f}·"
-        f"concept + {W_HAND:.2f}·hand` and `difficulty = round(3000 − "
-        "easy·2500)`, clipped to **400–3200**. When EV is unavailable its "
-        "weight redistributes across the other three axes."
+        f"Then `easy = {W_FREQ:.2f}·freq + {W_CONCEPT:.2f}·concept + "
+        f"{W_HAND:.2f}·hand` and `difficulty = round(3000 − easy·2500)`, "
+        "clipped to **400–3200**."
+    )
+    st.info(
+        "**Why no EV-gap axis?** Hold'em blends a 4th axis for the EV gap "
+        "between the best and 2nd-best action, but PLO leaves it OUT of the "
+        "rating. A *worthy* spot is mixed-frequency by definition, and a spot "
+        "mixes precisely because its top actions are nearly equal in EV — so "
+        "across worthy PLO spots the gap is ~0 (mean ~0.06 bb) and redundant "
+        "with the Frequency axis. Including it added no signal and shoved every "
+        "score up ~350–500 points, which made the Easy tier unreachable (no "
+        "worthy spot rated below ~1420).\n\n"
+        "The gap is still computed: it powers the **min EV-gap** quality gate "
+        "(drop true coinflips) and the **`easy_ev`** CSV column for analysis. "
+        "**Adding it back to the rating** could be worth it if a future pack "
+        "spans more EV-separated decisions, or if it's rescaled to PLO's "
+        "compressed magnitude (full credit near ~0.5 bb instead of 3 bb) — the "
+        "`easy_ev` column is kept so that call can be made from real data."
     )
 
 

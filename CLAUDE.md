@@ -315,13 +315,26 @@ worthiness window (55–95%) + an optional min-EV-gap quality gate live in the
 page's "Advanced filters" expander. (Postflop tab still uses legacy freq
 presets — dormant, pending Pio solves.)
 
-The difficulty algorithm (cols 37-41 are its diagnostics) is a weighted
-sum: `easy = 0.40 * easy_freq + 0.30 * easy_ev + 0.20 * easy_concept +
-0.10 * easy_hand`, then `difficulty = round(clip(3000 - easy * 2500,
-400, 3200))`. EV-weight redistributes across the other three when
-unavailable. Full details in `pipeline/preflop/difficulty.py` and the
-Generate page's "How is Difficulty calculated?" popover (which reads
-the constants live).
+The NLHE difficulty algorithm (cols 37-41 are its diagnostics) is a
+weighted sum: `easy = 0.40 * easy_freq + 0.30 * easy_ev + 0.20 *
+easy_concept + 0.10 * easy_hand`, then `difficulty = round(clip(3000 -
+easy * 2500, 400, 3200))`. EV-weight redistributes across the other
+three when unavailable. Full details in `pipeline/preflop/difficulty.py`
+and the Generate page's "How is Difficulty calculated?" popover (which
+reads the constants live).
+
+**PLO drops the EV axis (June 2026).** `pipeline/plo/difficulty.py` is
+3-axis — `easy = 0.57 * easy_freq + 0.29 * easy_concept + 0.14 *
+easy_hand` (the old freq/concept/hand 4:2:1 split renormalised). A
+*worthy* PLO spot is mixed-frequency by definition and therefore
+near-equal in EV, so the solver gap is ~0 across the worthiness window
+AND redundant with the frequency axis; including it added no signal and
+shoved every score up ~350-500 points, making the Easy tier unreachable
+(nothing rated below ~1420). `ev_gap_bb` is still computed for the
+`min_ev_gap_bb` worthiness gate and the `easy_ev` CSV diagnostic (so
+`easy_ev` is populated on PLO rows but does NOT feed the score); it could
+be re-added if rescaled to PLO's compressed magnitude (~0.5 bb full
+credit) or if the spot pool widens. The PLO popover documents this.
 
 Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 
