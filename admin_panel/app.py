@@ -3985,7 +3985,7 @@ def render_plo_generate_page() -> None:
         )
         exclude_ambiguous = st.checkbox(
             "Exclude ambiguous 90-95% band (recommended)",
-            value=False,
+            value=True,
             key="plo_exclude_ambiguous",
             help="Spots at 90-95% read as 'mostly' but sit just under the 95% "
             "'always' line, so the right read can still be marked wrong. "
@@ -4321,6 +4321,32 @@ def render_plo_generate_page() -> None:
             st.caption("**Concept tags:** " + (", ".join(r.concept_tags) or "none"))
 
 
+def _plo_batch_label(name: str) -> str:
+    """A readable picker label for a PLO batch file: ``<prefix> · <date time>``.
+
+    Batches are saved as ``<prefix>_YYYYMMDD_HHMMSS.csv`` (see the PLO Generate
+    page), so the creation timestamp is in the filename -- surface it so batches
+    are easy to tell apart. Falls back to the file's modified time if the name
+    has no parseable stamp.
+    """
+    import re  # noqa: PLC0415
+
+    stem = name[:-4] if name.endswith(".csv") else name
+    m = re.search(r"_(\d{8})_(\d{6})$", stem)
+    if m:
+        try:
+            when = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+            prefix = stem[: m.start()] or stem
+            return f"{prefix} · {when:%Y-%m-%d %H:%M:%S}"
+        except ValueError:
+            pass
+    try:
+        mtime = (_PLO_BATCH_DIR / name).stat().st_mtime
+        return f"{name} · {datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M}"
+    except OSError:
+        return name
+
+
 def render_plo_review_page() -> None:
     """Grade, edit, and prune PLO question batches (mirrors the NLHE Review page).
 
@@ -4359,10 +4385,14 @@ def render_plo_review_page() -> None:
         st.session_state["plo_review_batch"] = jump
 
     # Pick by FILENAME (not position): any edit bumps mtime and reorders the list.
-    pick = st.selectbox("Batch", options=names, key="plo_review_batch")
+    # The label shows each batch's creation date/time so they're easy to tell apart.
+    pick = st.selectbox(
+        "Batch", options=names, key="plo_review_batch", format_func=_plo_batch_label
+    )
     csv_path = _PLO_BATCH_DIR / pick
     with csv_path.open(encoding="utf-8-sig") as handle:
         questions = list(_csv.DictReader(handle))
+    st.caption(f"🕒 {_plo_batch_label(pick)}  ·  {len(questions)} questions  ·  {pick}")
     if not questions:
         st.warning("That batch is empty.")
         return
