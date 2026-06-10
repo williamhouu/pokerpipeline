@@ -48,13 +48,12 @@ from pipeline.fact_extractor.archetypes import (
 )
 from pipeline.fact_extractor.spot_data import SpotData
 
-# Default Anthropic model. Fable 5 is Anthropic's most capable model (a tier
-# above Opus) -- the default for the voice-sensitive explanation-writing task
-# since we optimize for the highest-quality prose. Callers (admin panel,
-# scripts) can override `model`: Opus 4.7 is the previous default (half the
-# price), Sonnet 4.6 is the cheap/fast option for iterating on prompts before
-# committing to a real batch.
-DEFAULT_MODEL = "claude-fable-5"
+# Default Anthropic model. Opus 4.7 is the default (June 2026, Zach's call):
+# near-Fable prose at half Fable's price. Callers (admin panel, scripts) can
+# override `model`: Fable 5 (a tier above Opus, 2x price, adaptive thinking +
+# max effort applied automatically) for the highest-quality prose, Sonnet 4.6
+# as the cheap/fast option for iterating on prompts before a real batch.
+DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
 DEFAULT_MAX_TOKENS = 2000                  # 4 short options + a multi-paragraph explanation
 GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"

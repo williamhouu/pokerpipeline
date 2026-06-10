@@ -127,11 +127,12 @@ from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E40
 
 # Map admin-panel model-radio labels to Anthropic API model identifiers.
 # Display strings stay human-readable; the API call needs the ID string.
-# Fable 5 first = the default everywhere (highest-quality explanations:
-# adaptive thinking + max effort are applied automatically by the pipeline).
+# Opus 4.7 first = the default everywhere (June 2026): near-Fable prose at
+# half the price. Fable 5 stays selectable for maximum quality (adaptive
+# thinking + max effort are applied automatically by the pipeline).
 _MODEL_LABEL_TO_API: dict[str, str] = {
+    "Opus 4.7 (high fidelity, the default)": "claude-opus-4-7",
     "Fable 5 (best quality, 2× Opus price)": "claude-fable-5",
-    "Opus 4.7 (high fidelity)": "claude-opus-4-7",
     "Sonnet 4.6 (cheapest, fastest)": "claude-sonnet-4-6",
 }
 
@@ -883,8 +884,9 @@ def render_generate_page() -> None:
             "Model",
             options=list(_MODEL_LABEL_TO_API),
             index=0,
-            help="Fable 5 for the highest-quality explanations (the default), "
-            "Opus 4.7 at half the price, Sonnet 4.6 for cheap experimentation.",
+            help="Opus 4.7 is the default (near-Fable prose at half the "
+            "price); Fable 5 for the highest-quality explanations, Sonnet 4.6 "
+            "for cheap experimentation.",
         )
         if "Fable" in model:
             st.caption(_FABLE_NOTE)
@@ -1261,7 +1263,7 @@ def _render_generate_page_preflop() -> None:
         _model = st.radio(
             "Model",
             options=list(_MODEL_LABEL_TO_API),
-            index=0,  # Fable 5 -- highest-quality explanations by default
+            index=0,  # Opus 4.7 -- the default model
             key="preflop_model",
         )
         if "Fable" in _model:
@@ -3831,7 +3833,8 @@ _PLO_DIFFICULTY_BANDS = {
     "Hard": (2100, 3200),
     "Mixed": (400, 3200),
 }
-_PLO_MODELS = ["claude-fable-5", "claude-opus-4-7", "claude-sonnet-4-6"]
+# Opus first = the default in every PLO picker (Generate + both Compare sides).
+_PLO_MODELS = ["claude-opus-4-7", "claude-fable-5", "claude-sonnet-4-6"]
 _PLO_MODEL_NAMES = {
     "claude-fable-5": "Fable 5 (best quality, 2x Opus price)",
     "claude-opus-4-7": "Opus 4.7 (high fidelity)",
@@ -4143,7 +4146,7 @@ def render_plo_generate_page() -> None:
     model = ms1.selectbox(
         "Model",
         options=_PLO_MODELS,
-        index=_PLO_MODELS.index("claude-fable-5"),  # default to the best model
+        index=_PLO_MODELS.index("claude-opus-4-7"),  # the default model
         format_func=lambda m: _PLO_MODEL_NAMES.get(m, m),
     )
     _is_fable = "fable" in model
