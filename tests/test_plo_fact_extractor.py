@@ -167,6 +167,37 @@ def test_non_bb_no_raise_is_not_bb_check():
     assert _classify(spot, None) != "bb_check"
 
 
+def test_sb_completing_first_in_is_sb_complete_not_open_fold():
+    # The SB first-in calling is COMPLETING the half bet (a limp), neither an
+    # open nor a fold -- "open_fold" handed the LLM a fold frame for a Call
+    # answer (the EASYYYYY batch row 1 bug).
+    spot = _spot(
+        history=(),
+        options=((F, None), (C, None), (R, 100)),
+        dominant=(C, None),
+        hero_cards=TRASH_CARDS,
+        actor="SB",
+    )
+    assert _classify(spot, None) == "sb_complete"
+    # SB folding or raising first-in keeps the normal open labels.
+    fold_spot = _spot(
+        history=(),
+        options=((F, None), (C, None), (R, 100)),
+        dominant=(F, None),
+        hero_cards=TRASH_CARDS,
+        actor="SB",
+    )
+    assert _classify(fold_spot, None) == "open_fold"
+    raise_spot = _spot(
+        history=(),
+        options=((F, None), (C, None), (R, 100)),
+        dominant=(R, 100),
+        hero_cards=VALUE_CARDS,
+        actor="SB",
+    )
+    assert _classify(raise_spot, None) == "open_for_value"
+
+
 def test_3bet_value_vs_bluff():
     history = (_act("LJ", R, 100),)
     opts = ((F, None), (C, None), (R, 100))

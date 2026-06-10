@@ -324,10 +324,15 @@ def classify_plo_archetype(
 
     # No raise faced. Only the BB can reach here without a bet to call -- they
     # posted the blind, so a limped/checked-around pot leaves them a CHECK, not
-    # an open-fold. Everyone else here is genuinely first-in (open / open-fold).
+    # an open-fold. The SB first-in can CALL too: completing the half bet (a
+    # limp), which is neither an open nor a fold -- labelling it "open_fold"
+    # handed the LLM a fold frame for a Call answer. Everyone else here is
+    # genuinely first-in (open / open-fold).
     if villain_action is None:
         if spot.node.actor == "BB" and dominant is PloActionType.CALL:
             return "bb_check"
+        if spot.node.actor == "SB" and dominant is PloActionType.CALL:
+            return "sb_complete"
         if dominant in (PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN):
             return "open_for_value"
         return "open_fold"

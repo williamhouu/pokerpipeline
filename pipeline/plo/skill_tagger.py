@@ -97,7 +97,9 @@ def from_plo_facts(facts: PloFacts) -> PloSkillContext:
 # --- catalog ---------------------------------------------------------------
 SkillRule = Callable[[PloSkillContext], bool]
 
-_OPEN = frozenset({"open_for_value", "open_fold"})
+# sb_complete is a first-in decision too: completing the half bet is the
+# hand-selection lesson, same family as opening or open-folding.
+_OPEN = frozenset({"open_for_value", "open_fold", "sb_complete"})
 _RIO_TRAP_SHAPES = frozenset({"bare_ace", "low_cards", "has_dangler"})
 _3BET = frozenset({"3bet_for_value", "3bet_as_bluff"})
 _4BET = frozenset({"4bet_for_value", "4bet_as_bluff"})

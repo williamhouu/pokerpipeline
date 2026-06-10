@@ -151,6 +151,7 @@ PLO_ARCHETYPE_GUIDANCE: dict[str, str] = {
     "open_for_value": "First in with a hand worth opening; frame around its shape and position.",
     "open_fold": "First in with a hand below the opening threshold; frame around position discipline.",
     "bb_check": "In the big blind with the pot limped to you and no raise to face, so there is nothing to call -- the choice is to check or raise. Checking takes the free option; the raise is reserved for hands that genuinely want to build the pot out of position. Frame around why this hand prefers to check rather than raise, and say CHECK, never call.",
+    "sb_complete": "First in from the small blind, completing the half bet rather than raising or open-folding. Frame around the discounted price and why this hand prefers seeing a cheap flop to raising out of position -- it is a call of half a blind, not a fold and not a check.",
     "fold_dominated": "Facing aggression with a hand too weak or non-nut to continue; frame around the missing equity and playability.",
     "fold_pot_odds": "A playable hand that is still priced out; frame around pot odds, realization, and reverse implied odds.",
     "call_for_value": "Calling with a strong hand that prefers a controlled pot to a re-raise; frame around strength and position.",
