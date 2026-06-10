@@ -18,6 +18,7 @@ from pipeline.plo.hand_model import (  # noqa: E402
     classify_plo_hand,
     describe_card_redundancy,
     describe_flush_potential,
+    describe_suit_redundancy,
     flush_suits,
 )
 
@@ -254,3 +255,27 @@ def test_no_redundancy_for_pairs_or_unpaired():
     assert describe_card_redundancy("Ac Ad 9h 9s") is None  # two pair
     assert describe_card_redundancy("Ac Ad Kh 9s") is None  # one pair
     assert describe_card_redundancy("Ac Kd Qh Js") is None  # unpaired
+
+
+# --- suit redundancy (3+ of one suit -> dead flush card) --------------------
+def test_three_suited_has_one_dead_suit_card():
+    # The KQJT failure hand: three diamonds, only two can ever play.
+    text = describe_suit_redundancy("Jc Td Qd Kd")
+    assert text is not None
+    assert "three diamonds" in text
+    assert "third diamond is a dead card" in text
+
+
+def test_monotone_has_two_dead_suit_cards():
+    text = describe_suit_redundancy("As Ks Qs Js")
+    assert text is not None
+    assert "all four of your cards are spades" in text
+    assert "two are dead cards" in text
+
+
+def test_no_suit_redundancy_for_two_or_fewer_per_suit():
+    assert describe_suit_redundancy("As Ks Ah Kh") is None  # double-suited
+    assert describe_suit_redundancy("As Kh Qd Jc") is None  # rainbow
+    assert describe_suit_redundancy("As Ks Qh Jd") is None  # single-suited
+    # Trips are rank redundancy, never suit redundancy (three suits occupied).
+    assert describe_suit_redundancy("9c Ad Ah As") is None

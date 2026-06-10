@@ -469,3 +469,33 @@ def describe_card_redundancy(hand: object) -> str | None:
                 f"remains in the deck -- this hand can never flop a set."
             )
     return None
+
+
+def describe_suit_redundancy(hand: object) -> str | None:
+    """Deterministic dead-suit-card note for three-suited/monotone hands.
+
+    A flush only ever uses two hole cards, so a third (or fourth) card of one
+    suit is a dead card that also removes the hand's own flush outs from the
+    deck. Stated here so Layer 6 reports the real structural flaw instead of
+    inventing one (e.g. calling a connected card "a dangler"). ``None`` for
+    rainbow / single-suited / double-suited hands -- no suit redundancy to
+    report. Mutually exclusive with :func:`describe_card_redundancy` (trips
+    occupy three different suits, quads four).
+    """
+    cards = _normalize(hand)
+    suit_counts = Counter(card_suit(c) for c in cards)
+    for suit, count in suit_counts.items():
+        word = _SUIT_CHAR_WORD[suit]
+        if count == 3:  # noqa: PLR2004
+            return (
+                f"you hold three {word} but a flush only ever uses two hole "
+                f"cards, so the third {word[:-1]} is a dead card that also "
+                f"removes one of your own flush outs from the deck."
+            )
+        if count == 4:  # noqa: PLR2004
+            return (
+                f"all four of your cards are {word} but a flush only ever "
+                f"uses two hole cards, so two are dead cards, and they remove "
+                f"two of your own flush outs from the deck."
+            )
+    return None

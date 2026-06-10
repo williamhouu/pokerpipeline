@@ -351,3 +351,61 @@ def test_unconverged_noise_gets_no_note():
         "Call",
     )
     assert "ev_note" not in data
+
+
+# --- suit_redundancy in the data block + the shape-claim audit ---------------
+def test_solver_data_carries_suit_redundancy_for_three_suited():
+    import dataclasses
+
+    facts = _facts()
+    spot = dataclasses.replace(facts.spot, hero_cards=("Jc", "Td", "Qd", "Kd"))
+    facts3 = dataclasses.replace(
+        facts, spot=spot, hand_class=classify_plo_hand(("Jc", "Td", "Qd", "Kd"))
+    )
+    data = build_solver_data(facts3, ["Fold", "Call"], "Fold")
+    assert "third diamond is a dead card" in data["suit_redundancy"]
+    # The double-suited fixture hand carries no such key.
+    assert "suit_redundancy" not in build_solver_data(_facts(), ["Fold", "Call"], "Fold")
+
+
+def test_shape_claim_audit_flags_invented_dangler():
+    from pipeline.plo.explanation_generator import _shape_claim_errors
+
+    hand = classify_plo_hand(("Jc", "Td", "Qd", "Kd"))  # rundown, NO dangler
+    assert _shape_claim_errors(
+        "Fold. The K on top is largely a dangler because it overlaps what "
+        "you already cover.",
+        hand,
+    ) == ["dangler"]
+    # Negated mention is fine.
+    assert _shape_claim_errors("Fold. Your hand has no dangler.", hand) == []
+    # True claims are fine.
+    assert _shape_claim_errors("Fold. Your three-suited hand is weak.", hand) == []
+
+
+def test_shape_claim_audit_ignores_villain_sentences():
+    from pipeline.plo.explanation_generator import _shape_claim_errors
+
+    rainbow = classify_plo_hand(("As", "Kh", "Qd", "Jc"))
+    # Villain-range prose may say double-suited freely.
+    assert _shape_claim_errors(
+        "Fold. His range is full of double-suited hands and big pairs.",
+        rainbow,
+    ) == []
+    # But a hero claim of double-suited on a rainbow hand is flagged.
+    assert _shape_claim_errors(
+        "Call. Your double-suited shape plays well here.", rainbow
+    ) == ["double-suited"]
+
+
+def test_invented_dangler_triggers_a_retry():
+    # CARDS is double-suited AAKK -- no dangler. First attempt invents one;
+    # the clean retry is accepted.
+    client = _MockClient(
+        _json("Call. Your hand has a dangler that weakens it badly."),
+        _json("Call. Your double-suited aces play well in position."),
+    )
+    result = generate_plo_answer_explanation(
+        _facts(), ["Fold", "Call"], "Call", client=client, examples=()
+    )
+    assert "dangler" not in result.answer_explanation

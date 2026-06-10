@@ -42,7 +42,12 @@ from pipeline.explanation_generator import (
 from pipeline.plo.action_history import format_plo_action_history, resolve_pot_limit
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.gold_examples import load_plo_gold_examples
-from pipeline.plo.hand_model import describe_card_redundancy, describe_flush_potential
+from pipeline.plo.hand_model import (
+    PloHandClass,
+    describe_card_redundancy,
+    describe_flush_potential,
+    describe_suit_redundancy,
+)
 from pipeline.plo.options import (
     canonicalize_action_label,
     canonicalize_strategy,
@@ -341,6 +346,9 @@ def build_solver_data(
     redundancy = describe_card_redundancy(facts.spot.hero_cards)
     if redundancy is not None:
         data["card_redundancy"] = redundancy
+    suit_redundancy = describe_suit_redundancy(facts.spot.hero_cards)
+    if suit_redundancy is not None:
+        data["suit_redundancy"] = suit_redundancy
     eq = _pct(facts.hero_equity_vs_villain)
     if eq is not None:
         data["your_hand_equity_vs_villain_range_pct"] = eq
@@ -435,6 +443,58 @@ def _fabricated_cards(prose: str, hero_cards: tuple[str, ...]) -> list[str]:
         if suit is not None and (rank.upper(), suit) not in held and token not in out:
             out.append(token)
     return out
+
+
+# --- shape-claim audit -------------------------------------------------------
+# The LLM occasionally invents a structural flaw to rationalize the solver's
+# answer -- e.g. calling the K in a K-Q-J-T rundown "a dangler" when the data
+# block says rundown / no dangler. These claims are checkable against the
+# deterministic PloHandClass, so contradictions reject + retry like the
+# card-fabrication audit. Only HERO-claim sentences are audited (must mention
+# you/your, no villain/seat reference) -- villain-range prose like "his range
+# is full of double-suited hands" must never be flagged.
+_SHAPE_CLAIMS: tuple[tuple[str, str], ...] = (
+    # (regex for the claim word, PloHandClass attribute/value it asserts)
+    (r"danglers?", "has_dangler"),
+    (r"double[ -]suited", "double_suited"),
+    (r"three[ -]suited", "three_suited"),
+    (r"rainbow", "rainbow"),
+    (r"monotone", "monotone"),
+)
+_NEGATION_RE = r"(?:no|not|never|without|isn't|aren't|lacks?|lacking|avoid\w*|rather than|instead of)[^.!?]{0,24}"
+_HERO_RE = re.compile(r"\b(?:you|your|yours)\b", re.IGNORECASE)
+_VILLAIN_RE = re.compile(
+    r"\b(?:his|hers?|their|they|he|she|villain|opponent|opener|raiser|"
+    r"lojack|hijack|cutoff|button|small blind|big blind|lj|hj|co|bu|sb|bb)\b",
+    re.IGNORECASE,
+)
+
+
+def _claim_is_true(hand: PloHandClass, key: str) -> bool:
+    if key == "has_dangler":
+        return hand.has_dangler
+    return hand.suit_pattern == key
+
+
+def _shape_claim_errors(prose: str, hand: PloHandClass) -> list[str]:
+    """Shape words the prose asserts about HERO's hand that the deterministic
+    classifier says are false. Negated mentions ("no dangler") and sentences
+    about the villain are never flagged -- precision over recall."""
+    errors: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", prose):
+        if not _HERO_RE.search(sentence) or _VILLAIN_RE.search(sentence):
+            continue
+        low = sentence.lower()
+        for word_re, key in _SHAPE_CLAIMS:
+            if _claim_is_true(hand, key):
+                continue
+            mentions = len(re.findall(word_re, low))
+            negated = len(re.findall(_NEGATION_RE + word_re, low))
+            if mentions > negated:
+                label = word_re.replace(r"[ -]", "-").replace("s?", "")
+                if label not in errors:
+                    errors.append(label)
+    return errors
 
 
 def _parse(text: str) -> str:
@@ -561,6 +621,16 @@ def generate_plo_answer_explanation(
                     f"named card(s) not in your hand: {', '.join(fabricated)}. "
                     f"Your exact hand is {hand} -- use only those four cards, "
                     "and prefer describing the shape over reciting cards."
+                )
+                raise ExplanationValidationError(msg)
+            shape_errors = _shape_claim_errors(prose, facts.hand_class)
+            if shape_errors:
+                msg = (
+                    "the explanation misstates the hand's shape: it claims "
+                    f"{', '.join(shape_errors)} but the hand is actually "
+                    f"'{facts.hand_class.descriptor}'. Describe the shape "
+                    "using only the your_hand_shape, card_redundancy, and "
+                    "suit_redundancy facts."
                 )
                 raise ExplanationValidationError(msg)
             return GeneratedExplanation(
