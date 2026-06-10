@@ -43,7 +43,12 @@ from pipeline.plo.action_history import format_plo_action_history, resolve_pot_l
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.gold_examples import load_plo_gold_examples
 from pipeline.plo.hand_model import describe_card_redundancy, describe_flush_potential
-from pipeline.plo.options import canonicalize_strategy
+from pipeline.plo.options import (
+    canonicalize_action_label,
+    canonicalize_strategy,
+    is_check_spot,
+)
+from pipeline.plo.pack import PloActionType
 from pipeline.plo.position import hero_relative_position
 from pipeline.plo.spot_tags import compute_plo_concept_tags
 
@@ -225,6 +230,68 @@ def _villain_action_phrase(facts: PloFacts) -> str:
     return facts.villain_stats.action_label
 
 
+# --- the pure-spot EV note ---------------------------------------------------
+# Only a TRULY pure spot gets an EV sentence: if the solver mixes at all (even
+# 99/1), equilibrium indifference means the mixed actions are equal in EV and a
+# measured "gap" is noise. Purity is the raw frequency (display rounds, so a
+# shown "100%" can really be 99.6 -- that spot correctly gets no note).
+_PURE_FREQ = 0.9999
+_EV_NOTE_MIN_GAP_BB = 0.3  # below this, "loses about 0.1bb" is fake precision
+_SB_PER_BB = 2  # this pack: SB = 1 chip, BB = 2 (mirrors fact_extractor)
+_GERUND = {
+    "Fold": "folding",
+    "Call": "calling",
+    "Check": "checking",
+    "Raise": "raising",
+    "3-bet": "3-betting",
+    "4-bet": "4-betting",
+    "5-bet": "5-betting",
+    "All-in": "moving all-in",
+}
+
+
+def _ev_note(facts: PloFacts) -> str | None:
+    """A deterministic 'the alternative loses X bb' sentence, or ``None``.
+
+    Emitted only when: the spot is truly pure (raw dominant frequency >=
+    :data:`_PURE_FREQ`), the best ALTERNATIVE action genuinely loses at least
+    :data:`_EV_NOTE_MIN_GAP_BB` vs the dominant one, and the EVs are sane
+    (an alternative "beating" the pure action = unconverged noise, no note).
+    Wording branches on the node's menu: with one alternative it is "the
+    only alternative"; with several, "even the best alternative ... and the
+    other options lose more" (every other option loses at least as much by
+    construction).
+    """
+    spot = facts.spot
+    if spot.dominant_frequency < _PURE_FREQ:
+        return None
+    evs = spot.ev_by_action
+    dominant_ev = evs.get(spot.dominant_action)
+    alternatives = {lbl: ev for lbl, ev in evs.items() if lbl != spot.dominant_action}
+    if dominant_ev is None or not alternatives:
+        return None
+    best_alt_label = max(alternatives, key=lambda lbl: alternatives[lbl])
+    loss_bb = (dominant_ev - alternatives[best_alt_label]) / _SB_PER_BB
+    if loss_bb < _EV_NOTE_MIN_GAP_BB:
+        return None
+    raise_level = 1 + sum(
+        1
+        for a in spot.node.history_before
+        if a.action
+        in (PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN)
+    )
+    canon = canonicalize_action_label(
+        best_alt_label, raise_level=raise_level, check_spot=is_check_spot(facts)
+    )
+    verb = _GERUND.get(canon, canon.lower())
+    if len(alternatives) == 1:
+        return f"the only alternative, {verb}, loses about {loss_bb:.1f}bb per hand."
+    return (
+        f"even the best alternative, {verb}, loses about {loss_bb:.1f}bb per "
+        "hand, and the other options lose more."
+    )
+
+
 def build_solver_data(
     facts: PloFacts,
     options: list[str],
@@ -237,6 +304,12 @@ def build_solver_data(
     ``include_skills`` adds the tagged user-facing skills as a
     ``skills_this_spot_tests`` field -- OFF by default; it exists so the admin
     Compare page can A/B "does naming the skills help the prose?" head-to-head.
+
+    The raw ``ev_gap_bb`` is deliberately NOT in the block: at any genuinely
+    mixed spot (even 99/1) equilibrium indifference means the gap between the
+    mixed actions is ~0, so a nonzero number there is solver noise the LLM
+    would misquote. Truly pure spots instead get a translated ``ev_note``
+    sentence (see :func:`_ev_note`).
     """
     from pipeline.plo.skill_tagger import compute_plo_skills  # noqa: PLC0415
     hand = facts.hand_class
@@ -261,10 +334,10 @@ def build_solver_data(
             f"{PLO_ARCHETYPE_GUIDANCE.get(facts.archetype, '')}"
         ),
         "concept_tags": compute_plo_concept_tags(facts),
-        "ev_gap_bb": (
-            round(facts.ev_gap_bb, 2) if facts.ev_gap_bb is not None else None
-        ),
     }
+    ev_note = _ev_note(facts)
+    if ev_note is not None:
+        data["ev_note"] = ev_note
     redundancy = describe_card_redundancy(facts.spot.hero_cards)
     if redundancy is not None:
         data["card_redundancy"] = redundancy

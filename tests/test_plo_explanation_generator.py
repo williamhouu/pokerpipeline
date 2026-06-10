@@ -269,3 +269,85 @@ def test_solver_data_carries_card_redundancy_for_trips_only():
     trips_facts = dataclasses.replace(facts, spot=trips_spot)
     data = build_solver_data(trips_facts, ["Fold", "Call"], "Fold")
     assert "ONE of the three is redundant" in data["card_redundancy"]
+
+
+# --- ev_note (pure spots only; mixed spots carry NO EV number at all) -------
+def _facts_with(freqs, evs, history=None):
+    node = PloDecisionNode(
+        actor="HJ",
+        history_before=history
+        if history is not None
+        else (PloAction("LJ", PloActionType.RAISE, 100),),
+        actions=(),
+        history_stem="40100",
+    )
+    spot = PloSpot(
+        node=node, hero_index=0, hero_label="x", hero_cards=CARDS,
+        action_frequencies=freqs, ev_by_action=evs, presence=1.0,
+    )
+    return PloFacts(spot=spot, hand_class=classify_plo_hand(CARDS), archetype="")
+
+
+def test_mixed_spot_carries_no_ev_at_all():
+    # Even a 99/1 spot: a genuine mix means the actions are ~equal in EV, so
+    # neither the raw gap nor an ev_note belongs in the block.
+    data = build_solver_data(
+        _facts_with({"Call": 0.99, "Fold": 0.01}, {"Call": 2.0, "Fold": 1.0}),
+        ["Fold", "Call"],
+        "Call",
+    )
+    assert "ev_gap_bb" not in data
+    assert "ev_note" not in data
+
+
+def test_pure_spot_with_three_actions_gets_best_alternative_note():
+    # Pure call; alternatives are a 3-bet (best alt) and a fold. Loss =
+    # (2.0 - 1.0) sb / 2 = 0.5bb.
+    data = build_solver_data(
+        _facts_with(
+            {"Call": 1.0, "Raise 100%": 0.0, "Fold": 0.0},
+            {"Call": 2.0, "Raise 100%": 1.0, "Fold": -7.0},
+        ),
+        ["Fold", "Call", "3-bet"],
+        "Call",
+    )
+    assert data["ev_note"] == (
+        "even the best alternative, 3-betting, loses about 0.5bb per hand, "
+        "and the other options lose more."
+    )
+
+
+def test_pure_spot_with_two_actions_says_only_alternative():
+    # An open node offers just fold/raise -> "the only alternative" is right.
+    data = build_solver_data(
+        _facts_with(
+            {"Raise 100%": 1.0, "Fold": 0.0},
+            {"Raise 100%": 3.0, "Fold": 0.0},
+            history=(),
+        ),
+        ["Fold", "Raise"],
+        "Raise",
+    )
+    assert data["ev_note"] == (
+        "the only alternative, folding, loses about 1.5bb per hand."
+    )
+
+
+def test_pure_spot_with_tiny_gap_gets_no_note():
+    # 0.1sb = 0.05bb gap: stating it would be fake precision.
+    data = build_solver_data(
+        _facts_with({"Call": 1.0, "Fold": 0.0}, {"Call": 1.0, "Fold": 0.9}),
+        ["Fold", "Call"],
+        "Call",
+    )
+    assert "ev_note" not in data
+
+
+def test_unconverged_noise_gets_no_note():
+    # An "alternative" with HIGHER EV than the pure action is solver noise.
+    data = build_solver_data(
+        _facts_with({"Call": 1.0, "Fold": 0.0}, {"Call": 1.0, "Fold": 5.0}),
+        ["Fold", "Call"],
+        "Call",
+    )
+    assert "ev_note" not in data
