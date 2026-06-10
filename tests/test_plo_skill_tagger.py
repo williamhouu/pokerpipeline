@@ -27,6 +27,7 @@ AAKK_DS = ("As", "Ks", "Ah", "Kh")  # pocket aces, double-suited, suited ace
 DS_RUNDOWN = ("Ts", "9s", "8h", "7h")  # double-suited unpaired rundown, no ace
 BARE_ACE = ("Ac", "5d", "8h", "Js")  # an ace with no nut-flush / connection
 LOW_CARDS = ("2c", "4d", "5h", "6s")  # all low -> non-nut everything
+QQTK_SS = ("Qc", "Qd", "Th", "Kh")  # broadway + pair, but K-high suit (non-nut)
 
 
 def _act(seat: str, atype: PloActionType, pct: int | None = None) -> PloAction:
@@ -181,8 +182,51 @@ def test_nuttedness_on_bare_ace_and_low_cards():
     )
 
 
-def test_reverse_implied_odds_on_speculative_nonnut_call():
+def test_reverse_implied_odds_fires_on_nonnut_fold():
+    # The RIO lesson lives on the fold: a playable-LOOKING hand priced out
+    # because its components are non-nut (K-high suit, no suited ace).
     skills = compute_plo_skills(
+        _facts(
+            archetype="fold_pot_odds",
+            hero_cards=QQTK_SS,
+            history=(_act("HJ", R, 100), _act("SB", C), _act("BB", R, 100)),
+            actor="SB",
+            freqs={"Fold": 0.95, "Call": 0.05},
+        )
+    )
+    assert "Reverse Implied Odds" in skills
+    assert "Implied Odds" not in skills  # disjoint by construction
+
+
+def test_reverse_implied_odds_not_on_nut_component_fold():
+    # A suited-ace hand folding on price alone: its components are nutted,
+    # so the fold teaches pot odds, not reverse implied odds.
+    skills = compute_plo_skills(
+        _facts(
+            archetype="fold_pot_odds",
+            hero_cards=AAKK_DS,  # suited aces -> nut_flush_potential
+            history=(_act("LJ", R, 100),),
+            freqs={"Fold": 1.0},
+        )
+    )
+    assert "Reverse Implied Odds" not in skills
+
+
+def test_reverse_implied_odds_not_on_trash_folds_or_calls():
+    # fold_dominated (a trash fold) is hand selection, not an RIO lesson.
+    trash = compute_plo_skills(
+        _facts(
+            archetype="fold_dominated",
+            hero_cards=LOW_CARDS,
+            history=(_act("LJ", R, 100),),
+            freqs={"Fold": 1.0},
+        )
+    )
+    assert "Reverse Implied Odds" not in trash
+    # Speculative calls fire Implied Odds ONLY, even with a trap shape --
+    # there RIO fear pushes toward the WRONG answer, and the trap pedagogy
+    # is carried by the hand-reading skills (e.g. Nuttedness, Danglers).
+    trappy_call = compute_plo_skills(
         _facts(
             archetype="call_for_implied_odds",
             hero_cards=BARE_ACE,
@@ -190,11 +234,11 @@ def test_reverse_implied_odds_on_speculative_nonnut_call():
             freqs={"Call": 1.0},
         )
     )
-    assert "Reverse Implied Odds" in skills
+    assert "Implied Odds" in trappy_call
+    assert "Reverse Implied Odds" not in trappy_call
 
 
-def test_implied_odds_fires_on_speculative_call_and_pairs_with_reverse():
-    # A well-shaped speculative call fires Implied Odds, NOT Reverse.
+def test_implied_odds_fires_on_speculative_call():
     good = compute_plo_skills(
         _facts(
             archetype="call_for_implied_odds",
@@ -205,17 +249,6 @@ def test_implied_odds_fires_on_speculative_call_and_pairs_with_reverse():
     )
     assert "Implied Odds" in good
     assert "Reverse Implied Odds" not in good
-    # A trappy (non-nut) speculative call fires BOTH lenses, like NLHE.
-    trappy = compute_plo_skills(
-        _facts(
-            archetype="call_for_implied_odds",
-            hero_cards=BARE_ACE,
-            history=(_act("LJ", R, 100),),
-            freqs={"Call": 1.0},
-        )
-    )
-    assert "Implied Odds" in trappy
-    assert "Reverse Implied Odds" in trappy
 
 
 def test_nut_blockers_fire_on_aggressive_spot_with_a_blocker():

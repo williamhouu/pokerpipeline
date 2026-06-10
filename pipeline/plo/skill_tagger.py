@@ -98,6 +98,7 @@ def from_plo_facts(facts: PloFacts) -> PloSkillContext:
 SkillRule = Callable[[PloSkillContext], bool]
 
 _OPEN = frozenset({"open_for_value", "open_fold"})
+_RIO_TRAP_SHAPES = frozenset({"bare_ace", "low_cards", "has_dangler"})
 _3BET = frozenset({"3bet_for_value", "3bet_as_bluff"})
 _4BET = frozenset({"4bet_for_value", "4bet_as_bluff"})
 _SQUEEZE = frozenset({"squeeze_for_value", "squeeze_as_bluff"})
@@ -179,14 +180,25 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     # --- C: math / dynamics ---
     # Implied odds: calling a well-shaped speculative hand for the big pots you
     # win when it connects. The call_for_implied_odds archetype IS this
-    # decision; matches the NLHE 'Implied Odds' skill. The positive counterpart
-    # to reverse implied odds (both fire on a trappy speculative call).
+    # decision; matches the NLHE 'Implied Odds' skill.
     "Implied Odds": lambda c: c.archetype == "call_for_implied_odds",
-    # Reverse implied odds: calling speculatively with a non-nut hand that can
-    # make second-best hands (the classic PLO money-loser).
+    # Reverse implied odds: folding a playable-LOOKING hand because its
+    # components are non-nut -- second-best flushes (suited with no ace) or a
+    # trap shape -- the classic PLO money-loser. Tagged where the insight
+    # actually drives the decision: the fold. It deliberately does NOT fire on
+    # speculative calls (there RIO fear pushes toward the WRONG answer, and the
+    # trap-shape pedagogy is already carried by the hand-reading skills), so
+    # it is disjoint from Implied Odds by construction. fold_dominated stays
+    # excluded: trash folding is hand selection, not an RIO lesson.
     "Reverse Implied Odds": lambda c: (
-        c.archetype == "call_for_implied_odds"
-        and bool(c.tags & {"bare_ace", "low_cards", "has_dangler"})
+        c.archetype == "fold_pot_odds"
+        and (
+            bool(c.tags & _RIO_TRAP_SHAPES)
+            or (
+                bool(c.tags & {"single_suited", "double_suited"})
+                and "nut_flush_potential" not in c.tags
+            )
+        )
     ),
     # Pot-limit bet sizing is only a *decision* when the tree offers more than
     # one raise size. This pack has a single pot-sized raise, so it stays off
@@ -291,7 +303,10 @@ SKILL_META: dict[str, PloSkillMeta] = {
         "it connects -- the positive counterpart to reverse implied odds.",
     ),
     "Reverse Implied Odds": PloSkillMeta(
-        CATEGORY_C, "Speculative calls with a non-nut hand that tends to make second-best hands."
+        CATEGORY_C,
+        "Folding a playable-looking hand because it tends to make second-best "
+        "hands (non-nut suits, trap shapes). Disjoint from Implied Odds: each "
+        "fires only where it drives the decision.",
     ),
     "Pot-Limit Bet Sizing": PloSkillMeta(
         CATEGORY_C,
