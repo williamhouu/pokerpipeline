@@ -807,7 +807,10 @@ def parse_response(text: str) -> GeneratedExplanation:
                 f"no JSON object in LLM response: {text!r}")
         cleaned = cleaned[start:end + 1]
     try:
-        data = json.loads(cleaned)
+        # strict=False: accept raw control characters (literal newlines)
+        # inside string values -- models writing multi-line explanations
+        # sometimes emit them unescaped, and the newline IS the wanted prose.
+        data = json.loads(cleaned, strict=False)
     except json.JSONDecodeError as exc:
         raise ExplanationValidationError(
             f"LLM response was not valid JSON: {exc}") from exc

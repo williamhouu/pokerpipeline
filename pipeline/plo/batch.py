@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 
 _AGGRESSIVE = {PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN}
 _MIN_PRESENCE = 0.5
+# Abort the batch after this many explanation failures IN A ROW (resets on
+# success): occasional failures backfill, a systemic one must not burn spend
+# across the whole spot pool.
+_MAX_CONSECUTIVE_FAILURES = 5
 _WORTHY_TRIES = 800  # random hands to try per node when hunting
 
 
@@ -160,11 +164,13 @@ def generate_plo_batch(
 
     When ``generate_explanations`` is True, Layer 6 (the LLM) fills the
     ``Answer Explanation`` column per spot; otherwise it is left blank (the
-    deterministic path, no API key needed). A failed explanation never drops the
-    question -- the row still ships with a blank explanation and is counted in
-    ``explanations_failed``. ``explanation_system_prompt`` (when set) overrides
-    the built-in Layer 6 system prompt verbatim -- the admin prompt library +
-    Compare page pass an edited prompt here.
+    deterministic path, no API key needed). A failed explanation DROPS the
+    question from the CSV (a blank-explanation row is not shippable) and is
+    counted in ``explanations_failed`` with its reason; the round-robin keeps
+    drawing, so the batch backfills toward ``total_questions`` with other
+    spots. ``explanation_system_prompt`` (when set) overrides the built-in
+    Layer 6 system prompt verbatim -- the admin prompt library + Compare page
+    pass an edited prompt here.
     """
     nodes = enumerate_plo_nodes(pack)
     rng = random.Random(seed)
@@ -204,10 +210,16 @@ def generate_plo_batch(
     # a rejected hand isn't redrawn forever); the loop ends when a full
     # pass draws nothing new.
     drawn: dict[str, set[int]] = {}
-    while len(rows) < total_questions:
+    # Circuit breaker for the drop-and-backfill failure handling: a systemic
+    # problem (API outage, broken prompt edit) would otherwise burn API spend
+    # across the ENTIRE spot pool chasing total_questions. Scattered failures
+    # backfill fine; this many in a row with no success aborts the batch.
+    consecutive_failures = 0
+    aborted = False
+    while len(rows) < total_questions and not aborted:
         drew_this_pass = False
         for node in candidates:
-            if len(rows) >= total_questions:
+            if len(rows) >= total_questions or aborted:
                 break
             scanned += 1
             spot = _first_worthy_spot(
@@ -260,15 +272,32 @@ def generate_plo_batch(
                     )
                     explanation = generated.answer_explanation
                     explanations_written += 1
+                    consecutive_failures = 0
                 except (ExplanationValidationError, OSError, KeyError) as exc:
+                    # A failed explanation DROPS the question from the CSV --
+                    # a blank-explanation row is not shippable. The failure is
+                    # still counted + reported (the Generate page's failure
+                    # expander), and the round-robin keeps drawing, so the
+                    # batch backfills toward total_questions with other spots
+                    # instead of shipping a hole.
                     explanations_failed += 1
+                    consecutive_failures += 1
                     cards = " ".join(spot.hero_cards)
                     explanation_failure_reasons.append(
                         f"{type(exc).__name__} ({cards}): {exc}"
                     )
                     logger.warning(
-                        "Layer 6 failed for a spot, shipping blank: %s", exc
+                        "Layer 6 failed for a spot, dropping the question: %s",
+                        exc,
                     )
+                    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                        logger.error(
+                            "Aborting batch: %d consecutive explanation "
+                            "failures (systemic problem, not bad luck).",
+                            consecutive_failures,
+                        )
+                        aborted = True
+                    continue
 
             rows.append(
                 build_plo_row(

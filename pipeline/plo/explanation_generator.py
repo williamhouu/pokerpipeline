@@ -545,7 +545,12 @@ def _parse(text: str) -> str:
             raise ExplanationValidationError(f"no JSON object in response: {text!r}")
         cleaned = cleaned[start : end + 1]
     try:
-        data = json.loads(cleaned)
+        # strict=False: accept raw control characters inside the string.
+        # Models writing multi-line explanations (the factor-list prompt's
+        # verdict + "- " lines) sometimes emit literal newlines instead of
+        # \n inside the JSON value; that is exactly the prose we want, not a
+        # reason to burn the attempt ("Invalid control character at ...").
+        data = json.loads(cleaned, strict=False)
     except json.JSONDecodeError as exc:
         raise ExplanationValidationError(f"response was not valid JSON: {exc}") from exc
     prose = data.get("answer_explanation")

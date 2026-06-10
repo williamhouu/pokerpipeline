@@ -215,22 +215,68 @@ class _JunkClient:
         self.messages = _JunkMessages()
 
 
-def test_batch_records_explanation_failure_reasons(tmp_path):
-    # A response that never validates ships blank AND records a reason, so the
-    # UI can show WHY instead of just a count.
+def test_failed_explanations_drop_the_row_and_trip_the_breaker(tmp_path):
+    # A response that never validates DROPS the question (no blank-explanation
+    # rows in the CSV), records each reason for the UI, and -- since every
+    # attempt fails -- the consecutive-failure circuit breaker aborts the
+    # batch instead of burning spend across the whole spot pool.
     pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
     result = generate_plo_batch(
         pack,
-        output_path=tmp_path / "batch.csv",
+        output_path=out,
         total_questions=1,
         seed=0,
         compute_equity=False,
         generate_explanations=True,
         explanation_client=_JunkClient(),
     )
-    assert result.explanations_failed == 1
-    assert len(result.explanation_failure_reasons) == 1
+    assert result.questions_written == 0
+    assert result.explanations_failed == 5  # the _MAX_CONSECUTIVE_FAILURES cap
+    assert len(result.explanation_failure_reasons) == 5  # noqa: PLR2004
     assert "ExplanationValidationError" in result.explanation_failure_reasons[0]
+    with out.open(encoding="utf-8") as handle:
+        assert list(csv.DictReader(handle)) == []  # no blank rows shipped
+
+
+class _FlakyMessages:
+    """Fails the first spot's attempts, then answers cleanly."""
+
+    def __init__(self, failures: int) -> None:
+        self._remaining = failures
+
+    def create(self, **_kw: object) -> _Resp:
+        if self._remaining > 0:
+            self._remaining -= 1
+            return _Resp("this is not json at all")
+        return _Resp('{"answer_explanation": "Call here. It plays well in position."}')
+
+
+class _FlakyClient:
+    def __init__(self, failures: int) -> None:
+        self.messages = _FlakyMessages(failures)
+
+
+def test_one_failed_explanation_backfills_with_another_spot(tmp_path):
+    # One spot fails (both its attempts) and is dropped; the round-robin draws
+    # a different hand and still delivers the requested question count.
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        generate_explanations=True,
+        explanation_client=_FlakyClient(failures=2),  # one spot = 2 attempts
+    )
+    assert result.explanations_failed == 1
+    assert result.questions_written == 1
+    with out.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["Answer Explanation"] == "Call here. It plays well in position."
 
 
 class _CapturingMessages:
