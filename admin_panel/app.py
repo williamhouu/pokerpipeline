@@ -4145,10 +4145,12 @@ def render_plo_generate_page() -> None:
         st.caption(_FABLE_NOTE)
     compute_eq = st.checkbox(
         "Compute hand equity for the explanation (~1s/spot; real generate only)",
-        value=True,
-        help="On = the LLM gets equity numbers to cite, at ~1s/spot (PLO "
-        "equity is ~60x heavier than Hold'em). Off = fast. The preview is "
-        "always equity-off for speed regardless of this.",
+        value=False,
+        help="Off (default): no equity numbers reach the LLM, so explanations "
+        "can't cite percentages — in PLO equities run close and the numbers "
+        "read as noise. On = the LLM gets equity numbers, at ~1s/spot (PLO "
+        "equity is ~60x heavier than Hold'em). The preview is always "
+        "equity-off regardless.",
     )
     # Rough per-question estimates by model tier (Fable 5 = 2x Opus list
     # price plus thinking tokens).
