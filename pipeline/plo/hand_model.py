@@ -126,39 +126,64 @@ def _pair_structure(cards: tuple[str, ...]) -> tuple[str, tuple[int, ...]]:
 
 
 # --- connectedness / danglers (ace plays high or low) ---------------------
-def _layout_metrics(distinct: list[int]) -> tuple[int, bool]:
-    """``(total_gap, has_dangler)`` for one ace-placement of the distinct ranks.
+def _layout_metrics(
+    distinct: list[int], unpaired: frozenset[int]
+) -> tuple[int, bool, bool]:
+    """``(total_gap, far_rank, has_dangler)`` for one ace-placement.
 
     ``total_gap`` = missing ranks between the lowest and highest distinct
-    card. A dangler is a card whose nearest neighbour is more than
-    :data:`_STRAIGHT_REACH` ranks away.
+    card. ``far_rank`` is True when ANY rank's nearest neighbour is more than
+    :data:`_STRAIGHT_REACH` away (drives the connected/disconnected category).
+    ``has_dangler`` restricts that to UNPAIRED ranks (high-ace values): a
+    paired rank is never a dangler -- its value is the pair (set-mining), not
+    connectivity -- so double-paired hands like KK44 and quads have none,
+    while QQJ2's deuce still is one. Distances are still measured against ALL
+    ranks (a side card sitting next to the pair rank is connected to it).
     """
     s = sorted(distinct)
     total_gap = (s[-1] - s[0]) - (len(s) - 1)
-    has_dangler = any(
-        min(abs(v - o) for j, o in enumerate(s) if j != i) > _STRAIGHT_REACH
-        for i, v in enumerate(s)
-    ) if len(s) > 1 else True
-    return total_gap, has_dangler
+    if len(s) <= 1:
+        # Quads: keep the historical "disconnected" category (no straight
+        # coordination), but all ranks are paired so there is no dangler.
+        return total_gap, True, False
+
+    def _is_far(i: int, v: int) -> bool:
+        return min(abs(v - o) for j, o in enumerate(s) if j != i) > _STRAIGHT_REACH
+
+    far_flags = [(_orig_rank(v) in unpaired, _is_far(i, v)) for i, v in enumerate(s)]
+    far_rank = any(far for _, far in far_flags)
+    has_dangler = any(far and is_unpaired for is_unpaired, far in far_flags)
+    return total_gap, far_rank, has_dangler
+
+
+def _orig_rank(layout_value: int) -> int:
+    """Map an ace-low layout value back to the high-ace rank (1 -> 14)."""
+    return 14 if layout_value == 1 else layout_value
 
 
 def _connectedness(
-    distinct_high: tuple[int, ...], pair_pattern: str
+    distinct_high: tuple[int, ...],
+    pair_pattern: str,
+    pair_ranks: tuple[int, ...],
 ) -> tuple[str, int, bool]:
     """Classify straight/wrap shape. Returns ``(category, span, has_dangler)``.
 
     Evaluates ace-high and (if an ace is present) ace-low, keeping whichever
-    layout is better connected.
+    layout is better connected. The category keys on raw rank distance (KK44
+    IS disconnected as a straight shape); the dangler flag additionally
+    requires the far card to be unpaired (KK44 has NO dangler -- the fours
+    are a set-mining pair, not a dead card).
     """
+    unpaired = frozenset(set(distinct_high) - set(pair_ranks))
     layouts = [list(distinct_high)]
     if 14 in distinct_high:
         layouts.append([1 if r == 14 else r for r in distinct_high])
 
-    best_gap, best_dangler, best_span = None, True, 0
+    best_gap, best_far, best_dangler, best_span = None, True, True, 0
     for layout in layouts:
-        gap, dangler = _layout_metrics(layout)
-        if best_gap is None or (gap, dangler) < (best_gap, best_dangler):
-            best_gap, best_dangler = gap, dangler
+        gap, far_rank, dangler = _layout_metrics(layout, unpaired)
+        if best_gap is None or (gap, far_rank) < (best_gap, best_far):
+            best_gap, best_far, best_dangler = gap, far_rank, dangler
             s = sorted(layout)
             best_span = s[-1] - s[0]
     assert best_gap is not None
@@ -171,9 +196,9 @@ def _connectedness(
         elif best_gap == 2:
             category = "two_gapper"
         else:
-            category = "disconnected" if best_dangler else "connected"
+            category = "disconnected" if best_far else "connected"
     else:
-        category = "disconnected" if best_dangler else "connected"
+        category = "disconnected" if best_far else "connected"
     return category, best_span, best_dangler
 
 
@@ -311,7 +336,9 @@ def classify_plo_hand(hand: object) -> PloHandClass:
     suit_pattern = _suit_pattern(cards)
     pair_pattern, pair_ranks = _pair_structure(cards)
     distinct_ranks = tuple(sorted({rank_value(c) for c in cards}, reverse=True))
-    connectedness, span, has_dangler = _connectedness(distinct_ranks, pair_pattern)
+    connectedness, span, has_dangler = _connectedness(
+        distinct_ranks, pair_pattern, pair_ranks
+    )
 
     has_ace = 14 in distinct_ranks
     suited_ace = _suited_ace(cards)

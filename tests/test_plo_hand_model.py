@@ -153,6 +153,31 @@ def test_disconnected_with_dangler():
     assert h.wrap_potential is False
 
 
+def test_double_paired_hands_have_no_dangler():
+    # KK44: the fours are a set-mining PAIR, not a dead card -- no dangler
+    # (and no descriptor note), though the hand is still "disconnected" as a
+    # straight shape.
+    h = _c("KcKd4c4d")
+    assert h.pair_pattern == "two_pair"
+    assert h.has_dangler is False
+    assert h.connectedness == "disconnected"
+    assert "with a dangler" not in h.descriptor
+
+
+def test_one_pair_side_card_is_still_a_dangler():
+    # QQ J 2: the unpaired deuce is far from everything -- a real dangler.
+    h = _c("QcQdJh2s")
+    assert h.has_dangler is True
+    assert "with a dangler" in h.descriptor
+
+
+def test_quads_have_no_dangler():
+    # All four ranks paired -- nothing to dangle; the badness is redundancy.
+    h = _c("KcKdKhKs")
+    assert h.has_dangler is False
+    assert h.connectedness == "disconnected"  # category unchanged
+
+
 # --- nut / high-card flags ------------------------------------------------
 def test_suited_ace_flag():
     assert _c("AsKsQhJh").suited_ace is True  # As shares spades with Ks
