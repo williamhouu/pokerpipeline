@@ -3930,7 +3930,11 @@ def render_plo_generate_page() -> None:
             "Hero positions (blank = any)",
             options=["LJ", "HJ", "CO", "BU", "SB", "BB"],
             default=[],
-            help="Which seats hero is in. Empty = all positions.",
+            # Display the NLHE/app seat names (the pack's internal codes are
+            # LJ/BU; everything player-facing says UTG/BTN).
+            format_func=lambda s: {"LJ": "UTG", "BU": "BTN"}.get(s, s),
+            help="Which seats hero is in. Empty = all positions. "
+            "UTG is the pack's 'Lojack' seat (same chair, two names).",
         )
     with hc2:
         action_contexts = st.multiselect(

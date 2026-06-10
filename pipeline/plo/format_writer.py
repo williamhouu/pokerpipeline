@@ -25,7 +25,11 @@ import csv
 from pathlib import Path
 
 from pipeline.format_writer import CSV_COLUMNS
-from pipeline.plo.action_history import format_plo_action_history, format_plo_context
+from pipeline.plo.action_history import (
+    display_seat,
+    format_plo_action_history,
+    format_plo_context,
+)
 from pipeline.plo.app_table_format import build_plo_app_table_columns
 from pipeline.plo.difficulty import PloDifficultyResult
 from pipeline.plo.fact_extractor import PloFacts
@@ -100,10 +104,11 @@ def _pot_type(facts: PloFacts) -> str:
 
 
 def _position_matchup(facts: PloFacts) -> str:
-    hero = facts.spot.node.actor
+    # App-facing seat codes (UTG/BTN), matching the NLHE matchup strings.
+    hero = display_seat(facts.spot.node.actor)
     if facts.villain_stats is None:
         return hero
-    return f"{hero}_vs_{facts.villain_stats.seat}"
+    return f"{hero}_vs_{display_seat(facts.villain_stats.seat)}"
 
 
 def _solver_reference(facts: PloFacts, pack_label: str) -> str:

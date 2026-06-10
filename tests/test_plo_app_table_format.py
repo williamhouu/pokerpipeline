@@ -35,7 +35,7 @@ AAKK = ("Ac", "Ad", "Kc", "Kd")
 
 def test_open_node_full_stacks_and_blind_pot():
     cols = _cols("LJ", (), AAKK)
-    assert cols["user_seat"] == "LJ-$100"
+    assert cols["user_seat"] == "UTG-$100"  # display code for the pack's LJ seat
     assert cols["pot"] == "$1.5"
     assert cols["default_stack"] == "$100"
     assert cols["table_size"] == "6"
@@ -46,7 +46,7 @@ def test_open_node_full_stacks_and_blind_pot():
 def test_facing_open_shows_opener_token():
     cols = _cols("HJ", (R("LJ"),), AAKK)
     assert cols["user_seat"] == "HJ-$100"  # hero hasn't acted
-    assert "LJ-$97-$3.5-raise" in cols["seats"]
+    assert "UTG-$97-$3.5-raise" in cols["seats"]
     assert cols["pot"] == "$5"
 
 
@@ -57,7 +57,7 @@ def test_facing_3bet_hero_open_token_and_fold_rules():
         (R("LJ"), F("HJ"), F("CO"), F("BU"), F("SB"), R("BB")),
         AAKK,
     )
-    assert cols["user_seat"] == "LJ-$97-$3.5-raise"  # hero's own open
+    assert cols["user_seat"] == "UTG-$97-$3.5-raise"  # hero's own open
     assert "BB-$89-$11-3-bet" in cols["seats"]
     assert "SB-$100-$0.5-FOLD" in cols["seats"]  # blind fold shown
     assert "HJ-" not in cols["seats"]  # silent non-blind fold omitted
@@ -75,6 +75,6 @@ def test_bb_display_uses_bb_not_dollars():
     cols = _cols("HJ", (R("LJ"),), AAKK, display_in_bb=True)
     assert "$" not in cols["seats"]
     # bb display keeps fractional remaining (no whole-dollar rounding).
-    assert "LJ-96.5BB-3.5BB-raise" in cols["seats"]
+    assert "UTG-96.5BB-3.5BB-raise" in cols["seats"]
     assert cols["pot"] == "5BB"
     assert cols["default_stack"] == "100BB"

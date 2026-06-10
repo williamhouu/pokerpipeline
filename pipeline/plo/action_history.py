@@ -29,8 +29,21 @@ from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.node_enumerator import PloDecisionNode
 from pipeline.plo.pack import PloAction, PloActionType
 
+# The pack speaks Monker's full-ring dialect (LJ for the first seat, BU for
+# the button); every PLAYER-FACING surface uses the NLHE/app convention
+# instead (UTG, BTN) so both games read the same. Pack internals -- filenames,
+# node ids, solver_reference -- keep the Monker codes untouched.
+DISPLAY_SEAT = {"LJ": "UTG", "BU": "BTN"}
+
+
+def display_seat(seat: str) -> str:
+    """Player-facing seat code for a pack seat code (LJ -> UTG, BU -> BTN)."""
+    return DISPLAY_SEAT.get(seat, seat)
+
+
+# Position phrases mirror the NLHE table exactly (UTG takes no article).
 _HERO_PHRASE = {
-    "LJ": "in the Lojack",
+    "LJ": "UTG",
     "HJ": "in the Hijack",
     "CO": "in the Cutoff",
     "BU": "on the Button",
@@ -38,7 +51,7 @@ _HERO_PHRASE = {
     "BB": "in the Big Blind",
 }
 _VILLAIN_REF = {
-    "LJ": "The Lojack",
+    "LJ": "UTG",
     "HJ": "The Hijack",
     "CO": "The Cutoff",
     "BU": "The Button",

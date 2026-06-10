@@ -91,7 +91,7 @@ def test_row_field_mapping():
     assert row["Correct Answer"] == "Call"
     assert row["Answer Explanation"] == ""  # Layer 6 not built
     assert row["archetype"] == "3bet_for_value"
-    assert row["Position Matchup"] == "HJ_vs_LJ"
+    assert row["Position Matchup"] == "HJ_vs_UTG"  # display codes (pack seat LJ)
     assert row["Preflop Pot Type"] == "Single raise pot"  # 1 prior raise, hero calls
     # EV gap = best(Call 2.0 sb) - 2nd(Raise 1.0 sb) = 1.0 sb = 0.5 bb.
     assert row["ev_gap_bb"] == "0.50"

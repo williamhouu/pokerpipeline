@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from pipeline.plo.action_history import resolve_pot_limit
+from pipeline.plo.action_history import display_seat, resolve_pot_limit
 from pipeline.plo.fact_extractor import PloFacts
 
 _SUIT_WORD = {"s": "spades", "h": "hearts", "d": "diamonds", "c": "clubs"}
@@ -130,8 +130,9 @@ def build_plo_app_table_columns(
         return "$" + str(_round_half_up(stack_chips - invested))
 
     # --- hero seat (User Seat) ------------------------------------------
+    # Tokens carry the NLHE/app seat codes (UTG/BTN), not the pack's LJ/BU.
     hero_info = info.get(hero_pos)
-    user_seat = f"{hero_pos}-{_remaining(money_in.get(hero_pos, 0.0))}"
+    user_seat = f"{display_seat(hero_pos)}-{_remaining(money_in.get(hero_pos, 0.0))}"
     if hero_info is not None and not hero_info["folded"] and hero_info["amount"] > 0:
         user_seat += "-" + _fmt(hero_info["amount"]) + "-" + hero_info["action"]
     elif hero_pos == "SB":
@@ -154,7 +155,7 @@ def build_plo_app_table_columns(
         if pos_info is None and not is_blind and not is_behind_hero:
             continue
 
-        seat_str = f"{pos}-{_remaining(money_in.get(pos, 0.0))}"
+        seat_str = f"{display_seat(pos)}-{_remaining(money_in.get(pos, 0.0))}"
         sort_amt = 0.0
         if pos_info is not None:
             if pos_info["action"] == "FOLD":

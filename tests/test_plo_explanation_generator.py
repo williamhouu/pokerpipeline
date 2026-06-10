@@ -110,7 +110,7 @@ def test_solver_data_has_the_facts():
     data = build_solver_data(_facts(), ["Fold", "Call", "3-bet"], "Call")
     assert data["correct_action"] == "Call"
     assert data["your_hand_equity_vs_villain_range_pct"] == 55  # noqa: PLR2004
-    assert data["villain"]["seat"] == "LJ"
+    assert data["villain"]["seat"] == "UTG"  # display code (pack seat is LJ)
     assert "3bet_for_value" in data["strategic_frame"]
     assert data["your_hand"]  # emoji cards
 

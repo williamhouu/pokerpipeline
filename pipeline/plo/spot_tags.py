@@ -76,7 +76,7 @@ def _active_count(facts: PloFacts) -> int:
 
 # --- Position context (5) --------------------------------------------------
 def early_position(facts: PloFacts) -> bool:
-    """Hero is in the Lojack (first to act)."""
+    """Hero is UTG (the pack's LJ seat, first to act)."""
     return facts.spot.node.actor in _EARLY
 
 

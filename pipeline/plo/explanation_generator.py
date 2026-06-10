@@ -39,7 +39,11 @@ from pipeline.explanation_generator import (
     GeneratedExplanation,
     call_messages_create,
 )
-from pipeline.plo.action_history import format_plo_action_history, resolve_pot_limit
+from pipeline.plo.action_history import (
+    display_seat,
+    format_plo_action_history,
+    resolve_pot_limit,
+)
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.gold_examples import load_plo_gold_examples
 from pipeline.plo.hand_model import (
@@ -87,8 +91,8 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "the reader. A one-idea answer can be one paragraph; a layered one reads "
     "better split up. Do not pad to hit a length, and do not cram a complex "
     "spot into one line.",
-    # 5. ADAPTED for PLO: 4-card hands have no 169-class label; positions use BU.
-    "Name things concretely: positions by abbreviation (LJ, HJ, CO, BU, SB, "
+    # 5. ADAPTED for PLO: 4-card hands have no 169-class label.
+    "Name things concretely: positions by abbreviation (UTG, HJ, CO, BTN, SB, "
     "BB), and your hand by its SHAPE (a double-suited rundown, aces with a "
     "broadway side card, a bare ace, a dangler). PLO hands have four cards and "
     "no two-card class label, so never write Hold'em notation like AKs or 77. "
@@ -357,7 +361,7 @@ def build_solver_data(
         data["your_range_equity_vs_villain_range_pct"] = range_eq
     if villain is not None:
         data["villain"] = {
-            "seat": villain.seat,
+            "seat": display_seat(villain.seat),
             "action": _villain_action_phrase(facts),
             "range_pct_of_all_hands": round(villain.pct_of_dealt_hands),
         }
@@ -464,8 +468,9 @@ _SHAPE_CLAIMS: tuple[tuple[str, str], ...] = (
 _NEGATION_RE = r"(?:no|not|never|without|isn't|aren't|lacks?|lacking|avoid\w*|rather than|instead of)[^.!?]{0,24}"
 _HERO_RE = re.compile(r"\b(?:you|your|yours)\b", re.IGNORECASE)
 _VILLAIN_RE = re.compile(
-    r"\b(?:his|hers?|their|they|he|she|villain|opponent|opener|raiser|"
-    r"lojack|hijack|cutoff|button|small blind|big blind|lj|hj|co|bu|sb|bb)\b",
+    r"\b(?:his|hers?|their|they|he|she|villain|opponent|opener|raiser|utg|"
+    r"under the gun|lojack|hijack|cutoff|button|small blind|big blind|"
+    r"lj|hj|co|bu|btn|sb|bb)\b",
     re.IGNORECASE,
 )
 

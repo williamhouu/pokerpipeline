@@ -91,7 +91,7 @@ def test_action_history_renders_hero_villain_and_drops_folds():
         ("Ac", "Ad", "4h", "8h"),
     )
     s = format_plo_action_history(facts)
-    assert s.startswith("You're in the Lojack with A♣️ A♦️ 4❤️ 8❤️.")
+    assert s.startswith("You're UTG with A♣️ A♦️ 4❤️ 8❤️.")
     assert "You open to $3.50." in s  # hero's own prior action
     assert "The Big Blind 3-bets to $11." in s
     assert "fold" not in s  # preflop folds dropped
@@ -99,13 +99,13 @@ def test_action_history_renders_hero_villain_and_drops_folds():
 
 def test_action_history_open_node_has_no_actions():
     facts = _facts("LJ", (), ("Ac", "Ad", "Kc", "Kd"))
-    assert format_plo_action_history(facts) == "You're in the Lojack with A♣️ A♦️ K♣️ K♦️."
+    assert format_plo_action_history(facts) == "You're UTG with A♣️ A♦️ K♣️ K♦️."
 
 
 def test_action_history_bb_display():
     facts = _facts("HJ", (R("LJ"),), ("Ac", "Ad", "Kc", "Kd"))
     s = format_plo_action_history(facts, display_in_bb=True)
-    assert "The Lojack opens to 3.5bb." in s
+    assert "UTG opens to 3.5bb." in s
 
 
 # --- context --------------------------------------------------------------
