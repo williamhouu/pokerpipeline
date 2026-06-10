@@ -1932,18 +1932,13 @@ def _render_preflop_job_panel() -> None:
     st.divider()
 
 
-def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) -> None:
-    """Append this job's usage to the JSONL log -- exactly once per process.
+def _log_batch_result_usage(result: BatchResult) -> None:
+    """Append one batch's usage to the lifetime JSONL log.
 
-    Idempotent: tracks logged job ids in a module-level set so the
-    fragment's per-second re-render doesn't duplicate the entry.
-    Dry-runs (``model_used == ""``) are dropped by
-    :func:`usage.append_log_entry`.
+    Dry-runs (``model_used == ""``) are skipped. Used by the job-completion
+    hook AND the (inline) NLHE Compare page, whose two batches previously
+    never reached the lifetime total.
     """
-    logged = _logged_job_ids()
-    if job.id in logged:
-        return
-    logged.add(job.id)
     if not result.model_used:
         return
     cost = usage.compute_cost_usd(
@@ -1964,6 +1959,19 @@ def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) ->
         questions_written=result.questions_written,
         output_filename=result.output_path.name if result.output_path else "",
     )
+
+
+def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) -> None:
+    """Append this job's usage to the JSONL log -- exactly once per process.
+
+    Idempotent: tracks logged job ids in a module-level set so the
+    fragment's per-second re-render doesn't duplicate the entry.
+    """
+    logged = _logged_job_ids()
+    if job.id in logged:
+        return
+    logged.add(job.id)
+    _log_batch_result_usage(result)
 
 
 def _render_preflop_failures(failures: list) -> None:
@@ -3310,6 +3318,10 @@ def render_compare_page() -> None:
                 dry_run=dry,
             )
             status.update(label="Comparison ready", state="complete")
+        # Compare runs are real API spend: log both sides to the lifetime
+        # total (no-op for dry runs, where model_used is empty).
+        _log_batch_result_usage(res_a)
+        _log_batch_result_usage(res_b)
         st.session_state["cmp_result"] = {
             "a_csv": str(res_a.output_path or out_a),
             "b_csv": str(res_b.output_path or out_b),
@@ -4595,6 +4607,15 @@ def render_plo_review_page() -> None:
                 use_container_width=True,
             ):
                 n = review.clear_all_approved(_PLO_BATCH_DIR)
+                # The open batch's grade radios still hold the OLD grade in
+                # widget session state; left alone, the very next rerun sees
+                # radio != sidecar and re-saves "approved" -- the clear that
+                # never sticks. Dropping the keys re-initializes every radio
+                # from the sidecar (the source of truth).
+                for k in [
+                    k for k in st.session_state if str(k).startswith("plo_grade_")
+                ]:
+                    del st.session_state[k]
                 st.session_state["plo_confirm_clear_approved"] = False
                 st.toast(f"Cleared {n} approved question(s)")
                 st.rerun()
@@ -4617,6 +4638,10 @@ def render_plo_review_page() -> None:
                     "🗑", key=f"plo_appr_del_{csv_path.name}_{no}", help="Un-approve"
                 ):
                     review.remove_review(csv_path, no)
+                    # If this row belongs to the batch open above, its grade
+                    # radio would re-save "approved" on rerun -- drop the
+                    # widget state so it re-reads the sidecar instead.
+                    st.session_state.pop(f"plo_grade_{csv_path.name}_{no}", None)
                     st.rerun()
 
 
@@ -5159,7 +5184,20 @@ def render_plo_compare_page() -> None:
         def _run(
             out_path: Path, slug: str, include_skills: bool, run_model: str
         ) -> None:
-            generate_plo_batch(
+            # Lifetime-spend accounting: the same accumulate-and-log pattern
+            # as the PLO Generate page. Compare runs are real API spend too --
+            # without this they were invisible to the sidebar's lifetime total.
+            acc = {"in": 0, "out": 0, "cc": 0, "cr": 0}
+            model_seen = [run_model]
+
+            def _usage_cb(mdl: str, in_t: int, out_t: int, cc: int, cr: int) -> None:
+                acc["in"] += in_t
+                acc["out"] += out_t
+                acc["cc"] += cc
+                acc["cr"] += cr
+                model_seen[0] = mdl
+
+            result = generate_plo_batch(
                 pack,
                 output_path=out_path,
                 total_questions=n_spots,
@@ -5178,6 +5216,24 @@ def render_plo_compare_page() -> None:
                 explanation_temperature=0.0,
                 explanation_system_prompt=lib.get_text(slug),
                 explanation_include_skills=include_skills,
+                usage_callback=_usage_cb,
+            )
+            usage.append_log_entry(
+                USAGE_LOG_PATH,
+                model=model_seen[0],
+                input_tokens=acc["in"],
+                output_tokens=acc["out"],
+                cache_creation_tokens=acc["cc"],
+                cache_read_tokens=acc["cr"],
+                cost_usd=usage.compute_cost_usd(
+                    model=model_seen[0],
+                    input_tokens=acc["in"],
+                    output_tokens=acc["out"],
+                    cache_creation_tokens=acc["cc"],
+                    cache_read_tokens=acc["cr"],
+                ),
+                questions_written=result.questions_written,
+                output_filename=out_path.name,
             )
 
         # When the models differ, bake the model into each side's label so
