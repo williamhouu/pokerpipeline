@@ -59,6 +59,7 @@ from pipeline.plo.options import (
 )
 from pipeline.plo.pack import PloActionType
 from pipeline.plo.position import hero_relative_position
+from pipeline.plo.range_examples import leaning_examples_for_spot
 from pipeline.plo.spot_tags import compute_plo_concept_tags
 
 logger = logging.getLogger(__name__)
@@ -359,6 +360,13 @@ def build_solver_data(
     suit_redundancy = describe_suit_redundancy(facts.spot.hero_cards)
     if suit_redundancy is not None:
         data["suit_redundancy"] = suit_redundancy
+    # Deterministic range examples: which hands in hero's OWN range at this
+    # node lean toward the runner-up action -- real solver data, so prose can
+    # name contrast hands without inventing them. Borderline band only (never
+    # pure-obvious hands); omitted when nothing qualifies.
+    leaning = leaning_examples_for_spot(facts)
+    if leaning is not None:
+        data["hands_in_your_range_that_prefer_the_other_action"] = leaning
     eq = _pct(facts.hero_equity_vs_villain)
     if eq is not None:
         data["your_hand_equity_vs_villain_range_pct"] = eq
