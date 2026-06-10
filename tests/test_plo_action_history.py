@@ -97,6 +97,24 @@ def test_action_history_renders_hero_villain_and_drops_folds():
     assert "fold" not in s  # preflop folds dropped
 
 
+def test_action_history_include_folds_renders_them():
+    # The LLM-facing variant: folds rendered so the model can tell a
+    # heads-up-after-the-opener-folded spot from a multiway one (the player
+    # sees the fold on the app's table render instead).
+    facts = _facts(
+        "SB",
+        (F("LJ"), R("HJ"), F("CO"), F("BU"), C("SB"), R("BB"), F("HJ")),
+        ("Qc", "Qd", "Th", "Kh"),
+    )
+    s = format_plo_action_history(facts, display_in_bb=True, include_folds=True)
+    assert "The Hijack opens to 3.5bb." in s
+    assert "You call." in s
+    assert "The Hijack folds." in s  # the entrant's exit is visible
+    assert "UTG folds." in s  # never-entered folds render too
+    # The player-facing default still drops every fold.
+    assert "fold" not in format_plo_action_history(facts)
+
+
 def test_action_history_open_node_has_no_actions():
     facts = _facts("LJ", (), ("Ac", "Ad", "Kc", "Kd"))
     assert format_plo_action_history(facts) == "You're UTG with A♣️ A♦️ K♣️ K♦️."

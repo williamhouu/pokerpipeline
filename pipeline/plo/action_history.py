@@ -159,7 +159,10 @@ def _sentence(act: ResolvedAction, hero: str, *, render_bb: bool) -> str:
         return f"{subject} {_conjugate('move all-in', is_hero=is_hero)} for {amount}."
     if act.verb == "call":
         return f"{subject} {_conjugate('call', is_hero=is_hero)}."
-    # fold is dropped before reaching here
+    if act.verb == "fold":
+        # Only rendered when include_folds is set (the LLM-facing variant);
+        # the player-facing question drops folds per the brief's Fold Rule.
+        return f"{subject} {_conjugate('fold', is_hero=is_hero)}."
     raise ValueError(f"unexpected verb {act.verb!r}")
 
 
@@ -170,6 +173,7 @@ def format_plo_action_history(
     game_format: str = "cash",
     display_in_bb: bool = False,
     stack_bb: float = 100.0,
+    include_folds: bool = False,
 ) -> str:
     """The action-history ("Question") block for a PLO spot.
 
@@ -177,6 +181,13 @@ def format_plo_action_history(
     action (preflop folds are dropped, per the brief's Fold Rule). Amounts are
     pot-limit-resolved; rendered in dollars for cash, or bb for tournament /
     when ``display_in_bb``.
+
+    ``include_folds=True`` renders the folds too ("The Hijack folds.") -- the
+    LLM-facing variant. The player sees the fold on the app's table render
+    (Seats marks an entrant who folded), but the LLM sees only this prose, so
+    without the folds it cannot tell "facing a squeeze after the opener
+    folded" (heads-up) from "opener still in" (multiway) -- sibling nodes
+    whose correct answers differ.
     """
     render_bb = display_in_bb or game_format != "cash"
     actions, _pot = resolve_pot_limit(
@@ -187,7 +198,7 @@ def format_plo_action_history(
     sentences += [
         _sentence(act, hero, render_bb=render_bb)
         for act in actions
-        if act.verb != "fold"
+        if include_folds or act.verb != "fold"
     ]
     return " ".join(sentences)
 

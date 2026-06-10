@@ -115,6 +115,36 @@ def test_solver_data_has_the_facts():
     assert data["your_hand"]  # emoji cards
 
 
+def test_solver_data_situation_includes_folds():
+    # The LLM sees only this prose (no table render), so the folds must be in
+    # it -- otherwise "facing a squeeze after the opener folded" (heads-up)
+    # is indistinguishable from "opener still in" (multiway).
+    node = PloDecisionNode(
+        actor="SB",
+        history_before=(
+            PloAction("HJ", PloActionType.RAISE, 100),
+            PloAction("SB", PloActionType.CALL, None),
+            PloAction("BB", PloActionType.RAISE, 100),
+            PloAction("HJ", PloActionType.FOLD, None),
+        ),
+        actions=(),
+        history_stem="x",
+    )
+    spot = PloSpot(
+        node=node,
+        hero_index=0,
+        hero_label="x",
+        hero_cards=CARDS,
+        action_frequencies={"Fold": 0.95, "Call": 0.05},
+        presence=1.0,
+    )
+    facts = PloFacts(
+        spot=spot, hand_class=classify_plo_hand(CARDS), archetype="fold_pot_odds"
+    )
+    data = build_solver_data(facts, ["Fold", "Call"], "Fold")
+    assert "The Hijack folds." in data["situation"]
+
+
 # --- generation -----------------------------------------------------------
 def test_generation_returns_prose():
     client = _MockClient(_json("You should 3-bet here. Strong double-suited aces in position."))

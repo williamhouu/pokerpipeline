@@ -324,7 +324,13 @@ def build_solver_data(
     hand = facts.hand_class
     villain = facts.villain_stats
     data: dict[str, Any] = {
-        "situation": format_plo_action_history(facts, display_in_bb=True),
+        # include_folds: unlike the player (who sees folds on the app's table
+        # render), the LLM sees ONLY this prose -- without the folds it cannot
+        # tell "facing a squeeze after the opener folded" (heads-up) from
+        # "opener still in" (multiway), and those siblings play differently.
+        "situation": format_plo_action_history(
+            facts, display_in_bb=True, include_folds=True
+        ),
         "your_hand": " ".join(format_card(c) for c in facts.spot.hero_cards),
         "your_hand_shape": f"{hand.descriptor} ({hand.strength})",
         "flush_potential": describe_flush_potential(facts.spot.hero_cards),
