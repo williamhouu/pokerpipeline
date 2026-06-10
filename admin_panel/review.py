@@ -6,7 +6,10 @@ can be unit-tested without a Streamlit runtime -- same split as
 
 Review grades live in a **sidecar JSON** next to each batch CSV
 (``<batch>.review.json``) so the generated CSV is never mutated. The
-sidecar maps ``str(No) -> {"status": ..., "note": ...}``.
+sidecar maps ``str(No) -> {"status": ..., "note": ...}`` plus an optional
+``"explanation"`` -- a reviewer-edited Answer Explanation that overrides
+the generated one wherever approved rows are collected (the CSV keeps the
+original, so an A/B verdict's context is never rewritten).
 """
 
 from __future__ import annotations
@@ -46,15 +49,29 @@ def load_reviews(csv_path: Path) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for key, val in data.items():
         if isinstance(val, dict):
-            out[str(key)] = {
+            entry = {
                 "status": str(val.get("status", "")),
                 "note": str(val.get("note", "")),
             }
+            if val.get("explanation"):
+                entry["explanation"] = str(val["explanation"])
+            out[str(key)] = entry
     return out
 
 
-def save_review(csv_path: Path, no: str | int, status: str, note: str) -> None:
+def save_review(
+    csv_path: Path,
+    no: str | int,
+    status: str,
+    note: str,
+    *,
+    explanation: str | None = None,
+) -> None:
     """Upsert one question's grade + note into the sidecar JSON.
+
+    ``explanation`` (optional) stores a reviewer-edited Answer Explanation
+    alongside the grade; :func:`collect_approved_rows` substitutes it for the
+    generated one. ``None`` leaves no override (the generated text ships).
 
     Raises:
         ValueError: if ``status`` isn't one of :data:`REVIEW_STATUSES` --
@@ -65,7 +82,10 @@ def save_review(csv_path: Path, no: str | int, status: str, note: str) -> None:
             f"status must be one of {REVIEW_STATUSES}, got {status!r}"
         )
     reviews = load_reviews(csv_path)
-    reviews[str(no)] = {"status": status, "note": note}
+    entry: dict[str, str] = {"status": status, "note": note}
+    if explanation:
+        entry["explanation"] = explanation
+    reviews[str(no)] = entry
     path = review_sidecar_path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
@@ -260,6 +280,10 @@ def _scan_approved(
             if key in seen:
                 continue
             seen.add(key)
+            # A reviewer-edited explanation (saved with the approval) ships
+            # in place of the generated one; the CSV itself stays untouched.
+            if grade.get("explanation"):
+                row = {**row, "Answer Explanation": grade["explanation"]}
             out.append((csv_path, no, row))
     return fieldnames, out
 

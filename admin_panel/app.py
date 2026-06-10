@@ -5087,6 +5087,40 @@ def render_plo_compare_page() -> None:
                 "slightly in wording between reruns."
             )
     band_low, band_high = _PLO_DIFFICULTY_BANDS[preset]
+
+    o1, o2 = st.columns(2)
+    with o1:
+        display_in_bb = (
+            st.radio(
+                "Amounts",
+                options=["Big blinds", "Dollars"],
+                index=0,  # bb default: matches the data block the LLM writes from
+                horizontal=True,
+                key="plo_cmp_amounts",
+                help="How the question + pot render. Big blinds (default) "
+                "matches the units the LLM's data block uses, so the prose "
+                "and the explanation agree.",
+            )
+            == "Big blinds"
+        )
+    with o2:
+        _cmp_style_labels = {
+            "Basic (Fold / Call / 3-bet)": "basic",
+            "GTO (Always / Mostly spectrum)": "gto",
+            "Auto-pick (Basic when dominant, GTO when mixed)": "auto",
+        }
+        answer_style = _cmp_style_labels[
+            st.radio(
+                "Answer option style",
+                options=list(_cmp_style_labels),
+                index=2,  # auto: the page's historical behavior
+                key="plo_cmp_answer_style",
+                help="Same styles as PLO Generate. **Basic** = bare action "
+                "labels. **GTO** = the Always/Mostly spectrum. **Auto-pick** "
+                "= Basic for dominant-action spots, GTO for mixed.",
+            )
+        ]
+
     seed = int(
         st.number_input("Seed", min_value=0, max_value=1_000_000, value=42, key="plo_cmp_seed")
     )
@@ -5137,7 +5171,8 @@ def render_plo_compare_page() -> None:
                 min_difficulty=band_low,
                 max_difficulty=band_high,
                 compute_equity=False,
-                answer_style="auto",
+                answer_style=answer_style,
+                display_in_bb=display_in_bb,
                 generate_explanations=True,
                 explanation_model=run_model,
                 explanation_temperature=0.0,
@@ -5232,13 +5267,34 @@ def render_plo_compare_page() -> None:
                 st.caption(f"concept tags: {row_a['concept_tags']}")
             if row_a.get("skills"):
                 st.caption(f"skills: {row_a['skills']}")
+            # Editable explanations: tweak the prose before finalizing -- the
+            # finalize buttons save whatever is in the box. Keys carry the
+            # CSV stem so a fresh comparison never inherits stale edits.
+            orig_a = row_a.get("Answer Explanation", "")
+            orig_b = row_b.get("Answer Explanation", "")
             col_a, col_b = st.columns(2)
             with col_a:
                 st.markdown(f"**{result['a_name']}**")
-                st.info(_md_lines(row_a.get("Answer Explanation", "")))
+                edited_a = st.text_area(
+                    "Explanation A",
+                    value=orig_a,
+                    height=220,
+                    key=f"plo_cmp_exp_a_{a_csv.stem}_{key}",
+                    label_visibility="collapsed",
+                )
+                if edited_a.strip() != orig_a.strip():
+                    st.caption("✏️ Edited — finalizing A saves this text.")
             with col_b:
                 st.markdown(f"**{result['b_name']}**")
-                st.info(_md_lines(row_b.get("Answer Explanation", "")))
+                edited_b = st.text_area(
+                    "Explanation B",
+                    value=orig_b,
+                    height=220,
+                    key=f"plo_cmp_exp_b_{b_csv.stem}_{key}",
+                    label_visibility="collapsed",
+                )
+                if edited_b.strip() != orig_b.strip():
+                    st.caption("✏️ Edited — finalizing B saves this text.")
             cur = verdicts.get(key)
             idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
             choice = st.radio(
@@ -5264,7 +5320,17 @@ def render_plo_compare_page() -> None:
                 use_container_width=True,
             ):
                 # Exclusive: finalizing one variant un-finalizes the other.
-                review.save_review(a_csv, no_a, "approved", "finalized from compare")
+                # An edited explanation rides along as a sidecar override --
+                # the compare CSV itself keeps the original prose.
+                review.save_review(
+                    a_csv,
+                    no_a,
+                    "approved",
+                    "finalized from compare",
+                    explanation=(
+                        edited_a if edited_a.strip() != orig_a.strip() else None
+                    ),
+                )
                 review.remove_review(b_csv, no_b)
                 st.rerun()
             if fcol_b.button(
@@ -5273,12 +5339,22 @@ def render_plo_compare_page() -> None:
                 disabled=fin_b,
                 use_container_width=True,
             ):
-                review.save_review(b_csv, no_b, "approved", "finalized from compare")
+                review.save_review(
+                    b_csv,
+                    no_b,
+                    "approved",
+                    "finalized from compare",
+                    explanation=(
+                        edited_b if edited_b.strip() != orig_b.strip() else None
+                    ),
+                )
                 review.remove_review(a_csv, no_a)
                 st.rerun()
             if fin_a or fin_b:
                 which = result["a_name"] if fin_a else result["b_name"]
-                st.caption(f"✅ Saved to finalized using **{which}**.")
+                _fin_grade = (reviews_a.get(no_a) if fin_a else reviews_b.get(no_b)) or {}
+                _edited_note = " (with your edits)" if _fin_grade.get("explanation") else ""
+                st.caption(f"✅ Saved to finalized using **{which}**{_edited_note}.")
                 if st.button("Remove from finalized", key=f"plo_cmp_unfin_{key}"):
                     review.remove_review(a_csv, no_a)
                     review.remove_review(b_csv, no_b)

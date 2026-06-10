@@ -374,6 +374,42 @@ def test_collect_approved_can_exclude_by_prefix(tmp_path: Path) -> None:
     assert rows == []
 
 
+def test_save_review_with_explanation_round_trip(tmp_path: Path) -> None:
+    b = tmp_path / "compare_20260610_A.csv"
+    _write_batch(b, [
+        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Call"}
+    ])
+    review.save_review(b, 1, "approved", "finalized", explanation="Edited prose.")
+    assert review.load_reviews(b)["1"]["explanation"] == "Edited prose."
+    # Re-saving without an explanation clears the override.
+    review.save_review(b, 1, "approved", "finalized")
+    assert "explanation" not in review.load_reviews(b)["1"]
+
+
+def test_collect_approved_applies_explanation_override(tmp_path: Path) -> None:
+    cols = [*_COLS, "Answer Explanation"]
+    b = tmp_path / "compare_20260610_A.csv"
+    with b.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=cols)
+        writer.writeheader()
+        writer.writerows([
+            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1",
+             "Correct Answer": "Call", "Answer Explanation": "Generated."},
+            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2",
+             "Correct Answer": "Fold", "Answer Explanation": "Generated."},
+        ])
+    review.save_review(b, 1, "approved", "", explanation="Edited.")
+    review.save_review(b, 2, "approved", "")
+    _, rows = review.collect_approved_rows(tmp_path)
+    by_no = {r["No"]: r for r in rows}
+    assert by_no["1"]["Answer Explanation"] == "Edited."
+    assert by_no["2"]["Answer Explanation"] == "Generated."  # no edit -> untouched
+    # The batch CSV itself is never mutated; the override lives in the sidecar.
+    with b.open(newline="", encoding="utf-8-sig") as fh:
+        raw = list(csv.DictReader(fh))
+    assert raw[0]["Answer Explanation"] == "Generated."
+
+
 def test_collect_approved_sources_returns_provenance(tmp_path: Path) -> None:
     b = tmp_path / "plo_20260601_120000.csv"
     _write_batch(
