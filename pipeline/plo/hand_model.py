@@ -391,11 +391,14 @@ _SUIT_CHAR_WORD = {"c": "clubs", "d": "diamonds", "h": "hearts", "s": "spades"}
 # Label for a flush whose HIGHEST card is this rank. Ace = the nut flush, king =
 # second-nut (it becomes the nut when the ace of that suit is on the board),
 # queen = third, jack = fourth; anything lower is a weak (non-nut) flush.
+# Only rankings players actually name: A/K/Q-high. Everything from the jack
+# down is just "weak" -- the old J="fourth-nut" vs T="weak" split put a fake
+# category cliff between adjacent ranks, and the LLM dramatized it into "the
+# diamonds are a real flush, the clubs are a backup".
 _FLUSH_NUT_LABEL: dict[str, str] = {
     "A": "nut",
     "K": "second-nut",
     "Q": "third-nut",
-    "J": "fourth-nut",
 }
 
 
@@ -440,20 +443,46 @@ def flush_suits(hand: object) -> tuple[FlushSuit, ...]:
     return tuple(sorted(out, key=lambda f: RANK_VALUE[f.high_rank], reverse=True))
 
 
+_CLOSE_SUIT_GAP = 2  # weak suits within two ranks are "close in strength"
+
+
+def _an(rank: str) -> str:
+    """The article for ``<rank>-high`` ("an A-high flush", "a K-high flush")."""
+    return "an" if rank in {"A", "8"} else "a"
+
+
 def describe_flush_potential(hand: object) -> str:
     """One-line flush nut-ranking for the SOLVER DATA block.
 
-    E.g. ``"diamonds K-high (second-nut flush), clubs T-high (weak flush)"`` or
-    ``"none (no two cards share a suit)"``. So Layer 6 reports the real ranking
-    instead of guessing -- a king-high flush is the SECOND nut, never "the nut
-    flush".
+    Draw-tense by construction: "can make at best a J-high flush" -- preflop
+    there is no made flush, and "gives you a real flush" prose came straight
+    from the old noun phrasing. When every suit is weak (J-high or below) the
+    line says no suit makes the nut flush and, when they sit within two ranks
+    of each other, that they are close in strength -- so the LLM cannot rank
+    one weak suit far above another. Real rankings (A/K/Q-high) keep their
+    labels: that hierarchy is true and worth teaching.
+
+    E.g. ``"diamonds can make at best a J-high flush (weak), clubs can make
+    at best a T-high flush (weak). Neither suit makes the nut flush, and the
+    two are close in strength"`` or ``"none (no two cards share a suit)"``.
     """
     suits = flush_suits(hand)
     if not suits:
         return "none (no two cards share a suit)"
-    return ", ".join(
-        f"{f.suit_word} {f.high_rank}-high ({f.nut_label} flush)" for f in suits
+    parts = ", ".join(
+        f"{f.suit_word} can make at best {_an(f.high_rank)} {f.high_rank}-high "
+        f"flush ({f.nut_label})"
+        for f in suits
     )
+    if all(f.nut_label == "weak" for f in suits):
+        if len(suits) == 1:
+            return f"{parts}. Not the nut flush"
+        gap = RANK_VALUE[suits[0].high_rank] - RANK_VALUE[suits[-1].high_rank]
+        close = (
+            ", and the two are close in strength" if gap <= _CLOSE_SUIT_GAP else ""
+        )
+        return f"{parts}. Neither suit makes the nut flush{close}"
+    return parts
 
 
 # --- card redundancy (trips / quads in hand; feeds the SOLVER DATA) ---------

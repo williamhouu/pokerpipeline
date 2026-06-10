@@ -471,13 +471,32 @@ def _fabricated_cards(prose: str, hero_cards: tuple[str, ...]) -> list[str]:
 # card-fabrication audit. Only HERO-claim sentences are audited (must mention
 # you/your, no villain/seat reference) -- villain-range prose like "his range
 # is full of double-suited hands" must never be flagged.
-_SHAPE_CLAIMS: tuple[tuple[str, str], ...] = (
-    # (regex for the claim word, PloHandClass attribute/value it asserts)
-    (r"danglers?", "has_dangler"),
-    (r"double[ -]suited", "double_suited"),
-    (r"three[ -]suited", "three_suited"),
-    (r"rainbow", "rainbow"),
-    (r"monotone", "monotone"),
+_SHAPE_CLAIMS: tuple[tuple[str, str, str], ...] = (
+    # (claim regex, PloHandClass attribute/value it asserts, display label)
+    (r"danglers?", "has_dangler", "dangler"),
+    (r"double[ -]suited", "double_suited", "double-suited"),
+    (r"three[ -]suited", "three_suited", "three-suited"),
+    (r"rainbow", "rainbow", "rainbow"),
+    (r"monotone", "monotone", "monotone"),
+    # Claiming the nut flush (made, draw, or potential) without a suited ace.
+    # Verb-anchored so blocker prose ("your bare ace blocks the nut flush")
+    # never matches -- that sentence is about removal, not about making it.
+    (
+        r"(?:makes?|made|have|having|holds?|holding|gives? you|your)"
+        r"\s+(?:the\s+)?nut[ -]flush",
+        "suited_ace",
+        "nut-flush claim without a suited ace",
+    ),
+    # A made flush stated in the present tense. Preflop NOTHING is made, so
+    # this claim is false for every hand -- "the diamonds give you a real
+    # flush" must be "can make at best a J-high flush". "...flush draw" /
+    # "...flush potential" stay legal via the lookahead.
+    (
+        r"(?:gives? you|you (?:have|hold)|you've got)\s+(?:a|the)\s+"
+        r"(?:\w+[- ]){0,2}flush\b(?!\s?(?:draw|potential|possib))",
+        "made_flush_preflop",
+        "made flush stated preflop",
+    ),
 )
 _NEGATION_RE = r"(?:no|not|never|without|isn't|aren't|lacks?|lacking|avoid\w*|rather than|instead of)[^.!?]{0,24}"
 _HERO_RE = re.compile(r"\b(?:you|your|yours)\b", re.IGNORECASE)
@@ -492,6 +511,10 @@ _VILLAIN_RE = re.compile(
 def _claim_is_true(hand: PloHandClass, key: str) -> bool:
     if key == "has_dangler":
         return hand.has_dangler
+    if key == "suited_ace":
+        return hand.suited_ace
+    if key == "made_flush_preflop":
+        return False  # preflop, a made flush is false for every hand
     return hand.suit_pattern == key
 
 
@@ -504,15 +527,13 @@ def _shape_claim_errors(prose: str, hand: PloHandClass) -> list[str]:
         if not _HERO_RE.search(sentence) or _VILLAIN_RE.search(sentence):
             continue
         low = sentence.lower()
-        for word_re, key in _SHAPE_CLAIMS:
+        for word_re, key, label in _SHAPE_CLAIMS:
             if _claim_is_true(hand, key):
                 continue
             mentions = len(re.findall(word_re, low))
             negated = len(re.findall(_NEGATION_RE + word_re, low))
-            if mentions > negated:
-                label = word_re.replace(r"[ -]", "-").replace("s?", "")
-                if label not in errors:
-                    errors.append(label)
+            if mentions > negated and label not in errors:
+                errors.append(label)
     return errors
 
 
@@ -645,11 +666,14 @@ def generate_plo_answer_explanation(
             shape_errors = _shape_claim_errors(prose, facts.hand_class)
             if shape_errors:
                 msg = (
-                    "the explanation misstates the hand's shape: it claims "
-                    f"{', '.join(shape_errors)} but the hand is actually "
+                    "the explanation misstates the hand: "
+                    f"{'; '.join(shape_errors)}. The hand is actually "
                     f"'{facts.hand_class.descriptor}'. Describe the shape "
                     "using only the your_hand_shape, card_redundancy, and "
-                    "suit_redundancy facts."
+                    "suit_redundancy facts, and flush strength using the "
+                    "flush_potential fact's own wording (potential to make "
+                    "a flush, never a made flush, never a ranking the fact "
+                    "does not state)."
                 )
                 raise ExplanationValidationError(msg)
             return GeneratedExplanation(

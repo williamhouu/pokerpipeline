@@ -35,9 +35,9 @@ def test_king_high_flush_is_second_nut_not_nut():
     assert suits["d"].nut_label == "second-nut"
     assert suits["d"].is_nut is False
     assert suits["c"].nut_label == "third-nut"  # Q-high clubs
-    assert (
-        describe_flush_potential("8c Qc Td Kd")
-        == "diamonds K-high (second-nut flush), clubs Q-high (third-nut flush)"
+    assert describe_flush_potential("8c Qc Td Kd") == (
+        "diamonds can make at best a K-high flush (second-nut), "
+        "clubs can make at best a Q-high flush (third-nut)"
     )
 
 
@@ -52,6 +52,46 @@ def test_low_flush_is_weak():
     suits = {f.suit: f for f in flush_suits("3c Tc 6d Kd")}
     assert suits["c"].nut_label == "weak"  # T-high clubs
     assert suits["d"].nut_label == "second-nut"  # K-high diamonds
+
+
+def test_jack_high_flush_is_weak_not_fourth_nut():
+    # The J="fourth-nut" vs T="weak" label cliff between adjacent ranks fed
+    # the "diamonds are a real flush, clubs are a backup" LLM invention.
+    suits = {f.suit: f for f in flush_suits("7c Tc 9d Jd")}
+    assert suits["d"].nut_label == "weak"
+    assert suits["c"].nut_label == "weak"
+
+
+def test_two_weak_suits_read_close_in_strength():
+    # Draw tense ("can make at best") + the comparability clause, so the LLM
+    # can neither claim a made flush nor rank one weak suit far above another.
+    assert describe_flush_potential("7c Tc 9d Jd") == (
+        "diamonds can make at best a J-high flush (weak), "
+        "clubs can make at best a T-high flush (weak). "
+        "Neither suit makes the nut flush, and the two are close in strength"
+    )
+
+
+def test_two_weak_suits_far_apart_skip_the_closeness_clause():
+    # J-high vs 5-high: both weak and neither is the nut, but they are NOT
+    # close in strength, so that clause must not appear.
+    text = describe_flush_potential("Jc Tc 5d 2d")
+    assert text.endswith("Neither suit makes the nut flush")
+    assert "close in strength" not in text
+
+
+def test_single_weak_suit_says_not_the_nut():
+    assert describe_flush_potential("3h Th Kd 2s") == (
+        "hearts can make at best a T-high flush (weak). Not the nut flush"
+    )
+
+
+def test_nut_suit_keeps_its_ranking_no_closeness_clause():
+    # A real hierarchy (nut vs weak) is true and stays; no comparability talk.
+    text = describe_flush_potential("As 2s 3h 4h")
+    assert "spades can make at best an A-high flush (nut)" in text
+    assert "close in strength" not in text
+    assert "Neither suit" not in text
 
 
 def test_rainbow_hand_has_no_flush_potential():

@@ -428,6 +428,50 @@ def test_shape_claim_audit_ignores_villain_sentences():
     ) == ["double-suited"]
 
 
+def test_nut_flush_claim_without_suited_ace_is_flagged():
+    from pipeline.plo.explanation_generator import _shape_claim_errors
+
+    no_ace = classify_plo_hand(("Kd", "Qd", "Jc", "Tc"))  # no suited ace
+    assert _shape_claim_errors(
+        "Call. You have the nut flush draw to fall back on.", no_ace
+    ) == ["nut-flush claim without a suited ace"]
+    # Blocker prose is about removal, not making it -- the claim regex is
+    # verb-anchored, so "blocks the nut flush" never matches even in a pure
+    # hero sentence with no villain reference.
+    assert _shape_claim_errors(
+        "4-bet. Your bare ace blocks the nut flush and adds fold equity.",
+        classify_plo_hand(("Ah", "Kd", "Qc", "Js")),
+    ) == []
+    # Negation is fine, and a real suited ace may claim it.
+    assert _shape_claim_errors("Fold. You do not have the nut flush draw.", no_ace) == []
+    suited_ace = classify_plo_hand(("As", "Ks", "Qd", "Jd"))
+    assert _shape_claim_errors(
+        "Call. Your nut flush potential carries the hand.", suited_ace
+    ) == []
+
+
+def test_made_flush_preflop_tense_is_flagged():
+    from pipeline.plo.explanation_generator import _shape_claim_errors
+
+    ds = classify_plo_hand(("7c", "Tc", "9d", "Jd"))
+    # The reported prose: a flush stated as already made.
+    assert _shape_claim_errors(
+        "Call. The diamonds give you a real flush, while the clubs are a "
+        "small caution.",
+        ds,
+    ) == ["made flush stated preflop"]
+    # Draw / potential phrasing stays legal.
+    assert _shape_claim_errors(
+        "Call. The diamonds give you a J-high flush draw and position helps.",
+        ds,
+    ) == []
+    assert _shape_claim_errors(
+        "Call. You can make at best a J-high flush, so play the suits with "
+        "care.",
+        ds,
+    ) == []
+
+
 def test_invented_dangler_triggers_a_retry():
     # CARDS is double-suited AAKK -- no dangler. First attempt invents one;
     # the clean retry is accepted.
