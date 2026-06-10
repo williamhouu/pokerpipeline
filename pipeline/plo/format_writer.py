@@ -33,6 +33,7 @@ from pipeline.plo.action_history import (
 from pipeline.plo.app_table_format import build_plo_app_table_columns
 from pipeline.plo.difficulty import PloDifficultyResult
 from pipeline.plo.fact_extractor import PloFacts
+from pipeline.plo.node_enumerator import plo_active_player_count
 from pipeline.plo.options import canonicalize_strategy
 from pipeline.plo.pack import PloActionType
 from pipeline.plo.position import hero_relative_position
@@ -87,13 +88,8 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
 
 
 def _active_count(facts: PloFacts) -> int:
-    seats = {
-        a.seat
-        for a in facts.spot.node.history_before
-        if a.action is not PloActionType.FOLD
-    }
-    seats.add(facts.spot.node.actor)
-    return len(seats)
+    """Players still in (last-action non-folders + hero), for Pot Participant."""
+    return plo_active_player_count(facts.spot.node)
 
 
 def _pot_type(facts: PloFacts) -> str:

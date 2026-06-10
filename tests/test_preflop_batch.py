@@ -672,9 +672,20 @@ def test_filter_nodes_by_player_count() -> None:
     three_way = _node(
         "SB", (ParsedAction("HJ", PT.RAISE, 60.0), ParsedAction("CO", PT.CALL))
     )                                                               # {HJ,CO,SB} = 3
+    # HJ opened then folded to the squeeze -> out of the hand: {SB,BTN} = 2.
+    entrant_folded = _node(
+        "BTN",
+        (
+            ParsedAction("HJ", PT.RAISE, 60.0),
+            ParsedAction("BTN", PT.CALL),
+            ParsedAction("SB", PT.RAISE, 200.0),
+            ParsedAction("HJ", PT.FOLD),
+        ),
+    )
     assert active_player_count(open_node) == 1
     assert active_player_count(heads_up) == 2
     assert active_player_count(three_way) == 3
+    assert active_player_count(entrant_folded) == 2
 
     nodes = [open_node, heads_up, three_way]
     # Only heads-up.

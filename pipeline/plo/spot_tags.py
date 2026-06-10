@@ -25,6 +25,7 @@ from collections.abc import Callable
 
 from pipeline.plo.concept_tags import compute_plo_hand_tags
 from pipeline.plo.fact_extractor import PloFacts
+from pipeline.plo.node_enumerator import plo_active_player_count
 from pipeline.plo.pack import PloActionType
 
 FactsTagFn = Callable[[PloFacts], bool]
@@ -64,14 +65,8 @@ def _calls_after_last_raise(facts: PloFacts) -> int:
 
 
 def _active_count(facts: PloFacts) -> int:
-    """Players still in the pot at hero's decision (unique non-folders + hero)."""
-    active = {
-        a.seat
-        for a in facts.spot.node.history_before
-        if a.action is not PloActionType.FOLD
-    }
-    active.add(facts.spot.node.actor)
-    return len(active)
+    """Players still in the pot at hero's decision (last-action non-folders + hero)."""
+    return plo_active_player_count(facts.spot.node)
 
 
 # --- Position context (5) --------------------------------------------------
@@ -128,6 +123,9 @@ def squeeze_opportunity(facts: PloFacts) -> bool:
 
 def bvb_spot(facts: PloFacts) -> bool:
     """Only the blinds are left and hero is one of them (blind vs blind)."""
+    # Deliberately ANY non-fold action (not last-action like the active-player
+    # count): a non-blind who entered the pot and later folded still shaped
+    # the ranges and left dead money, so it's not a pure blind battle.
     non_blind_acted = any(
         a.seat not in ("SB", "BB") and a.action is not PloActionType.FOLD
         for a in facts.spot.node.history_before

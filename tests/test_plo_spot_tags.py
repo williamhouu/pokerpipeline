@@ -119,6 +119,16 @@ def test_multiway_pot():
     assert "multiway_pot" in tags
 
 
+def test_multiway_pot_excludes_entrant_who_later_folds():
+    # HJ opened then folded to BB's 3-bet: SB's decision is heads-up vs BB,
+    # not multiway -- HJ's dead money doesn't keep him in the pot.
+    history = (_act("HJ", R, 100), _act("SB", C), _act("BB", R, 100), _act("HJ", F))
+    assert "multiway_pot" not in _tags(actor="SB", history=history)
+    # If HJ calls the 3-bet instead, the pot is genuinely three-way.
+    history = (_act("HJ", R, 100), _act("SB", C), _act("BB", R, 100), _act("HJ", C))
+    assert "multiway_pot" in _tags(actor="SB", history=history)
+
+
 # --- strategy shape -------------------------------------------------------
 def test_strategy_shape_tags():
     assert "mixed_strategy" in _tags(freqs={"Raise 100%": 0.7, "Fold": 0.3})

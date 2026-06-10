@@ -180,3 +180,17 @@ def test_active_player_count_counts_non_folders_plus_hero():
 def test_active_player_count_open_node_is_heads_up_floor():
     # First in: only hero is "in" so far.
     assert plo_active_player_count(_node_with("LJ")) == 1
+
+
+def test_active_player_count_excludes_entrant_who_later_folds():
+    # The squeeze line: HJ opens, SB calls, BB 3-bets, HJ folds -> SB's
+    # decision is heads-up vs BB (HJ's dead money doesn't keep him "in").
+    node = _node_with(
+        "SB", _act("HJ", R, 100), _act("SB", C), _act("BB", R, 100), _act("HJ", F)
+    )
+    assert plo_active_player_count(node) == 2  # noqa: PLR2004
+    # If HJ calls the 3-bet instead, the pot is genuinely three-way.
+    node = _node_with(
+        "SB", _act("HJ", R, 100), _act("SB", C), _act("BB", R, 100), _act("HJ", C)
+    )
+    assert plo_active_player_count(node) == 3  # noqa: PLR2004

@@ -276,15 +276,20 @@ def node_action_context(node: PreflopDecisionNode) -> str:
 def active_player_count(node: PreflopDecisionNode) -> int:
     """Players still in the pot at this decision (incl. hero).
 
-    Node-level twin of ``concept_tags._non_fold_actor_count``: unique
-    non-fold positions in the history plus the actor. 2 = heads-up,
-    3 = three-way, etc. Used by the player-count filter so the user can
-    ask for, say, only 3- or 4-way spots instead of the deep bloodbaths.
+    Node-level twin of ``concept_tags._non_fold_actor_count`` (keep in
+    sync): a position counts only if its LAST action is a non-fold, so a
+    player who entered the pot and then folded (opened, then folded to a
+    squeeze) is out. Hero always counts. 2 = heads-up, 3 = three-way, etc.
+    Used by the player-count filter so the user can ask for, say, only
+    3- or 4-way spots instead of the deep bloodbaths.
     """
+    last_action: dict[str, PreflopActionType] = {}
+    for a in node.history_before:
+        last_action[a.position] = a.action_type
     positions = {
-        a.position
-        for a in node.history_before
-        if a.action_type is not PreflopActionType.FOLD
+        position
+        for position, action_type in last_action.items()
+        if action_type is not PreflopActionType.FOLD
     }
     positions.add(node.actor)
     return len(positions)

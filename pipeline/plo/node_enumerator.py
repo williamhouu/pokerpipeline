@@ -271,15 +271,20 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
 def plo_active_player_count(node: PloDecisionNode) -> int:
     """Players still in the pot at this decision (incl. hero).
 
-    Unique non-fold seats in the history plus the actor: 2 = heads-up,
-    3 = three-way, etc. Port of
+    A seat counts only if its LAST action is a non-fold -- a player who
+    entered the pot and then folded (e.g. opened, then folded to a squeeze)
+    is out of the hand, even though their dead money remains. Hero always
+    counts. 2 = heads-up, 3 = three-way, etc. Port of
     :func:`pipeline.preflop.batch.active_player_count`; lets the Generate
     page ask for clean 3-/4-way spots instead of the deep multiway tail.
     """
+    last_action: dict[str, PloActionType] = {}
+    for a in node.history_before:
+        last_action[a.seat] = a.action
     seats = {
-        a.seat
-        for a in node.history_before
-        if a.action is not PloActionType.FOLD
+        seat
+        for seat, action in last_action.items()
+        if action is not PloActionType.FOLD
     }
     seats.add(node.actor)
     return len(seats)

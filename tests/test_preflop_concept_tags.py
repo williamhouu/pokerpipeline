@@ -248,6 +248,19 @@ def test_multiway_pot_does_not_fire_heads_up() -> None:
     assert multiway_pot(facts) is False
 
 
+def test_multiway_pot_excludes_entrant_who_later_folds() -> None:
+    """HJ opened then folded to SB's squeeze: BTN's decision is heads-up vs
+    SB, not multiway -- HJ's dead money doesn't keep him in the pot."""
+    history = (
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
+        ParsedAction("BTN", PreflopActionType.CALL),
+        ParsedAction("SB", PreflopActionType.RAISE, 200.0),
+        ParsedAction("HJ", PreflopActionType.FOLD),
+    )
+    facts = _facts(actor="BTN", history=history)
+    assert multiway_pot(facts) is False
+
+
 def test_multiway_pot_does_not_fire_when_hero_opened_then_faces_3bet() -> None:
     """Regression: heads-up 'HJ opens, CO 3-bets, HJ decides' was wrongly
     tagged multiway because hero's own open in history_before doubled

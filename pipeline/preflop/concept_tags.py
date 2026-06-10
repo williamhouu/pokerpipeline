@@ -68,23 +68,31 @@ def _calls_after_last_raise(facts: PreflopFacts) -> int:
 def _non_fold_actor_count(facts: PreflopFacts) -> int:
     """Players still in the pot at hero's decision point (incl. hero).
 
-    Counts UNIQUE positions that took a non-fold action in the action
-    history, plus hero. Set semantics dedupe so hero's own prior raise
-    (e.g. an open before later facing a 3-bet) isn't double-counted
-    against the explicit +1 for hero -- that was the bug behind
-    multiway_pot firing on heads-up "HJ opens, CO 3-bets, HJ decides"
-    spots.
+    A position counts only if its LAST action in the history is a non-fold
+    -- a player who entered the pot and then folded (e.g. opened, then
+    folded to a squeeze) is out of the hand, even though their dead money
+    remains; that was the bug behind multiway_pot firing on heads-up
+    "HJ opens, BTN calls, SB squeezes, HJ folds, BTN decides" spots.
+    Hero always counts; set semantics dedupe hero's own prior action
+    (e.g. an open before later facing a 3-bet) against the explicit add.
+    Mirrors ``format_writer._active_villain_actions``; keep in sync with
+    its node-level twin :func:`pipeline.preflop.batch.active_player_count`.
 
     Examples:
         * HJ opens, CO 3-bets, HJ decides -> {HJ, CO} = 2 (heads-up).
         * BTN opens, BB calls, hero is SB to act -> {BTN, BB, SB} = 3
           (squeeze opportunity, truly multiway).
         * UTG to act first (open) -> {UTG} = 1 (hero alone).
+        * HJ opens, BTN calls, SB squeezes, HJ folds, BTN decides ->
+          {SB, BTN} = 2 (heads-up again -- HJ is out).
     """
-    active_positions: set[str] = {
-        a.position
-        for a in facts.spot.node.history_before
-        if a.action_type is not PreflopActionType.FOLD
+    last_action: dict[str, PreflopActionType] = {}
+    for a in facts.spot.node.history_before:
+        last_action[a.position] = a.action_type
+    active_positions = {
+        position
+        for position, action_type in last_action.items()
+        if action_type is not PreflopActionType.FOLD
     }
     active_positions.add(facts.spot.node.actor)
     return len(active_positions)
@@ -164,7 +172,10 @@ def bvb_spot(facts: PreflopFacts) -> bool:
     a blind-vs-blind situation -- either SB opens or BB defends an SB
     open."""
     history = facts.spot.node.history_before
-    # All non-blind positions must be folded for it to be BvB.
+    # All non-blind positions must be folded for it to be BvB. Deliberately
+    # ANY non-fold action (not last-action like _non_fold_actor_count): a
+    # non-blind who entered the pot and later folded still shaped the ranges
+    # and left dead money, so it's not a pure blind battle.
     non_blinds_in_history = [a for a in history if a.position not in ("SB", "BB")]
     if any(a.action_type is not PreflopActionType.FOLD for a in non_blinds_in_history):
         return False
