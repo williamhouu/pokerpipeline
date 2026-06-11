@@ -58,6 +58,11 @@ from typing import Any
 
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
+from pipeline.preflop.action_history import (
+    ResolvedPreflopState,
+    raise_to_bb,
+    resolve_preflop_history,
+)
 from pipeline.preflop.app_table_format import build_app_table_columns
 from pipeline.preflop.concept_tags import (
     _non_fold_actor_count,
@@ -217,50 +222,21 @@ def _compute_pot_bb(
 ) -> float:
     """Reconstruct the pot in bb at hero's decision point.
 
-    Walks ``facts.spot.node.history_before`` maintaining each position's
-    committed chips. The pot at any point is the sum of all committed
-    amounts. Starts with SB and BB posting their blinds.
-
-    For raise actions, the raise size in bb comes from
-    :func:`pipeline.preflop.action_history._raise_size_bb` (same lookup
-    table the question-narrative renderer uses, so the prose
-    ``"opens to $1.25"`` and the POT column stay in sync). For all-ins
-    we approximate the shove as the effective stack depth -- precise
+    Thin wrapper over the shared pot accounting in
+    :func:`pipeline.preflop.action_history.resolve_preflop_history` (the
+    same walk the question-narrative renderer and the EV engine use, so
+    the prose ``"opens to $1.25"`` and the POT column stay in sync).
+    All-ins are approximated as the effective stack depth -- precise
     side-pot math would need stack tracking per position, deferred.
 
     Returns the pot in big blinds. Callers convert to dollars (for
     cash) or render directly as bb (for tournaments).
     """
-    from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        resolve_preflop_history,
+    )
 
-    committed: dict[str, float] = {"SB": pack.sb_to_bb_ratio, "BB": 1.0}
-    current_max_bet = 1.0  # everyone has to match the BB to enter
-    raise_level = 0
-    for parsed in facts.spot.node.history_before:
-        pos = parsed.position
-        if parsed.action_type is PreflopActionType.FOLD:
-            # Fold doesn't add chips. Any chips already committed (SB / BB
-            # blinds, or anyone who raised then we later see them fold,
-            # though that shouldn't appear in history_before) stay in.
-            continue
-        if parsed.action_type is PreflopActionType.CALL:
-            # Caller matches the current bet level.
-            committed[pos] = current_max_bet
-            continue
-        if parsed.action_type is PreflopActionType.RAISE:
-            raise_level += 1
-            bb_size = _raise_size_bb(parsed, raise_level, pack)
-            committed[pos] = bb_size
-            current_max_bet = bb_size
-            continue
-        if parsed.action_type is PreflopActionType.ALL_IN:
-            raise_level += 1
-            # Approximation: shove to effective stack. Precise side-pot
-            # math would need per-position stack tracking.
-            committed[pos] = float(pack.stack_depth_bb)
-            current_max_bet = float(pack.stack_depth_bb)
-            continue
-    return sum(committed.values())
+    return resolve_preflop_history(facts.spot.node.history_before, pack).pot_bb
 
 
 def _compute_preflop_skills(
@@ -448,14 +424,16 @@ def _villain_decision_node(
 def _normalize_action(
     option: PreflopActionOption,
     actor: str,
-    raise_level: int,
+    state: ResolvedPreflopState,
     pack: PreflopPack,
 ) -> tuple[str, float | None]:
     """Map a node action option to a ``(label, to_bb)`` pair.
 
     Labels are normalised verbs the app renders directly
     (fold/call/raise/allin); raises and jams carry their size in big blinds
-    (matching the Question prose), folds and calls carry no size.
+    (matching the Question prose), folds and calls carry no size. ``state``
+    is the resolved pot accounting at the node, which sizes the raise
+    options (Monker packs derive the raise-to from the running pot).
     """
     action_type = option.action_type
     if action_type is PreflopActionType.FOLD:
@@ -466,14 +444,13 @@ def _normalize_action(
         # A preflop jam commits the effective stack.
         return "allin", float(pack.stack_depth_bb)
     if action_type is PreflopActionType.RAISE:
-        from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
-
-        parsed = ParsedAction(
+        size = raise_to_bb(
+            state,
             position=actor,
-            action_type=PreflopActionType.RAISE,
             raise_size_pct=option.raise_size_pct,
+            pack=pack,
         )
-        return "raise", round(_raise_size_bb(parsed, raise_level, pack), 2)
+        return "raise", round(size, 2)
     return action_type.value.lower(), None
 
 
@@ -488,18 +465,11 @@ def _action_mix_for_node(
     that pure-fold are omitted (the renderer treats a missing hand as 100%
     fold), so a typical chart is ~30-60 hands rather than all 169.
     """
-    raise_level = (
-        sum(
-            1
-            for a in node.history_before
-            if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
-        )
-        + 1
-    )
+    state = resolve_preflop_history(node.history_before, pack)
     # Read each action's range file once, paired with its normalised label.
     loaded: list[tuple[str, float | None, dict[str, float]]] = [
         (
-            *_normalize_action(option, node.actor, raise_level, pack),
+            *_normalize_action(option, node.actor, state, pack),
             parse_range_file(option.range_file.path),
         )
         for option in node.actions

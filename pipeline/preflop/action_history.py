@@ -29,6 +29,7 @@ bb-size converter generalised once we have more pack data).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from pipeline.action_history import format_action_history
@@ -112,23 +113,168 @@ def _raise_size_bb(
     return fallback
 
 
+# --- shared history resolution (sizes + pot accounting) ----------------------
+# Monker-export packs (grammar "monker_nlhe") don't need a size lookup at
+# all: the raise token IS the size, as a percent of pot under Monker's
+# pot-relative rule. Resolving it requires the running pot state, so the
+# walk below is the single source of truth for preflop pot math -- the
+# Question prose, the POT column, the EV engine, and the ranges-column
+# action mixes all read from it and can't drift apart.
+_MONKER_GRAMMAR = "monker_nlhe"
+
+
+@dataclass(frozen=True)
+class ResolvedPreflopState:
+    """Pot accounting after a sequence of preflop actions.
+
+    Fields:
+        sizes_bb: Per-action "to" amount in bb, aligned with the input
+            history: the raise-to / all-in total for aggressive actions,
+            ``None`` for folds and calls.
+        committed_bb: Each seat's total commitment so far, blinds
+            included. Folded seats keep their dead money here (it is in
+            the pot).
+        high_bet_bb: The current bet level a caller must match.
+        raise_level: Aggressive actions so far (1 = open, 2 = 3-bet, ...).
+    """
+
+    sizes_bb: tuple[float | None, ...]
+    committed_bb: dict[str, float]
+    high_bet_bb: float
+    raise_level: int
+
+    @property
+    def pot_bb(self) -> float:
+        """Chips in the middle: every seat's commitment, dead money included."""
+        return sum(self.committed_bb.values())
+
+    def call_cost_bb(self, position: str) -> float:
+        """What ``position`` must add to match the current bet."""
+        return max(0.0, self.high_bet_bb - self.committed_bb.get(position, 0.0))
+
+
+def _monker_raise_to_bb(
+    raise_size_pct: float,
+    *,
+    committed: dict[str, float],
+    high_bet: float,
+    position: str,
+) -> float:
+    """Monker's pot-relative raise rule, in bb.
+
+    ``raise_to = high_bet + pct × (pot + to_call)`` where ``to_call`` is
+    what the raiser owes before raising. Same math as the PLO pack's
+    :func:`pipeline.plo.action_history.resolve_pot_limit` (Monker uses one
+    sizing rule across games; NLHE just isn't capped at 100%). First-in at
+    a 9-max table: ``1 + 1.2 × (1.5 + 1) = 4.0`` -- the pack's 40120 token
+    is the documented 4bb open.
+    """
+    prev = committed.get(position, 0.0)
+    to_call = high_bet - prev
+    pot = sum(committed.values())
+    return high_bet + (raise_size_pct / 100.0) * (pot + to_call)
+
+
+def resolve_preflop_history(
+    history: tuple[ParsedAction, ...],
+    pack: PreflopPack,
+) -> ResolvedPreflopState:
+    """Walk a prior-action sequence into per-action bb sizes + pot state.
+
+    Starts from the posted blinds and applies each action in order. Raise
+    sizes come from the pack's sizing convention: Monker-grammar packs use
+    the pot-relative formula on the running state; PioViewer packs use the
+    :data:`_RYAN_PACK_RAISE_SIZES_BB` token lookup (with its documented
+    fallbacks). All-ins commit the effective stack -- precise side-pot
+    math would need per-seat stack tracking, deferred.
+    """
+    is_monker = pack.grammar_name == _MONKER_GRAMMAR
+    committed: dict[str, float] = {"SB": pack.sb_to_bb_ratio, "BB": 1.0}
+    high_bet = 1.0  # everyone has to match the BB to enter
+    raise_level = 0
+    sizes: list[float | None] = []
+    for parsed in history:
+        pos = parsed.position
+        if parsed.action_type is PreflopActionType.FOLD:
+            # Fold adds no chips; any blind already posted stays in the pot.
+            sizes.append(None)
+            continue
+        if parsed.action_type is PreflopActionType.CALL:
+            committed[pos] = high_bet
+            sizes.append(None)
+            continue
+        raise_level += 1
+        if parsed.action_type is PreflopActionType.ALL_IN:
+            stack = float(pack.stack_depth_bb)
+            committed[pos] = stack
+            high_bet = max(high_bet, stack)
+            sizes.append(stack)
+            continue
+        # RAISE
+        if is_monker:
+            raise_to = _monker_raise_to_bb(
+                parsed.raise_size_pct or 100.0,
+                committed=committed,
+                high_bet=high_bet,
+                position=pos,
+            )
+        else:
+            raise_to = _raise_size_bb(parsed, raise_level, pack)
+        committed[pos] = raise_to
+        high_bet = raise_to
+        sizes.append(raise_to)
+    return ResolvedPreflopState(
+        sizes_bb=tuple(sizes),
+        committed_bb=committed,
+        high_bet_bb=high_bet,
+        raise_level=raise_level,
+    )
+
+
+def raise_to_bb(
+    state: ResolvedPreflopState,
+    *,
+    position: str,
+    raise_size_pct: float | None,
+    pack: PreflopPack,
+) -> float:
+    """Size (bb) of a hypothetical NEXT raise by ``position`` given ``state``.
+
+    Used to size the actions *offered at* a node (hero's raise option, a
+    villain chart's raise column) rather than actions already in the
+    history. Monker packs apply the pot-relative rule to the resolved
+    state; PioViewer packs hit the token lookup at ``state.raise_level + 1``.
+    """
+    if pack.grammar_name == _MONKER_GRAMMAR:
+        return _monker_raise_to_bb(
+            raise_size_pct or 100.0,
+            committed=state.committed_bb,
+            high_bet=state.high_bet_bb,
+            position=position,
+        )
+    parsed = ParsedAction(
+        position=position,
+        action_type=PreflopActionType.RAISE,
+        raise_size_pct=raise_size_pct,
+    )
+    return _raise_size_bb(parsed, state.raise_level + 1, pack)
+
+
 def _to_action_tuple(
     parsed: ParsedAction,
-    raise_level: int,
+    size_bb: float | None,
     bb_amount_multiplier: float,
-    pack: PreflopPack,
 ) -> tuple:
     """Convert one ParsedAction to the brief's ``(position, verb, [amount])`` shape.
 
     Args:
         parsed: The ParsedAction.
-        raise_level: 0 if this action is not itself a raise; 1..N if it is
-            (1 = open, 2 = 3-bet, etc).
+        size_bb: The action's resolved "to" amount in bb (from
+            :func:`resolve_preflop_history`); ``None`` for fold/call.
         bb_amount_multiplier: Multiplier from bb-count to the units used in
             the action history. For cash, this is the dollar value of one
             big blind (so a 2.5bb open becomes ``$1.25``). For tournament,
             pass ``1.0`` (so a 2.5bb open stays as ``2.5bb``).
-        pack: Source pack.
 
     Returns:
         A 2-tuple ``(position, verb)`` for fold/call/check, or a 3-tuple
@@ -139,14 +285,12 @@ def _to_action_tuple(
         return (pos, "fold")
     if parsed.action_type is PreflopActionType.CALL:
         return (pos, "call")
+    if size_bb is None:
+        raise ValueError(f"missing resolved size for {parsed.action_type!r}")
     if parsed.action_type is PreflopActionType.ALL_IN:
-        # All-in caps at effective stack -- approximate the size as
-        # the stack depth in the chosen unit.
-        amount = round(pack.stack_depth_bb * bb_amount_multiplier, 2)
-        return (pos, "all-in", amount)
+        return (pos, "all-in", round(size_bb * bb_amount_multiplier, 2))
     if parsed.action_type is PreflopActionType.RAISE:
-        bb_size = _raise_size_bb(parsed, raise_level, pack)
-        return (pos, "raise", round(bb_size * bb_amount_multiplier, 2))
+        return (pos, "raise", round(size_bb * bb_amount_multiplier, 2))
     raise ValueError(f"unknown action type: {parsed.action_type!r}")
 
 
@@ -191,17 +335,14 @@ def build_hand_dict(
     # multiplier is 1.0.
     bb_amount_multiplier = 1.0 if render_in_bb else bb_dollars
 
-    # Walk history_before, tracking raise count to assign raise levels.
-    actions: list[tuple] = []
-    raise_level = 0
-    for parsed in facts.spot.node.history_before:
-        if parsed.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
-            raise_level += 1
-            actions.append(
-                _to_action_tuple(parsed, raise_level, bb_amount_multiplier, pack)
-            )
-        else:
-            actions.append(_to_action_tuple(parsed, 0, bb_amount_multiplier, pack))
+    # Resolve every prior action's bb size in one walk (the shared pot
+    # accounting), then render each as the brief's action tuple.
+    history = facts.spot.node.history_before
+    state = resolve_preflop_history(history, pack)
+    actions: list[tuple] = [
+        _to_action_tuple(parsed, size_bb, bb_amount_multiplier)
+        for parsed, size_bb in zip(history, state.sizes_bb, strict=True)
+    ]
 
     # Effective stack in the display unit: bb when rendering bb, else dollars.
     eff_stack: float = (
@@ -283,6 +424,9 @@ def format_preflop_action_history(
 
 
 __all__ = [
+    "ResolvedPreflopState",
     "build_hand_dict",
     "format_preflop_action_history",
+    "raise_to_bb",
+    "resolve_preflop_history",
 ]

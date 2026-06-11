@@ -55,7 +55,6 @@ from __future__ import annotations
 import logging
 
 from pipeline.preflop.fact_extractor import PreflopFacts
-from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import PreflopPack
 
@@ -68,39 +67,18 @@ def _pot_and_call_cost_bb(
 ) -> tuple[float, float]:
     """Return ``(pot_bb, hero_call_cost_bb)`` at hero's decision point.
 
-    Walks the history exactly like
-    :func:`pipeline.preflop.format_writer._compute_pot_bb`, but also
-    tracks the per-position commits so we can compute hero's
-    incremental cost to call (= current_max_bet - hero's existing
-    commit, or 0 if hero is already up to the max).
+    Thin wrapper over the shared pot accounting in
+    :func:`pipeline.preflop.action_history.resolve_preflop_history`, so
+    the EV math, the Question prose, and the POT column can't drift
+    apart. Hero's call cost = the current bet minus hero's existing
+    commit (0 if hero is already up to the max).
     """
-    from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        resolve_preflop_history,
+    )
 
-    committed: dict[str, float] = {"SB": pack.sb_to_bb_ratio, "BB": 1.0}
-    current_max_bet = 1.0
-    raise_level = 0
-    for parsed in facts.spot.node.history_before:
-        pos = parsed.position
-        if parsed.action_type is PreflopActionType.FOLD:
-            continue
-        if parsed.action_type is PreflopActionType.CALL:
-            committed[pos] = current_max_bet
-            continue
-        if parsed.action_type is PreflopActionType.RAISE:
-            raise_level += 1
-            bb_size = _raise_size_bb(parsed, raise_level, pack)
-            committed[pos] = bb_size
-            current_max_bet = bb_size
-            continue
-        if parsed.action_type is PreflopActionType.ALL_IN:
-            raise_level += 1
-            committed[pos] = float(pack.stack_depth_bb)
-            current_max_bet = float(pack.stack_depth_bb)
-            continue
-    pot_bb = sum(committed.values())
-    hero_committed = committed.get(facts.spot.node.actor, 0.0)
-    call_cost_bb = max(0.0, current_max_bet - hero_committed)
-    return pot_bb, call_cost_bb
+    state = resolve_preflop_history(facts.spot.node.history_before, pack)
+    return state.pot_bb, state.call_cost_bb(facts.spot.node.actor)
 
 
 def ev_fold_bb() -> float:
