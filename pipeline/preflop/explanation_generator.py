@@ -217,9 +217,14 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     ),
     "fold_pot_odds": (
         "Hero is facing a raise where the price is wrong despite some "
-        "equity. Frame the explanation around pot odds + reverse implied "
-        "odds: hero has enough raw equity but not enough realized equity "
-        "out of position or against a polarized range."
+        "equity. Frame the explanation around the price versus realized "
+        "equity: hero has enough raw equity but cannot realize it out of "
+        "position or against a polarized range. Mention reverse implied "
+        "odds ONLY when the concept_tags include dominated and "
+        "unconnected_offsuit (offsuit hands that make second-best pairs). "
+        "Small pairs and suited hands fold on price and realization, NOT "
+        "reverse implied odds: their made hands (sets, flushes) are strong, "
+        "so do not call them reverse-implied-odds folds."
     ),
     "call_for_value": (
         "Hero is calling a raise with a strong-but-not-3bet-worthy hand. "
