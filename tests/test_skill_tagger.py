@@ -273,25 +273,53 @@ def test_reverse_implied_odds() -> None:
         "Reverse Implied Odds",
         _ctx(path="postflop", concept_tags=frozenset({"reverse_implied_odds_call"})),
     )
-    # Preflop: a dominated, weak-OFFSUIT hand (offsuit broadway / weak ace).
+    # Preflop: FOLDING a dominated, weak-OFFSUIT hand fires (the insight
+    # drives the decision).
     assert _has(
         "Reverse Implied Odds",
-        _ctx(concept_tags=frozenset({"dominated", "unconnected_offsuit"})),
+        _ctx(
+            archetype="fold_dominated",
+            concept_tags=frozenset({"dominated", "unconnected_offsuit"}),
+        ),
     )
+    assert _has(
+        "Reverse Implied Odds",
+        _ctx(
+            archetype="fold_pot_odds",
+            concept_tags=frozenset({"dominated", "unconnected_offsuit"}),
+        ),
+    )
+    # A correct dominated CALL does NOT fire (RIO fear points at the wrong
+    # answer there; it keeps Implied Odds instead -- disjoint by construction).
+    call_ctx = _ctx(
+        archetype="call_for_implied_odds",
+        concept_tags=frozenset({"dominated", "unconnected_offsuit"}),
+    )
+    assert not _has("Reverse Implied Odds", call_ctx)
+    assert _has("Implied Odds", call_ctx)
     # A dominated PAIR is a set-miner (good implied odds) -> does NOT fire.
     assert not _has(
         "Reverse Implied Odds",
-        _ctx(concept_tags=frozenset({"dominated", "small_pair"})),
+        _ctx(
+            archetype="fold_dominated",
+            concept_tags=frozenset({"dominated", "small_pair"}),
+        ),
     )
     # A dominated SUITED hand has nut-draw potential -> does NOT fire.
     assert not _has(
         "Reverse Implied Odds",
-        _ctx(concept_tags=frozenset({"dominated", "suited_ace"})),
+        _ctx(
+            archetype="fold_dominated",
+            concept_tags=frozenset({"dominated", "suited_ace"}),
+        ),
     )
     # Weak offsuit but NOT dominated (decent equity) -> does NOT fire.
     assert not _has(
         "Reverse Implied Odds",
-        _ctx(concept_tags=frozenset({"unconnected_offsuit"})),
+        _ctx(
+            archetype="fold_dominated",
+            concept_tags=frozenset({"unconnected_offsuit"}),
+        ),
     )
 
 

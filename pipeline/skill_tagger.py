@@ -337,10 +337,21 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     # second-best top pairs. unconnected_offsuit structurally excludes pairs
     # (set-miners have GOOD implied odds) and suited hands (nut-flush / nut
     # draws) -- the opposite of reverse implied odds -- so this can't misfire
-    # on them. Needs equity (dominated), so it only fires when there's a villain.
+    # on them. Needs equity (dominated), so it only fires when there's a
+    # villain. Gated to FOLD archetypes (same ruling as PLO, June 2026):
+    # tagged where the insight drives the decision. On a correct dominated
+    # call (KJo closing the BB on price) RIO knowledge pushes toward the
+    # WRONG answer -- measured on the pack, 12 of 95 worthy dominant-Call
+    # offsuit spots co-fired RIO with Implied Odds. The gate removes those;
+    # dominated-offsuit FOLDS (the real RIO lesson) fire exactly as before.
+    # Disjoint from Implied Odds by construction now.
     "Reverse Implied Odds": lambda c: (
         "reverse_implied_odds_call" in c.concept_tags
-        or ("dominated" in c.concept_tags and "unconnected_offsuit" in c.concept_tags)
+        or (
+            c.archetype in _ARCHETYPES_FOLD
+            and "dominated" in c.concept_tags
+            and "unconnected_offsuit" in c.concept_tags
+        )
     ),
     "Minimum Defense Frequency (MDF)": lambda c: (
         "mdf_defense_threshold" in c.concept_tags
@@ -632,10 +643,12 @@ SKILL_META: dict[str, SkillMeta] = {
     ),
     "Reverse Implied Odds": SkillMeta(
         "Math & Theory", _PREFLOP,
-        "Preflop: a dominated, weak-OFFSUIT hand (offsuit broadway / weak "
-        "ace) that makes second-best top pairs -- `dominated` + "
-        "`unconnected_offsuit`, which excludes set-mining pairs and nut-draw "
-        "suited hands. Also the postflop `reverse_implied_odds_call` tag.",
+        "Preflop: FOLDING a dominated, weak-OFFSUIT hand (offsuit broadway / "
+        "weak ace) that makes second-best top pairs -- fold archetype + "
+        "`dominated` + `unconnected_offsuit`, which excludes set-mining pairs "
+        "and nut-draw suited hands. Fold-gated so it never fires on a correct "
+        "dominated call (disjoint from Implied Odds). Also the postflop "
+        "`reverse_implied_odds_call` tag.",
     ),
     "Minimum Defense Frequency (MDF)": SkillMeta(
         "Math & Theory", _POSTFLOP,
