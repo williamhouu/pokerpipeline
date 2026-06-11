@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 class PreflopActionOption:
     """One action available at a decision node.
 
-    Each option corresponds to one ``.txt`` file in the pack. The
+    Each option corresponds to one range file in the pack (``.txt`` for
+    PioViewer packs, ``.rng`` for Monker-export packs). The
     ``range_file`` field points at the parsed metadata; load the
     actual 169-class weights via
     ``pipeline.preflop_ranges.parse_range_file(option.range_file.path)``.
@@ -135,7 +136,9 @@ def enumerate_nodes(
     file_count = 0
     skip_count = 0
     for pack in packs:
-        for txt_path in sorted(pack.root_path.rglob("*.txt")):
+        # Each pack declares its own file pattern (PioViewer packs are
+        # .txt, Monker-export packs are .rng).
+        for txt_path in sorted(pack.root_path.rglob(pack.file_glob)):
             file_count += 1
             try:
                 parsed = parse(txt_path, pack=pack)

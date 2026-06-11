@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from pipeline.preflop.grammars import ryan_pack
+from pipeline.preflop.grammars import monker_nlhe, ryan_pack
 from pipeline.preflop.grammars.types import (
     ParsedAction,
     ParsedRangeFile,
@@ -37,6 +37,7 @@ from pipeline.preflop.pack import PreflopPack
 # PreflopPackSignature.grammar_name values.
 _REGISTRY: dict[str, Callable[[Path, PreflopPack], ParsedRangeFile]] = {
     "ryan_pack": ryan_pack.parse,
+    "monker_nlhe": monker_nlhe.parse,
 }
 
 

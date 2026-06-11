@@ -52,6 +52,10 @@ class PreflopPack:
         sb_to_bb_ratio: Small-blind size as a fraction of big-blind size.
             0.5 in most cash games; tournaments sometimes use 0.4 or other
             ratios.
+        file_glob: Glob pattern (relative to ``root_path``, recursive) the
+            node enumerator walks to find this pack's range files.
+            ``"*.txt"`` for the PioViewer-format Ryan pack; Monker-export
+            packs use ``"*.rng"``.
         description: Short human-readable description for the admin panel.
     """
 
@@ -62,6 +66,7 @@ class PreflopPack:
     stack_depth_bb: int
     open_size_bb: float
     sb_to_bb_ratio: float = 0.5
+    file_glob: str = "*.txt"
     description: str = ""
 
     def __post_init__(self) -> None:
@@ -93,6 +98,7 @@ class PreflopPackSignature:
     stack_depth_bb: int
     open_size_bb: float
     sb_to_bb_ratio: float = 0.5
+    file_glob: str = "*.txt"
     description: str = ""
 
 
@@ -199,6 +205,7 @@ def discover_packs(
             stack_depth_bb=sig.stack_depth_bb,
             open_size_bb=sig.open_size_bb,
             sb_to_bb_ratio=sig.sb_to_bb_ratio,
+            file_glob=sig.file_glob,
             description=sig.description,
         )
         register_pack(pack)

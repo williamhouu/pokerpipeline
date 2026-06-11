@@ -174,13 +174,25 @@ def format_hand_class_range(class_weights: dict[str, float]) -> str:
 
 
 def parse_range_file(path: Path | str) -> dict[str, float]:
-    """Parse a Ryan-pack range file into a `{hand_class: weight}` dict.
+    """Parse a preflop range file into a `{hand_class: weight}` dict.
 
-    The file format is a single line of `Hand:weight` pairs separated by
-    commas. Whitespace is tolerated. Expected to carry all 169 hand classes;
-    a sanity check enforces that count.
+    Dispatches on the file extension:
+
+      * ``.rng`` -- a MonkerSolver-export node file (the NLHE 9-max pack);
+        the weight column of :func:`parse_monker_rng_file`.
+      * anything else -- Ryan-pack PioViewer format: a single line of
+        `Hand:weight` pairs separated by commas. Whitespace is tolerated.
+
+    Both formats carry all 169 hand classes (zero-weight ones included);
+    a sanity check enforces that count. The weights have the same
+    semantics in both packs: the JOINT probability that the hand reaches
+    the node AND takes this action (the spot sampler normalises by
+    presence downstream).
     """
-    text = Path(path).read_text(encoding="utf-8").strip()
+    path = Path(path)
+    if path.suffix == ".rng":
+        return {hand: p for hand, (p, _ev) in parse_monker_rng_file(path).items()}
+    text = path.read_text(encoding="utf-8").strip()
     out: dict[str, float] = {}
     for pair in text.split(","):
         pair = pair.strip()
@@ -193,6 +205,74 @@ def parse_range_file(path: Path | str) -> dict[str, float]:
             f"expected 169 hand classes in {path}, got {len(out)}. The pack "
             f"format assumes all 169 entries are present (zero-weight ones "
             f"included). Mismatches likely mean a corrupted or truncated file.")
+    return out
+
+
+def parse_monker_rng_file(path: Path | str) -> dict[str, tuple[float, float]]:
+    """Parse a MonkerSolver-export NLHE `.rng` node file.
+
+    Format (see ``docs/nlhe9_pack_notes.md``): ASCII text, two lines per
+    hand class, 169 classes per file::
+
+        AA
+        1.0;8313.56063199635
+        A2s
+        0.546;0.017402295110777916
+        ...
+
+    Line 1 of each pair is the hand-class label (the same 169 labels as
+    the Ryan pack: ``AA``, ``A2s``, ``A2o``...), line 2 is
+    ``<weight>;<ev>``. Unlike the PLO pack's `.rng` files (16,432
+    pattern lines, order-implicit), these are self-labeling -- the label
+    is read, not inferred from line position.
+
+    Returns:
+        ``{hand_class: (weight, ev_raw)}`` for all 169 classes. ``weight``
+        is the joint reach-and-take-this-action probability in [0, 1].
+        ``ev_raw`` is Monker's EV figure exactly as stored -- its unit is
+        NOT yet calibrated for this pack (see the pack notes doc), so no
+        pipeline math may consume it until a documented scale lands here.
+        A missing EV field (``"0.5;"``) parses as 0.0, mirroring the PLO
+        reader's tolerance.
+
+    Raises:
+        ValueError: wrong line count, a weight/EV line with no ``;``, a
+            duplicate or non-canonical label set, or unparseable floats.
+    """
+    path = Path(path)
+    lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    expected = 2 * 169
+    if len(lines) != expected:
+        raise ValueError(
+            f"{path.name}: expected {expected} non-empty lines "
+            f"(169 label + weight;ev pairs), got {len(lines)} -- not a "
+            "169-class NLHE Monker .rng")
+    out: dict[str, tuple[float, float]] = {}
+    for i in range(169):
+        label = lines[2 * i]
+        payload = lines[2 * i + 1]
+        p_str, sep, ev_str = payload.partition(";")
+        if not sep:
+            raise ValueError(
+                f"{path.name}: line {2 * i + 2} ({payload!r}) has no "
+                f"';' separator -- expected '<weight>;<ev>'")
+        try:
+            weight = float(p_str)
+            ev = float(ev_str) if ev_str else 0.0
+        except ValueError as exc:
+            raise ValueError(
+                f"{path.name}: unparseable weight/EV pair {payload!r} "
+                f"for hand {label!r}") from exc
+        if label in out:
+            raise ValueError(f"{path.name}: duplicate hand label {label!r}")
+        out[label] = (weight, ev)
+    if set(out) != set(canonical_169_hand_classes()):
+        missing = sorted(set(canonical_169_hand_classes()) - set(out))[:5]
+        extra = sorted(set(out) - set(canonical_169_hand_classes()))[:5]
+        raise ValueError(
+            f"{path.name}: label set is not the canonical 169 hand classes "
+            f"(missing e.g. {missing}, unexpected e.g. {extra})")
     return out
 
 
@@ -252,5 +332,6 @@ __all__ = [
     "expand_to_combo_weights",
     "format_hand_class_range",
     "format_set_range_line",
+    "parse_monker_rng_file",
     "parse_range_file",
 ]
