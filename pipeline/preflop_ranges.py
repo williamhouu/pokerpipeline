@@ -229,15 +229,18 @@ def parse_monker_rng_file(path: Path | str) -> dict[str, tuple[float, float]]:
     Returns:
         ``{hand_class: (weight, ev_raw)}`` for all 169 classes. ``weight``
         is the joint reach-and-take-this-action probability in [0, 1].
-        ``ev_raw`` is Monker's EV figure exactly as stored -- its unit is
-        NOT yet calibrated for this pack (see the pack notes doc), so no
-        pipeline math may consume it until a documented scale lands here.
-        A missing EV field (``"0.5;"``) parses as 0.0, mirroring the PLO
-        reader's tolerance.
+        ``ev_raw`` is Monker's EV in milli-big-blinds measured from the
+        start of the hand (verified June 2026, see
+        ``docs/nlhe9_pack_notes.md`` -- NOT the PLO pack's milli-small-
+        blinds). Because the baseline is per-hand constant, EV gaps
+        between actions are ``(ev_a - ev_b) / 1000`` in bb. A missing EV
+        field (``"0.5;"`` or a bare ``"0.5"`` -- the export drops the
+        field on some deep low-traffic nodes) parses as 0.0, mirroring
+        the PLO reader's tolerance.
 
     Raises:
-        ValueError: wrong line count, a weight/EV line with no ``;``, a
-            duplicate or non-canonical label set, or unparseable floats.
+        ValueError: wrong line count, a duplicate or non-canonical label
+            set, or unparseable floats.
     """
     path = Path(path)
     lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()
@@ -252,11 +255,7 @@ def parse_monker_rng_file(path: Path | str) -> dict[str, tuple[float, float]]:
     for i in range(169):
         label = lines[2 * i]
         payload = lines[2 * i + 1]
-        p_str, sep, ev_str = payload.partition(";")
-        if not sep:
-            raise ValueError(
-                f"{path.name}: line {2 * i + 2} ({payload!r}) has no "
-                f"';' separator -- expected '<weight>;<ev>'")
+        p_str, _sep, ev_str = payload.partition(";")
         try:
             weight = float(p_str)
             ev = float(ev_str) if ev_str else 0.0

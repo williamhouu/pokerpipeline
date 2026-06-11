@@ -232,12 +232,15 @@ def test_parse_monker_rng_rejects_unknown_label(tmp_path: Path):
         parse_monker_rng_file(rng)
 
 
-def test_parse_monker_rng_rejects_missing_separator(tmp_path: Path):
-    rng = _write_rng(tmp_path / "bad.rng")
+def test_parse_monker_rng_bare_weight_line_means_ev_zero(tmp_path: Path):
+    """The export drops the EV field on some deep nodes -- a bare weight
+    line (no ';') is valid and parses as ev 0.0 (real-pack example:
+    40120.40084.40046.3.1.1.1.1.0.rng)."""
+    rng = _write_rng(tmp_path / "deep.rng")
     text = rng.read_text(encoding="utf-8").replace("0.0;0.0", "0.75", 1)
     rng.write_text(text, encoding="utf-8")
-    with pytest.raises(ValueError, match="no ';' separator"):
-        parse_monker_rng_file(rng)
+    out = parse_monker_rng_file(rng)
+    assert out["AA"] == (0.75, 0.0)
 
 
 def test_parse_monker_rng_rejects_duplicate_label(tmp_path: Path):
@@ -284,3 +287,25 @@ def test_enumerate_nodes_file_glob_excludes_other_extensions(tmp_path: Path):
     nodes = enumerate_nodes([_pack(root=tmp_path)])
     assert len(nodes) == 1
     assert nodes[0].actions[0].range_file.path.suffix == ".rng"
+
+
+def test_villain_range_path_is_stem_prefix(tmp_path: Path):
+    """Monker villain range = the node stem truncated at the villain's token."""
+    from pipeline.preflop.fact_extractor import (  # noqa: PLC0415
+        construct_villain_range_path,
+        identify_villain,
+    )
+
+    for stem in (
+        "40120.0.0.0.0.0.0.0.0",
+        "40120.0.0.0.0.0.0.0.1",
+        "40120.0.0.0.0.0.0.0.40084",
+    ):
+        (tmp_path / f"{stem}.rng").touch()
+    pack = _pack(root=tmp_path)
+    (node,) = enumerate_nodes([pack])
+    villain = identify_villain(node)
+    assert villain is not None
+    assert villain.position == "UTG"
+    path = construct_villain_range_path(node, villain, pack)
+    assert path == tmp_path / "40120.rng"

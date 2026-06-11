@@ -169,9 +169,14 @@ def construct_villain_range_path(
     """Build the absolute path to the villain's range file at the moment
     they took their last raise/all-in action.
 
-    The grammar is: take the action history up to and including the
-    villain's last raise, format as ``<Pos>_<Action>_..._<VillainPos>_<VillainAction>``,
-    and put it in the villain-position folder under the pack root.
+    Ryan-pack grammar: take the action history up to and including the
+    villain's last raise, format as
+    ``<Pos>_<Action>_..._<VillainPos>_<VillainAction>``, and put it in the
+    villain-position folder under the pack root. Monker packs are flat and
+    name files by token chain alone, so the villain's file is simply the
+    node's own stem truncated after the villain's action token -- sliced
+    from a real option filename rather than re-encoded, so the pack's own
+    token spelling (zero-padded raise sizes etc.) is preserved exactly.
     """
     # Find the index of the villain's last raise/all-in action in history.
     villain_index = None
@@ -188,6 +193,15 @@ def construct_villain_range_path(
         raise ValueError(
             f"villain {villain.position} not found in node history: {node.node_id}"
         )
+
+    if pack.grammar_name == "monker_nlhe":
+        # Any option file's stem = the history tokens + the option's own
+        # token; the villain's range file is the prefix ending at their
+        # action.
+        option_path = node.actions[0].range_file.path
+        stem_tokens = option_path.stem.split(".")
+        villain_stem = ".".join(stem_tokens[: villain_index + 1])
+        return pack.root_path / f"{villain_stem}{option_path.suffix}"
 
     chain = node.history_before[: villain_index + 1]
     tokens = []
