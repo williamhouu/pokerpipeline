@@ -17,6 +17,11 @@ ranges/
 # here once purchased; the pipeline.plo parser reads it.
 plo_ranges/
 
+# NLHE 9-max Monker pack (June 2026) — MonkerViewer export, 93k .rng files
+# (~428MB extracted), local-only like the other packs. The canonical full
+# solve (the 3.4GB .mkr) stays in the team Dropbox.
+nlhe9_ranges/
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]
