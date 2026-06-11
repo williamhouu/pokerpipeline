@@ -622,9 +622,117 @@ def test_no_rows_writes_no_meta(tmp_path: Path) -> None:
     assert not out.with_suffix(".meta.json").exists()
 
 
-def test_node_is_unconverged_guard_against_real_pack() -> None:
-    """Convergence guard: a clean RFI node passes, but the deep multiway jam
-    tail (AA folding / premium inversions) is overwhelmingly flagged."""
+def _write_canary_rng(
+    path: Path, overrides: dict[str, tuple[float, float]]
+) -> None:
+    """A structurally valid 169-class Monker .rng with per-hand overrides."""
+    from pipeline.preflop_ranges import canonical_169_hand_classes
+
+    lines: list[str] = []
+    for cls in canonical_169_hand_classes():
+        p, ev = overrides.get(cls, (0.0, 0.0))
+        lines.append(cls)
+        lines.append(f"{p};{ev}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _canary_node(tmp_path: Path, files: dict[str, dict[str, tuple[float, float]]]):
+    """Build one decision node from Monker stems -> per-hand override maps."""
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+    from pipeline.preflop.pack import PreflopPack
+
+    for stem, overrides in files.items():
+        _write_canary_rng(tmp_path / f"{stem}.rng", overrides)
+    pack = PreflopPack(
+        pack_id="canary_test",
+        root_path=tmp_path,
+        grammar_name="monker_nlhe",
+        table_size=9,
+        stack_depth_bb=100,
+        open_size_bb=4.0,
+        file_glob="*.rng",
+    )
+    (node,) = enumerate_nodes([pack])
+    return node
+
+
+# SB limped earlier, faces the BB's iso-raise: AA's presence at this node
+# is small (AA almost never limps) -- the canary must judge the
+# CONDITIONAL strategy, not the raw joint mass.
+_LIMP_WAR = "0.0.0.0.0.0.0.1.40100"
+
+
+def test_canary_passes_converged_hero_acted_before_node(tmp_path: Path) -> None:
+    """AA reaches at 0.2 (it rarely limped) but continues 100% of the time
+    it is here -> converged, NOT flagged. The pre-June-2026 raw-sum version
+    compared 0.2 to ~1 and flagged this (and ~80% of every hero-acted-before
+    node on the 9-max pack), silently gutting After-call(s) generation."""
+    from pipeline.preflop.batch import node_is_unconverged
+
+    node = _canary_node(
+        tmp_path,
+        {
+            f"{_LIMP_WAR}.0": {"AA": (0.0, 0.0), "KK": (0.0, 0.0)},
+            f"{_LIMP_WAR}.1": {"AA": (0.05, 0.0), "KK": (0.1, 0.0)},
+            f"{_LIMP_WAR}.40100": {"AA": (0.15, 0.0), "KK": (0.1, 0.0)},
+        },
+    )
+    assert node_is_unconverged(node) is False
+
+
+def test_canary_flags_aa_folding_conditionally(tmp_path: Path) -> None:
+    """AA reaches at 0.2 but folds half of that -> unconverged, flagged."""
+    from pipeline.preflop.batch import node_is_unconverged
+
+    node = _canary_node(
+        tmp_path,
+        {
+            f"{_LIMP_WAR}.0": {"AA": (0.1, 0.0)},
+            f"{_LIMP_WAR}.1": {"AA": (0.05, 0.0)},
+            f"{_LIMP_WAR}.40100": {"AA": (0.05, 0.0)},
+        },
+    )
+    assert node_is_unconverged(node) is True
+
+
+def test_canary_skips_near_zero_presence(tmp_path: Path) -> None:
+    """AA effectively never reaches (presence 0.001) -> nothing to judge;
+    the spot-level presence filter owns these, not the canary."""
+    from pipeline.preflop.batch import node_is_unconverged
+
+    node = _canary_node(
+        tmp_path,
+        {
+            f"{_LIMP_WAR}.0": {"AA": (0.001, 0.0)},
+            f"{_LIMP_WAR}.1": {"72o": (0.5, 0.0)},
+            f"{_LIMP_WAR}.40100": {},
+        },
+    )
+    assert node_is_unconverged(node) is False
+
+
+def test_canary_flags_conditional_premium_inversion(tmp_path: Path) -> None:
+    """KK continuing less often than QQ (conditionally) is an inversion."""
+    from pipeline.preflop.batch import node_is_unconverged
+
+    node = _canary_node(
+        tmp_path,
+        {
+            f"{_LIMP_WAR}.0": {"KK": (0.2, 0.0), "QQ": (0.05, 0.0)},
+            f"{_LIMP_WAR}.1": {"AA": (1.0, 0.0), "KK": (0.4, 0.0), "QQ": (0.5, 0.0)},
+            f"{_LIMP_WAR}.40100": {"KK": (0.4, 0.0), "QQ": (0.45, 0.0)},
+        },
+    )
+    # AA: presence 1.0, continues 1.0 (passes). KK: 0.8/1.0 = 0.80
+    # continue; QQ: 0.95/1.0 = 0.95 -> KK < QQ - 0.10 -> flagged.
+    assert node_is_unconverged(node) is True
+
+
+def test_node_is_unconverged_guard_against_real_packs() -> None:
+    """Convergence guard on the real packs: clean RFI nodes pass, the deep
+    jam tail is flagged at a real-but-not-wholesale rate (the conditional
+    canary fires on true AA-misbehavior, not on low reach), and a known
+    garbage 9-max node (AA folding half its mass facing a jam) is caught."""
     ranges = Path(__file__).resolve().parent.parent / "ranges"
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
@@ -636,23 +744,44 @@ def test_node_is_unconverged_guard_against_real_pack() -> None:
     clear_registry()
     packs = discover_packs(ranges)
     if not packs:
-        pytest.skip("Ryan pack not present under ranges/")
-    nodes = enumerate_nodes(packs)
-    # A clean UTG RFI node (first to act) is converged -> not flagged.
-    utg = next(n for n in nodes if n.actor == "UTG" and len(n.history_before) == 0)
-    assert node_is_unconverged(utg) is False
-    # The deep multiway facing-jam tail is unconverged -> the guard fires on
-    # the large majority of it (we measured ~88% AA-folding).
-    jam = [
-        n
-        for n in nodes
-        if n.actor == "UTG"
-        and any(a.action_type is PT.ALL_IN for a in n.history_before)
-        and len(n.history_before) >= 6
-    ]
-    assert jam, "expected deep multiway jam nodes in the pack"
-    flagged = sum(1 for n in jam if node_is_unconverged(n))
-    assert flagged > 0.5 * len(jam)
+        pytest.skip("no real pack present under ranges/")
+    for pack in packs:
+        nodes = enumerate_nodes([pack])
+        # A clean UTG RFI node (first to act) is converged -> not flagged.
+        utg = next(
+            n for n in nodes if n.actor == "UTG" and len(n.history_before) == 0
+        )
+        assert node_is_unconverged(utg) is False, pack.pack_id
+        # Deep facing-jam tail: flagged meaningfully but not wholesale
+        # (measured 8-9% on both packs with the conditional canary).
+        jam = [
+            n
+            for n in nodes
+            if n.actor == "UTG"
+            and any(a.action_type is PT.ALL_IN for a in n.history_before)
+            and len(n.history_before) >= 6
+        ]
+        if jam:
+            flagged = sum(1 for n in jam if node_is_unconverged(n))
+            assert 0.02 * len(jam) <= flagged <= 0.6 * len(jam), (
+                f"{pack.pack_id}: {flagged}/{len(jam)}"
+            )
+        if pack.grammar_name == "monker_nlhe":
+            # The audit's known-garbage node: 5-way limp/jam fest where the
+            # BB chart shows AA folding ~50% -- must be caught.
+            bad = next(
+                (
+                    n
+                    for n in nodes
+                    if n.actor == "BB"
+                    and n.actions[0].range_file.path.stem.startswith(
+                        "40120.40084.40046.3.1.1.1.1"
+                    )
+                ),
+                None,
+            )
+            if bad is not None:
+                assert node_is_unconverged(bad) is True
 
 
 def test_filter_nodes_by_player_count() -> None:

@@ -115,12 +115,82 @@ the file EVs prove it's genuine indifference, not noise (QQ call
 settings popover text written for the 6-max pack does NOT describe this
 pack.
 
-## 6. Known tree quirks
+## 6. Full inventory (June 11 audit)
 
-- Deep multiway jam tails (5-bet wars with several cold-calls) exist and
-  are unconverged in places (AA folding mixed, junk calling jams). The
-  existing AA-canary `node_is_unconverged` check + presence/worthiness
-  filters drop them; don't relax those for 9-max.
-- ~760 heads-up jam-call closing nodes exist (the calibration anchors).
-- Depth runs to 17 actions; intermediate strategy exists at every node
+**Nodes by action context × hero seat** (the admin filter buckets):
+
+| context | UTG | UTG+1 | UTG+2 | LJ | HJ | CO | BTN | SB | BB | total |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Opening | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 9 |
+| Facing single raise | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 36 |
+| Facing 3-bet | 8 | 7 | 7 | 8 | 10 | 13 | 17 | 22 | 28 | 120 |
+| Facing 4-bet+ | 120 | 128 | 134 | 139 | 145 | 155 | 173 | 204 | 254 | 1,452 |
+| After call(s) | 3,576 | 4,231 | 4,964 | 5,356 | 5,217 | 4,704 | 4,101 | 4,195 | 6,097 | 42,441 |
+
+The FSR triangle (8+7+...+1 = 36) is complete: every seat-vs-seat
+single-raise matchup exists. **96.3% of nodes are "After call(s)"** —
+Monker allows cold-calls everywhere, so the tree explodes through call
+branches; that bucket spans everything from clean squeezes to 5-way
+limp-fests (the admin context filter is coarse here; skill tags slice
+finer within a batch).
+
+**Players still in at the decision:** 1: 8 · 2: 5,625 · 3: 13,594 ·
+4: 13,120 · 5: 7,337 · 6: 2,993 · 7: 1,109 · 8: 247 · 9: 25.
+
+**Worthy-spot runway** (55–95% window, presence ≥ 0.01; before
+difficulty/noise filters): Opening 177 · FSR 740 · F3B 743 · F4B+ 4,071 ·
+After call(s) ~129,000 (sampled) — **≈135k worthy spots total.**
+
+**Option shapes:** ZERO nodes offer two raise sizes (one raise ± jam ±
+call per node — same single-size-per-node property as the 6-max pack, so
+no preflop "pick the size" questions from either). Jams (token 3) first
+become available at depth 2 — facing an open + 3-bet (e.g. the
+`40120.40084` node, where UTG+2 may cold-4-bet-jam) — and are offered at
+4,827 nodes (F3B 120 / F4B+ 330 / After-calls 4,377); there is NO
+jam-over-a-single-open (correct at 100bb). 469 nodes (~1%) facing a bet
+offer **no flat call** — jam-or-fold (± one raise size) at 4-bet+ depth,
+standard Monker abstraction; none of them face an existing all-in (every
+facing-a-jam node does have its call). Raise-size menus by level: opens
+120/100/81%; 3-bets 84–141% pot (14 context-dependent sizes, IP smaller /
+blinds bigger); 4-bets 43–56% pot; 5-bets are jam-only.
+
+**SB-limp subtree:** 6 nodes (SB limps 0.1% of combos at this rake);
+`sb_complete`/`bb_check` exist but will essentially never produce
+questions from this pack.
+
+## 7. Convergence quality (and the canary fix it forced)
+
+Sampled per players-still-in bucket with the **conditional** AA canary
+(continue mass ÷ presence):
+
+| players in | flagged | | players in | flagged |
+|---|---|---|---|---|
+| 2 | ~3% | | 6 | ~7% |
+| 3 | ~2% | | 7 | ~19% |
+| 4 | ~2% | | 8 | ~35% |
+| 5 | ~2% | | 9 | ~44% |
+
+So the practical generation surface (HU–5-way) is **97–98% clean**, and
+the garbage concentrates exactly where expected: the 7–9-way limp/call
+tails (~1,400 nodes), which the noise filter + presence/worthiness gates
+drop. Deep UTG facing-jam lines flag at 8–9% on BOTH packs.
+
+**Canary bug found by this audit (fixed June 11):** the original
+`node_is_unconverged` compared AA's RAW joint mass to ~1.0. Joint
+weights include reach, so any node hero reached via an earlier
+call/limp/raise carried AA mass ≪ 1 and got flagged — ~80% of
+hero-acted-before nodes on this pack, i.e. "After call(s)" generation
+would have been silently gutted on either pack. It now normalises by
+presence (skipping hands below 0.5% presence) and flags only true
+AA-misbehavior; fixture + real-pack tests pin both directions.
+
+## 8. Known data quirks
+
+- **EV field omitted on ~1.1% of payload lines** (172,045 lines across
+  8,016 files, concentrated in deep low-traffic nodes): a bare `0.5`
+  instead of `0.5;<ev>`. The reader parses these as `ev = 0.0`. Harmless
+  while nothing consumes file EVs; if pack-EV gaps ever get wired in,
+  bare-line entries must be treated as "EV unknown", not 0.
+- ~760 heads-up jam-call closing nodes exist (the §4 calibration anchors).
+- Depth runs to 17 tokens; intermediate strategy exists at every node
   (the brief's full-coverage requirement, verified June 11).

@@ -366,24 +366,37 @@ def collect_worthy_spots(
 # must also continue in strength order facing the same action.
 _AA_CONTINUE_NOISE_TOL = 0.02
 _PREMIUM_MONOTONIC_TOL = 0.10
+# Below this PRESENCE (joint reach mass summed across every option, fold
+# included) a premium effectively never reaches the node, so its
+# conditional strategy is meaningless noise -- skip the check rather than
+# divide by ~0. Same idea as the spot sampler's presence filter.
+_CANARY_MIN_PRESENCE = 0.005
 
 
 def node_is_unconverged(node: PreflopDecisionNode) -> bool:
     """True if a node's solver strategy is detectably non-GTO (unconverged).
 
-    These show up on near-zero-reach lines (deep multiway 5-bet/jam pots) the
-    solver never converged, and they produce nonsense questions. Two clean
-    tells:
+    These show up on near-zero-reach lines (deep multiway limp/jam pots)
+    the solver never converged, and they produce nonsense questions. Two
+    clean tells, both computed as CONDITIONAL frequencies (continue mass
+    divided by the hand's presence at the node):
 
-    * **AA canary** -- AA's total continue frequency (sum across every
-      non-fold action) must be ~100%: AA never folds preflop in cash, and a
-      converged node always allocates it fully. An AA continue meaningfully
-      below 1 means the node is garbage (AA folding *or* simply
-      under-allocated, both of which happen on these unconverged jam nodes).
-      This alone catches ~88% of the noisy deep-multiway jam tail.
+    * **AA canary** -- given AA reaches this node at all, it must continue
+      ~100% of the time: AA never folds preflop in cash. A conditional
+      continue meaningfully below 1 means the node is garbage.
     * **Premium-pair monotonicity** -- facing the same action AA must
       continue at least as often as KK, and KK at least as often as QQ; an
       inversion (a stronger pair continuing LESS) is unconverged.
+
+    The normalisation matters: range files store JOINT weights (reach x
+    action), so at any node hero reached by an earlier call/limp/raise,
+    AA's raw mass is far below 1 simply because AA mostly took a different
+    earlier action. The pre-June-2026 version compared the RAW sum to ~1
+    and therefore flagged ~80% of perfectly converged hero-acted-before
+    nodes on the 9-max Monker pack (silently over-filtering any
+    "After call(s)" generation on both packs). When AA's presence is below
+    :data:`_CANARY_MIN_PRESENCE` there is nothing to judge -- the node is
+    left to the worthiness/presence filters.
 
     Deliberately does NOT flag KK/QQ folding on its own -- those can rarely be
     legitimate folds in extreme multiway AA-heavy all-in spots, so they aren't
@@ -396,21 +409,37 @@ def node_is_unconverged(node: PreflopDecisionNode) -> bool:
         return False  # nothing but fold -> no continue strategy to check
     from pipeline.preflop_ranges import parse_range_file  # noqa: PLC0415
 
-    # Sum each premium's continue frequency across all non-fold actions.
+    # Per-premium: presence (all options) and continue mass (non-fold).
+    presence = {"AA": 0.0, "KK": 0.0, "QQ": 0.0}
     cont = {"AA": 0.0, "KK": 0.0, "QQ": 0.0}
-    for opt in non_fold:
+    for opt in node.actions:
         try:
             weights = parse_range_file(opt.range_file.path)
         except (OSError, ValueError):
             return False  # unreadable -> don't guess; leave it to other filters
-        for hand in cont:
-            cont[hand] += weights.get(hand, 0.0)
+        is_continue = opt.action_type is not PreflopActionType.FOLD
+        for hand in presence:
+            w = weights.get(hand, 0.0)
+            presence[hand] += w
+            if is_continue:
+                cont[hand] += w
 
-    if cont["AA"] < 1.0 - _AA_CONTINUE_NOISE_TOL:
+    if presence["AA"] < _CANARY_MIN_PRESENCE:
+        return False  # AA effectively never here; nothing to judge
+    cond = {
+        hand: (cont[hand] / presence[hand] if presence[hand] > 0 else 1.0)
+        for hand in presence
+    }
+
+    if cond["AA"] < 1.0 - _AA_CONTINUE_NOISE_TOL:
         return True
     return (
-        cont["AA"] < cont["KK"] - _PREMIUM_MONOTONIC_TOL
-        or cont["KK"] < cont["QQ"] - _PREMIUM_MONOTONIC_TOL
+        presence["KK"] >= _CANARY_MIN_PRESENCE
+        and cond["AA"] < cond["KK"] - _PREMIUM_MONOTONIC_TOL
+    ) or (
+        presence["KK"] >= _CANARY_MIN_PRESENCE
+        and presence["QQ"] >= _CANARY_MIN_PRESENCE
+        and cond["KK"] < cond["QQ"] - _PREMIUM_MONOTONIC_TOL
     )
 
 
