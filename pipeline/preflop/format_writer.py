@@ -632,6 +632,7 @@ def format_preflop_question(
 # pack not listed gets no rake suffix (e.g. tournaments). Add new packs here.
 _PACK_RAKE_NOTES: dict[str, str] = {
     "ryan_preflop_tree_6max_100bb": "4% / 0.3bb cap",
+    "monker_nlhe_9max_100bb": "10% / 3bb cap",
 }
 
 

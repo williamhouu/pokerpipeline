@@ -115,14 +115,23 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         sb_to_bb_ratio=0.5,
         description="Ryan's 6-max 100bb 2.5x Open pack, PioViewer format.",
     ),
-    # Future: when the 9-max pack arrives, add a sibling signature like:
-    # PreflopPackSignature(
-    #     pack_id="ryan_preflop_tree_9max_100bb",
-    #     relative_pack_root="ryan_preflop_tree/PioViewer - NLH 9max 100bb 2.5x Open",
-    #     grammar_name="ryan_pack",        # same grammar -> no parser change
-    #     table_size=9, stack_depth_bb=100, open_size_bb=2.5,
-    #     description="Ryan's 9-max 100bb 2.5x Open pack.",
-    # ),
+    # The 9-max Monker pack lives in its own gitignored sibling dir (where
+    # the June-2026 extraction was verified), not under ranges/ -- the
+    # ".." hop is deliberate; discover_packs resolves it away.
+    PreflopPackSignature(
+        pack_id="monker_nlhe_9max_100bb",
+        relative_pack_root="../nlhe9_ranges/ranges/Hold'em/9-way/100bb[10p-3bb]",
+        grammar_name="monker_nlhe",
+        table_size=9,
+        stack_depth_bb=100,
+        open_size_bb=4.0,  # the root 40120 token = 120% pot = 4bb
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        description=(
+            "NLHE 9-max 100bb Monker pack -- 4x opens, rake 10%/3bb cap "
+            "(see docs/nlhe9_pack_notes.md)."
+        ),
+    ),
 )
 
 
@@ -194,7 +203,9 @@ def discover_packs(
     root = Path(ranges_root).resolve()
     found: list[PreflopPack] = []
     for sig in signatures:
-        pack_root = root / sig.relative_pack_root
+        # resolve() collapses any ".." hops (packs living in sibling dirs
+        # of ranges/) so downstream paths/solver references stay clean.
+        pack_root = (root / sig.relative_pack_root).resolve()
         if not pack_root.is_dir():
             continue
         pack = PreflopPack(

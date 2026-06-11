@@ -104,6 +104,7 @@ from admin_panel import (  # noqa: E402
 
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
+from pipeline.action_history import preflop_order  # noqa: E402
 from pipeline.explanation_generator import (  # noqa: E402
     DEFAULT_TEMPERATURE,
     build_system_prompt,
@@ -210,6 +211,12 @@ EXPECTED_RANGE_COUNTS = {
     "SB": 2999,
     "UTG": 2977,
 }
+
+# The 9-max Monker pack is flat (no position folders): one .rng per
+# node-action. Count verified in the June 2026 extraction audit
+# (docs/nlhe9_pack_notes.md).
+NLHE9_PACK_ID = "monker_nlhe_9max_100bb"
+EXPECTED_NLHE9_RANGE_COUNT = 93_235
 
 # Board-texture filter options. The composite descriptor values are produced
 # by pipeline/fact_extractor/board_texture.py:_composite() -- six categories
@@ -381,12 +388,59 @@ def _cached_preflop_packs() -> tuple[PreflopPack, ...]:
 
 
 @st.cache_resource
-def _cached_preflop_nodes_by_actor() -> dict[str, tuple[PreflopDecisionNode, ...]]:
-    """Walk the preflop packs once and group nodes by hero position."""
-    packs = _cached_preflop_packs()
+def _cached_preflop_nodes_by_actor(
+    pack_id: str,
+) -> dict[str, tuple[PreflopDecisionNode, ...]]:
+    """Walk ONE preflop pack and group its nodes by hero position.
+
+    Per-pack (cached per pack_id) -- with both the 6-max and 9-max packs
+    registered, a combined walk would silently mix their nodes into every
+    filter, count, and viewer.
+    """
+    packs = [p for p in _cached_preflop_packs() if p.pack_id == pack_id]
     if not packs:
         return {}
     return enumerate_nodes_by_actor(packs)
+
+
+# Where the NLHE Generate page persists its pack choice (hidden file so the
+# batch-dir *.csv globs never see it). Same mechanism as the PLO page's
+# settings snapshot.
+PREFLOP_GEN_SETTINGS_PATH = PREFLOP_OUTPUT_DIR / ".preflop_generate_settings.json"
+
+
+def _select_preflop_pack(widget_key: str) -> PreflopPack | None:
+    """Render the pack selector and return the chosen pack.
+
+    With a single discovered pack there is no choice to make -- show a
+    caption and return it. The widget's session value persists across
+    pages that share ``widget_key``; the Generate page additionally
+    snapshots it to disk on launch.
+    """
+    packs = _cached_preflop_packs()
+    if not packs:
+        return None
+
+    def _label(pack_id: str) -> str:
+        p = next(pk for pk in packs if pk.pack_id == pack_id)
+        return f"{p.table_size}-max · {p.stack_depth_bb}bb · {p.pack_id}"
+
+    if len(packs) == 1:
+        st.caption(f"Range pack: **{_label(packs[0].pack_id)}**")
+        return packs[0]
+    ids = [p.pack_id for p in packs]
+    choice = st.selectbox(
+        "Range pack",
+        options=ids,
+        format_func=_label,
+        key=widget_key,
+        help=(
+            "Which preflop solve the batch samples from. 6-max = Ryan's "
+            "PioViewer pack (rake 4%/0.3bb); 9-max = the Monker pack "
+            "(rake 10%/3bb -- visibly tighter ranges)."
+        ),
+    )
+    return next(p for p in packs if p.pack_id == choice)
 
 
 @st.cache_resource(show_spinner="Building a sample spot for the prompt preview…")
@@ -412,7 +466,7 @@ def _preview_sample_spot() -> tuple[PreflopFacts, list[str], str] | None:
         return None
     pack = packs[0]
     raise_types = (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
-    for nodes in _cached_preflop_nodes_by_actor().values():
+    for nodes in _cached_preflop_nodes_by_actor(pack.pack_id).values():
         for node in nodes:
             if not any(a.action_type in raise_types for a in node.history_before):
                 continue
@@ -431,7 +485,7 @@ def _preview_sample_spot() -> tuple[PreflopFacts, list[str], str] | None:
 
 
 def ranges_pack_status() -> tuple[bool, dict[str, int]]:
-    """Return (is_complete, per_position_counts) for the ranges pack."""
+    """Return (is_complete, per_position_counts) for the 6-max ranges pack."""
     counts = {}
     for pos in POSITION_FOLDERS:
         folder = RANGES_SUBDIR / pos
@@ -440,6 +494,16 @@ def ranges_pack_status() -> tuple[bool, dict[str, int]]:
         counts[pos] == EXPECTED_RANGE_COUNTS[pos] for pos in POSITION_FOLDERS
     )
     return is_complete, counts
+
+
+@st.cache_resource
+def _monker_pack_file_count(pack_id: str) -> int:
+    """Count a Monker pack's .rng files once per session (93k file stat
+    on every sidebar rerun would visibly lag the panel)."""
+    packs = [p for p in _cached_preflop_packs() if p.pack_id == pack_id]
+    if not packs:
+        return 0
+    return sum(1 for _ in packs[0].root_path.rglob(packs[0].file_glob))
 
 
 # --- page: Files -----------------------------------------------------------
@@ -491,6 +555,28 @@ def render_files_page() -> None:
         help="Upload not wired in this preview. The ranges/ folder is "
         "managed manually for now.",
     )
+
+    # 9-max Monker pack (flat .rng dir under nlhe9_ranges/, gitignored).
+    st.subheader("📂 Ranges (NLHE 9-max Monker pack)")
+    nlhe9_count = _monker_pack_file_count(NLHE9_PACK_ID)
+    if nlhe9_count == EXPECTED_NLHE9_RANGE_COUNT:
+        st.success(
+            f"✅ 9-max pack is complete: {nlhe9_count:,} .rng node files "
+            "(44,058 decision nodes)."
+        )
+    elif nlhe9_count == 0:
+        st.error(
+            "❌ 9-max pack not found. Extract it to "
+            "`nlhe9_ranges/ranges/Hold'em/9-way/100bb[10p-3bb]/` (the "
+            "canonical 3.4GB .mkr lives in the team Dropbox; see "
+            "docs/nlhe9_pack_notes.md)."
+        )
+    else:
+        st.warning(
+            f"⚠️ 9-max pack is partial: {nlhe9_count:,} files present, "
+            f"expected {EXPECTED_NLHE9_RANGE_COUNT:,}. Re-extract from the "
+            "Dropbox .mkr export."
+        )
 
     st.divider()
 
@@ -995,17 +1081,26 @@ def _render_generate_page_preflop() -> None:
         st.error(
             "❌ No preflop pack loaded. Upload a pack on the Files page "
             "first. (Ryan's PioViewer pack belongs under "
-            "`ranges/ryan_preflop_tree/`.)"
+            "`ranges/ryan_preflop_tree/`; the 9-max Monker pack under "
+            "`nlhe9_ranges/`.)"
         )
         return
-    for p in packs:
-        st.success(
-            f"✅ **{p.pack_id}** · {p.table_size}-max · "
-            f"{p.stack_depth_bb}bb · {p.open_size_bb}x open · "
-            f"{p.description}"
-        )
+    # Restore the last-used pack BEFORE the widget exists (same seeding
+    # pattern as the PLO page); a stale/unknown saved id is ignored.
+    if "preflop_gen_pack" not in st.session_state:
+        saved = gen_settings.load_settings(PREFLOP_GEN_SETTINGS_PATH)
+        saved_pack = saved.get("preflop_gen_pack")
+        if saved_pack in {p.pack_id for p in packs}:
+            st.session_state["preflop_gen_pack"] = saved_pack
+    pack = _select_preflop_pack("preflop_gen_pack")
+    assert pack is not None  # guarded by the empty-packs return above
+    st.success(
+        f"✅ **{pack.pack_id}** · {pack.table_size}-max · "
+        f"{pack.stack_depth_bb}bb · {pack.open_size_bb}x open · "
+        f"{pack.description}"
+    )
 
-    nodes_by_actor = _cached_preflop_nodes_by_actor()
+    nodes_by_actor = _cached_preflop_nodes_by_actor(pack.pack_id)
     total_nodes = sum(len(ns) for ns in nodes_by_actor.values())
     st.caption(
         f"Walked the pack: **{total_nodes:,} preflop decision nodes** enumerated."
@@ -1017,7 +1112,12 @@ def _render_generate_page_preflop() -> None:
     st.subheader("2. Hero context")
     col1, col2 = st.columns(2)
     with col1:
-        positions_available = sorted(nodes_by_actor.keys())
+        # Seat order (UTG first), not alphabetical -- reads like a table.
+        seat_order = preflop_order(pack.table_size)
+        positions_available = [p for p in seat_order if p in nodes_by_actor]
+        positions_available += sorted(
+            p for p in nodes_by_actor if p not in seat_order
+        )  # defensive: never hide a position the pack actually has
         hero_positions = st.multiselect(
             "Hero positions",
             options=positions_available,
@@ -1038,10 +1138,11 @@ def _render_generate_page_preflop() -> None:
             default=["Facing single raise", "Facing 3-bet"],
             help="What hero is responding to. Empty = include all.",
         )
+        count_options = list(range(1, pack.table_size + 1))
         player_counts = st.multiselect(
             "Players in the pot",
-            options=[1, 2, 3, 4, 5, 6],
-            default=[1, 2, 3, 4, 5, 6],
+            options=count_options,
+            default=count_options,
             format_func=lambda n: (
                 "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
             ),
@@ -1417,8 +1518,13 @@ def _render_generate_page_preflop() -> None:
         use_container_width=True,
         key="preflop_generate_btn",
     ):
+        # Snapshot the pack choice so the next session (or a panel
+        # restart) regenerates against the same tree by default.
+        gen_settings.save_settings(
+            PREFLOP_GEN_SETTINGS_PATH, {"preflop_gen_pack": pack.pack_id}
+        )
         _start_preflop_job(
-            pack=packs[0],
+            pack=pack,
             hero_positions=list(hero_positions),
             action_contexts=list(action_contexts),
             player_counts=list(player_counts),
@@ -2999,36 +3105,55 @@ def render_ranges_page() -> None:
         "show the strategy (what to do with each hand); villains show the "
         "range they're in the pot with."
     )
-    with st.popover("📋  Match this pack in GTO Wizard"):
-        st.markdown(
-            "To sanity-check a spot in GTO Wizard, load a solution with these "
-            "settings. **This pack's actual rake is 4% with a 0.3bb cap** "
-            "(low-stakes online style), which is why cold-call ranges run "
-            "tight:\n\n"
-            "- **Solutions:** Cash\n"
-            "- **Type:** Classic\n"
-            "- **Players:** 6-max\n"
-            "- **Stack:** 100bb\n"
-            "- **Preflop bet sizes:** With cold calls\n"
-            "- **Opening size:** 2.5x\n"
-            "- **Rake:** closest GTOW preset is **NL50** (its presets don't "
-            "let you type 4% / 0.3bb directly)\n"
-            "- **Postflop bet sizes:** any (doesn't affect preflop)\n\n"
-            "**Confirming the match:** pick the rake where **T9s in the CO "
-            "facing a HJ open folds ~90% with just a sliver of call**. Less "
-            "rake (NL100+) flats more; more rake (NL10/NL25) goes pure "
-            "3-bet-or-fold. The tightness is correct for a raked game, not a bug."
-        )
-
-    ranges_ok, _ = ranges_pack_status()
     # Reuse the cached, registry-safe accessors (a raw discover_packs() here
     # would re-register the pack and raise on the second page visit).
-    packs = _cached_preflop_packs() if ranges_ok else ()
-    if not packs:
+    pack = _select_preflop_pack("ranges_pack")
+    if pack is None:
         st.warning("No range pack found in `ranges/`.")
         return
-    pack = packs[0]
-    by_actor = _cached_preflop_nodes_by_actor()
+
+    if pack.grammar_name == "monker_nlhe":
+        with st.popover("📋  Match this pack in GTO Wizard"):
+            st.markdown(
+                "To sanity-check a spot in GTO Wizard, load a 9-max cash "
+                "solution. **This pack's actual rake is 10% with a 3bb cap** "
+                "(micro-stakes structure) -- far heavier than any GTOW "
+                "preset, so expect this pack to be NOTICEABLY tighter than "
+                "whatever you load:\n\n"
+                "- **Solutions:** Cash\n"
+                "- **Players:** 9-max (full ring)\n"
+                "- **Stack:** 100bb\n"
+                "- **Opening size:** 4x (this pack opens 120% pot = 4bb "
+                "UTG-HJ, 3.5bb CO, ~3bb BTN/SB)\n"
+                "- **Rake:** the heaviest preset available (NL10-ish)\n\n"
+                "**Calibration example from this pack:** UTG+1 folds QQ 99% "
+                "against the UTG open -- and the solve's own EVs show a true "
+                "indifference (call -0.001bb). The extreme tightness is the "
+                "rake, not a parsing bug. See docs/nlhe9_pack_notes.md."
+            )
+    else:
+        with st.popover("📋  Match this pack in GTO Wizard"):
+            st.markdown(
+                "To sanity-check a spot in GTO Wizard, load a solution with these "
+                "settings. **This pack's actual rake is 4% with a 0.3bb cap** "
+                "(low-stakes online style), which is why cold-call ranges run "
+                "tight:\n\n"
+                "- **Solutions:** Cash\n"
+                "- **Type:** Classic\n"
+                "- **Players:** 6-max\n"
+                "- **Stack:** 100bb\n"
+                "- **Preflop bet sizes:** With cold calls\n"
+                "- **Opening size:** 2.5x\n"
+                "- **Rake:** closest GTOW preset is **NL50** (its presets don't "
+                "let you type 4% / 0.3bb directly)\n"
+                "- **Postflop bet sizes:** any (doesn't affect preflop)\n\n"
+                "**Confirming the match:** pick the rake where **T9s in the CO "
+                "facing a HJ open folds ~90% with just a sliver of call**. Less "
+                "rake (NL100+) flats more; more rake (NL10/NL25) goes pure "
+                "3-bet-or-fold. The tightness is correct for a raked game, not a bug."
+            )
+
+    by_actor = _cached_preflop_nodes_by_actor(pack.pack_id)
     node_by_id = {n.node_id: n for ns in by_actor.values() for n in ns}
     if not node_by_id:
         st.warning("The range pack has no parseable nodes.")
@@ -3044,7 +3169,10 @@ def render_ranges_page() -> None:
             st.session_state.pop("ranges_from_q", None)
             st.rerun()
     else:
-        actors = sorted(by_actor)
+        _seats = preflop_order(pack.table_size)
+        actors = [s for s in _seats if s in by_actor] + sorted(
+            a for a in by_actor if a not in _seats
+        )
         col_a, col_b = st.columns([1, 4])
         with col_a:
             actor = st.selectbox("Position", options=actors, key="ranges_actor")
@@ -3065,11 +3193,13 @@ def render_ranges_page() -> None:
         return
 
     # The pack encodes raise sizes as a percent-of-pot token (e.g. "60%").
-    # Convert to big blinds using the SAME helper the Question prose uses, so
-    # the viewer's amounts match the question text (e.g. "opens to 2.5bb")
-    # instead of showing the raw percent token. bb (not dollars) because the
-    # ranges are stake-independent.
-    from pipeline.preflop.action_history import _raise_size_bb  # noqa: PLC0415
+    # Convert to big blinds using the SAME shared pot walk the Question
+    # prose uses, so the viewer's amounts match the question text (e.g.
+    # "opens to 2.5bb") instead of showing the raw percent token. bb (not
+    # dollars) because the ranges are stake-independent.
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        resolve_preflop_history,
+    )
 
     _verbs = {
         PreflopActionType.FOLD: "folds",
@@ -3077,25 +3207,23 @@ def render_ranges_page() -> None:
         PreflopActionType.ALL_IN: "shoves all-in",
     }
 
-    def _verb(a: ParsedAction, raise_level: int) -> str:
-        if a.action_type is PreflopActionType.RAISE:
-            return f"raises to {_raise_size_bb(a, raise_level, pack):g}bb"
+    def _verb(a: ParsedAction, size_bb: float | None) -> str:
+        if a.action_type is PreflopActionType.RAISE and size_bb is not None:
+            return f"raises to {size_bb:g}bb"
         return _verbs.get(a.action_type, a.action_type.value.lower())
 
-    # Tag each prior action with its bet level (1 = open, 2 = 3-bet, ...) so
-    # the size converter knows which raise it is.
-    leveled: list[tuple[ParsedAction, int]] = []
-    _lvl = 0
-    for a in node.history_before:
-        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
-            _lvl += 1
-        leveled.append((a, _lvl))
+    _state = resolve_preflop_history(node.history_before, pack)
 
     st.subheader(f"{node.actor} · {node_action_context(node)}")
-    if leveled:
+    if node.history_before:
         st.caption(
             "Action so far → "
-            + " · ".join(f"{a.position} {_verb(a, lvl)}" for a, lvl in leveled)
+            + " · ".join(
+                f"{a.position} {_verb(a, size)}"
+                for a, size in zip(
+                    node.history_before, _state.sizes_bb, strict=True
+                )
+            )
         )
 
     _action_color = {
@@ -3166,14 +3294,14 @@ def render_ranges_page() -> None:
     #     the node where they acted, coloured by action (same legend as the
     #     hero). Fixes the old flat-green grid that made a villain who RAISED
     #     look like they were only calling. ---
-    last: dict[str, tuple[ParsedAction, int]] = {}
-    for a, lvl in leveled:
+    last: dict[str, tuple[ParsedAction, float | None]] = {}
+    for a, size in zip(node.history_before, _state.sizes_bb, strict=True):
         if a.position == node.actor:
             continue
         if a.action_type is PreflopActionType.FOLD:
             last.pop(a.position, None)
             continue
-        last[a.position] = (a, lvl)
+        last[a.position] = (a, size)
 
     villain_freqs: dict[str, dict[str, dict[str, float]]] = {}
     if last:
@@ -3183,7 +3311,7 @@ def render_ranges_page() -> None:
             "(same colour legend as above) — not just the one action that "
             "kept them in the pot."
         )
-        for pos, (action, lvl) in last.items():
+        for pos, (action, size) in last.items():
             villain_node = _villain_decision_node(node, pos, pack)
             if villain_node is None:
                 st.caption(f"**{pos}**: decision node unavailable")
@@ -3191,7 +3319,7 @@ def render_ranges_page() -> None:
             v_segments, v_freqs = _mix_segments(villain_node)
             villain_freqs[pos] = v_freqs
             st.markdown(
-                f"**{pos}** {_verb(action, lvl)} — their strategy with each hand"
+                f"**{pos}** {_verb(action, size)} — their strategy with each hand"
             )
             st.html(range_view.grid_html(v_segments))
 
@@ -3263,13 +3391,22 @@ def render_compare_page() -> None:
         )
 
     # Spot filters — applied IDENTICALLY to both prompts so the A/B stays fair.
+    # Both sides run on the SAME pack (a 6-max-vs-9-max comparison would
+    # confound the prompt A/B with a tree change).
+    cmp_pack = _select_preflop_pack("cmp_pack")
+    if cmp_pack is None:
+        st.error("No range pack found in `ranges/`.")
+        return
+    _cmp_actors = _cached_preflop_nodes_by_actor(cmp_pack.pack_id)
+    _cmp_seat_order = preflop_order(cmp_pack.table_size)
+    _cmp_positions = [p for p in _cmp_seat_order if p in _cmp_actors]
     f1, f2 = st.columns(2)
     with f1:
         positions = st.multiselect(
             "Hero positions",
-            options=sorted(_cached_preflop_nodes_by_actor().keys()),
-            default=sorted(_cached_preflop_nodes_by_actor().keys()),
-            key="cmp_pos",
+            options=_cmp_positions,
+            default=_cmp_positions,
+            key=f"cmp_pos_{cmp_pack.pack_id}",
             help="Empty = all positions.",
         )
     with f2:
@@ -3393,11 +3530,7 @@ def render_compare_page() -> None:
                 "run to test the flow."
             )
             return
-        packs = _cached_preflop_packs()
-        if not packs:
-            st.error("No range pack found in `ranges/`.")
-            return
-        pack = packs[0]
+        pack = cmp_pack  # both sides sample the same selected pack
         model_api_a = _MODEL_LABEL_TO_API.get(model_a_label, model_a_label)
         model_api_b = _MODEL_LABEL_TO_API.get(model_b_label, model_b_label)
         # When the models differ, bake the model into each side's label so
@@ -6006,7 +6139,16 @@ def main() -> None:
     st.sidebar.divider()
     st.sidebar.subheader("Status")
     ranges_ok, _ = ranges_pack_status()
-    st.sidebar.text(f"Ranges: {'✅ ready' if ranges_ok else '❌ missing'}")
+    st.sidebar.text(f"Ranges 6-max: {'✅ ready' if ranges_ok else '❌ missing'}")
+    _n9 = _monker_pack_file_count(NLHE9_PACK_ID)
+    st.sidebar.text(
+        "Ranges 9-max: "
+        + (
+            "✅ ready"
+            if _n9 == EXPECTED_NLHE9_RANGE_COUNT
+            else ("❌ missing" if _n9 == 0 else f"⚠️ {_n9:,} files")
+        )
+    )
     total_cfrs = sum(count_cfrs(s.name) for s in SCENARIOS)
     expected_cfrs = len(SCENARIOS) * 25
     if total_cfrs == 0:

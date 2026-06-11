@@ -230,9 +230,9 @@ def test_results_are_deterministically_ordered(tmp_path):
     assert [n.node_id for n in first] == [n.node_id for n in second]
 
 
-# --- integration: real pack -------------------------------------------------
-def test_enumerate_against_real_pack():
-    """Sanity-check the enumerator on the real Ryan pack if present."""
+# --- integration: real packs ------------------------------------------------
+def test_enumerate_against_real_packs():
+    """Sanity-check the enumerator per real pack, whichever are present."""
     ranges = REPO_ROOT / "ranges"
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
@@ -240,12 +240,24 @@ def test_enumerate_against_real_pack():
 
     packs = discover_packs(ranges)
     if not packs:
-        pytest.skip("Ryan pack not present under ranges/")
-    nodes = enumerate_nodes(packs)
-    # The pack has ~20k files; node count should be a meaningful fraction.
-    assert 1_000 <= len(nodes) <= 30_000, f"unexpected node count: {len(nodes)}"
-    # Every node belongs to a known position.
-    actors = {n.actor for n in nodes}
-    assert actors.issubset({"UTG", "HJ", "CO", "BTN", "SB", "BB"})
-    # Every node has at least 1 action.
-    assert all(len(n.actions) >= 1 for n in nodes)
+        pytest.skip("no real pack present under ranges/")
+    by_pack = {p.pack_id: enumerate_nodes([p]) for p in packs}
+    for pack_id, nodes in by_pack.items():
+        # Every node has at least 1 action.
+        assert all(len(n.actions) >= 1 for n in nodes), pack_id
+
+    ryan = by_pack.get("ryan_preflop_tree_6max_100bb")
+    if ryan:
+        # The pack has ~20k files; node count should be a meaningful fraction.
+        assert 1_000 <= len(ryan) <= 30_000, f"unexpected node count: {len(ryan)}"
+        assert {n.actor for n in ryan}.issubset(
+            {"UTG", "HJ", "CO", "BTN", "SB", "BB"}
+        )
+
+    monker = by_pack.get("monker_nlhe_9max_100bb")
+    if monker:
+        # Landmark from the June-2026 extraction audit.
+        assert len(monker) == 44_058, f"unexpected node count: {len(monker)}"
+        assert {n.actor for n in monker} == {
+            "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN", "SB", "BB",
+        }

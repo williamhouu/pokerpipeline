@@ -728,6 +728,7 @@ def generate_preflop_batch(
             seed=random_seed,
             dry_run=dry_run,
             prompt_records=prompt_records,
+            pack=pack,
         )
         meta_path = out_path.with_suffix(".meta.json")
         meta_path.write_text(
@@ -793,13 +794,15 @@ def _build_batch_meta(
     seed: int | None,
     dry_run: bool,
     prompt_records: list[dict[str, object]],
+    pack: PreflopPack | None = None,
 ) -> dict[str, object]:
     """Assemble the ``<stem>.meta.json`` payload for one batch.
 
     Records the prompt SNAPSHOT (name + text + sha) so a later edit or
     rename of that prompt can't make this batch's provenance ambiguous,
-    the run settings (model / temperature / seed), and the per-question
-    inputs in CSV row order.
+    the run settings (model / temperature / seed), the source pack (so
+    Review/Compare can tell a 9-max batch from a 6-max one), and the
+    per-question inputs in CSV row order.
     """
     return {
         "prompt_name": prompt_name,
@@ -810,6 +813,8 @@ def _build_batch_meta(
         "temperature": temperature,
         "seed": seed,
         "dry_run": dry_run,
+        "pack_id": pack.pack_id if pack else "",
+        "table_size": pack.table_size if pack else None,
         "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "questions": prompt_records,
     }
