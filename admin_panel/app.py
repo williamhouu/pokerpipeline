@@ -2912,6 +2912,74 @@ def render_review_page() -> None:
         else:
             st.warning(f"#{no} was not found in the batch.")
 
+    # --- cross-batch approved pool (mirrors the PLO Review page) ------------
+    # Every question graded "approved" -- here or finalized on the Compare
+    # page -- gathered from EVERY batch's sidecar into one downloadable set.
+    # Derived live from the grades, so approving adds and un-approving drops.
+    st.divider()
+    st.subheader("✅ Approved questions (all batches)")
+    approved_sources = review.collect_approved_sources(PREFLOP_OUTPUT_DIR)
+    if not approved_sources:
+        st.caption(
+            "No approved questions yet. Grade questions **approved** above "
+            "(or finalize on the Compare page) and they collect here across "
+            "batches."
+        )
+    else:
+        appr_rows = [r for _csv, _no, r in approved_sources]
+        appr_fields = list(appr_rows[0].keys())
+        st.caption(
+            f"**{len(appr_rows)}** approved across all batches (deduped by "
+            "spot). Updates live as you grade."
+        )
+        dcol, ccol = st.columns([3, 2])
+        dcol.download_button(
+            "⬇️  Download approved (CSV)",
+            review.approved_rows_to_csv(appr_fields, appr_rows),
+            file_name="nlhe_approved_all_batches.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="nlhe_download_approved",
+        )
+        # Clear-all is destructive (un-approves everything): confirm in 2 steps.
+        # (NLHE grades via buttons, not state-holding radios, so the PLO
+        # widget-resurrect issue can't happen here.)
+        if st.session_state.get("nlhe_confirm_clear_approved"):
+            if ccol.button(
+                f"⚠️ Confirm: clear all {len(appr_rows)}",
+                key="nlhe_clear_approved_confirm",
+                use_container_width=True,
+            ):
+                n_cleared = review.clear_all_approved(PREFLOP_OUTPUT_DIR)
+                st.session_state["nlhe_confirm_clear_approved"] = False
+                st.toast(f"Cleared {n_cleared} approved question(s)")
+                st.rerun()
+        elif ccol.button(
+            "🧹 Clear all approved",
+            key="nlhe_clear_approved",
+            use_container_width=True,
+        ):
+            st.session_state["nlhe_confirm_clear_approved"] = True
+            st.rerun()
+
+        with st.expander("🗑  Remove individual questions"):
+            for src_csv, src_no, src_row in approved_sources:
+                rcol, xcol = st.columns([10, 1])
+                rcol.markdown(
+                    f"**{src_row.get('User Cards', '')}**  ·  "
+                    f"{src_row.get('Correct Answer', '')}  ·  "
+                    f"`{src_row.get('archetype', '')}`  ·  diff "
+                    f"{src_row.get('Difficulty Rating', '')}"
+                )
+                if xcol.button(
+                    "🗑",
+                    key=f"nlhe_appr_del_{src_csv.name}_{src_no}",
+                    help="Un-approve",
+                ):
+                    review.remove_review(src_csv, src_no)
+                    st.rerun()
+
 
 # --- page: Ranges -----------------------------------------------------------
 def render_ranges_page() -> None:
@@ -3246,16 +3314,55 @@ def render_compare_page() -> None:
             key="cmp_diff",
         )
     with s3:
-        model_label = st.radio(
-            "Model", options=list(_MODEL_LABEL_TO_API), index=0, key="cmp_model",
-            help="Compare with the model you'll ship with so verdicts carry over.",
+        # Per-side models (mirrors PLO Compare): same cost as a single-model
+        # compare and it unlocks model-vs-model A/B on identical spots.
+        _short_lbl = lambda lbl: lbl.split(" (")[0]  # noqa: E731
+        model_a_label = st.selectbox(
+            "Model A",
+            options=list(_MODEL_LABEL_TO_API),
+            index=0,
+            format_func=_short_lbl,
+            key="cmp_model_a",
         )
-        if "Fable" in model_label:
+        model_b_label = st.selectbox(
+            "Model B",
+            options=list(_MODEL_LABEL_TO_API),
+            index=0,
+            format_func=_short_lbl,
+            key="cmp_model_b",
+        )
+        if "Fable" in model_a_label or "Fable" in model_b_label:
             st.caption(
                 "Fable 5 has no temperature control, so 'deterministic' runs "
                 "may still vary slightly in wording."
             )
     band_low, band_high = difficulty_bands[preset]
+
+    o1, o2 = st.columns(2)
+    with o1:
+        cmp_display_in_bb = (
+            st.radio(
+                "Amounts",
+                options=["Big blinds", "Dollars"],
+                index=0,
+                horizontal=True,
+                key="cmp_amounts",
+                help="How the question renders. Big blinds is the default.",
+            )
+            == "Big blinds"
+        )
+    with o2:
+        cmp_style = ANSWER_STYLE_FROM_RADIO_LABEL[
+            st.radio(
+                "Answer option style",
+                options=list(ANSWER_STYLE_FROM_RADIO_LABEL),
+                index=list(ANSWER_STYLE_FROM_RADIO_LABEL.values()).index("auto"),
+                key="cmp_answer_style",
+                help="Same styles as the Generate page. Auto-pick = Basic for "
+                "dominant-action spots, GTO for mixed.",
+            )
+        ]
+
     s4, s5 = st.columns(2)
     with s4:
         seed = int(
@@ -3266,13 +3373,25 @@ def render_compare_page() -> None:
     with s5:
         dry = st.toggle("Dry run", key="cmp_dry", help="No API calls — flow check.")
 
-    same = a_slug == b_slug
-    if same:
-        st.info("Pick two different prompts to compare.")
+    # Side-identity checks: identical sides = pointless; two variables at
+    # once = a confounded verdict.
+    same_content = a_slug == b_slug
+    same_models = model_a_label == model_b_label
+    if same_content and same_models:
+        st.info(
+            "Pick two different prompts, or two different models — identical "
+            "sides would generate the same thing twice."
+        )
+    elif not same_content and not same_models:
+        st.warning(
+            "Both the prompt and the model differ between sides, so a verdict "
+            "won't tell you which one caused the difference. For a clean "
+            "test, vary one at a time."
+        )
     if st.button(
         "Run comparison",
         type="primary",
-        disabled=same or jobs.has_active_job(),
+        disabled=(same_content and same_models) or jobs.has_active_job(),
         key="cmp_run",
     ):
         if not dry and not os.environ.get("ANTHROPIC_API_KEY"):
@@ -3286,7 +3405,16 @@ def render_compare_page() -> None:
             st.error("No range pack found in `ranges/`.")
             return
         pack = packs[0]
-        model_api = _MODEL_LABEL_TO_API.get(model_label, model_label)
+        model_api_a = _MODEL_LABEL_TO_API.get(model_a_label, model_a_label)
+        model_api_b = _MODEL_LABEL_TO_API.get(model_b_label, model_b_label)
+        # When the models differ, bake the model into each side's label so
+        # the tally + verdict buttons say exactly what they're crediting.
+        a_name = names[a_slug] + (
+            f" · {_short_lbl(model_a_label)}" if not same_models else ""
+        )
+        b_name = names[b_slug] + (
+            f" · {_short_lbl(model_b_label)}" if not same_models else ""
+        )
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         PREFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         out_a = PREFLOP_OUTPUT_DIR / f"compare_{ts}_A.csv"
@@ -3294,7 +3422,7 @@ def render_compare_page() -> None:
         with st.status(
             "Running both prompts on the same spots…", expanded=True
         ) as status:
-            st.write(f"Prompt A — {names[a_slug]}")
+            st.write(f"A — {a_name}")
             res_a = generate_preflop_batch(
                 pack=pack,
                 output_path=out_a,
@@ -3303,14 +3431,16 @@ def render_compare_page() -> None:
                 action_contexts=contexts or None,
                 min_difficulty=band_low,
                 max_difficulty=band_high,
+                answer_style=cmp_style,
+                display_in_bb=cmp_display_in_bb,
                 system_prompt=lib.get_text(a_slug),
                 prompt_name=names[a_slug],
                 random_seed=seed,
                 temperature=0.0,
-                model=model_api,
+                model=model_api_a,
                 dry_run=dry,
             )
-            st.write(f"Prompt B — {names[b_slug]}")
+            st.write(f"B — {b_name}")
             res_b = generate_preflop_batch(
                 pack=pack,
                 output_path=out_b,
@@ -3319,11 +3449,13 @@ def render_compare_page() -> None:
                 action_contexts=contexts or None,
                 min_difficulty=band_low,
                 max_difficulty=band_high,
+                answer_style=cmp_style,
+                display_in_bb=cmp_display_in_bb,
                 system_prompt=lib.get_text(b_slug),
                 prompt_name=names[b_slug],
                 random_seed=seed,
                 temperature=0.0,
-                model=model_api,
+                model=model_api_b,
                 dry_run=dry,
             )
             status.update(label="Comparison ready", state="complete")
@@ -3334,8 +3466,8 @@ def render_compare_page() -> None:
         st.session_state["cmp_result"] = {
             "a_csv": str(res_a.output_path or out_a),
             "b_csv": str(res_b.output_path or out_b),
-            "a_name": names[a_slug],
-            "b_name": names[b_slug],
+            "a_name": a_name,
+            "b_name": b_name,
         }
         st.rerun()
 
@@ -3369,6 +3501,12 @@ def render_compare_page() -> None:
     opts = [f"{result['a_name']} better", "Tie", f"{result['b_name']} better"]
     to_verdict = {opts[0]: "A", opts[1]: "tie", opts[2]: "B"}
     from_verdict = {"A": opts[0], "tie": opts[1], "B": opts[2]}
+
+    # Finalize grades live in each compare CSV's own .review.json sidecar (the
+    # same store the Review page uses), so a question finalized here flows
+    # into the cross-batch "Approved questions" pool. Loaded once per rerun.
+    reviews_a = review.load_reviews(a_csv)
+    reviews_b = review.load_reviews(b_csv)
 
     for key, row_a, row_b in pairs:
         with st.container(border=True):
@@ -3404,13 +3542,34 @@ def render_compare_page() -> None:
                 st.caption(f"concept tags: {row_a['concept_tags']}")
             if row_a.get("skills"):
                 st.caption(f"skills: {row_a['skills']}")
+            # Editable explanations: tweak the prose before finalizing -- the
+            # finalize buttons save whatever is in the box. Keys carry the
+            # CSV stem so a fresh comparison never inherits stale edits.
+            orig_a = row_a.get("Answer Explanation", "")
+            orig_b = row_b.get("Answer Explanation", "")
             col_a, col_b = st.columns(2)
             with col_a:
                 st.markdown(f"**{result['a_name']}**")
-                st.info(_md_lines(row_a.get("Answer Explanation", "")))
+                edited_a = st.text_area(
+                    "Explanation A",
+                    value=orig_a,
+                    height=400,
+                    key=f"cmp_exp_a_{a_csv.stem}_{key}",
+                    label_visibility="collapsed",
+                )
+                if edited_a.strip() != orig_a.strip():
+                    st.caption("✏️ Edited — finalizing A saves this text.")
             with col_b:
                 st.markdown(f"**{result['b_name']}**")
-                st.info(_md_lines(row_b.get("Answer Explanation", "")))
+                edited_b = st.text_area(
+                    "Explanation B",
+                    value=orig_b,
+                    height=400,
+                    key=f"cmp_exp_b_{b_csv.stem}_{key}",
+                    label_visibility="collapsed",
+                )
+                if edited_b.strip() != orig_b.strip():
+                    st.caption("✏️ Edited — finalizing B saves this text.")
             cur = verdicts.get(key)
             idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
             choice = st.radio(
@@ -3423,6 +3582,80 @@ def render_compare_page() -> None:
             if choice is not None and to_verdict[choice] != cur:
                 compare.save_verdict(a_csv, key, to_verdict[choice])
                 st.rerun()
+
+            # --- finalize: save the chosen explanation to the approved pool ---
+            no_a, no_b = str(row_a.get("No", "")), str(row_b.get("No", ""))
+            fin_a = reviews_a.get(no_a, {}).get("status") == "approved"
+            fin_b = reviews_b.get(no_b, {}).get("status") == "approved"
+            fcol_a, fcol_b = st.columns(2)
+            if fcol_a.button(
+                "Save A to finalized",
+                key=f"cmp_fin_a_{key}",
+                disabled=fin_a,
+                use_container_width=True,
+            ):
+                # Exclusive: finalizing one variant un-finalizes the other.
+                # An edited explanation rides along as a sidecar override --
+                # the compare CSV itself keeps the original prose.
+                review.save_review(
+                    a_csv,
+                    no_a,
+                    "approved",
+                    "finalized from compare",
+                    explanation=(
+                        edited_a if edited_a.strip() != orig_a.strip() else None
+                    ),
+                )
+                review.remove_review(b_csv, no_b)
+                st.rerun()
+            if fcol_b.button(
+                "Save B to finalized",
+                key=f"cmp_fin_b_{key}",
+                disabled=fin_b,
+                use_container_width=True,
+            ):
+                review.save_review(
+                    b_csv,
+                    no_b,
+                    "approved",
+                    "finalized from compare",
+                    explanation=(
+                        edited_b if edited_b.strip() != orig_b.strip() else None
+                    ),
+                )
+                review.remove_review(a_csv, no_a)
+                st.rerun()
+            if fin_a or fin_b:
+                which = result["a_name"] if fin_a else result["b_name"]
+                _fin_grade = (reviews_a.get(no_a) if fin_a else reviews_b.get(no_b)) or {}
+                _edited_note = " (with your edits)" if _fin_grade.get("explanation") else ""
+                st.caption(f"✅ Saved to finalized using **{which}**{_edited_note}.")
+                if st.button("Remove from finalized", key=f"cmp_unfin_{key}"):
+                    review.remove_review(a_csv, no_a)
+                    review.remove_review(b_csv, no_b)
+                    st.rerun()
+
+    # --- download the shared finalized pool (same set as the Review page) -----
+    st.divider()
+    fin_fields, fin_rows = review.collect_approved_rows(PREFLOP_OUTPUT_DIR)
+    if fin_rows:
+        st.download_button(
+            f"⬇️  Download finalized questions (CSV) — {len(fin_rows)} total",
+            review.approved_rows_to_csv(fin_fields, fin_rows),
+            file_name="nlhe_approved_all_batches.csv",
+            mime="text/csv",
+            type="primary",
+            key="cmp_download_finalized",
+        )
+        st.caption(
+            "Every question you save to finalized here or approve on the "
+            "Review page, across all batches, deduped by spot."
+        )
+    else:
+        st.caption(
+            "Save questions to finalized above (or approve them on the Review "
+            "page) to build your downloadable set."
+        )
 
 
 # --- page: Prompt -----------------------------------------------------------
@@ -5485,7 +5718,7 @@ def render_plo_compare_page() -> None:
                 edited_a = st.text_area(
                     "Explanation A",
                     value=orig_a,
-                    height=220,
+                    height=400,
                     key=f"plo_cmp_exp_a_{a_csv.stem}_{key}",
                     label_visibility="collapsed",
                 )
@@ -5496,7 +5729,7 @@ def render_plo_compare_page() -> None:
                 edited_b = st.text_area(
                     "Explanation B",
                     value=orig_b,
-                    height=220,
+                    height=400,
                     key=f"plo_cmp_exp_b_{b_csv.stem}_{key}",
                     label_visibility="collapsed",
                 )
