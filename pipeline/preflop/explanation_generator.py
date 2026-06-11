@@ -72,6 +72,7 @@ from pipeline.preflop.gold_examples import load_preflop_gold_examples
 from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.position import hero_relative_position
+from pipeline.preflop.range_examples import leaning_examples_for_spot
 
 logger = logging.getLogger(__name__)
 
@@ -596,6 +597,13 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
     if facts.break_even_equity is not None:
         # Pot-odds threshold to call -- cite this instead of doing the math.
         out["break_even_equity_to_call"] = round(facts.break_even_equity, 4)
+    # Deterministic range examples: which hand classes in hero's OWN range
+    # at this node lean toward the runner-up action -- real pack data, so
+    # prose can name contrast hands without inventing them. Borderline band
+    # only (never pure-obvious hands); omitted when nothing qualifies.
+    leaning = leaning_examples_for_spot(facts)
+    if leaning is not None:
+        out["hands_in_your_range_that_prefer_the_other_action"] = leaning
     if facts.villain_stats is not None:
         v = facts.villain_stats
         out["villain_stats"] = {
