@@ -897,15 +897,11 @@ def render_generate_page() -> None:
         )
         if "Fable" in model:
             st.caption(_FABLE_NOTE)
+    # (A "Questions per API call" selector used to sit here -- it was never
+    # wired to anything. Generation is one question per API call by design:
+    # per-spot validators + retries need surgical failures, and prompt
+    # caching already amortizes the big system prompt across calls.)
     with col2:
-        batch_size = st.selectbox(
-            "Questions per API call",
-            options=[1, 5, 10, 25],
-            index=1,
-            help="5 is the recommended starting sweet spot. Higher = "
-            "faster but more risk if a call fails.",
-        )
-    with col3:
         dry_run = st.toggle(
             "Dry run (no API calls)",
             help="Show what would be generated without spending API tokens.",
@@ -920,14 +916,14 @@ def render_generate_page() -> None:
     else:
         est_cost_per_q = 0.08
     est_total_cost = total * est_cost_per_q if total else 0
-    est_minutes = total * 0.5 / max(batch_size, 1) if total else 0
+    # One API call per question (~30s each with validation retries).
+    est_minutes = total * 0.5 if total else 0
 
     st.info(
         f"**Estimated**: {total} questions · "
         f"~${est_total_cost:.2f} · "
         f"~{est_minutes:.1f} min · "
-        f"model={model.split()[0]} · "
-        f"batch={batch_size}"
+        f"model={model.split()[0]}"
     )
 
     st.divider()
@@ -1275,14 +1271,11 @@ def _render_generate_page_preflop() -> None:
         )
         if "Fable" in _model:
             st.caption(_FABLE_NOTE)
+    # (A "Questions per API call" selector used to sit here -- it was never
+    # wired to anything. Generation is one question per API call by design:
+    # per-spot validators + retries need surgical failures, and prompt
+    # caching already amortizes the big system prompt across calls.)
     with col2:
-        _batch_size = st.selectbox(
-            "Questions per API call",
-            options=[1, 5, 10, 25],
-            index=1,
-            key="preflop_batch_size",
-        )
-    with col3:
         _dry_run = st.toggle(
             "Dry run (no API calls)",
             key="preflop_dry_run",
