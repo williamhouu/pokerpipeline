@@ -93,7 +93,14 @@ import streamlit as st  # noqa: E402
 # reruns (sidebar clicks, tab switches) don't kill them mid-flight.
 # Usage helper computes per-batch $ cost from token totals and appends
 # a JSONL log so a lifetime spend total survives admin-panel restarts.
-from admin_panel import compare, jobs, range_view, review, usage  # noqa: E402
+from admin_panel import (  # noqa: E402
+    compare,
+    gen_settings,
+    jobs,
+    range_view,
+    review,
+    usage,
+)
 
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
@@ -3835,6 +3842,140 @@ _PLO_DIFFICULTY_BANDS = {
 }
 # Opus first = the default in every PLO picker (Generate + both Compare sides).
 _PLO_MODELS = ["claude-opus-4-7", "claude-fable-5", "claude-sonnet-4-6"]
+
+# --- PLO Generate settings persistence ---------------------------------------
+# The page's widget state is snapshotted to disk when a batch launches and
+# re-seeded on every render, so after a batch completes (and across page
+# switches or panel restarts) the Generate tab still shows exactly the setup
+# that batch ran with -- regenerating is one click.
+_PLO_GEN_SETTINGS_PATH = _PLO_BATCH_DIR / ".plo_generate_settings.json"
+_PLO_SEATS = ["LJ", "HJ", "CO", "BU", "SB", "BB"]
+_PLO_STYLE_LABELS = {
+    "Basic (Fold / Call / 3-bet)": "basic",
+    "GTO (Always / Mostly spectrum)": "gto",
+    "Auto-pick (Basic when dominant, GTO when mixed)": "auto",
+}
+_PLO_AMOUNT_LABELS = ["Dollars", "Big blinds"]
+#: Every persisted widget key on the PLO Generate page.
+_PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
+    "plo_clean_only",
+    "plo_gen_positions",
+    "plo_gen_contexts",
+    "plo_gen_player_counts",
+    "plo_difficulty_preset",
+    "plo_gen_custom_band",
+    "plo_worthiness_slider",
+    "plo_exclude_ambiguous",
+    "plo_min_ev_gap",
+    "plo_answer_style",
+    "plo_gen_count",
+    "plo_gen_pin_seed",
+    "plo_gen_seed_val",
+    "plo_gen_amounts",
+    "plo_gen_out_prefix",
+    "plo_gen_model",
+    "plo_gen_temperature",
+    "plo_gen_compute_eq",
+    "plo_gen_prompt_select",
+)
+
+
+def _seed_plo_generate_settings() -> None:
+    """Re-seed the Generate page's widget state from the last batch's snapshot.
+
+    Only keys ABSENT from session state are filled (a fresh session, or a
+    widget unmounted by visiting another page) -- live edits always win.
+    Saved values are sanitized against each widget's vocabulary and bounds,
+    so a stale file (renamed model, changed options) can never crash a
+    widget; anything invalid falls back to the hardcoded default.
+    """
+    from pipeline.plo.node_enumerator import PLO_ACTION_CONTEXTS  # noqa: PLC0415
+
+    saved = gen_settings.load_settings(_PLO_GEN_SETTINGS_PATH)
+
+    def _choice(v: object, options: list[str], default: str) -> str:
+        return v if isinstance(v, str) and v in options else default
+
+    def _subset(v: object, options: list, default: list) -> list:
+        if not isinstance(v, list):
+            return default
+        return [x for x in v if x in options]  # empty = a real choice ("any")
+
+    def _num(v: object, lo: float, hi: float, default: float, cast: type) -> object:
+        try:
+            x = cast(v)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        return min(max(x, lo), hi)
+
+    def _rng(
+        v: object, lo: int, hi: int, default: tuple[int, int]
+    ) -> tuple[int, int]:
+        if isinstance(v, (list, tuple)) and len(v) == 2:  # noqa: PLR2004
+            a = _num(v[0], lo, hi, default[0], int)
+            b = _num(v[1], lo, hi, default[1], int)
+            if isinstance(a, int) and isinstance(b, int) and a <= b:
+                return (a, b)
+        return default
+
+    def _flag(v: object, default: bool) -> bool:
+        return v if isinstance(v, bool) else default
+
+    restored: dict[str, object] = {
+        "plo_clean_only": _flag(saved.get("plo_clean_only"), True),
+        "plo_gen_positions": _subset(saved.get("plo_gen_positions"), _PLO_SEATS, []),
+        "plo_gen_contexts": _subset(
+            saved.get("plo_gen_contexts"),
+            list(PLO_ACTION_CONTEXTS),
+            ["Opening", "Facing single raise", "Facing 3-bet"],
+        ),
+        "plo_gen_player_counts": _subset(
+            saved.get("plo_gen_player_counts"), [1, 2, 3, 4, 5, 6], [1, 2, 3]
+        ),
+        "plo_difficulty_preset": _choice(
+            saved.get("plo_difficulty_preset"),
+            [*_PLO_DIFFICULTY_BANDS, "Custom"],
+            "Mixed",
+        ),
+        "plo_gen_custom_band": _rng(
+            saved.get("plo_gen_custom_band"), 400, 3200, (400, 3200)
+        ),
+        "plo_worthiness_slider": _rng(
+            saved.get("plo_worthiness_slider"), 50, 100, (60, 99)
+        ),
+        "plo_exclude_ambiguous": _flag(saved.get("plo_exclude_ambiguous"), True),
+        "plo_min_ev_gap": _num(saved.get("plo_min_ev_gap"), 0.0, 3.0, 0.0, float),
+        "plo_answer_style": _choice(
+            saved.get("plo_answer_style"),
+            list(_PLO_STYLE_LABELS),
+            "GTO (Always / Mostly spectrum)",
+        ),
+        "plo_gen_count": _num(saved.get("plo_gen_count"), 1, 200, 12, int),
+        "plo_gen_pin_seed": _flag(saved.get("plo_gen_pin_seed"), False),
+        "plo_gen_seed_val": _num(saved.get("plo_gen_seed_val"), 0, 1_000_000, 42, int),
+        "plo_gen_amounts": _choice(
+            saved.get("plo_gen_amounts"), _PLO_AMOUNT_LABELS, "Big blinds"
+        ),
+        "plo_gen_out_prefix": (
+            saved["plo_gen_out_prefix"]
+            if isinstance(saved.get("plo_gen_out_prefix"), str)
+            else "plo_batch"
+        ),
+        "plo_gen_model": _choice(
+            saved.get("plo_gen_model"), _PLO_MODELS, "claude-opus-4-7"
+        ),
+        "plo_gen_temperature": _num(
+            saved.get("plo_gen_temperature"), 0.0, 1.0, 0.6, float
+        ),
+        "plo_gen_compute_eq": _flag(saved.get("plo_gen_compute_eq"), False),
+    }
+    # The prompt picker validates itself at render (a stale slug falls back
+    # to the active prompt), so the saved slug is seeded as-is.
+    if isinstance(saved.get("plo_gen_prompt_select"), str):
+        restored["plo_gen_prompt_select"] = saved["plo_gen_prompt_select"]
+    for key, value in restored.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 _PLO_MODEL_NAMES = {
     "claude-fable-5": "Fable 5 (best quality, 2x Opus price)",
     "claude-opus-4-7": "Opus 4.7 (high fidelity)",
@@ -3915,6 +4056,11 @@ def render_plo_generate_page() -> None:
         "metric, same as Hold'em."
     )
 
+    # Restore the last batch's settings into any widget whose state is gone
+    # (fresh session, or a visit to another page unmounted it) -- so the tab
+    # always shows the setup the last batch ran with.
+    _seed_plo_generate_settings()
+
     loaded = _render_plo_pack_loader()
     if loaded is None:
         return
@@ -3931,7 +4077,6 @@ def render_plo_generate_page() -> None:
     st.subheader("1. Hero context")
     clean_only = st.toggle(
         "🧹 Clean lines only (recommended)",
-        value=True,
         key="plo_clean_only",
         help="ON: restrict to the solver's CONVERGED lines -- opens, "
         "single-raised pots, and heads-up / 3-way 3-bet pots (<=2 raises, <=3 "
@@ -3943,8 +4088,8 @@ def render_plo_generate_page() -> None:
     with hc1:
         positions = st.multiselect(
             "Hero positions (blank = any)",
-            options=["LJ", "HJ", "CO", "BU", "SB", "BB"],
-            default=[],
+            options=_PLO_SEATS,
+            key="plo_gen_positions",
             # Display the NLHE/app seat names (the pack's internal codes are
             # LJ/BU; everything player-facing says UTG/BTN).
             format_func=lambda s: {"LJ": "UTG", "BU": "BTN"}.get(s, s),
@@ -3955,14 +4100,14 @@ def render_plo_generate_page() -> None:
         action_contexts = st.multiselect(
             "Action faced",
             options=list(PLO_ACTION_CONTEXTS),
-            default=["Opening", "Facing single raise", "Facing 3-bet"],
+            key="plo_gen_contexts",
             help="What hero is responding to. Empty = all. (With 'Clean lines "
             "only' on, the 4-bet+ tail stays excluded even if selected.)",
         )
         player_counts = st.multiselect(
             "Players in the pot",
             options=[1, 2, 3, 4, 5, 6],
-            default=[1, 2, 3],
+            key="plo_gen_player_counts",
             format_func=lambda n: (
                 "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
             ),
@@ -4011,12 +4156,13 @@ def render_plo_generate_page() -> None:
     preset = st.radio(
         "Preset",
         options=[*_PLO_DIFFICULTY_BANDS, "Custom"],
-        index=3,
         horizontal=True,
         key="plo_difficulty_preset",
     )
     if preset == "Custom":
-        lo, hi = st.slider("Difficulty rating band", 400, 3200, (400, 3200), step=50)
+        lo, hi = st.slider(
+            "Difficulty rating band", 400, 3200, step=50, key="plo_gen_custom_band"
+        )
     else:
         lo, hi = _PLO_DIFFICULTY_BANDS[preset]
         st.caption(f"Difficulty band: **{lo}–{hi}** (computed 4-axis rating).")
@@ -4032,13 +4178,11 @@ def render_plo_generate_page() -> None:
             "Solver frequency worthiness window (%)",
             min_value=50,
             max_value=100,
-            value=(60, 99),
             key="plo_worthiness_slider",
             help="Below 55% = no clear best answer; 100% = trivial.",
         )
         exclude_ambiguous = st.checkbox(
             "Exclude ambiguous 90-95% band (recommended)",
-            value=True,
             key="plo_exclude_ambiguous",
             help="Spots at 90-95% read as 'mostly' but sit just under the 95% "
             "'always' line, so the right read can still be marked wrong. "
@@ -4048,7 +4192,6 @@ def render_plo_generate_page() -> None:
             "Minimum EV gap (bb) — 0 = off",
             min_value=0.0,
             max_value=3.0,
-            value=0.0,
             step=0.05,
             key="plo_min_ev_gap",
             help="Drops spots whose EV gap to the 2nd-best action is below "
@@ -4071,16 +4214,10 @@ def render_plo_generate_page() -> None:
 
     # --- 3. Answer option style (same as Hold'em; Sizing N/A for pot-limit) ---
     st.subheader("3. Answer option style")
-    _style_labels = {
-        "Basic (Fold / Call / 3-bet)": "basic",
-        "GTO (Always / Mostly spectrum)": "gto",
-        "Auto-pick (Basic when dominant, GTO when mixed)": "auto",
-    }
-    style = _style_labels[
+    style = _PLO_STYLE_LABELS[
         st.radio(
             "Style",
-            options=list(_style_labels),
-            index=1,  # default to GTO (Always / Mostly)
+            options=list(_PLO_STYLE_LABELS),
             key="plo_answer_style",
             help="**Basic** = bare action labels. **GTO** = the Always/Mostly "
             "spectrum that surfaces mixed strategies. **Auto-pick** = Basic for "
@@ -4098,8 +4235,8 @@ def render_plo_generate_page() -> None:
         "Questions",
         min_value=1,
         max_value=200,
-        value=12,
         step=1,
+        key="plo_gen_count",
         help="How many questions to generate (spread across matching nodes).",
     )
     # Fresh spots every run by default. The old bare "Random seed" input
@@ -4117,7 +4254,6 @@ def render_plo_generate_page() -> None:
         "Test-set seed",
         min_value=0,
         max_value=1_000_000,
-        value=42,
         step=1,
         key="plo_gen_seed_val",
         disabled=not _pin_plo_seed,
@@ -4126,15 +4262,15 @@ def render_plo_generate_page() -> None:
     display_in_bb = (
         bo3.radio(
             "Amounts",
-            options=["Dollars", "Big blinds"],
-            index=1,
+            options=_PLO_AMOUNT_LABELS,
             horizontal=True,
+            key="plo_gen_amounts",
         )
         == "Big blinds"
     )
     out_prefix = st.text_input(
         "Output filename (prefix)",
-        value="plo_batch",
+        key="plo_gen_out_prefix",
         help="A timestamp is appended; every batch lands in its own file.",
     )
 
@@ -4146,7 +4282,7 @@ def render_plo_generate_page() -> None:
     model = ms1.selectbox(
         "Model",
         options=_PLO_MODELS,
-        index=_PLO_MODELS.index("claude-opus-4-7"),  # the default model
+        key="plo_gen_model",
         format_func=lambda m: _PLO_MODEL_NAMES.get(m, m),
     )
     _is_fable = "fable" in model
@@ -4154,8 +4290,8 @@ def render_plo_generate_page() -> None:
         "Temperature",
         0.0,
         1.0,
-        0.6,
-        0.05,
+        step=0.05,
+        key="plo_gen_temperature",
         disabled=_is_fable,
         help="Higher = more varied prose. 0.6 is a good start with no "
         "examples. Fable 5 has no temperature control (ignored).",
@@ -4164,7 +4300,7 @@ def render_plo_generate_page() -> None:
         st.caption(_FABLE_NOTE)
     compute_eq = st.checkbox(
         "Compute hand equity for the explanation (~1s/spot; real generate only)",
-        value=False,
+        key="plo_gen_compute_eq",
         help="Off (default): no equity numbers reach the LLM, so explanations "
         "can't cite percentages — in PLO equities run close and the numbers "
         "read as noise. On = the LLM gets equity numbers, at ~1s/spot (PLO "
@@ -4235,7 +4371,11 @@ def render_plo_generate_page() -> None:
             "lifetime spend."
         )
         if _done["failed"]:
-            st.warning(f"{_done['failed']} explanations failed and shipped blank.")
+            st.warning(
+                f"{_done['failed']} explanation(s) failed — those questions "
+                "were dropped from the CSV and backfilled with other spots "
+                "where possible."
+            )
             _reasons = _done.get("failure_reasons") or []
             if _reasons:
                 with st.expander("Why did they fail?"):
@@ -4245,7 +4385,8 @@ def render_plo_generate_page() -> None:
                         "Most are the Layer 6 validators (e.g. a card-fabrication "
                         "guard rejecting a card not in the hand, or a banned em "
                         "dash / semicolon) firing on both the attempt and its one "
-                        "retry. Regenerate, or edit the prompt to address the cause."
+                        "retry. Your settings are kept — regenerate any time, or "
+                        "edit the prompt to address the cause."
                     )
         if _done["shortfall"]:
             st.warning(
@@ -4271,6 +4412,13 @@ def render_plo_generate_page() -> None:
                 "way as Hold'em, so set it there and restart the panel."
             )
             return
+        # Snapshot THIS batch's settings so the page re-seeds them after the
+        # run (and across page switches / panel restarts) -- regenerating
+        # with the same setup is one click.
+        gen_settings.save_settings(
+            _PLO_GEN_SETTINGS_PATH,
+            {k: st.session_state.get(k) for k in _PLO_GEN_SAVED_KEYS},
+        )
         _PLO_BATCH_DIR.mkdir(parents=True, exist_ok=True)
         _stem = (out_prefix or "plo_batch").removesuffix(".csv").strip() or "plo_batch"
         out_path = _PLO_BATCH_DIR / f"{_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
