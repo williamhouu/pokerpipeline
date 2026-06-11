@@ -474,11 +474,12 @@ def _fabricated_cards(prose: str, hero_cards: tuple[str, ...]) -> list[str]:
 # is full of double-suited hands" must never be flagged.
 _SHAPE_CLAIMS: tuple[tuple[str, str, str], ...] = (
     # (claim regex, PloHandClass attribute/value it asserts, display label)
-    (r"danglers?", "has_dangler", "dangler"),
-    (r"double[ -]suited", "double_suited", "double-suited"),
-    (r"three[ -]suited", "three_suited", "three-suited"),
-    (r"rainbow", "rainbow", "rainbow"),
-    (r"monotone", "monotone", "monotone"),
+    # \b-bounded so derivatives ("danglery") never match.
+    (r"\bdanglers?\b", "has_dangler", "dangler"),
+    (r"\bdouble[ -]suited\b", "double_suited", "double-suited"),
+    (r"\bthree[ -]suited\b", "three_suited", "three-suited"),
+    (r"\brainbow\b", "rainbow", "rainbow"),
+    (r"\bmonotone\b", "monotone", "monotone"),
     # Claiming the nut flush (made, draw, or potential) without a suited ace.
     # Verb-anchored so blocker prose ("your bare ace blocks the nut flush")
     # never matches -- that sentence is about removal, not about making it.
@@ -499,12 +500,24 @@ _SHAPE_CLAIMS: tuple[tuple[str, str, str], ...] = (
         "made flush stated preflop",
     ),
 )
-_NEGATION_RE = r"(?:no|not|never|without|isn't|aren't|lacks?|lacking|avoid\w*|rather than|instead of)[^.!?]{0,24}"
+_NEGATION_RE = (
+    r"(?:no|not|never|without|cannot|can't|don't|doesn't|won't|wouldn't|"
+    r"isn't|aren't|lacks?|lacking|avoid\w*|rather than|instead of)"
+    r"[^.!?]{0,24}"
+)
 _HERO_RE = re.compile(r"\b(?:you|your|yours)\b", re.IGNORECASE)
 _VILLAIN_RE = re.compile(
     r"\b(?:his|hers?|their|they|he|she|villain|opponent|opener|raiser|utg|"
     r"under the gun|lojack|hijack|cutoff|button|small blind|big blind|"
     r"lj|hj|co|bu|btn|sb|bb)\b",
+    re.IGNORECASE,
+)
+# Contrast clauses talk about OTHER hands by construction ("hands like KQJT
+# double-suited mostly call here", "if you held JT98 rainbow ..."), which the
+# range-examples fact actively encourages -- their shape words must never be
+# attributed to hero's hand.
+_CONTRAST_RE = re.compile(
+    r"\b(?:hands? like|hands? such as|a hand like|if you (?:held|had))\b",
     re.IGNORECASE,
 )
 
@@ -519,15 +532,31 @@ def _claim_is_true(hand: PloHandClass, key: str) -> bool:
     return hand.suit_pattern == key
 
 
-def _shape_claim_errors(prose: str, hand: PloHandClass) -> list[str]:
+def _shape_claim_errors(
+    prose: str,
+    hand: PloHandClass,
+    exempt_phrases: tuple[str, ...] = (),
+) -> list[str]:
     """Shape words the prose asserts about HERO's hand that the deterministic
-    classifier says are false. Negated mentions ("no dangler") and sentences
-    about the villain are never flagged -- precision over recall."""
+    classifier says are false. Negated mentions ("no dangler"), sentences
+    about the villain, and contrast clauses about OTHER hands are never
+    flagged -- precision over recall.
+
+    ``exempt_phrases`` are quoted-verbatim hand names from the data block's
+    range-examples fact ("QQ87 double-suited") -- their suit-pattern words
+    describe the example hand, not hero's, so they are masked out of each
+    sentence before the claim scan.
+    """
     errors: list[str] = []
+    masks = [p.lower() for p in exempt_phrases if p]
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", prose):
         if not _HERO_RE.search(sentence) or _VILLAIN_RE.search(sentence):
             continue
+        if _CONTRAST_RE.search(sentence):
+            continue  # "hands like X ..." / "if you held X ..." = not hero
         low = sentence.lower()
+        for phrase in masks:
+            low = low.replace(phrase, " ")
         for word_re, key, label in _SHAPE_CLAIMS:
             if _claim_is_true(hand, key):
                 continue
@@ -640,6 +669,17 @@ def generate_plo_answer_explanation(
     ]
     padded = (list(options) + ["", "", "", ""])[:4]
 
+    # Hand names quoted from the range-examples fact ("QQ87 double-suited
+    # (mostly calls)") carry suit-pattern words that describe the EXAMPLE
+    # hand -- exempt them from the shape-claim audit or every contrast
+    # sentence gets attributed to hero and rejected. Memoized, so this
+    # recompute is free.
+    leaning = leaning_examples_for_spot(facts)
+    exempt: tuple[str, ...] = ()
+    if leaning is not None:
+        hands = [str(h) for h in leaning.get("hands", [])]
+        exempt = tuple(hands) + tuple(h.split(" (")[0] for h in hands)
+
     last_error = ""
     last_text = ""
     for _ in range(max_retries + 1):
@@ -669,7 +709,9 @@ def generate_plo_answer_explanation(
                     "and prefer describing the shape over reciting cards."
                 )
                 raise ExplanationValidationError(msg)
-            shape_errors = _shape_claim_errors(prose, facts.hand_class)
+            shape_errors = _shape_claim_errors(
+                prose, facts.hand_class, exempt_phrases=exempt
+            )
             if shape_errors:
                 msg = (
                     "the explanation misstates the hand: "

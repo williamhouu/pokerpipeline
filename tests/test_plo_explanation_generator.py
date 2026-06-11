@@ -450,6 +450,56 @@ def test_nut_flush_claim_without_suited_ace_is_flagged():
     ) == []
 
 
+def test_shape_audit_spares_contrast_clauses_and_quoted_examples():
+    # The range-examples interaction bug: contrast sentences quote example
+    # hands whose suit-pattern words must NOT be attributed to hero.
+    from pipeline.plo.explanation_generator import _shape_claim_errors
+
+    single = classify_plo_hand(("As", "Kd", "9d", "4c"))  # single-suited
+    # "hands like ..." is a contrast clause -> sentence skipped entirely.
+    assert _shape_claim_errors(
+        "Fold. Hands like QQ87 double-suited mostly call here, but your "
+        "hand misses that strength.",
+        single,
+    ) == []
+    # "if you held ..." (the factor-list prompt's required framing).
+    assert _shape_claim_errors(
+        "Fold. However, if you held JT98 rainbow you would mostly fold "
+        "as well.",
+        single,
+    ) == []
+    # A quoted example name is masked even without a contrast marker.
+    assert _shape_claim_errors(
+        "Fold. Even KK44 double-suited (mostly calls) only continues "
+        "sometimes, and your hand has less.",
+        single,
+        exempt_phrases=("KK44 double-suited (mostly calls)", "KK44 double-suited"),
+    ) == []
+    # A genuine hero misclaim still rejects.
+    assert _shape_claim_errors(
+        "Call. Your double-suited shape plays well.", single
+    ) == ["double-suited"]
+
+
+def test_shape_audit_word_boundaries_and_negation_gaps():
+    from pipeline.plo.explanation_generator import _shape_claim_errors
+
+    connected = classify_plo_hand(("Ks", "Qd", "Jh", "Tc"))  # rundown, no dangler
+    # Derivative words ("danglery") no longer match the dangler claim.
+    assert _shape_claim_errors(
+        "Call. You realize equity well even with a danglery look to it.",
+        connected,
+    ) == []
+    # "can't / cannot" now count as negation for the nut-flush claim.
+    no_ace_suit = classify_plo_hand(("Kd", "Qd", "Jc", "Tc"))
+    assert _shape_claim_errors(
+        "Fold. You cannot make the nut flush with these suits.", no_ace_suit
+    ) == []
+    assert _shape_claim_errors(
+        "Fold. You can't make the nut flush here.", no_ace_suit
+    ) == []
+
+
 def test_made_flush_preflop_tense_is_flagged():
     from pipeline.plo.explanation_generator import _shape_claim_errors
 
