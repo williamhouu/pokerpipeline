@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.difficulty import (  # noqa: E402
+    ARCHETYPE_BASE_EASE,
     BUMP_RULES,
     HAND_CLASS_EASE,
     W_CONCEPT,
@@ -580,3 +581,18 @@ def test_break_even_equity_is_pot_odds_threshold() -> None:
         _fold_facts(hand_class="73s", combo="7s3s", multiway=True), pack)
     assert be is not None
     assert 0.30 <= be <= 0.50
+
+
+def test_every_guidance_archetype_has_a_base_ease_entry() -> None:
+    """The Layer-6 catalog and the difficulty table must stay in sync.
+
+    A classifier label with a frame but no base ease would silently score
+    at the 0.50 default -- catch the drift here (sb_complete was the first
+    archetype added after both tables existed).
+    """
+    from pipeline.preflop.explanation_generator import (
+        PREFLOP_ARCHETYPE_GUIDANCE,
+    )
+
+    missing = set(PREFLOP_ARCHETYPE_GUIDANCE) - set(ARCHETYPE_BASE_EASE)
+    assert not missing, f"archetypes missing a base ease: {sorted(missing)}"

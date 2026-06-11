@@ -213,7 +213,9 @@ _ARCHETYPES_3BET = frozenset({"3bet_for_value", "3bet_as_bluff"})
 _ARCHETYPES_4BET = frozenset({"4bet_for_value", "4bet_as_bluff"})
 _ARCHETYPES_5BET = frozenset({"5bet_for_value", "5bet_as_bluff"})
 _ARCHETYPES_SQUEEZE = frozenset({"squeeze_for_value", "squeeze_as_bluff"})
-_ARCHETYPES_OPEN = frozenset({"open_for_value", "fold_outranged"})
+# sb_complete is a first-in decision too: completing the half bet is the
+# SB's version of choosing whether to enter the pot (same as PLO's set).
+_ARCHETYPES_OPEN = frozenset({"open_for_value", "fold_outranged", "sb_complete"})
 _ARCHETYPES_CALL = frozenset(
     {"call_for_value", "call_for_implied_odds", "call_allin"}
 )

@@ -429,6 +429,35 @@ def test_archetype_bb_check_is_bb_only():
     )
 
 
+def test_archetype_sb_complete_first_in():
+    """SB first-in with dominant Call = completing the half bet (a limp).
+
+    The Monker 9-max pack offers the SB limp (the Pio 6-max pack didn't);
+    labelling it open_for_value/fold_outranged would hand the LLM the
+    wrong frame for a Call answer.
+    """
+    history = tuple(
+        ParsedAction(pos, PreflopActionType.FOLD)
+        for pos in ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
+    )
+    spot = _spot_with(
+        "Call", {"Fold": 0.2, "Call": 0.6, "Raise 100%": 0.2}, history, actor="SB"
+    )
+    assert (
+        classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
+        == "sb_complete"
+    )
+
+
+def test_archetype_sb_complete_is_sb_only():
+    """A non-blind first-in with a dominant Call never gets sb_complete."""
+    spot = _spot_with("Call", {"Call": 0.9, "Fold": 0.1}, actor="CO")
+    assert (
+        classify_archetype(spot, villain=None, hero_equity_vs_villain=None)
+        != "sb_complete"
+    )
+
+
 def test_archetype_3bet_for_value():
     """Facing one raise, dominant Raise with high equity -> 3bet_for_value."""
     history = (

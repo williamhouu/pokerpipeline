@@ -122,6 +122,9 @@ ARCHETYPE_BASE_EASE: dict[str, float] = {
     # Checking the option in a limped/unraised pot (the BB facing no bet) is a
     # near-trivial decision -- you check almost everything, raise a few hands.
     "bb_check":               0.95,
+    # Completing the half bet first-in from the SB -- easy, not trivial
+    # (same base as the PLO tagger's entry).
+    "sb_complete":            0.85,
     # Folding a clearly-dominated hand is about as trivial as poker gets,
     # so this sits near the top (was 0.70, which left obvious junk-folds
     # mis-rated as medium). fold_pot_odds stays lower: folding despite

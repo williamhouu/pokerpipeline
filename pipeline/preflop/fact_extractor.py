@@ -467,7 +467,8 @@ def classify_archetype(
     raise, 3-bet, 4-bet, squeeze, all-in) + hero's equity vs villain to
     classify as value vs bluff vs fold reason.
 
-    The 14 archetypes returned are listed in the module docstring.
+    The full label catalog (with the frame each demands) is
+    ``pipeline.preflop.explanation_generator.PREFLOP_ARCHETYPE_GUIDANCE``.
     Returns a snake_case string. Defaults to ``"unclassified"`` if the
     pattern doesn't fit or hero's hand has near-zero presence at the node
     (i.e. hero would have folded earlier in the tree and never reached
@@ -502,11 +503,15 @@ def classify_archetype(
 
     # No villain faced. Only the BB can reach here without a bet to call -- they
     # posted the blind, so a limped/checked-around pot leaves them a CHECK (the
-    # pack still files it under "Call"), not an open-fold. Everyone else here is
-    # genuinely first-in with a raising option.
+    # pack still files it under "Call"), not an open-fold. The SB first-in can
+    # CALL too: completing the half bet (a limp), which is neither an open nor
+    # a fold -- the Monker 9-max pack offers it (the Pio 6-max pack didn't).
+    # Everyone else here is genuinely first-in with a raising option.
     if villain is None:
         if spot.node.actor == "BB" and dominant == "Call":
             return "bb_check"
+        if spot.node.actor == "SB" and dominant == "Call":
+            return "sb_complete"
         if "Raise" in dominant:
             return "open_for_value"
         if "AllIn" in dominant:

@@ -209,6 +209,13 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "building a pot out of position. Say CHECK, never 'call' (there is "
         "no bet to call)."
     ),
+    "sb_complete": (
+        "Hero is first in from the small blind, completing the half bet "
+        "rather than raising or open-folding. Frame the explanation around "
+        "the discounted price and why this hand prefers seeing a cheap flop "
+        "to raising out of position -- it is a call of half a blind, not a "
+        "fold and not a check."
+    ),
     "fold_dominated": (
         "Hero is facing a raise with a hand dominated by villain's range. "
         "Frame the explanation around domination: villain's continuing "
@@ -372,7 +379,8 @@ def build_preflop_system_prompt() -> str:
         f"{_format_voice_rules()}\n\n"
         "STRATEGIC ARCHETYPES. The data block carries a `archetype` field. "
         "It is the STRATEGIC FRAME your explanation must be built around -- "
-        "the action itself is in `dominant_action`. The 17 preflop "
+        "the action itself is in `dominant_action`. The "
+        f"{len(PREFLOP_ARCHETYPE_GUIDANCE)} preflop "
         "archetypes and the frame each one demands:\n"
         f"{_format_archetype_catalog()}\n\n"
         f"BANNED PHRASES (never appear in any output field): {_format_banned_phrases()}.\n\n"
