@@ -1,0 +1,10 @@
+# Admin-panel Streamlit config (committed on purpose -- project-wide).
+#
+# theme.base pins LIGHT mode explicitly. Without it Streamlit uses "auto",
+# which follows the OS/browser dark-mode preference per browser origin --
+# that's why the panel "turned dark by itself" (June 2026): a new port =
+# a new origin with no saved preference, falling back to the OS setting
+# (macOS auto-switches dark at sunset). Pinning the theme makes every
+# instance look the same on every machine at every hour.
+[theme]
+base = "light"

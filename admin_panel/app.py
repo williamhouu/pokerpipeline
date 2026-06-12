@@ -2089,19 +2089,57 @@ _HAND_TAG_EXAMPLES: dict[str, str] = {
 }
 
 
+def _job_done_rerun_once(job) -> None:
+    """From inside a ticking fragment: the moment the job flips to done,
+    trigger ONE full-app rerun so the static result panel (rendered
+    OUTSIDE any fragment) appears without user interaction. Guarded per
+    job id -- the rerun must not loop."""
+    flag = f"_job_done_rerun_{job.id}"
+    if not st.session_state.get(flag):
+        st.session_state[flag] = True
+        st.rerun(scope="app")
+
+
 @st.fragment(run_every=1.0)
+def _render_active_job_progress() -> None:
+    """The ONLY auto-refreshing part of the job panel: live progress.
+
+    Mounted exclusively while a job is active, so the once-a-second
+    ticking stops the moment the batch finishes. (June 2026 fix: the
+    whole panel -- including the completed-batch UI with its CSV
+    re-read, download button, and preview -- used to live inside the
+    ticking fragment, so a finished batch kept the app busy every
+    second forever; that was the post-batch "everything is laggy,
+    spinner never stops" report.)
+    """
+    job = jobs.get_current_job()
+    if job is None:
+        return
+    if not job.is_active:
+        _job_done_rerun_once(job)
+        return
+    st.markdown(f"**🔄 Running:** {job.label}")
+    progress = job.progress
+    if progress.total > 0:
+        pct = min(1.0, (progress.current + 1) / progress.total)
+        st.progress(pct, text=progress.message or "Starting…")
+    else:
+        st.text(progress.message or "Starting…")
+    st.caption(
+        f"job id `{job.id}` · elapsed {job.elapsed_seconds:.0f}s · "
+        "this keeps running if you switch tabs."
+    )
+
+
 def _render_preflop_job_panel() -> None:
     """Top-of-page panel showing the current (or last) background job.
 
-    Wrapped in ``@st.fragment(run_every=1.0)`` so it auto-refreshes
-    once a second without rerunning the whole filter form -- the user
-    can keep configuring the NEXT batch while the current one runs.
-
     Three visual states:
 
-    * **Active** (PENDING / RUNNING)  -- progress bar + status line.
-    * **Completed** -- success + download + preview (same UI the
-      synchronous version rendered, now reusable).
+    * **Active** (PENDING / RUNNING)  -- live progress via the ticking
+      fragment above (the user can keep configuring the NEXT batch).
+    * **Completed** -- success + download + preview, rendered as plain
+      static content on normal reruns only.
     * **Failed** -- error + traceback in an expander.
 
     A "Clear" button hides a done/failed job from the panel; this is
@@ -2114,22 +2152,12 @@ def _render_preflop_job_panel() -> None:
 
     with st.container(border=True):
         if job.is_active:
-            st.markdown(f"**🔄 Running:** {job.label}")
-            progress = job.progress
-            if progress.total > 0:
-                pct = min(1.0, (progress.current + 1) / progress.total)
-                st.progress(pct, text=progress.message or "Starting…")
-            else:
-                st.text(progress.message or "Starting…")
-            st.caption(
-                f"job id `{job.id}` · elapsed {job.elapsed_seconds:.0f}s · "
-                "this keeps running if you switch tabs."
-            )
+            _render_active_job_progress()
         elif job.status is jobs.JobStatus.COMPLETED:
             st.markdown(f"**✅ Last batch:** {job.label}")
             if isinstance(job.result, BatchResult):
                 # Append to the usage log exactly once -- module-level
-                # dedupe across browser sessions + fragment reruns.
+                # dedupe across browser sessions + reruns.
                 _maybe_log_completed_job(job, job.result)
                 _render_preflop_result_ui(job.result)
             else:
@@ -6331,31 +6359,46 @@ def main() -> None:
 
 
 @st.fragment(run_every=1.0)
+def _render_sidebar_active_job() -> None:
+    """Ticking sidebar progress line -- mounted only while a job runs.
+
+    Writes via bare ``st.info`` (NOT ``st.sidebar.X``): Streamlit
+    forbids fragments from calling ``st.sidebar`` directly; the caller
+    wraps the invocation in ``with st.sidebar:`` instead. When the job
+    flips to done, triggers one full-app rerun (the user may be on any
+    page -- this fragment is the only ticker there) so the static
+    done/failed line below takes over and the ticking stops.
+    """
+    job = jobs.get_current_job()
+    if job is None:
+        return
+    if not job.is_active:
+        _job_done_rerun_once(job)
+        return
+    p = job.progress
+    if p.total > 0:
+        pct = ((p.current + 1) / p.total) * 100
+        st.info(
+            f"🔄 Job: {p.current + 1}/{p.total}  ({pct:.0f}%) · "
+            f"{job.elapsed_seconds:.0f}s"
+        )
+    else:
+        st.info(f"🔄 Job: starting · {job.elapsed_seconds:.0f}s")
+
+
 def _render_sidebar_job_indicator() -> None:
-    """Tiny sidebar widget that shows current job status.
+    """Tiny sidebar widget showing current job status (any page).
 
-    Self-refreshing fragment so "running 12/30" ticks up even when the
-    user is on a different page. Renders nothing when there's no job.
-
-    IMPORTANT: This fragment writes via bare ``st.info`` / ``st.success``
-    / ``st.error`` (NOT ``st.sidebar.X``). Streamlit forbids fragments
-    from calling ``st.sidebar`` directly; the caller wraps the
-    invocation in ``with st.sidebar:`` instead, and inside that
-    context bare ``st.X`` lands in the sidebar.
+    Live progress comes from the ticking fragment above, mounted only
+    while the job is active; done/failed states are plain static lines
+    on normal reruns (June 2026: the always-ticking version kept the
+    whole app busy once a second forever after a batch finished).
     """
     job = jobs.get_current_job()
     if job is None:
         return
     if job.is_active:
-        p = job.progress
-        if p.total > 0:
-            pct = ((p.current + 1) / p.total) * 100
-            st.info(
-                f"🔄 Job: {p.current + 1}/{p.total}  ({pct:.0f}%) · "
-                f"{job.elapsed_seconds:.0f}s"
-            )
-        else:
-            st.info(f"🔄 Job: starting · {job.elapsed_seconds:.0f}s")
+        _render_sidebar_active_job()
     elif job.status is jobs.JobStatus.COMPLETED:
         st.success(f"✅ Job done · {job.elapsed_seconds:.0f}s")
     elif job.status is jobs.JobStatus.FAILED:
