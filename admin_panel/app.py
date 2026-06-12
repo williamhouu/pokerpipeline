@@ -1331,6 +1331,28 @@ def _render_generate_page_preflop() -> None:
                 "is below this. Raise spots (no computed EV) always pass."
             ),
         )
+        # Premise-realism gates (June 2026 audit). Both default ON.
+        min_villain_pct = st.number_input(
+            "Min villain line frequency (% of dealt hands) — 0 = off",
+            min_value=0.0, max_value=10.0, value=0.25, step=0.05,
+            key="preflop_min_villain_pct",
+            help=(
+                "Skips spots where the opponent's whole line is something "
+                "the solver almost never does (e.g. a jam range that is "
+                "0.01% of hands). The question would be built on a ghost."
+            ),
+        )
+        min_premise_pct = st.number_input(
+            "Min hero premise frequency (%) — 0 = off",
+            min_value=0.0, max_value=50.0, value=5.0, step=1.0,
+            key="preflop_min_premise_pct",
+            help=(
+                "Skips spots whose STORY requires you to have made a "
+                "near-never play earlier in the hand (e.g. 'you opened "
+                "K6s from the LJ' when the solver opens it ~1% there). "
+                "Checks each of your own prior actions in the line."
+            ),
+        )
 
     # Visible settings summary -- exactly what THIS batch will use. Promoted
     # to a prominent info box so the numbers are obvious the moment you pick
@@ -1640,6 +1662,12 @@ def _render_generate_page_preflop() -> None:
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+            min_villain_line_pct=(
+                None if min_villain_pct == 0.0 else float(min_villain_pct)
+            ),
+            min_hero_premise_freq=(
+                None if min_premise_pct == 0.0 else float(min_premise_pct) / 100.0
+            ),
             display_in_bb=_currency.startswith("Big blinds"),
             stakes_bb_dollars=float(_stake_bb),
             live_or_online=_venue,
@@ -1667,6 +1695,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     min_difficulty: int,
     max_difficulty: int,
     min_ev_gap_bb: float | None,
+    min_villain_line_pct: float | None,
+    min_hero_premise_freq: float | None,
     display_in_bb: bool,
     total_questions: int,
     output_filename: str,
@@ -1737,6 +1767,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             min_difficulty=min_difficulty,
             max_difficulty=max_difficulty,
             min_ev_gap_bb=min_ev_gap_bb,
+            min_villain_line_pct=min_villain_line_pct,
+            min_hero_premise_freq=min_hero_premise_freq,
             display_in_bb=display_in_bb,
             stakes_bb_dollars=stakes_bb_dollars,
             live_or_online=live_or_online,
@@ -2384,6 +2416,18 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
                     f"**{result.noise_filtered_out}** were skipped as "
                     "unconverged solver nodes (AA folding a jam / premium "
                     "inversions -- the noisy multiway tail)"
+                )
+            if result.rare_line_filtered_out:
+                _why_bits.append(
+                    f"**{result.rare_line_filtered_out}** were skipped because "
+                    "the villain's whole line is near-never taken (min villain "
+                    "line frequency gate)"
+                )
+            if result.rare_premise_filtered_out:
+                _why_bits.append(
+                    f"**{result.rare_premise_filtered_out}** were skipped "
+                    "because hero's own earlier actions in the story are "
+                    "near-never solver plays (premise-realism gate)"
                 )
             if result.failures:
                 _why_bits.append(

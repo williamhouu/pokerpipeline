@@ -77,7 +77,9 @@ from pipeline.preflop.explanation_generator import (
 )
 from pipeline.preflop.fact_extractor import (
     DEFAULT_EQUITY_RUNOUTS,
+    construct_villain_range_path,
     extract_facts,
+    identify_villain,
 )
 from pipeline.preflop.format_writer import (
     format_preflop_question,
@@ -99,7 +101,9 @@ from pipeline.preflop.question_extractor import (
 )
 from pipeline.preflop.spot_sampler import (
     PreflopSpot,
+    _cached_parse_range_file,
     enumerate_spots_for_node,
+    sample_spot,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,6 +214,13 @@ class BatchResult:
     # unconverged solver nodes (AA folding preflop / premium-pair inversions),
     # typically the near-zero-reach multiway 5-bet/jam lines. UI feedback.
     noise_filtered_out: int = 0
+
+    # Premise-realism gate counts (June 2026): spots skipped because the
+    # villain takes their whole line too rarely (rare_line) or because
+    # hero's own earlier actions in the story are near-never solver
+    # actions with this hand (rare_premise). UI feedback.
+    rare_line_filtered_out: int = 0
+    rare_premise_filtered_out: int = 0
 
     # How many questions the caller asked for (the total_questions arg). The
     # run writes fewer when the worthy pool runs out after filtering; the UI
@@ -443,6 +454,69 @@ def node_is_unconverged(node: PreflopDecisionNode) -> bool:
     )
 
 
+def _villain_line_pct(
+    node: PreflopDecisionNode, pack: PreflopPack
+) -> float | None:
+    """How often (as % of dealt hands) the primary villain takes their line.
+
+    June 2026 audit finding: spots were generated around villain lines the
+    solver takes ~0.0% of the time -- a question built on a ghost. This is
+    the same number as ``villain_stats.pct_of_dealt_hands``, computed
+    cheaply (one cached range-file read) BEFORE any equity sim or LLM
+    spend so the batch can gate on it. ``None`` when there is no villain
+    (open spots) or the file is unreadable -- the gate then passes.
+    """
+    villain = identify_villain(node)
+    if villain is None:
+        return None
+    try:
+        path = construct_villain_range_path(node, villain, pack)
+        if not path.is_file():
+            return None
+        weights = _cached_parse_range_file(str(path))
+    except (OSError, ValueError):
+        return None
+    total = sum(
+        w * (6 if len(h) == 2 else 4 if h.endswith("s") else 12)
+        for h, w in weights.items()
+    )
+    return 100.0 * total / 1326.0
+
+
+def _hero_premise_min_freq(
+    spot: PreflopSpot,
+    node_index: dict[tuple[str, tuple], PreflopDecisionNode],
+) -> float | None:
+    """The weakest link in hero's own story: min frequency of hero's hand
+    across HERO'S earlier actions in the line.
+
+    June 2026 audit finding: a question premised on "you opened K6s from
+    the LJ" -- an action the solver takes ~1% of the time -- asks the
+    player to own a decision a good player wouldn't have made. For each
+    prior action by hero, look up the node where hero took it and read
+    this hand's conditional frequency for that exact action; return the
+    minimum. ``None`` when hero has no prior actions (clean spots) or a
+    lookup fails -- the gate then passes.
+    """
+    node = spot.node
+    min_freq: float | None = None
+    for i, a in enumerate(node.history_before):
+        if a.position != node.actor:
+            continue
+        prior = node_index.get((node.actor, node.history_before[:i]))
+        if prior is None:
+            continue
+        if a.action_type is PreflopActionType.RAISE:
+            label = f"Raise {a.raise_size_pct:g}%"
+        else:
+            label = a.action_type.value
+        freq = sample_spot(prior, spot.hero_hand_class).action_frequencies.get(label)
+        if freq is None:
+            continue
+        min_freq = freq if min_freq is None else min(min_freq, freq)
+    return min_freq
+
+
 # --- the entry point --------------------------------------------------------
 def generate_preflop_batch(
     *,
@@ -458,6 +532,8 @@ def generate_preflop_batch(
     min_difficulty: int = DIFFICULTY_MIN,
     max_difficulty: int = DIFFICULTY_MAX,
     min_ev_gap_bb: float | None = None,
+    min_villain_line_pct: float | None = 0.25,
+    min_hero_premise_freq: float | None = 0.05,
     answer_style: str = "auto",
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
@@ -614,6 +690,16 @@ def generate_preflop_batch(
     # node is only checked once even though many hands share it.
     noise_filtered_out = 0
     _node_noise: dict[str, bool] = {}
+    # Premise-realism gates (June 2026 audit): spots built on a villain
+    # line the solver ~never takes, or on hero prior actions the solver
+    # ~never takes with this hand. Both checked from cached range files
+    # BEFORE any equity sim / LLM spend.
+    rare_line_filtered_out = 0
+    rare_premise_filtered_out = 0
+    _node_villain_pct: dict[str, float | None] = {}
+    node_index: dict[tuple[str, tuple], PreflopDecisionNode] = {
+        (n.actor, n.history_before): n for n in nodes
+    }
     # ``_evaluation`` carried the pre-facts freq-only difficulty; we
     # discard it and recompute the canonical 4-axis rating below.
     for spot, _evaluation in worthy:
@@ -631,6 +717,21 @@ def generate_preflop_batch(
         if is_bad:
             noise_filtered_out += 1
             continue
+        # --- premise-realism gates (cheap, pre-equity, pre-LLM) ----------
+        if min_villain_line_pct is not None:
+            if nid in _node_villain_pct:
+                vpct = _node_villain_pct[nid]
+            else:
+                vpct = _villain_line_pct(spot.node, pack)
+                _node_villain_pct[nid] = vpct
+            if vpct is not None and vpct < min_villain_line_pct:
+                rare_line_filtered_out += 1
+                continue
+        if min_hero_premise_freq is not None:
+            premise = _hero_premise_min_freq(spot, node_index)
+            if premise is not None and premise < min_hero_premise_freq:
+                rare_premise_filtered_out += 1
+                continue
         # --- facts + canonical difficulty (no API spend yet) -------------
         # compute_difficulty blends freq + EV gap + archetype/concept +
         # hand class (with EV-weight redistribution when the EV engine
@@ -758,6 +859,23 @@ def generate_preflop_batch(
             dry_run=dry_run,
             prompt_records=prompt_records,
             pack=pack,
+            run_settings={
+                "answer_style": answer_style,
+                "hero_positions": list(hero_positions) if hero_positions else None,
+                "action_contexts": list(action_contexts) if action_contexts else None,
+                "player_counts": list(player_counts) if player_counts else None,
+                "min_frequency": min_frequency,
+                "max_frequency": max_frequency,
+                "min_difficulty": min_difficulty,
+                "max_difficulty": max_difficulty,
+                "min_ev_gap_bb": min_ev_gap_bb,
+                "min_villain_line_pct": min_villain_line_pct,
+                "min_hero_premise_freq": min_hero_premise_freq,
+                "equity_runouts": equity_runouts,
+                "display_in_bb": display_in_bb,
+                "stakes_bb_dollars": stakes_bb_dollars,
+                "live_or_online": live_or_online,
+            },
         )
         meta_path = out_path.with_suffix(".meta.json")
         meta_path.write_text(
@@ -773,6 +891,8 @@ def generate_preflop_batch(
         nodes_after_filter=len(filtered_nodes),
         difficulty_filtered_out=difficulty_filtered_out,
         noise_filtered_out=noise_filtered_out,
+        rare_line_filtered_out=rare_line_filtered_out,
+        rare_premise_filtered_out=rare_premise_filtered_out,
         requested_questions=total_questions,
         total_input_tokens=usage_totals["input"],
         total_output_tokens=usage_totals["output"],
@@ -824,6 +944,7 @@ def _build_batch_meta(
     dry_run: bool,
     prompt_records: list[dict[str, object]],
     pack: PreflopPack | None = None,
+    run_settings: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Assemble the ``<stem>.meta.json`` payload for one batch.
 
@@ -844,6 +965,7 @@ def _build_batch_meta(
         "dry_run": dry_run,
         "pack_id": pack.pack_id if pack else "",
         "table_size": pack.table_size if pack else None,
+        "run_settings": run_settings or {},
         "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "questions": prompt_records,
     }
