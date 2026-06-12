@@ -221,11 +221,34 @@ via the admin Generate/Compare/Ranges pack selector (choice persists to
   re-runnable audit in `scripts/audit_nlhe9_pack.py`. Monker raise
   tokens are pot-relative; bb sizes come from the shared
   `pipeline/preflop/action_history.py:resolve_preflop_history` walk
-  (the Ryan pack keeps its `(pct, level)` lookup table). The 9 seats
-  flow through as `UTG, UTG+1, UTG+2, LJ, HJ, CO, BTN, SB, BB` —
-  the grammar normalizes, downstream never sees Monker's UTG1/BU
-  dialect. No pipeline math consumes the pack's file EVs (the analytic
-  ev_engine drives `ev_gap_bb`/`easy_ev` for both packs).
+  (the Ryan pack keeps its `(pct, level)` lookup table), and the
+  registered pack quantizes rendered sizes to a 0.5bb grid
+  (`size_round_bb`) with the pot math following the rounded game. The
+  9 seats flow through as `UTG, UTG+1, UTG+2, LJ, HJ, CO, BTN, SB,
+  BB` — the grammar normalizes, downstream never sees Monker's
+  UTG1/BU dialect. No pipeline math consumes the pack's file EVs (the
+  analytic ev_engine drives `ev_gap_bb`/`easy_ev` for both packs).
+  9-max batches default to **Live $1/$2** framing (stakes/venue
+  selectors in Generate §7; bb display drops stakes from Context).
+
+### Preflop quality loop (June 2026)
+
+The batch-audit protocol + severity taxonomy live in
+`docs/quality_audit_playbook.md`; the deterministic re-verifier is
+`scripts/audit_preflop_batch.py` (rebuilds every CSV row from the pack
+and diffs — equity is per-spot seeded via `fact_extractor._spot_rng`,
+runouts 400, so recomputation is byte-identical and ANY drift is a
+regression). Layer 6's SOLVER DATA carries multiway-awareness facts
+(`other_players_still_in_hand`, `still_to_act_after_you`,
+`your_call_or_fold_closes_the_action` from
+`action_history.compute_action_pending`) and voice rule 11 forbids
+characterizing any range except `villain_stats`. Generation applies two
+premise-realism gates by default (`min_villain_line_pct` 0.25%,
+`min_hero_premise_freq` 5% — Advanced filters in Generate), and batch
+`meta.json` records full `run_settings` + per-question solver-data
+blocks (the audit's join key). Audit flags are written into the batch's
+`.review.json` sidecar (status `needs_review`, note prefix
+`AUDIT (Claude):`) so they render inline on the Review page.
 
 ## Build phases & status
 
