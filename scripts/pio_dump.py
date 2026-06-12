@@ -378,24 +378,38 @@ def main() -> int:
     if args.selftest:
         return _selftest()
     if not args.pio_exe or not args.cfr_file:
-        ap.error("need both the PioSolver exe path and the .cfr path")
+        ap.error("need both the PioSolver exe path and the .cfr (file or folder)")
     if not Path(args.pio_exe).is_file():
         ap.error(f"solver exe not found: {args.pio_exe}")
-    if not Path(args.cfr_file).is_file():
+
+    # A folder works too: every .cfr inside is dumped, one combined zip out.
+    target = Path(args.cfr_file)
+    if target.is_dir():
+        cfrs = sorted(target.glob("*.cfr"))
+        if not cfrs:
+            ap.error(f"no .cfr files inside folder: {target}")
+    elif target.is_file():
+        cfrs = [target]
+    else:
         ap.error(f".cfr not found: {args.cfr_file}")
 
-    out_dir = Path.cwd() / f"pio_dump_{Path(args.cfr_file).stem}"
-    print(f"Loading {args.cfr_file} (a 1GB file can take a few minutes)...")
-    zip_path = dump_tree(
-        [args.pio_exe],
-        args.cfr_file,
-        out_dir,
-        streets={s.strip() for s in args.streets.split(",") if s.strip()},
-        with_ev=not args.no_ev,
-        max_nodes=args.max_nodes,
-    )
-    print("\nDONE. Send back this file:")
-    print(f"  {zip_path}")
+    streets = {s.strip() for s in args.streets.split(",") if s.strip()}
+    zips: list[Path] = []
+    for i, cfr in enumerate(cfrs, start=1):
+        out_dir = Path.cwd() / f"pio_dump_{cfr.stem}"
+        print(f"[{i}/{len(cfrs)}] Loading {cfr.name} "
+              "(a 1GB file can take a few minutes)...")
+        zips.append(dump_tree(
+            [args.pio_exe],
+            str(cfr),
+            out_dir,
+            streets=streets,
+            with_ev=not args.no_ev,
+            max_nodes=args.max_nodes,
+        ))
+    print("\nDONE. Send back " + ("this file:" if len(zips) == 1 else "these files:"))
+    for z in zips:
+        print(f"  {z}")
     return 0
 
 
