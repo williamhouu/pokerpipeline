@@ -56,6 +56,15 @@ class PreflopPack:
             node enumerator walks to find this pack's range files.
             ``"*.txt"`` for the PioViewer-format Ryan pack; Monker-export
             packs use ``"*.rng"``.
+        size_round_bb: Quantum (in bb) to snap resolved raise sizes to, or
+            ``None`` for exact. Monker trees are specified in percent-of-pot,
+            so exact sizes come out like 13.625bb; with ``0.5`` the rendered
+            game plays "raise to 13.5bb" and the pot math follows the
+            ROUNDED sizes, so prose, POT column, Seats tokens, and pot-odds
+            all stay mutually consistent (June 2026, Zach's call). Rounding
+            never touches all-ins (always the effective stack) and is
+            display-game quantization only -- the solver's frequencies are
+            from the exact tree.
         description: Short human-readable description for the admin panel.
     """
 
@@ -67,6 +76,7 @@ class PreflopPack:
     open_size_bb: float
     sb_to_bb_ratio: float = 0.5
     file_glob: str = "*.txt"
+    size_round_bb: float | None = None
     description: str = ""
 
     def __post_init__(self) -> None:
@@ -99,6 +109,7 @@ class PreflopPackSignature:
     open_size_bb: float
     sb_to_bb_ratio: float = 0.5
     file_glob: str = "*.txt"
+    size_round_bb: float | None = None
     description: str = ""
 
 
@@ -127,6 +138,7 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         open_size_bb=4.0,  # the root 40120 token = 120% pot = 4bb
         sb_to_bb_ratio=0.5,
         file_glob="*.rng",
+        size_round_bb=0.5,  # pot-% tree -> snap rendered sizes to 0.5bb
         description=(
             "NLHE 9-max 100bb Monker pack -- 4x opens, rake 10%/3bb cap "
             "(see docs/nlhe9_pack_notes.md)."
@@ -217,6 +229,7 @@ def discover_packs(
             open_size_bb=sig.open_size_bb,
             sb_to_bb_ratio=sig.sb_to_bb_ratio,
             file_glob=sig.file_glob,
+            size_round_bb=sig.size_round_bb,
             description=sig.description,
         )
         register_pack(pack)

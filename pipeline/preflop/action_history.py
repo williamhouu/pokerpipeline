@@ -175,6 +175,22 @@ def _monker_raise_to_bb(
     return high_bet + (raise_size_pct / 100.0) * (pot + to_call)
 
 
+def _quantize_raise(raise_to: float, pack: PreflopPack) -> float:
+    """Snap a resolved raise-to amount to the pack's display quantum.
+
+    Pot-percentage trees produce sizes like 13.625bb; packs with
+    ``size_round_bb`` set (the Monker 9-max pack uses 0.5) render the
+    nearest clean amount instead, and the CALLER's pot accounting then
+    accumulates from the rounded value -- so the prose, POT column, and
+    pot-odds all describe the same (quantized) game. All-ins never pass
+    through here.
+    """
+    q = pack.size_round_bb
+    if not q:
+        return raise_to
+    return round(raise_to / q) * q
+
+
 def resolve_preflop_history(
     history: tuple[ParsedAction, ...],
     pack: PreflopPack,
@@ -212,11 +228,14 @@ def resolve_preflop_history(
             continue
         # RAISE
         if is_monker:
-            raise_to = _monker_raise_to_bb(
-                parsed.raise_size_pct or 100.0,
-                committed=committed,
-                high_bet=high_bet,
-                position=pos,
+            raise_to = _quantize_raise(
+                _monker_raise_to_bb(
+                    parsed.raise_size_pct or 100.0,
+                    committed=committed,
+                    high_bet=high_bet,
+                    position=pos,
+                ),
+                pack,
             )
         else:
             raise_to = _raise_size_bb(parsed, raise_level, pack)
@@ -243,14 +262,19 @@ def raise_to_bb(
     Used to size the actions *offered at* a node (hero's raise option, a
     villain chart's raise column) rather than actions already in the
     history. Monker packs apply the pot-relative rule to the resolved
-    state; PioViewer packs hit the token lookup at ``state.raise_level + 1``.
+    state (quantized like the history sizes, so an option reading "raise
+    to 13.5bb" matches what the prose would say if taken); PioViewer
+    packs hit the token lookup at ``state.raise_level + 1``.
     """
     if pack.grammar_name == _MONKER_GRAMMAR:
-        return _monker_raise_to_bb(
-            raise_size_pct or 100.0,
-            committed=state.committed_bb,
-            high_bet=state.high_bet_bb,
-            position=position,
+        return _quantize_raise(
+            _monker_raise_to_bb(
+                raise_size_pct or 100.0,
+                committed=state.committed_bb,
+                high_bet=state.high_bet_bb,
+                position=position,
+            ),
+            pack,
         )
     parsed = ParsedAction(
         position=position,

@@ -59,6 +59,11 @@ _COMBOS = {"pair": 6, "suited": 4, "offsuit": 12}
 
 
 def build_pack() -> PreflopPack:
+    # Deliberately NO size_round_bb: the EV-anchor proofs in
+    # audit_ev_scale compare the resolver's commitments against the
+    # solve's own bookkeeping to the milli-bb, which requires EXACT
+    # pot-percentage sizes (the registered pack quantizes to 0.5bb for
+    # rendering; that is display-game policy, not solve truth).
     return PreflopPack(
         pack_id="monker_nlhe_9max_100bb",
         root_path=PACK_ROOT,

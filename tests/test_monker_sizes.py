@@ -122,6 +122,57 @@ def test_monker_raise_to_bb_hypothetical_option():
     ) == pytest.approx(11.14)
 
 
+# --- size quantization (size_round_bb, the registered 9-max pack's 0.5) -------
+def _rounded_pack() -> PreflopPack:
+    return PreflopPack(
+        pack_id="monker_rounded",
+        root_path=Path("/tmp/fake"),
+        grammar_name="monker_nlhe",
+        table_size=9,
+        stack_depth_bb=100,
+        open_size_bb=4.0,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+    )
+
+
+def test_quantized_raise_snaps_and_pot_follows():
+    """CO opens 3.5, BB 3-bets 135% = 13.625 exact -> 13.5 rendered, and
+    the pot/call-cost accumulate from the ROUNDED size (Zach's June-11
+    call: prose, POT, and pot odds describe the same quantized game)."""
+    stem = "0.0.0.0.0.40100.0.0.40135"
+    pack = _rounded_pack()
+    state = resolve_preflop_history(_history(stem, pack), pack)
+    assert state.sizes_bb[5] == 3.5  # open already on-grid
+    assert state.sizes_bb[-1] == 13.5
+    assert state.pot_bb == pytest.approx(0.5 + 3.5 + 13.5)
+    assert state.call_cost_bb("CO") == pytest.approx(10.0)
+
+
+def test_quantized_chain_cascades_from_rounded_state():
+    """A later raise is computed FROM the rounded pot, then rounded itself:
+    self-consistent display game, slightly different from the exact tree
+    (exact: 26.39 -> 26.5; from-rounded: 26.15 -> 26.0)."""
+    pack = _rounded_pack()
+    stem = "0.0.0.0.0.40100.0.0.40135"
+    state = resolve_preflop_history(_history(stem, pack), pack)
+    assert raise_to_bb(
+        state, position="CO", raise_size_pct=46.0, pack=pack
+    ) == pytest.approx(26.0)
+
+
+def test_quantization_skips_all_ins_and_exact_packs():
+    pack = _rounded_pack()
+    stem = "0.0.0.0.0.0.0.1.40100.40100.3.1"
+    state = resolve_preflop_history(_history(stem, pack), pack)
+    assert state.sizes_bb[10] == 100.0  # jam = effective stack, never rounded
+    # The default (size_round_bb=None) pack stays exact.
+    exact = resolve_preflop_history(
+        _history("0.0.0.0.0.40100.0.0.40135", _monker_pack()), _monker_pack()
+    )
+    assert exact.sizes_bb[-1] == pytest.approx(13.625)
+
+
 # --- Ryan-pack lookup path unchanged ------------------------------------------
 def test_ryan_history_sizes_still_come_from_lookup():
     from pipeline.preflop.grammars.types import (  # noqa: PLC0415
