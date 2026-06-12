@@ -71,6 +71,7 @@ from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.gold_examples import load_preflop_gold_examples
 from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.options import canonicalize_strategy
+from pipeline.preflop.pack import get_pack
 from pipeline.preflop.position import hero_relative_position
 from pipeline.preflop.range_examples import leaning_examples_for_spot
 
@@ -181,6 +182,18 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "Do not describe villain's range abstractly with only generic phrases "
     'like "value hands" or "top of range" -- anchor abstract phrases '
     "to actual hand classes from the data block.",
+    # 11. One villain's range only; everyone else is actions-only (June 2026
+    # audit: the model invented other players' holdings in multiway pots and
+    # claimed folded players could still act)
+    "The ONLY range you may describe is the one in `villain_stats`. For "
+    "every other player, state only their recorded action (called, folded, "
+    "shoved) -- NEVER characterize what hands they hold, call their range "
+    "tight or loose, or claim they fold/continue some way. Who can still "
+    "act comes ONLY from `still_to_act_after_you`: never say a player is "
+    "still live, can wake up behind you, or remains a threat unless that "
+    "exact seat is in that list, and when "
+    "`your_call_or_fold_closes_the_action` is true, your call or fold ends "
+    "the preflop action -- say so rather than inventing later pressure.",
 )
 
 
@@ -375,7 +388,7 @@ def build_preflop_system_prompt() -> str:
         "explanations for PREFLOP decisions. You never reason about poker "
         "yourself: every strategic claim in your output must be supported "
         "by a field in the SOLVER DATA block the user gives you.\n\n"
-        "VOICE RULES (all ten apply to every output):\n"
+        f"VOICE RULES (all {len(VOICE_RULES_PREFLOP)} apply to every output):\n"
         f"{_format_voice_rules()}\n\n"
         "STRATEGIC ARCHETYPES. The data block carries a `archetype` field. "
         "It is the STRATEGIC FRAME your explanation must be built around -- "
@@ -557,6 +570,38 @@ def _compute_concept_tags_for_prompt(facts: PreflopFacts) -> list[str]:
     return compute_concept_tags(facts)
 
 
+def _action_pending_fields(facts: PreflopFacts) -> dict[str, Any]:
+    """Who's still in / still to act -- the multiway-awareness facts.
+
+    June 2026 audit findings #1/#3: with only one villain's range in the
+    block, the model invented the other players' holdings and twice
+    claimed folded players could still act. These three deterministic
+    fields (pure bookkeeping over the recorded action) give it the truth;
+    a voice rule pins how they may be used.
+
+    Needs the pack's table size for the seat universe; when the node's
+    pack isn't in the registry (bare unit-test fixtures), the fields are
+    simply omitted -- real generation always has packs registered.
+    """
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        compute_action_pending,
+    )
+
+    node = facts.spot.node
+    try:
+        pack = get_pack(node.pack_id)
+    except KeyError:
+        return {}
+    others_in, pending, closes = compute_action_pending(
+        node.history_before, node.actor, pack.table_size
+    )
+    return {
+        "other_players_still_in_hand": others_in,
+        "still_to_act_after_you": pending,
+        "your_call_or_fold_closes_the_action": closes,
+    }
+
+
 def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
     """A compact JSON-ready view of PreflopFacts for the user prompt.
 
@@ -601,6 +646,7 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         # 3-bets") -- the SAME single source as the framing + Question, so
         # the model never recounts bet levels from raw tokens.
         "prior_action": _render_history_bet_levels(spot.node),
+        **_action_pending_fields(facts),
         # Concept tags from pipeline.preflop.concept_tags -- the firing
         # tags for this spot. Layer 6 uses them to anchor the explanation
         # in specific strategic concepts (e.g. "ace_blocker" makes

@@ -221,7 +221,9 @@ def _mock_client(responses: list[str]) -> SimpleNamespace:
 # --- system prompt carries voice rules + archetypes + banned phrases --------
 def test_system_prompt_includes_every_preflop_voice_rule() -> None:
     system = build_preflop_system_prompt()
-    assert len(VOICE_RULES_PREFLOP) == 10
+    # 11 rules since June 2026 (rule 11: one villain's range only +
+    # still-to-act discipline -- the multiway-fabrication guard).
+    assert len(VOICE_RULES_PREFLOP) == 11
     for rule in VOICE_RULES_PREFLOP:
         # Rules are long; assert on the leading clause so a future
         # word-tweak doesn't break the test.
@@ -767,3 +769,74 @@ def test_build_explanation_prompt_parts_exposes_per_spot_inputs() -> None:
     assert "SYSTEM PROMPT" in parts["assembled"]
     assert "GOLD EXAMPLE 1" in parts["assembled"]
     assert "SOLVER DATA" in parts["assembled"]
+
+
+def test_solver_data_includes_action_pending_fields() -> None:
+    """With the node's pack registered, the SOLVER DATA block carries the
+    multiway-awareness facts (June 2026 audit findings #1/#3)."""
+    from pathlib import Path
+
+    from pipeline.preflop.explanation_generator import _trim_facts_for_prompt
+    from pipeline.preflop.fact_extractor import PreflopFacts
+    from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+    from pipeline.preflop.node_enumerator import PreflopDecisionNode
+    from pipeline.preflop.pack import PreflopPack, clear_registry, register_pack
+    from pipeline.preflop.spot_sampler import PreflopSpot
+
+    PT = PreflopActionType
+    clear_registry()
+    try:
+        register_pack(PreflopPack(
+            pack_id="pending_test_pack",
+            root_path=Path("/tmp/fake"),
+            grammar_name="monker_nlhe",
+            table_size=9,
+            stack_depth_bb=100,
+            open_size_bb=4.0,
+        ))
+        history = (
+            ParsedAction("UTG", PT.RAISE, 120.0),
+            ParsedAction("UTG+1", PT.FOLD),
+            ParsedAction("UTG+2", PT.CALL),
+            ParsedAction("LJ", PT.FOLD), ParsedAction("HJ", PT.FOLD),
+            ParsedAction("CO", PT.FOLD), ParsedAction("BTN", PT.FOLD),
+            ParsedAction("SB", PT.FOLD),
+        )
+        node = PreflopDecisionNode(
+            pack_id="pending_test_pack", actor="BB",
+            history_before=history, actions=(),
+        )
+        spot = PreflopSpot(
+            node=node, hero_hand_class="AJs", hero_card_combo="AsJs",
+            action_frequencies={"Fold": 0.3, "Call": 0.7},
+            dominant_action="Call", dominant_frequency=0.7,
+        )
+        out = _trim_facts_for_prompt(PreflopFacts(spot=spot))
+        assert out["other_players_still_in_hand"] == ["UTG", "UTG+2"]
+        # UTG raised and UTG+2 called: if the BB just calls, both have no
+        # further decision -> hero's call/fold closes the preflop action.
+        assert out["still_to_act_after_you"] == []
+        assert out["your_call_or_fold_closes_the_action"] is True
+    finally:
+        clear_registry()
+
+
+def test_solver_data_omits_pending_fields_without_registry() -> None:
+    from pipeline.preflop.explanation_generator import _trim_facts_for_prompt
+    from pipeline.preflop.fact_extractor import PreflopFacts
+    from pipeline.preflop.node_enumerator import PreflopDecisionNode
+    from pipeline.preflop.pack import clear_registry
+    from pipeline.preflop.spot_sampler import PreflopSpot
+
+    clear_registry()
+    node = PreflopDecisionNode(
+        pack_id="never_registered", actor="BB", history_before=(), actions=(),
+    )
+    spot = PreflopSpot(
+        node=node, hero_hand_class="AA", hero_card_combo="AcAd",
+        action_frequencies={"Fold": 0.1, "Call": 0.9},
+        dominant_action="Call", dominant_frequency=0.9,
+    )
+    out = _trim_facts_for_prompt(PreflopFacts(spot=spot))
+    assert "other_players_still_in_hand" not in out
+    assert "your_call_or_fold_closes_the_action" not in out

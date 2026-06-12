@@ -25,6 +25,7 @@ concept tags.
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -51,11 +52,12 @@ from pipeline.preflop_ranges import (
 logger = logging.getLogger(__name__)
 
 # How many 5-card boards to sample per villain combo when computing
-# hero's equity. 200 gives ~1-2% noise on the per-spot equity number;
-# adequate for filter thresholds and prose, not for a published equity
-# figure. Increase if quality review shows the noise mattering;
-# decrease if batch speed matters more than the second decimal.
-DEFAULT_EQUITY_RUNOUTS = 200
+# hero's equity. 400 (raised from 200, June 2026) roughly halves the
+# per-spot noise; together with the per-spot seeded RNG (_spot_rng) the
+# estimate is also REPRODUCIBLE, so threshold-fed values (archetype
+# frames, dominated/coinflip tags, ev_gap, difficulty) can't flip
+# between runs of the same spot.
+DEFAULT_EQUITY_RUNOUTS = 400
 
 # How many top combos to surface in VillainRangeStats.top_combos. Layer 6
 # uses these for "villain's range has hands like AKs, AKo, KQs, ..."
@@ -300,19 +302,38 @@ def compute_hero_equity_vs_range(
     villain_combo_weights: dict[str, float],
     *,
     max_runouts: int = DEFAULT_EQUITY_RUNOUTS,
+    rng: random.Random | None = None,
 ) -> float:
     """Hero hand vs villain's full range, no board cards.
 
     Returns a single float in [0.0, 1.0]. Uses
     ``pipeline.preflop.equity.preflop_equity_vs_range``, which Monte
-    Carlos 5-card boards per villain combo. Carries 1-2pp noise at
-    default settings.
+    Carlos 5-card boards per villain combo. Pass a seeded ``rng`` for
+    reproducible results (see :func:`_spot_rng`).
     """
     hero_cards = [hero_combo[:2], hero_combo[2:]]
     return preflop_equity_vs_range(
         hero=hero_cards,
         villain_range=villain_combo_weights,
         n_samples=max_runouts,
+        rng=rng,
+    )
+
+
+def _spot_rng(spot: PreflopSpot) -> random.Random:
+    """A deterministic RNG derived from the spot's identity.
+
+    June 2026 audit finding: unseeded Monte-Carlo equity fed hard
+    thresholds (the 0.40 fold_dominated/fold_pot_odds frame split, the
+    dominated/coinflip tags, ev_gap_bb, and through it the difficulty
+    score), so regenerating the SAME spot could flip its strategic frame
+    and move its difficulty hundreds of points. Seeding by
+    (node_id, hand class, combo) makes every recomputation of a spot
+    byte-identical -- across batches, audits, and Compare runs -- while
+    different spots still get independent samples.
+    """
+    return random.Random(
+        f"{spot.node.node_id}|{spot.hero_hand_class}|{spot.hero_card_combo}"
     )
 
 
@@ -368,10 +389,12 @@ def extract_facts(
             top_n=top_combo_count,
         )
         villain_combos = _cached_load_combo_weights(str(villain_path))
+        rng = _spot_rng(spot)
         hero_eq = compute_hero_equity_vs_range(
             spot.hero_card_combo,
             villain_combos,
             max_runouts=equity_runouts,
+            rng=rng,
         )
         # Chunk 2 facts: range-vs-range equity, blockers, archetype.
         hero_combos = _hero_range_at_node_cached(spot.node)
@@ -380,6 +403,7 @@ def extract_facts(
             villain_range=villain_combos,
             max_matchups=200,
             n_samples_per_matchup=50,
+            rng=rng,
         )
         blockers = compute_blockers(spot.hero_card_combo, villain_combos)
         archetype = classify_archetype(spot, villain, hero_eq)

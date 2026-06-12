@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from pipeline.action_history import format_action_history
+from pipeline.action_history import format_action_history, preflop_order
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
 from pipeline.preflop.pack import PreflopPack
@@ -250,6 +250,82 @@ def resolve_preflop_history(
     )
 
 
+def compute_action_pending(
+    history: tuple[ParsedAction, ...],
+    actor: str,
+    table_size: int,
+) -> tuple[list[str], list[str], bool]:
+    """Who is still in the hand, and who still acts after hero.
+
+    Returns ``(others_still_in, still_to_act_after_hero, hero_closes)``:
+
+      * ``others_still_in`` -- every non-folded seat except hero, in seat
+        order, with all-in seats marked ``"HJ (all-in)"``. These players
+        hold cards; the LLM may reference their recorded actions but has
+        no range data for them.
+      * ``still_to_act_after_hero`` -- the subset with a PENDING decision
+        if hero calls or folds: seats that owe chips to the current bet,
+        plus seats that haven't acted at all since the bet reached its
+        current level (the BB option in unraised pots). All-in and folded
+        seats never appear.
+      * ``hero_closes`` -- True when that list is empty: hero's call or
+        fold ends the preflop action. (A raise by hero always reopens
+        it -- this bool is about the passive lines.)
+
+    Built for the Layer-6 SOLVER DATA block (June 2026 audit findings #1
+    and #3: the model invented still-live players who had already folded,
+    and missed that hero closed the action). Pure bookkeeping from the
+    recorded history -- no file reads.
+    """
+    seats = preflop_order(table_size)
+    folded: set[str] = set()
+    all_in: set[str] = set()
+    committed: dict[str, float] = {"SB": 0.5, "BB": 1.0}
+    high_bet = 1.0
+    acted_since_raise: set[str] = set()
+    for a in history:
+        if a.action_type is PreflopActionType.FOLD:
+            folded.add(a.position)
+            acted_since_raise.add(a.position)
+        elif a.action_type is PreflopActionType.CALL:
+            committed[a.position] = high_bet
+            acted_since_raise.add(a.position)
+        elif a.action_type is PreflopActionType.ALL_IN:
+            # Jams commit the effective stack (sentinel: actual size is
+            # irrelevant for pending logic). A jam over an existing jam is
+            # a CALL-OFF at equal stacks, not a new bet level -- it must
+            # not reset who has already acted.
+            all_in.add(a.position)
+            jam = 1e9
+            if high_bet < jam:
+                high_bet = jam
+                acted_since_raise = {a.position}
+            else:
+                acted_since_raise.add(a.position)
+            committed[a.position] = jam
+        else:  # RAISE -- exact size irrelevant here; only "a new bet level"
+            high_bet += 1.0
+            committed[a.position] = high_bet
+            acted_since_raise = {a.position}
+
+    others_in = [
+        s + (" (all-in)" if s in all_in else "")
+        for s in seats
+        if s != actor and s not in folded
+    ]
+    pending = [
+        s
+        for s in seats
+        if s != actor
+        and s not in folded
+        and s not in all_in
+        and (
+            committed.get(s, 0.0) < high_bet or s not in acted_since_raise
+        )
+    ]
+    return others_in, pending, not pending
+
+
 def raise_to_bb(
     state: ResolvedPreflopState,
     *,
@@ -450,6 +526,7 @@ def format_preflop_action_history(
 __all__ = [
     "ResolvedPreflopState",
     "build_hand_dict",
+    "compute_action_pending",
     "format_preflop_action_history",
     "raise_to_bb",
     "resolve_preflop_history",

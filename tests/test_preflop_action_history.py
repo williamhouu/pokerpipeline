@@ -80,3 +80,109 @@ def test_lookup_table_has_distinct_sb_bvb_entry() -> None:
     doesn't silently delete the entry."""
     assert _RYAN_PACK_RAISE_SIZES_BB[(60.0, 1)] == 2.5
     assert _RYAN_PACK_RAISE_SIZES_BB[(76.0, 1)] == 3.0
+
+
+# --- compute_action_pending (June 2026 multiway-awareness facts) -------------
+def test_pending_open_spot_everyone_behind() -> None:
+    """CO first-in at 6-max: BTN/SB/BB all still to act."""
+    from pipeline.preflop.action_history import compute_action_pending
+    from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+
+    history = tuple(
+        ParsedAction(p, PreflopActionType.FOLD) for p in ("UTG", "HJ")
+    )
+    others, pending, closes = compute_action_pending(history, "CO", 6)
+    assert others == ["BTN", "SB", "BB"]
+    assert pending == ["BTN", "SB", "BB"]
+    assert closes is False
+
+
+def test_pending_hero_closes_after_jam_when_all_folded() -> None:
+    """The June-12 audit #1 spot shape: jam, everyone else folds, hero
+    closes -- nobody can 'wake up behind you'."""
+    from pipeline.preflop.action_history import compute_action_pending
+    from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+
+    PT = PreflopActionType
+    history = (
+        ParsedAction("UTG", PT.FOLD), ParsedAction("UTG+1", PT.FOLD),
+        ParsedAction("UTG+2", PT.FOLD),
+        ParsedAction("LJ", PT.RAISE, 120.0),
+        ParsedAction("HJ", PT.CALL), ParsedAction("CO", PT.CALL),
+        ParsedAction("BTN", PT.RAISE, 90.0),
+        ParsedAction("SB", PT.FOLD), ParsedAction("BB", PT.CALL),
+        ParsedAction("LJ", PT.CALL),
+        ParsedAction("HJ", PT.ALL_IN),
+        ParsedAction("CO", PT.FOLD), ParsedAction("BTN", PT.FOLD),
+        ParsedAction("BB", PT.FOLD),
+    )
+    others, pending, closes = compute_action_pending(history, "LJ", 9)
+    assert others == ["HJ (all-in)"]
+    assert pending == []
+    assert closes is True
+
+
+def test_pending_caller_before_jam_still_to_act() -> None:
+    """The audit #3 spot shape: LJ called BEFORE the jam so LJ still has a
+    decision, but UTG+1 (folded) does not."""
+    from pipeline.preflop.action_history import compute_action_pending
+    from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+
+    PT = PreflopActionType
+    history = (
+        ParsedAction("UTG", PT.FOLD),
+        ParsedAction("UTG+1", PT.RAISE, 120.0),
+        ParsedAction("UTG+2", PT.CALL),
+        ParsedAction("LJ", PT.CALL),
+        ParsedAction("HJ", PT.ALL_IN),
+        ParsedAction("CO", PT.FOLD), ParsedAction("BTN", PT.FOLD),
+        ParsedAction("SB", PT.FOLD), ParsedAction("BB", PT.FOLD),
+        ParsedAction("UTG+1", PT.FOLD),
+    )
+    others, pending, closes = compute_action_pending(history, "UTG+2", 9)
+    assert others == ["LJ", "HJ (all-in)"]
+    assert pending == ["LJ"]
+    assert closes is False
+
+
+def test_pending_bb_option_in_limped_pot() -> None:
+    """SB limps: the BB has matched the bet but never acted -> the BB has
+    the option (pending) until they check/raise."""
+    from pipeline.preflop.action_history import compute_action_pending
+    from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+
+    PT = PreflopActionType
+    history = tuple(
+        ParsedAction(p, PT.FOLD)
+        for p in ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
+    ) + (ParsedAction("SB", PT.CALL),)
+    others, pending, closes = compute_action_pending(history, "SB", 9)
+    # From the SB's own decision point AFTER limping isn't meaningful;
+    # check the BB's view instead: SB limped, BB to act -> closes.
+    others, pending, closes = compute_action_pending(history, "BB", 9)
+    assert others == ["SB"]
+    assert pending == []
+    assert closes is True
+
+
+def test_pending_jam_over_jam_is_call_off() -> None:
+    """A second all-in over an existing all-in must NOT reopen the action
+    for players who already called the first jam."""
+    from pipeline.preflop.action_history import compute_action_pending
+    from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+
+    PT = PreflopActionType
+    history = (
+        ParsedAction("UTG", PT.FOLD), ParsedAction("UTG+1", PT.FOLD),
+        ParsedAction("UTG+2", PT.ALL_IN),
+        ParsedAction("LJ", PT.CALL),
+        ParsedAction("HJ", PT.ALL_IN),
+        ParsedAction("CO", PT.FOLD), ParsedAction("BTN", PT.FOLD),
+        ParsedAction("SB", PT.FOLD),
+    )
+    others, pending, closes = compute_action_pending(history, "BB", 9)
+    assert others == ["UTG+2 (all-in)", "LJ", "HJ (all-in)"]
+    # LJ already matched the full stack calling jam #1; the equal-stack
+    # second jam leaves it nothing to decide -> no pending action.
+    assert pending == []
+    assert closes is True

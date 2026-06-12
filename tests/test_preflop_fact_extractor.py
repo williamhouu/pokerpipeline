@@ -593,3 +593,39 @@ def test_extract_facts_populates_chunk2_fields_real_pack():
     # OR call_for_value, depending on pack strategy. Just assert it's not empty.
     assert facts.archetype != ""
     assert facts.archetype != "unclassified"
+
+
+def test_spot_rng_is_deterministic_per_spot():
+    """Same spot -> same RNG stream; different combo -> different stream.
+
+    The June 2026 fix for threshold instability: equity Monte-Carlo is
+    seeded by (node_id, hand_class, combo), so archetype frames, equity
+    tags, ev_gap, and difficulty can't flip between recomputations of
+    the same spot.
+    """
+    from pipeline.preflop.fact_extractor import _spot_rng
+
+    spot_a = _spot_with("Call", {"Call": 0.7, "Fold": 0.3})
+    spot_b = _spot_with("Call", {"Call": 0.7, "Fold": 0.3})
+    seq_a = [_spot_rng(spot_a).random() for _ in range(3)]
+    seq_b = [_spot_rng(spot_b).random() for _ in range(3)]
+    assert seq_a[0] == seq_b[0]  # identical identity -> identical stream
+
+    import dataclasses
+    spot_c = dataclasses.replace(spot_a, hero_card_combo="AsKd")
+    assert _spot_rng(spot_c).random() != seq_a[0]
+
+
+def test_equity_vs_range_reproducible_with_seeded_rng():
+    import random
+
+    from pipeline.preflop.fact_extractor import compute_hero_equity_vs_range
+
+    villain = {"AhAd": 1.0, "KhKd": 1.0, "QsJs": 0.5}
+    eq1 = compute_hero_equity_vs_range(
+        "AsKs", villain, max_runouts=50, rng=random.Random("seed")
+    )
+    eq2 = compute_hero_equity_vs_range(
+        "AsKs", villain, max_runouts=50, rng=random.Random("seed")
+    )
+    assert eq1 == eq2
