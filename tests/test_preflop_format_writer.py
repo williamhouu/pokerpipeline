@@ -379,15 +379,33 @@ def test_display_in_bb_renders_big_blinds_but_keeps_cash_label() -> None:
     )
     assert row["Cash/Tourney"] == "Cash"          # semantics unchanged
     # Venue leads (default Online); this pack_id carries a rake note.
-    assert row["Context"] == (
-        "Online · 6-Handed, $0.25/$0.50 · Rake 4% / 0.3bb cap"
-    )
+    # In bb display the stakes are DROPPED from the Context (June 2026,
+    # Zach's call): every visible amount is in bb, so "$0.25/$0.50" is
+    # irrelevant noise there.
+    assert row["Context"] == "Online · 6-Handed · Rake 4% / 0.3bb cap"
     assert row["User Seat"] == "SB-99.5BB-0.5BB"
     assert row["Seats"] == "BB-99BB-1BB, BTN-97.5BB-2.5BB-raise"
     assert row["POT"] == "4BB"
     assert row["Default Stack"] == "100BB"
     assert "2.5bb" in row["Question"]             # prose amounts in bb
     assert "$" not in row["User Seat"] and "$" not in row["Seats"]
+    assert "$" not in row["Context"]
+
+
+def test_dollar_display_keeps_stakes_in_context() -> None:
+    """Dollar display still shows the stakes in Context (the player sees
+    dollar amounts, so the stake level is load-bearing information)."""
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty=_difficulty(1500),
+        number=1,
+        stakes_bb_dollars=2.0,
+        live_or_online="Live",
+        display_in_bb=False,
+    )
+    assert row["Context"] == "Live · 6-Handed, $1/$2 · Rake 4% / 0.3bb cap"
 
 
 def test_dollar_display_is_the_default() -> None:

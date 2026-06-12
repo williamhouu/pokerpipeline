@@ -641,6 +641,7 @@ def _context_column(
     stakes_bb_dollars: float,
     game_format: str,
     live_or_online: str = "Online",
+    display_in_bb: bool = False,
 ) -> str:
     """The Context column value -- short prose mirroring the postflop format.
 
@@ -650,13 +651,17 @@ def _context_column(
     so it's unambiguous. Venue is omitted when not Online/Live (e.g. "Not
     specified"); rake is omitted for packs without a listed note.
 
-    Core (cash): ``"<n>-Handed, <stakes>"``; tournament: ``"<n>-Handed"``.
-    The stack size is intentionally NOT shown here -- the dedicated
-    ``Default Stack`` column already carries it, so repeating it in the
-    Context was redundant (dropped June 2026 per Zach's feedback). This
-    also makes the Context independent of the ``display_in_bb`` toggle.
+    Core (cash, dollar display): ``"<n>-Handed, <stakes>"``; tournament:
+    ``"<n>-Handed"``. The stack size is intentionally NOT shown here -- the
+    dedicated ``Default Stack`` column already carries it, so repeating it
+    in the Context was redundant (dropped June 2026 per Zach's feedback).
+
+    When the question renders in big blinds (``display_in_bb``), the
+    stakes are dropped too (June 2026, Zach's call): every amount the
+    player sees is in bb, so "$1/$2" is irrelevant noise -- the Context
+    reads ``"Live · 9-Handed · Rake 10% / 3bb cap"``.
     """
-    if game_format == "cash":
+    if game_format == "cash" and not display_in_bb:
         sb_dollars = round(stakes_bb_dollars * pack.sb_to_bb_ratio, 2)
         stakes_str = f"{_dollars(sb_dollars)}/{_dollars(stakes_bb_dollars)}"
         core = f"{pack.table_size}-Handed, {stakes_str}"
@@ -742,6 +747,7 @@ def build_preflop_row(
         "Context": _context_column(
             pack, stakes_bb_dollars, game_format,
             live_or_online=live_or_online,
+            display_in_bb=display_in_bb,
         ),
         "Question": format_preflop_question(
             facts,
