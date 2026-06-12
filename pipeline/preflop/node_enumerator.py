@@ -29,6 +29,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cached_property
 
 from pipeline.preflop.grammars import parse
 from pipeline.preflop.grammars.types import (
@@ -83,7 +84,7 @@ class PreflopDecisionNode:
     history_before: tuple[ParsedAction, ...]
     actions: tuple[PreflopActionOption, ...]
 
-    @property
+    @cached_property
     def node_id(self) -> str:
         """A stable, human-readable id for the node.
 
@@ -91,6 +92,11 @@ class PreflopDecisionNode:
         the actor's position, similar to the Ryan-pack filename style.
         Useful for logging / debugging / dedup. Not guaranteed unique
         across packs -- pair with ``pack_id`` for global uniqueness.
+        Cached: the admin pages sort/key tens of thousands of nodes by id
+        per render, and rebuilding the string each access was measurable
+        at the 9-max pack's 44k-node scale. (cached_property writes via
+        ``__dict__`` so it works on this frozen dataclass; equality and
+        hashing stay field-based.)
         """
         parts = []
         for a in self.history_before:

@@ -409,6 +409,54 @@ def _cached_preflop_nodes_by_actor(
 PREFLOP_GEN_SETTINGS_PATH = PREFLOP_OUTPUT_DIR / ".preflop_generate_settings.json"
 
 
+@st.cache_resource
+def _cached_node_filter_meta(
+    pack_id: str,
+) -> dict[str, tuple[tuple[str, int], ...]]:
+    """Per-actor (action_context, player_count) tuples for live filter counts.
+
+    The Generate page recomputes "how many nodes match these filters" on
+    EVERY widget interaction. Walking 44k real node objects through
+    node_action_context + active_player_count per rerun took multiple
+    seconds on the 9-max pack; filtering these precomputed tuples takes
+    milliseconds. Built once per pack per session.
+    """
+    out: dict[str, list[tuple[str, int]]] = {}
+    for actor, nodes in _cached_preflop_nodes_by_actor(pack_id).items():
+        out[actor] = [
+            (node_action_context(n), active_player_count(n)) for n in nodes
+        ]
+    return {actor: tuple(metas) for actor, metas in out.items()}
+
+
+@st.cache_resource
+def _cached_ranges_index(
+    pack_id: str,
+) -> tuple[
+    dict[str, PreflopDecisionNode],
+    dict[str, tuple[str, ...]],
+    dict[str, str],
+]:
+    """Prebuilt lookup tables for the Range viewer.
+
+    Returns ``(node_by_id, sorted_ids_by_actor, display_label_by_id)``.
+    Building these per rerun meant constructing + sorting 44k node-id
+    strings and recomputing every option's action context on each click --
+    the viewer's 10-second lag on the 9-max pack. Built once per pack.
+    """
+    by_actor = _cached_preflop_nodes_by_actor(pack_id)
+    node_by_id: dict[str, PreflopDecisionNode] = {}
+    ids_by_actor: dict[str, tuple[str, ...]] = {}
+    labels: dict[str, str] = {}
+    for actor, nodes in by_actor.items():
+        ordered = sorted(nodes, key=lambda n: n.node_id)
+        ids_by_actor[actor] = tuple(n.node_id for n in ordered)
+        for n in ordered:
+            node_by_id[n.node_id] = n
+            labels[n.node_id] = f"{node_action_context(n)} · {n.node_id}"
+    return node_by_id, ids_by_actor, labels
+
+
 def _select_preflop_pack(widget_key: str) -> PreflopPack | None:
     """Render the pack selector and return the chosen pack.
 
@@ -484,8 +532,14 @@ def _preview_sample_spot() -> tuple[PreflopFacts, list[str], str] | None:
     return None
 
 
+@st.cache_data(ttl=60)
 def ranges_pack_status() -> tuple[bool, dict[str, int]]:
-    """Return (is_complete, per_position_counts) for the 6-max ranges pack."""
+    """Return (is_complete, per_position_counts) for the 6-max ranges pack.
+
+    Cached for 60s: the sidebar renders this on EVERY rerun of every
+    page, and the underlying glob stats ~20k files. A freshly-extracted
+    pack shows up within a minute, which is plenty for a manual process.
+    """
     counts = {}
     for pos in POSITION_FOLDERS:
         folder = RANGES_SUBDIR / pos
@@ -1152,18 +1206,21 @@ def _render_generate_page_preflop() -> None:
         )
 
     # Filter the node catalog by all three filters; show a live count.
+    # Uses the precomputed per-node (context, players) tuples -- walking
+    # the real node objects here ran on every widget click and took
+    # seconds at the 9-max pack's 44k-node scale.
     _count_set = set(player_counts) if player_counts else None
-    filtered_nodes: list[PreflopDecisionNode] = []
-    for actor in hero_positions:
-        for node in nodes_by_actor.get(actor, ()):
-            ctx = node_action_context(node)
-            if action_contexts and ctx not in action_contexts:
-                continue
-            if _count_set is not None and active_player_count(node) not in _count_set:
-                continue
-            filtered_nodes.append(node)
+    _ctx_set = set(action_contexts) if action_contexts else None
+    filter_meta = _cached_node_filter_meta(pack.pack_id)
+    n_filtered = sum(
+        1
+        for actor in hero_positions
+        for ctx, players in filter_meta.get(actor, ())
+        if (_ctx_set is None or ctx in _ctx_set)
+        and (_count_set is None or players in _count_set)
+    )
     st.caption(
-        f"**{len(filtered_nodes):,}** decision nodes match these filters "
+        f"**{n_filtered:,}** decision nodes match these filters "
         f"(of {total_nodes:,} total)."
     )
 
@@ -1358,6 +1415,55 @@ def _render_generate_page_preflop() -> None:
             ),
         )
 
+    # Stakes + venue are DISPLAY framing only -- every solver number is in
+    # bb, so the strategy is identical at any stake. Defaults are
+    # pack-aware: the 9-max Monker pack (9-handed, 4x opens, 10%/3bb rake
+    # = a $1/$2-style live structure) frames as a Live $1/$2 game; the
+    # 6-max pack keeps the original Online $0.25/$0.50 framing. Widgets
+    # are keyed per pack so switching packs re-applies the matching
+    # default without fighting your last manual choice.
+    def _stake_label_preflop(bb_dollars: float) -> str:
+        sb = bb_dollars / 2
+        sb_str = f"${sb:.2f}".rstrip("0").rstrip(".") if sb < 1 else f"${sb:g}"
+        bb_str = (
+            f"${bb_dollars:.2f}".rstrip("0").rstrip(".")
+            if bb_dollars < 1
+            else f"${bb_dollars:g}"
+        )
+        return f"{sb_str}/{bb_str}"
+
+    _is_live_style_pack = pack.grammar_name == "monker_nlhe"
+    col3, col4 = st.columns(2)
+    with col3:
+        _stake_default = 2.00 if _is_live_style_pack else 0.50
+        _stake_bb = st.selectbox(
+            "Stakes (rendered in output)",
+            options=list(COMMON_STAKE_LEVELS_BB_DOLLARS),
+            index=list(COMMON_STAKE_LEVELS_BB_DOLLARS).index(_stake_default),
+            format_func=_stake_label_preflop,
+            key=f"preflop_stakes_{pack.pack_id}",
+            help=(
+                "Cosmetic: dollar amounts in the Question/Seats/POT scale "
+                "to this stake; the underlying solve is stake-independent "
+                "(all math in bb). The 9-max pack's rake (10% capped 3bb) "
+                "matches a $1/$2 live cap of $6, so $1/$2 reads most "
+                "coherent there."
+            ),
+        )
+    with col4:
+        _venue = st.radio(
+            "Venue (Live or Online column)",
+            options=["Online", "Live"],
+            index=1 if _is_live_style_pack else 0,
+            horizontal=True,
+            key=f"preflop_venue_{pack.pack_id}",
+            help=(
+                "Cosmetic framing for the CSV's 'Live or Online' + Context "
+                "columns. The 9-max pack (9-handed, 4x opens, heavy capped "
+                "rake) is shaped like a live low-stakes game."
+            ),
+        )
+
     st.divider()
 
     # --- 8. Model + API ---
@@ -1388,7 +1494,7 @@ def _render_generate_page_preflop() -> None:
     est_cost = total * cost_per_q
     st.info(
         f"**Estimated**: {total} questions · ~${est_cost:.2f} · "
-        f"difficulty {band_low}-{band_high} · {len(filtered_nodes):,} "
+        f"difficulty {band_low}-{band_high} · {n_filtered:,} "
         f"nodes available"
     )
 
@@ -1480,13 +1586,13 @@ def _render_generate_page_preflop() -> None:
 
     # --- 10. Generate button (kicks off a BACKGROUND job) ---
     # Inputs ready when: at least one position selected AND at least one
-    # action context AND filtered_nodes non-empty AND total > 0.
+    # action context AND the filters match >= 1 node AND total > 0.
     # Disabled while another job is in flight -- the active-job panel
     # rendered above shows that one.
     can_generate = (
         bool(hero_positions)
         and bool(action_contexts)
-        and len(filtered_nodes) > 0
+        and n_filtered > 0
         and total > 0
     )
     job_active = jobs.has_active_job()
@@ -1535,6 +1641,8 @@ def _render_generate_page_preflop() -> None:
             max_difficulty=int(band_high),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
             display_in_bb=_currency.startswith("Big blinds"),
+            stakes_bb_dollars=float(_stake_bb),
+            live_or_online=_venue,
             total_questions=int(total),
             output_filename=_out_filename,
             model_label=_model,
@@ -1565,6 +1673,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     model_label: str,
     dry_run: bool,
     answer_style: str,
+    stakes_bb_dollars: float = 0.50,
+    live_or_online: str = "Online",
     system_prompt: str | None = None,
     prompt_name: str = "",
     random_seed: int | None = None,
@@ -1628,6 +1738,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             max_difficulty=max_difficulty,
             min_ev_gap_bb=min_ev_gap_bb,
             display_in_bb=display_in_bb,
+            stakes_bb_dollars=stakes_bb_dollars,
+            live_or_online=live_or_online,
             answer_style=answer_style,
             model=model_api,
             temperature=temperature,
@@ -3153,8 +3265,7 @@ def render_ranges_page() -> None:
                 "3-bet-or-fold. The tightness is correct for a raked game, not a bug."
             )
 
-    by_actor = _cached_preflop_nodes_by_actor(pack.pack_id)
-    node_by_id = {n.node_id: n for ns in by_actor.values() for n in ns}
+    node_by_id, ids_by_actor, node_labels = _cached_ranges_index(pack.pack_id)
     if not node_by_id:
         st.warning("The range pack has no parseable nodes.")
         return
@@ -3170,20 +3281,18 @@ def render_ranges_page() -> None:
             st.rerun()
     else:
         _seats = preflop_order(pack.table_size)
-        actors = [s for s in _seats if s in by_actor] + sorted(
-            a for a in by_actor if a not in _seats
+        actors = [s for s in _seats if s in ids_by_actor] + sorted(
+            a for a in ids_by_actor if a not in _seats
         )
         col_a, col_b = st.columns([1, 4])
         with col_a:
             actor = st.selectbox("Position", options=actors, key="ranges_actor")
-        actor_nodes = sorted(by_actor.get(actor, ()), key=lambda n: n.node_id)
+        actor_ids = ids_by_actor.get(actor, ())
         with col_b:
             target_id = st.selectbox(
-                f"Node — {len(actor_nodes)} where {actor} acts",
-                options=[n.node_id for n in actor_nodes],
-                format_func=lambda nid: (
-                    f"{node_action_context(node_by_id[nid])} · {nid}"
-                ),
+                f"Node — {len(actor_ids)} where {actor} acts",
+                options=actor_ids,
+                format_func=node_labels.__getitem__,
                 key="ranges_node",
             )
 

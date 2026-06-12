@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from pipeline.plo.pack import (
@@ -129,13 +130,15 @@ class PloDecisionNode:
     actions: tuple[PloActionOption, ...]
     history_stem: str
 
-    @property
+    @cached_property
     def node_id(self) -> str:
         """Stable, human-readable id, e.g. ``'LJ_raise100_HJ_decision'``.
 
         Built from the action history and the actor. The open node (no
         history) is ``'<actor>_decision'``. Useful for logging / dedup; pair
-        with the pack label for global uniqueness.
+        with the pack label for global uniqueness. Cached (admin pages key
+        thousands of nodes by id per render; works on the frozen dataclass
+        because cached_property writes via ``__dict__``).
         """
         parts = [f"{a.seat}_{_verb(a)}" for a in self.history_before]
         parts.append(f"{self.actor}_decision")
