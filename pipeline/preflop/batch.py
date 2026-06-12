@@ -105,6 +105,7 @@ from pipeline.preflop.spot_sampler import (
     enumerate_spots_for_node,
     sample_spot,
 )
+from pipeline.preflop.validators import run_preflop_soft_validators
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,12 @@ class BatchResult:
     # actions with this hand (rare_premise). UI feedback.
     rare_line_filtered_out: int = 0
     rare_premise_filtered_out: int = 0
+
+    # How many WRITTEN rows a soft validator warned on (their CSV
+    # validation_status is "flagged"; the warning text lives in the meta
+    # sidecar's question record). Soft warnings never reject a row --
+    # they queue it for human review. (June 2026 round-2 audit.)
+    soft_flagged_rows: int = 0
 
     # How many questions the caller asked for (the total_questions arg). The
     # run writes fewer when the worthy pool runs out after filtering; the UI
@@ -655,6 +662,10 @@ def generate_preflop_batch(
     #    difficulty-band + min-EV-gap filters BEFORE the (paid) LLM call,
     #    then generate. Stop once total_questions rows are collected.
     rows: list[tuple] = []
+    # Per-row validation_status overrides, positionally aligned with
+    # ``rows``: None = auto_approved, "flagged" = a soft validator warned
+    # (warning text goes into the row's meta record below).
+    row_statuses: list[str | None] = []
     # Per-spot prompt inputs (framing / options / correct / solver-data /
     # live block), captured in row order for the meta sidecar + inspector.
     prompt_records: list[dict[str, object]] = []
@@ -801,17 +812,25 @@ def generate_preflop_batch(
                     system_prompt=system_prompt,
                 )
             rows.append((facts, explanation, difficulty))
+            # Soft validators: never reject, only queue for review. Skipped
+            # on dry-runs (placeholder prose has nothing to check).
+            soft_warnings: list[str] = (
+                [] if dry_run
+                else run_preflop_soft_validators(explanation, facts)
+            )
+            row_statuses.append("flagged" if soft_warnings else None)
             # Record the exact (deterministic) inputs that produced this row,
             # in the same order rows are written to the CSV. Cheap + no API:
             # gold examples are lru-cached and the parts are pure functions.
-            prompt_records.append(
-                _prompt_record(
-                    spot,
-                    build_explanation_prompt_parts(
-                        facts, options, correct, system_prompt=system_prompt
-                    ),
-                )
+            record = _prompt_record(
+                spot,
+                build_explanation_prompt_parts(
+                    facts, options, correct, system_prompt=system_prompt
+                ),
             )
+            if soft_warnings:
+                record["validator_warnings"] = soft_warnings
+            prompt_records.append(record)
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
             failures.append(
@@ -842,6 +861,7 @@ def generate_preflop_batch(
             live_or_online=live_or_online,
             game_format=game_format,
             display_in_bb=display_in_bb,
+            row_statuses=row_statuses,
         )
         final_out = out_path
         # Sidecar metadata: which prompt produced these rows + the exact
@@ -876,6 +896,21 @@ def generate_preflop_batch(
                 "stakes_bb_dollars": stakes_bb_dollars,
                 "live_or_online": live_or_online,
             },
+            # Outcome counters (June 2026 round-2 audit, finding #6: the
+            # gate settings were recorded but the skip COUNTS were UI-only,
+            # so an audit couldn't confirm the gates fired from the meta
+            # alone). run_settings = inputs; counters = what happened.
+            counters={
+                "worthy_spots_available": len(worthy),
+                "nodes_after_filter": len(filtered_nodes),
+                "difficulty_filtered_out": difficulty_filtered_out,
+                "noise_filtered_out": noise_filtered_out,
+                "rare_line_filtered_out": rare_line_filtered_out,
+                "rare_premise_filtered_out": rare_premise_filtered_out,
+                "questions_attempted": attempted,
+                "questions_written": written,
+                "soft_flagged_rows": sum(1 for s in row_statuses if s),
+            },
         )
         meta_path = out_path.with_suffix(".meta.json")
         meta_path.write_text(
@@ -893,6 +928,7 @@ def generate_preflop_batch(
         noise_filtered_out=noise_filtered_out,
         rare_line_filtered_out=rare_line_filtered_out,
         rare_premise_filtered_out=rare_premise_filtered_out,
+        soft_flagged_rows=sum(1 for s in row_statuses if s),
         requested_questions=total_questions,
         total_input_tokens=usage_totals["input"],
         total_output_tokens=usage_totals["output"],
@@ -945,14 +981,16 @@ def _build_batch_meta(
     prompt_records: list[dict[str, object]],
     pack: PreflopPack | None = None,
     run_settings: dict[str, object] | None = None,
+    counters: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Assemble the ``<stem>.meta.json`` payload for one batch.
 
     Records the prompt SNAPSHOT (name + text + sha) so a later edit or
     rename of that prompt can't make this batch's provenance ambiguous,
     the run settings (model / temperature / seed), the source pack (so
-    Review/Compare can tell a 9-max batch from a 6-max one), and the
-    per-question inputs in CSV row order.
+    Review/Compare can tell a 9-max batch from a 6-max one), the outcome
+    counters (what the gates/filters actually skipped -- the audit's
+    proof the gates ran), and the per-question inputs in CSV row order.
     """
     return {
         "prompt_name": prompt_name,
@@ -966,6 +1004,7 @@ def _build_batch_meta(
         "pack_id": pack.pack_id if pack else "",
         "table_size": pack.table_size if pack else None,
         "run_settings": run_settings or {},
+        "counters": counters or {},
         "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "questions": prompt_records,
     }

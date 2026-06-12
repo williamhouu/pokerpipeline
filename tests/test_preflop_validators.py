@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -28,15 +31,43 @@ from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402
 from pipeline.preflop.validators import (  # noqa: E402
     PreflopValidationResult,
     run_preflop_audit_validators,
+    run_preflop_soft_validators,
+    soft_validate_position_words,
     validate_banned_phrases,
+    validate_blocker_claims,
+    validate_card_suit_consistency,
     validate_composite_label_frequencies,
     validate_no_postflop_on_allin,
     validate_no_standalone_sometimes,
     validate_option_set,
+    validate_terminology,
 )
 
 
 # --- fixtures -------------------------------------------------------------
+# Default history: folded to BTN who opens, SB folds, hero BB decides.
+_DEFAULT_HISTORY = (
+    ParsedAction("UTG", PreflopActionType.FOLD),
+    ParsedAction("HJ", PreflopActionType.FOLD),
+    ParsedAction("CO", PreflopActionType.FOLD),
+    ParsedAction("BTN", PreflopActionType.RAISE, 60.0),
+    ParsedAction("SB", PreflopActionType.FOLD),
+)
+
+# 9-max-style cold 3-bet line: UTG opens, UTG+2 3-bets, folds to hero BB.
+# No caller anywhere -- the squeeze/cold-call terminology tests' canvas.
+_HIST_UTG_OPEN_UTG2_3BET = (
+    ParsedAction("UTG", PreflopActionType.RAISE, 120.0),
+    ParsedAction("UTG+1", PreflopActionType.FOLD),
+    ParsedAction("UTG+2", PreflopActionType.RAISE, 84.0),
+    ParsedAction("LJ", PreflopActionType.FOLD),
+    ParsedAction("HJ", PreflopActionType.FOLD),
+    ParsedAction("CO", PreflopActionType.FOLD),
+    ParsedAction("BTN", PreflopActionType.FOLD),
+    ParsedAction("SB", PreflopActionType.FOLD),
+)
+
+
 def _facts(
     *,
     action_frequencies: dict[str, float] | None = None,
@@ -44,37 +75,49 @@ def _facts(
     dominant_frequency: float = 0.66,
     actor: str = "BB",
     archetype: str = "call_for_value",
+    history: tuple[ParsedAction, ...] | None = None,
+    hero_card_combo: str = "AhKc",
+    blockers: dict[str, int] | None = None,
+    villain_position: str | None = "BTN",
+    villain_top: tuple[tuple[str, float], ...] = (),
 ) -> PreflopFacts:
-    """Minimal PreflopFacts. Default: BB facing a BTN open, 66/34 call/fold."""
+    """Minimal PreflopFacts. Default: BB facing a BTN open, 66/34 call/fold.
+
+    The round-2 validator tests vary the history, hero combo, blockers
+    fact, and villain identity; ``villain_position=None`` makes an open
+    spot (no villain, empty blockers).
+    """
     if action_frequencies is None:
         action_frequencies = {"Call": 0.66, "Fold": 0.34}
     spot = PreflopSpot(
         node=PreflopDecisionNode(
             pack_id="t", actor=actor,
             history_before=(
-                ParsedAction("UTG", PreflopActionType.FOLD),
-                ParsedAction("HJ", PreflopActionType.FOLD),
-                ParsedAction("CO", PreflopActionType.FOLD),
-                ParsedAction("BTN", PreflopActionType.RAISE, 60.0),
-                ParsedAction("SB", PreflopActionType.FOLD),
+                history if history is not None else _DEFAULT_HISTORY
             ),
             actions=(),
         ),
         hero_hand_class="AKo",
-        hero_card_combo="AhKc",
+        hero_card_combo=hero_card_combo,
         action_frequencies=action_frequencies,
         dominant_action=dominant_action,
         dominant_frequency=dominant_frequency,
     )
+    villain = (
+        VillainRangeStats(
+            position=villain_position, action_label="Raise 60%",
+            weighted_combo_count=600.0, pct_of_dealt_hands=45.0,
+            top_combos=villain_top,
+        )
+        if villain_position is not None
+        else None
+    )
     return PreflopFacts(
         spot=spot,
-        villain_stats=VillainRangeStats(
-            position="BTN", action_label="Raise 60%",
-            weighted_combo_count=600.0, pct_of_dealt_hands=45.0,
-            top_combos=(),
-        ),
+        villain_stats=villain,
         hero_equity_vs_villain=0.55,
         archetype=archetype,
+        blockers=blockers or {},
     )
 
 
@@ -350,3 +393,289 @@ def test_validation_result_fail_factory() -> None:
     result = PreflopValidationResult.fail("oops")
     assert not result.is_valid
     assert result.error_message == "oops"
+
+
+# --- validate_blocker_claims (June 2026 round-2 audit) ---------------------
+def test_blocker_claim_outside_fact_fails() -> None:
+    """The flagship round-2 defect: 'your queens block KK and AA' with no
+    ace or king in hand. Both impossible hands must be named in the error."""
+    facts = _facts(
+        hero_card_combo="QcQd",
+        blockers={"QQ": 5, "KQs": 2, "AQs": 2},
+    )
+    generated = _gen(
+        prose="4-betting works because your queens block KK and AA combos."
+    )
+    result = validate_blocker_claims(generated, facts)
+    assert not result.is_valid
+    assert "AA" in result.error_message
+    assert "KK" in result.error_message
+
+
+def test_blocker_claim_licensed_passes() -> None:
+    """Bare 'AK' is satisfied by the AKo/AKs entries in the fact."""
+    facts = _facts(
+        hero_card_combo="KsTs",
+        blockers={"KK": 3, "AKo": 3, "AKs": 1},
+    )
+    generated = _gen(
+        prose="Your K♠️ blocks some of villain's KK and AK combos."
+    )
+    assert validate_blocker_claims(generated, facts).is_valid
+
+
+def test_blocker_negated_and_unblock_sentences_skipped() -> None:
+    """Negative claims ('block almost nothing', 'unblocks AA') are often
+    TRUE because the hand is absent from the fact -- never police them."""
+    facts = _facts(hero_card_combo="TcTd", blockers={"TT": 5})
+    generated = _gen(
+        prose=(
+            "You block almost nothing in villain's value range. "
+            "Your hand unblocks the AA and AQs hands that continue."
+        )
+    )
+    assert validate_blocker_claims(generated, facts).is_valid
+
+
+def test_blocker_talk_with_no_blockers_fact_fails() -> None:
+    """Open spots carry no blockers fact, so ANY blocker sentence is
+    unlicensed (round-1 finding #6, now enforced)."""
+    facts = _facts(villain_position=None, history=())
+    generated = _gen(prose="Your ace is a strong blocker here.")
+    result = validate_blocker_claims(generated, facts)
+    assert not result.is_valid
+    assert "blockers fact" in result.error_message
+
+
+def test_no_blocker_talk_with_empty_fact_passes() -> None:
+    facts = _facts(villain_position=None, history=())
+    generated = _gen(prose="Open this hand for value and size up.")
+    assert validate_blocker_claims(generated, facts).is_valid
+
+
+# --- validate_terminology (June 2026 round-2 audit) -------------------------
+def test_opener_cold_call_fails() -> None:
+    """3 of 20 round-2 rows said the OPENER could 'cold-call' the 3-bet."""
+    facts = _facts(
+        actor="BB",
+        history=_HIST_UTG_OPEN_UTG2_3BET,
+        villain_position="UTG+2",
+    )
+    generated = _gen(prose="UTG can cold-call or 4-bet behind you.")
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+    assert "cold-call" in result.error_message
+    assert "UTG" in result.error_message
+
+
+def test_cold_call_sentence_naming_a_cold_seat_passes() -> None:
+    """Mixed sentences (a raiser AND a genuinely cold seat named) pass --
+    the validator must not cry wolf when the verb's subject is ambiguous."""
+    facts = _facts()
+    generated = _gen(prose="After BTN's raise, SB can cold-call in front of you.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_hero_cold_call_when_hero_is_cold_passes() -> None:
+    facts = _facts()  # hero BB, no prior voluntary action
+    generated = _gen(prose="You'd be cold-calling against a strong range.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_hero_cold_call_after_hero_raised_fails() -> None:
+    """Hero opened earlier in the line -- hero can't cold-call the 3-bet."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("UTG+1", PreflopActionType.FOLD),
+        ParsedAction("UTG+2", PreflopActionType.RAISE, 120.0),  # hero's open
+        ParsedAction("LJ", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.FOLD),
+        ParsedAction("CO", PreflopActionType.RAISE, 84.0),
+        ParsedAction("BTN", PreflopActionType.FOLD),
+        ParsedAction("SB", PreflopActionType.FOLD),
+        ParsedAction("BB", PreflopActionType.FOLD),
+    )
+    facts = _facts(actor="UTG+2", history=history, villain_position="CO")
+    generated = _gen(prose="You can cold-call the 3-bet here.")
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+
+
+def test_unnamed_cold_caller_with_no_cold_pending_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-2 #14: 'a cold-caller behind' when every pending seat had
+    already raised. Needs the pack's seat roster, so the registry lookup
+    is monkeypatched to a 6-max stub."""
+    import pipeline.preflop.pack as pack_mod
+
+    monkeypatch.setattr(
+        pack_mod, "get_pack", lambda pid: SimpleNamespace(table_size=6)
+    )
+    facts = _facts()  # default 6-max line: hero BB closes, only BTN raised
+    generated = _gen(
+        prose="You are stuck between the raiser and a cold-caller behind."
+    )
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+    assert "cold-call" in result.error_message
+
+
+def test_unnamed_cold_caller_unknown_pack_passes() -> None:
+    """Bare fixtures have no registered pack: the fallback must stay
+    silent rather than guess (mirrors the Layer-6 graceful degradation)."""
+    facts = _facts()
+    generated = _gen(prose="A cold-caller behind would change the math.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_squeeze_label_on_villains_3bet_without_caller_fails() -> None:
+    facts = _facts(
+        actor="BB",
+        history=_HIST_UTG_OPEN_UTG2_3BET,
+        villain_position="UTG+2",
+    )
+    generated = _gen(prose="UTG opened and UTG+2 squeezed over the top.")
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+    assert "squeeze" in result.error_message
+
+
+def test_get_squeezed_off_passive_passes() -> None:
+    """'You can get squeezed off the hand' is about HERO's future, not a
+    mislabel of the recorded raise -- must not fire (round-2 #16 phrasing)."""
+    facts = _facts(
+        actor="BB",
+        history=_HIST_UTG_OPEN_UTG2_3BET,
+        villain_position="UTG+2",
+    )
+    generated = _gen(prose="If you call light you can get squeezed off the hand.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_squeeze_with_real_caller_passes() -> None:
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 120.0),
+        ParsedAction("UTG+1", PreflopActionType.CALL),
+        ParsedAction("UTG+2", PreflopActionType.RAISE, 84.0),
+        ParsedAction("LJ", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.FOLD),
+        ParsedAction("CO", PreflopActionType.FOLD),
+        ParsedAction("BTN", PreflopActionType.FOLD),
+        ParsedAction("SB", PreflopActionType.FOLD),
+    )
+    facts = _facts(actor="BB", history=history, villain_position="UTG+2")
+    generated = _gen(prose="UTG+2 squeezed the opener and the caller.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_open_fold_while_facing_a_raise_fails() -> None:
+    facts = _facts()  # BTN open in history
+    generated = _gen(prose="Against a tighter opener, just open-fold every time.")
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+    assert "open-fold" in result.error_message
+
+
+def test_open_fold_first_in_passes() -> None:
+    facts = _facts(villain_position=None, actor="UTG", history=())
+    generated = _gen(prose="You can open-fold the bottom of your range.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_raise_ladder_overflow_fails() -> None:
+    """Two raises in history: hero's raise is the 4-bet, the response the
+    5-bet -- a 6-bet is unreachable and must fail."""
+    facts = _facts(
+        actor="BB",
+        history=_HIST_UTG_OPEN_UTG2_3BET,
+        villain_position="UTG+2",
+    )
+    generated = _gen(prose="He will never fold KK to a 6-bet.")
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+    assert "6-bet" in result.error_message
+
+
+def test_raise_ladder_within_bound_passes() -> None:
+    facts = _facts(
+        actor="BB",
+        history=_HIST_UTG_OPEN_UTG2_3BET,
+        villain_position="UTG+2",
+    )
+    generated = _gen(prose="You can 4-bet, and calling a 5-bet jam is fine.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+def test_capped_for_aa_heavy_villain_range_fails() -> None:
+    facts = _facts(villain_top=(("AA", 1.0), ("KK", 1.0)))
+    generated = _gen(prose="Villain's raising range is capped here.")
+    result = validate_terminology(generated, facts)
+    assert not result.is_valid
+    assert "capped" in result.error_message
+
+
+def test_capped_about_hero_range_passes() -> None:
+    """Hero's own range CAN legitimately be capped -- only villain-referenced
+    capped claims are checked against villain's top combos."""
+    facts = _facts(villain_top=(("AA", 1.0), ("KK", 1.0)))
+    generated = _gen(prose="Your range is capped after just calling.")
+    assert validate_terminology(generated, facts).is_valid
+
+
+# --- validate_card_suit_consistency (June 2026 round-2 audit) ----------------
+def test_wrong_suit_in_prose_fails() -> None:
+    """Round-2 #16: hero holds K♠5♠ but the prose said 'your K❤️' twice."""
+    facts = _facts(hero_card_combo="Ks5s")
+    generated = _gen(prose="Your K❤️ is the key card in this spot.")
+    result = validate_card_suit_consistency(generated, facts)
+    assert not result.is_valid
+    assert "Kh" in result.error_message
+
+
+def test_correct_suits_and_heart_variants_pass() -> None:
+    """Both heart emojis (U+2665 and U+2764) normalise to hearts."""
+    facts = _facts(hero_card_combo="AhQc")
+    generated = _gen(prose="Your A♥️Q♣️ plays well, and the A❤️ blocks a lot.")
+    assert validate_card_suit_consistency(generated, facts).is_valid
+
+
+def test_hand_class_labels_without_emoji_ignored() -> None:
+    facts = _facts(hero_card_combo="Ks5s")
+    generated = _gen(prose="Hands like AKo and JTs prefer raising instead.")
+    assert validate_card_suit_consistency(generated, facts).is_valid
+
+
+# --- soft validators ---------------------------------------------------------
+def test_soft_position_warns_on_oop_claim_when_ip() -> None:
+    """Round-2 #15/#18: 'calling out of position' while the fact says In
+    Position. Soft (flag-not-reject): legit multiway-realization phrasing
+    exists, so it queues for review instead of failing the row."""
+    facts = _facts(actor="BTN", villain_position="SB")
+    generated = _gen(prose="You are out of position in this pot.")
+    warnings = soft_validate_position_words(generated, facts)
+    assert len(warnings) == 1
+    assert "In Position" in warnings[0]
+
+
+def test_soft_position_warns_on_ip_claim_when_oop() -> None:
+    facts = _facts()  # BB vs BTN: hero OOP
+    generated = _gen(prose="You get to play in position with the lead.")
+    warnings = soft_validate_position_words(generated, facts)
+    assert len(warnings) == 1
+
+
+def test_soft_position_consistent_prose_is_silent() -> None:
+    facts = _facts()  # BB vs BTN: hero OOP
+    generated = _gen(prose="You are out of position against the raiser.")
+    assert soft_validate_position_words(generated, facts) == []
+    assert run_preflop_soft_validators(generated, facts) == []
+
+
+# --- runner picks up the round-2 validators ----------------------------------
+def test_runner_catches_round2_defects() -> None:
+    facts = _facts(hero_card_combo="Ks5s")
+    generated = _gen(prose="Your K❤️ likes this price.")
+    result = run_preflop_audit_validators(generated, facts)
+    assert not result.is_valid
+    assert "Kh" in result.error_message

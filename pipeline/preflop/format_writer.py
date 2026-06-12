@@ -690,6 +690,7 @@ def build_preflop_row(
     live_or_online: str = "Online",
     game_format: str = "cash",
     display_in_bb: bool = False,
+    validation_status: str = "auto_approved",
 ) -> dict[str, str]:
     """Turn one populated PreflopFacts + its LLM-written explanation into a CSV row.
 
@@ -793,7 +794,10 @@ def build_preflop_row(
         # raise (the v1 engine doesn't model raise EVs -- see the
         # engine module docstring for the scope rationale).
         "ev_gap_bb": _render_ev_gap(facts, pack),
-        "validation_status": "auto_approved",
+        # "auto_approved" unless the caller overrides -- the batch driver
+        # passes "flagged" when a soft validator warned on this row (the
+        # warnings themselves live in the meta sidecar's question record).
+        "validation_status": validation_status,
         # Use canonical labels here too so the QA column reads as
         # "Raise: 70%, Fold: 30%" not "Raise 60%: 70%, Fold: 30%"
         # (the % token from Pio's internal labels would be misread as
@@ -847,6 +851,7 @@ def write_preflop_csv(
     live_or_online: str = "Online",
     game_format: str = "cash",
     display_in_bb: bool = False,
+    row_statuses: Iterable[str | None] | None = None,
 ) -> int:
     """Write preflop question rows to a CSV at ``path``; return rows written.
 
@@ -864,12 +869,18 @@ def write_preflop_csv(
         stakes_bb_dollars: BB size in dollars. Default 0.50 = Tier 1.
         live_or_online: "Online" or "Live". Cosmetic.
         game_format: "cash" or "tournament".
+        row_statuses: Optional per-row ``validation_status`` overrides,
+            positionally aligned with ``rows``. ``None`` entries (and a
+            ``None`` argument) keep the default ``auto_approved``. The
+            batch driver passes ``"flagged"`` for rows a soft validator
+            warned on.
 
     Returns:
         Number of rows written (excludes the header).
     """
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    status_list = list(row_statuses) if row_statuses is not None else []
     written = 0
     # utf-8-sig writes a BOM so Excel on Windows auto-detects UTF-8 instead
     # of falling back to cp1252 and mojibake-ing the suit emoji bytes.
@@ -878,6 +889,11 @@ def write_preflop_csv(
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for number, (facts, explanation, difficulty) in enumerate(rows, start=1):
+            status = (
+                status_list[number - 1]
+                if number - 1 < len(status_list) and status_list[number - 1]
+                else "auto_approved"
+            )
             row: dict[str, Any] = build_preflop_row(
                 facts,
                 explanation,
@@ -888,6 +904,7 @@ def write_preflop_csv(
                 live_or_online=live_or_online,
                 game_format=game_format,
                 display_in_bb=display_in_bb,
+                validation_status=status,
             )
             writer.writerow(row)
             written += 1

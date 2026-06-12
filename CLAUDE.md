@@ -250,6 +250,26 @@ blocks (the audit's join key). Audit flags are written into the batch's
 `.review.json` sidecar (status `needs_review`, note prefix
 `AUDIT (Claude):`) so they render inline on the Review page.
 
+**Round-2 fixes (June 12 PM).** The round-2 audit (20q, all three
+round-1 major modes dead; new #1 = false blocker claims) produced:
+voice rules 12–16 (blocker claims only from the `blockers` fact, never
+invent WHY alternative-action hands prefer their line, position wording
+from `hero_position`, equity/flip talk vs the FULL range only,
+cold-call/squeeze/open-fold/raise-ladder definitions) in the factory
+AND the 3 gitignored prompt snapshots; three new HARD validators in
+`pipeline/preflop/validators.py` (suit-emoji-vs-hero-cards,
+blocker-claims-vs-blockers-fact, terminology-vs-action-history) wired
+into the generation retry stack; a SOFT flag-not-reject path
+(`run_preflop_soft_validators`, v1 = position-wording check) that sets
+`validation_status="flagged"` + a `validator_warnings` list in the meta
+question record; and meta.json `counters` (worthy/filtered/rare-gate
+skip counts + `soft_flagged_rows`) next to `run_settings`. Replayed on
+the round-2 batch: 7/20 rows hard-fail (all were audit-flagged; zero
+hits on clean rows), soft warns on 3. Known non-catches by design:
+subject-bound ladder slips inside the reachable bound ("CO folds to a
+5-bet" where only CO could make it) and equity-vs-named-hand claims
+(rule 15 is prompt-only).
+
 ## Build phases & status
 
 Each phase ships something usable on its own. Check-in milestones gate phases 2, 3, 4.

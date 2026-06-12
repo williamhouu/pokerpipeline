@@ -194,6 +194,46 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "exact seat is in that list, and when "
     "`your_call_or_fold_closes_the_action` is true, your call or fold ends "
     "the preflop action -- say so rather than inventing later pressure.",
+    # 12. Blocker claims only from the blockers fact (June 2026 round-2
+    # audit: 4 of 20 rows asserted physically impossible blocks -- "your
+    # queens block KK and AA combos" with no ace or king in hand -- and
+    # used them to justify raise mixes)
+    "You may say your hand blocks a specific villain hand ONLY if that "
+    "hand class appears in the `blockers` fact. If `blockers` is empty or "
+    "absent (open spots have no villain), make no blocker claims at all. "
+    "Never name a blocked hand from memory: a hand with no ace blocks "
+    "zero AA combos, a hand with no king blocks zero KK combos.",
+    # 13. Never invent WHY the solver prefers other hands (round-2 audit:
+    # garbled/reversed blocker rationales for the alternative-action hands)
+    "When `hands_in_your_range_that_prefer_the_other_action` names hands, "
+    "you may cite them as the hands that take the other line, but NEVER "
+    "invent the reason the solver prefers them. No blocker, playability, "
+    "or balance rationale of your own for those specific hands: state "
+    "that they prefer the other action and move on.",
+    # 14. Position wording comes from the position fact (round-2 audit:
+    # "Calling out of position... Sorry, you're in the HJ" garbles)
+    "Describe your position only as `hero_position` states: In Position "
+    "means you act after the villain postflop, Out of Position means you "
+    "act first. You may note that players still to act behind you would "
+    "have position on you IF they come along, but never call yourself out "
+    "of position when `hero_position` says In Position, or the reverse.",
+    # 15. Equity numbers and flip talk apply to the FULL range only
+    # (round-2 audit: "coinflip scenarios against AK" for a hand AK
+    # dominates -- the data has no per-hand equities to check against)
+    "Your equity number measures your hand against villain's FULL range. "
+    "Never attach an equity number, or words like flip, coinflip, or "
+    "race, to your matchup against ONE named hand -- the data contains "
+    "no per-hand equities. (Calling a dominated matchup dominated is "
+    "fine; putting numbers or flip labels on single hands is not.)",
+    # 16. Preflop terminology precision (round-2 audit: the opener
+    # "cold-calling" a 3-bet, a "squeeze" with no caller, "open-fold"
+    # while facing a raise, a "5-bet" the line couldn't reach)
+    "Use preflop terms precisely. Cold-call = calling a raise when you "
+    "have no voluntary money in yet, so a player who already raised can "
+    "NEVER cold-call. Squeeze = a 3-bet made over an open PLUS at least "
+    "one caller. Open-fold = folding when the action folds TO you "
+    "unopened, never when facing a raise. Count raises in order (open, "
+    "3-bet, 4-bet, 5-bet) and never name a level the line cannot reach.",
 )
 
 

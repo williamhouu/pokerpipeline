@@ -546,6 +546,32 @@ def test_build_batch_meta_snapshots_prompt_and_records() -> None:
     assert meta["gold_block"] == "GOLD"
     assert meta["model"] == "claude-opus-4-7"
     assert meta["questions"] == records
+    # Counters default to {} when the caller doesn't pass them.
+    assert meta["counters"] == {}
+
+
+def test_build_batch_meta_records_counters() -> None:
+    """Outcome counters land in the meta sidecar (June 2026 audit gap:
+    gate SETTINGS were recorded but the skip counts were UI-only, so a
+    re-audit couldn't confirm the gates fired from the meta alone)."""
+    counters = {
+        "rare_line_filtered_out": 3,
+        "rare_premise_filtered_out": 6,
+        "questions_written": 5,
+        "soft_flagged_rows": 1,
+    }
+    meta = _build_batch_meta(
+        prompt_name="P",
+        system_prompt="S",
+        gold_block="G",
+        model="m",
+        temperature=0.3,
+        seed=None,
+        dry_run=True,
+        prompt_records=[],
+        counters=counters,
+    )
+    assert meta["counters"] == counters
 
 
 def test_build_batch_meta_blanks_model_on_dry_run() -> None:

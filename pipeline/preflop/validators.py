@@ -29,6 +29,14 @@ becomes the retry message):
      the team's literal-phrase blocklist (e.g. "leverage the dead
      money", "dynamic spot") are banned. The LLM is told these in
      the system prompt; this validator hard-enforces.
+  5. :func:`validate_card_suit_consistency` -- specific cards named in
+     prose must be hero's own two (June 2026 round-2 audit: "your K❤️"
+     while holding K♠5♠).
+  6. :func:`validate_blocker_claims` -- "your hand blocks X" only when
+     X is in the blockers fact; no blocker talk at all when the fact
+     is empty (round-2 audit: 4/20 rows claimed impossible blocks).
+  7. :func:`validate_terminology` -- cold-call/squeeze/open-fold/N-bet
+     claims the action history disproves (round-2 audit).
 
 (A ``validate_no_postflop_talk`` keyword check was removed -- it
 hard-banned terms like "runout"/"draws" and false-positived on
@@ -39,8 +47,11 @@ Strategy / failure-pattern validators are stubbed in
 :func:`run_preflop_audit_validators` but currently always pass --
 will be tuned against the first batches of real review feedback.
 
-Soft (warning-only) validators run after the hard stack and never
-fail a generation. Reserved for v2.
+Soft (warning-only) validators (June 2026): run via
+:func:`run_preflop_soft_validators` after generation succeeds; they
+never fail a row. The batch driver marks warned rows
+``validation_status='flagged'`` and stores the warnings in the meta
+sidecar. v1 soft check: position words vs the hero_position fact.
 """
 
 from __future__ import annotations
@@ -459,6 +470,421 @@ def validate_no_postflop_on_allin(
     return PreflopValidationResult.ok()
 
 
+# --- June 2026 round-2 audit validators --------------------------------------
+# The round-2 prose audit (LATEST AUDIT READY_20260612_122054) found three
+# mechanical failure modes after the multiway fixes killed the round-1 ones:
+# blocker claims hero's cards can't make (4/20 rows said "blocks AA" with no
+# ace in hand), terminology the action history disproves (the opener
+# "cold-calling", a "squeeze" with no caller), and a wrong suit emoji on
+# hero's own card. All three are verifiable from PreflopFacts alone, so they
+# run as HARD validators: a failure is a real defect, never a judgment call.
+# Each check is deliberately conservative (negation guards, both-named
+# escapes) -- a hard validator must never cry wolf, because its failure
+# message becomes the corrective retry prompt.
+
+# "block/blocks/blocker(s)/blocking" but NOT "unblock*" -- un-block claims
+# assert the ABSENCE of a blocker and are checked by no rule here.
+_BLOCK_WORD = re.compile(r"\b(?<!un)(?<!Un)[Bb]lock\w*")
+# A 169-grid hand-class token: two ranks + optional s/o suffix. (?!%) keeps
+# bare percentages like "33%" from reading as pocket threes.
+_HAND_CLASS_TOKEN = re.compile(r"\b([AKQJT2-9]{2})(s|o)?\b(?!%)")
+# Sentences whose blocker claims we skip: negated or hedged claims ("you
+# don't block", "blocks almost nothing") can be TRUE precisely because a
+# hand is absent from the blockers fact, so only positive claims are policed.
+_NEGATION_MARKERS = ("not ", "n't", " no ", " nothing", " never", "unblock")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+# Specific-card token: rank immediately followed by a suit emoji (voice
+# rule 9's format). Both heart emojis appear in the wild (rule 9 itself
+# uses U+2764, gold prose uses U+2665) -- normalise both to 'h'.
+_CARD_EMOJI = re.compile(r"([AKQJT2-9])([♠♥♦♣❤])")
+_SUIT_LETTER = {
+    "♠": "s",  # ♠
+    "♥": "h",  # ♥
+    "❤": "h",  # ❤
+    "♦": "d",  # ♦
+    "♣": "c",  # ♣
+}
+
+_COLD_CALL = re.compile(r"\bcold[\s-]?call\w*", re.I)
+# "you'd be cold-calling" / "you can cold-call": the cold-call verb bound to
+# HERO. Requires you + (optional single auxiliary) + cold-call adjacency so
+# an incidental "...behind you and can cold-call..." doesn't bind to hero.
+_HERO_COLD_CALL = re.compile(
+    r"\byou(?:'d|'re|'ll)?"
+    r"(?:\s+(?:be|are|were|would|could|can|will|should|might|just))?"
+    r"\s+cold[\s-]?call",
+    re.I,
+)
+_SQUEEZE = re.compile(r"\bsqueez\w*", re.I)
+_OPEN_FOLD = re.compile(r"\bopen[\s-]fold\w*", re.I)
+_N_BET_TOKEN = re.compile(r"\b([3-9])-bet", re.I)
+_CAPPED = re.compile(r"\bcapped\b", re.I)
+# Longest-first so "UTG" can't match inside "UTG+1".
+_POSITION_SHORT = re.compile(r"\b(UTG\+[12]|UTG|LJ|HJ|CO|BTN|SB|BB)\b")
+_POSITION_LONG = {
+    "under the gun": "UTG",
+    "lojack": "LJ",
+    "hijack": "HJ",
+    "cutoff": "CO",
+    "button": "BTN",
+    "small blind": "SB",
+    "big blind": "BB",
+}
+
+
+def _positions_named(sentence: str) -> set[str]:
+    """Every seat the sentence names, short or long form, as canon tokens."""
+    named = set(_POSITION_SHORT.findall(sentence))
+    low = sentence.lower()
+    for phrase, pos in _POSITION_LONG.items():
+        if phrase in low:
+            named.add(pos)
+    return named
+
+
+def _raisers(facts: PreflopFacts) -> set[str]:
+    """Seats that have voluntarily raised (or jammed) before hero's decision.
+
+    These players can never cold-call: they already have aggression money
+    in. Limp/call-only players stay "cold" on purpose -- a caller of an
+    open WAS cold-calling, and policing their later calls would cry wolf.
+    """
+    return {
+        a.position
+        for a in facts.spot.node.history_before
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    }
+
+
+def _pending_cold_seats(facts: PreflopFacts) -> list[str] | None:
+    """Seats that still act after hero AND could legitimately cold-call.
+
+    None when the spot's pack isn't registered (bare unit-test fixtures) --
+    callers treat None as "unknown, don't judge". Mirrors the graceful
+    degradation of the Layer-6 solver-data builder.
+    """
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        compute_action_pending,
+    )
+    from pipeline.preflop.pack import get_pack  # noqa: PLC0415
+
+    node = facts.spot.node
+    try:
+        pack = get_pack(node.pack_id)
+    except KeyError:
+        return None
+    _others, pending, _closes = compute_action_pending(
+        node.history_before, node.actor, pack.table_size
+    )
+    raisers = _raisers(facts)
+    return [p for p in pending if p not in raisers]
+
+
+def _hand_blocked_in_fact(
+    core: str, suffix: str, blockers: dict[str, int]
+) -> bool:
+    """Is the prose's hand token licensed by the blockers fact?
+
+    Pairs match exactly; bare non-pair tokens like "AK" are satisfied by
+    either the suited or offsuit entry (prose often drops the suffix).
+    """
+    if suffix:
+        return f"{core}{suffix}" in blockers
+    if core[0] == core[1]:
+        return core in blockers
+    return (
+        core in blockers
+        or f"{core}s" in blockers
+        or f"{core}o" in blockers
+    )
+
+
+def validate_blocker_claims(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> PreflopValidationResult:
+    """Every "your hand blocks X" claim must trace to the blockers fact.
+
+    June 2026 round-2 audit: 4 of 20 rows asserted physically impossible
+    blocks ("your queens block KK and AA combos" with no ace or king in
+    hero's hand) -- the flagship reversed-blocker-logic disease. The
+    blockers fact lists exactly which villain hand classes hero's cards
+    remove combos from, so the check is mechanical:
+
+      * a sentence containing a positive block-word may only name hand
+        classes present in ``facts.blockers``;
+      * when the blockers fact is EMPTY (open spots: no villain), any
+        positive blocker sentence at all is a defect -- there is no fact
+        to license blocker talk (round-1 finding #6).
+
+    Negated/hedged sentences ("you block almost nothing", "don't block")
+    and un-block claims are skipped: those assert absence, which is often
+    true BECAUSE the hand is missing from the fact.
+    """
+    text = generated.answer_explanation or ""
+    if not text:
+        return PreflopValidationResult.ok()
+
+    for sentence in _SENTENCE_SPLIT.split(text):
+        if not _BLOCK_WORD.search(sentence):
+            continue
+        low = sentence.lower()
+        if any(marker in low for marker in _NEGATION_MARKERS):
+            continue
+        if not facts.blockers:
+            return PreflopValidationResult.fail(
+                "the explanation makes a blocker claim but this spot has NO "
+                "blockers fact (no villain range -- e.g. an open spot). "
+                "Remove all blocker talk: nothing licenses it. Offending "
+                f"sentence: {sentence.strip()!r}"
+            )
+        unlicensed = sorted({
+            f"{core}{suffix or ''}"
+            for core, suffix in _HAND_CLASS_TOKEN.findall(sentence)
+            if not _hand_blocked_in_fact(core, suffix, facts.blockers)
+        })
+        if unlicensed:
+            return PreflopValidationResult.fail(
+                "the explanation claims your hand blocks "
+                + ", ".join(unlicensed)
+                + " but the blockers fact licenses only "
+                + ", ".join(sorted(facts.blockers))
+                + ". A hand may be named as blocked ONLY if it appears in "
+                "the blockers fact (your cards physically cannot block the "
+                f"others). Offending sentence: {sentence.strip()!r}"
+            )
+    return PreflopValidationResult.ok()
+
+
+def validate_terminology(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> PreflopValidationResult:
+    """Preflop terms the action history disproves (round-2 audit, June 2026).
+
+    Four checks, all grounded in ``history_before``:
+
+      * **cold-call by a raiser** -- a player who already raised can never
+        cold-call (3 of 20 rows called the opener's hypothetical call a
+        cold-call). Fails when every seat a cold-call sentence names has
+        already raised, or -- for an unnamed "a cold-caller behind" -- when
+        no pending seat could still cold-call. Sentences that also name a
+        genuinely cold seat pass (no wolf-crying on mixed sentences).
+      * **squeeze with no caller** -- describing the villain's recorded
+        raise as a squeeze when nobody called before it. Prospective
+        squeeze talk ("if you call, the blinds can squeeze") stays legal:
+        hero's own call would create the open-plus-caller precondition.
+      * **open-fold while facing action** -- open-folding means folding
+        when the action folds TO you; facing a raise you simply fold.
+      * **raise-ladder overflow** -- an N-bet the line cannot reach. Max
+        nameable level = raises so far + hero's next raise + one re-raise
+        over it. (Subject-bound miscounts inside that bound, like "CO
+        folds to a 5-bet" where only CO could make the 5-bet, are left to
+        the prose audit -- parsing who makes which raise is not mechanical.)
+    """
+    text = generated.answer_explanation or ""
+    if not text:
+        return PreflopValidationResult.ok()
+
+    history = facts.spot.node.history_before
+    hero = facts.spot.node.actor
+    raisers = _raisers(facts)
+    any_call_in_history = any(
+        a.action_type is PreflopActionType.CALL for a in history
+    )
+    n_raises = sum(
+        1
+        for a in history
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    )
+    max_nameable_bet = n_raises + 3  # current top + hero's raise + one re-raise
+    villain_pos = facts.villain_stats.position if facts.villain_stats else None
+
+    for sentence in _SENTENCE_SPLIT.split(text):
+        low = sentence.lower()
+
+        if _COLD_CALL.search(sentence):
+            named = _positions_named(sentence)
+            if _HERO_COLD_CALL.search(sentence):
+                named.add(hero)
+            if named:
+                if all(seat in raisers for seat in named):
+                    return PreflopValidationResult.fail(
+                        "the explanation says "
+                        + ", ".join(sorted(named))
+                        + " could cold-call, but a player who already "
+                        "raised can NEVER cold-call (cold-calling means "
+                        "calling with no voluntary money in yet). Say "
+                        "'call' for the opener/raiser, or name a seat that "
+                        f"is actually cold. Offending sentence: {sentence.strip()!r}"
+                    )
+            else:
+                cold_pending = _pending_cold_seats(facts)
+                if cold_pending is not None and not cold_pending:
+                    return PreflopValidationResult.fail(
+                        "the explanation mentions a cold-caller but no seat "
+                        "still to act could cold-call here (every pending "
+                        "player already raised). Use their recorded role "
+                        f"instead. Offending sentence: {sentence.strip()!r}"
+                    )
+
+        if (
+            _SQUEEZE.search(sentence)
+            and not any_call_in_history
+            and villain_pos is not None
+            and villain_pos in _positions_named(sentence)
+        ):
+            return PreflopValidationResult.fail(
+                f"the explanation calls {villain_pos}'s raise a squeeze, "
+                "but nobody called before it -- a squeeze is a 3-bet over "
+                "an open PLUS at least one caller. Call it a 3-bet. "
+                f"Offending sentence: {sentence.strip()!r}"
+            )
+
+        if _OPEN_FOLD.search(sentence) and any(
+            a.action_type
+            in (
+                PreflopActionType.RAISE,
+                PreflopActionType.ALL_IN,
+                PreflopActionType.CALL,
+            )
+            for a in history
+        ):
+            return PreflopValidationResult.fail(
+                "the explanation says 'open-fold' but you are FACING "
+                "action -- open-folding means folding when the action "
+                "folds to you unopened. Just say fold. Offending "
+                f"sentence: {sentence.strip()!r}"
+            )
+
+        for match in _N_BET_TOKEN.finditer(sentence):
+            level = int(match.group(1))
+            if level > max_nameable_bet:
+                return PreflopValidationResult.fail(
+                    f"the explanation mentions a {level}-bet but this line "
+                    f"can only reach a {max_nameable_bet}-bet (raises so "
+                    f"far: {n_raises}, plus your raise and one re-raise). "
+                    "Count the ladder: open, 3-bet, 4-bet, 5-bet. "
+                    f"Offending sentence: {sentence.strip()!r}"
+                )
+
+        if (
+            _CAPPED.search(sentence)
+            and facts.villain_stats is not None
+            and (villain_pos in _positions_named(sentence) or "villain" in low)
+            and any(
+                hand_class in ("AA", "KK") and weight >= 0.5
+                for hand_class, weight in facts.villain_stats.top_combos
+            )
+        ):
+            return PreflopValidationResult.fail(
+                "the explanation calls villain's range capped, but that "
+                "range contains AA/KK at high weight -- capped means the "
+                "range CANNOT contain the top hands. Describe it as strong "
+                f"or condensed instead. Offending sentence: {sentence.strip()!r}"
+            )
+
+    return PreflopValidationResult.ok()
+
+
+def validate_card_suit_consistency(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> PreflopValidationResult:
+    """Every specific card named in prose must be one of hero's two cards.
+
+    Preflop there is no board and villain's cards are unknown, so the only
+    specific cards the explanation may name are hero's own. Round-2 audit:
+    one row wrote "your K❤️" twice while hero held K♠5♠ -- strategy-neutral
+    preflop, but trust-destroying and trivially checkable.
+    """
+    text = generated.answer_explanation or ""
+    if not text:
+        return PreflopValidationResult.ok()
+
+    combo = facts.spot.hero_card_combo or ""
+    hero_cards = {
+        (combo[i].upper(), combo[i + 1].lower())
+        for i in range(0, len(combo) - 1, 2)
+    }
+    if not hero_cards:
+        return PreflopValidationResult.ok()
+
+    offending = sorted({
+        f"{rank}{_SUIT_LETTER[suit]}"
+        for rank, suit in _CARD_EMOJI.findall(text)
+        if (rank, _SUIT_LETTER[suit]) not in hero_cards
+    })
+    if offending:
+        return PreflopValidationResult.fail(
+            "the explanation names specific cards that are not yours: "
+            + ", ".join(offending)
+            + f". Your cards are {combo}. Preflop the only specific cards "
+            "you may name are your own two (hand-class labels like AKo "
+            "stay plain text)."
+        )
+    return PreflopValidationResult.ok()
+
+
+# --- soft validators (flag, never fail) --------------------------------------
+def soft_validate_position_words(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> list[str]:
+    """Warn when prose position words contradict the hero_position fact.
+
+    SOFT on purpose: "out of position" in an In Position spot is *usually*
+    the round-2 garble (#15's "Sorry, you're in the HJ"), but can be a
+    legitimate multiway-realization claim ("you'd be out of position
+    against the callers behind"), so it flags for review instead of
+    failing the generation.
+    """
+    from pipeline.preflop.position import (  # noqa: PLC0415
+        hero_relative_position,
+    )
+
+    text = (generated.answer_explanation or "").lower()
+    if not text:
+        return []
+
+    relative = hero_relative_position(facts)
+    warnings: list[str] = []
+    if relative == "In Position" and "out of position" in text:
+        warnings.append(
+            "prose says 'out of position' but hero is In Position vs the "
+            "villain. May be a multiway-realization claim about callers "
+            "behind: review."
+        )
+    if (
+        relative == "Out of Position"
+        and "in position" in text.replace("out of position", "")
+        and "not in position" not in text
+    ):
+        warnings.append(
+            "prose says 'in position' but hero is Out of Position vs the "
+            "villain: review."
+        )
+    return warnings
+
+
+def run_preflop_soft_validators(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> list[str]:
+    """Run every soft validator; return all warnings (empty = clean).
+
+    Soft warnings never fail a generation and never trigger a retry. The
+    batch driver marks warned rows ``validation_status='flagged'`` and
+    records the warnings in the meta sidecar so the Review page surfaces
+    them for a human.
+    """
+    warnings: list[str] = []
+    for check in (soft_validate_position_words,):
+        warnings.extend(check(generated, facts))
+    return warnings
+
+
 # --- runner -----------------------------------------------------------------
 def run_preflop_audit_validators(
     generated: GeneratedExplanation,
@@ -483,6 +909,9 @@ def run_preflop_audit_validators(
         validate_composite_label_frequencies,
         validate_no_postflop_on_allin,
         validate_banned_phrases,
+        validate_card_suit_consistency,
+        validate_blocker_claims,
+        validate_terminology,
     ):
         result = check(generated, facts)
         if not result.is_valid:
@@ -493,9 +922,14 @@ def run_preflop_audit_validators(
 __all__ = [
     "PreflopValidationResult",
     "run_preflop_audit_validators",
+    "run_preflop_soft_validators",
+    "soft_validate_position_words",
     "validate_banned_phrases",
+    "validate_blocker_claims",
+    "validate_card_suit_consistency",
     "validate_composite_label_frequencies",
     "validate_no_postflop_on_allin",
     "validate_no_standalone_sometimes",
     "validate_option_set",
+    "validate_terminology",
 ]

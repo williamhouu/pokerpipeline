@@ -278,6 +278,27 @@ def test_no_column_auto_increments() -> None:
     assert row1["No"] == "7"
 
 
+def test_row_statuses_override_validation_status() -> None:
+    """Soft-validator flags reach the CSV: a "flagged" entry in
+    row_statuses overrides the default auto_approved for that row only."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "statuses.csv"
+        count = write_preflop_csv(
+            out,
+            [
+                (_facing_open_facts(), _explanation(), _difficulty(1500)),
+                (_facing_open_facts(), _explanation(), _difficulty(1500)),
+            ],
+            pack=_pack(),
+            row_statuses=[None, "flagged"],
+        )
+        assert count == 2
+        with open(out, newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.DictReader(handle))
+        assert rows[0]["validation_status"] == "auto_approved"
+        assert rows[1]["validation_status"] == "flagged"
+
+
 # --- preflop-specific column values -----------------------------------------
 def test_hand_stage_is_preflop() -> None:
     row = build_preflop_row(
