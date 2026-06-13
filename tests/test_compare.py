@@ -11,7 +11,24 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from admin_panel import compare  # noqa: E402
+from admin_panel import app, compare  # noqa: E402
+
+
+def test_pack_display_framing_is_pack_aware() -> None:
+    """The 9-max Monker pack frames Live $1/$2; everything else Online.
+
+    Regression guard for the Compare page rendering "Online · 9-Handed" on
+    the Live pack: Compare hardcoded the batch default instead of asking
+    the pack. Generate and Compare now share this one helper, so they
+    cannot drift again. Pure logic -> stubbed pack (the real Monker pack is
+    gitignored, so a disk-backed test wouldn't run in CI).
+    """
+    from types import SimpleNamespace
+
+    monker = SimpleNamespace(grammar_name="monker_nlhe")
+    ryan = SimpleNamespace(grammar_name="ryan_pack")
+    assert app._pack_display_framing(monker) == ("Live", 2.00)
+    assert app._pack_display_framing(ryan) == ("Online", 0.50)
 
 
 def _row(node: str, hand: str, expl: str) -> dict[str, str]:

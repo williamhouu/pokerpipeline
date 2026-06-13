@@ -514,6 +514,22 @@ def _cached_ranges_index(
     return node_by_id, ids_by_actor, labels
 
 
+def _pack_display_framing(pack: PreflopPack) -> tuple[str, float]:
+    """Pack-aware ``(venue, stakes_bb_dollars)`` display default.
+
+    Venue/stakes are cosmetic -- every solver number is in bb -- but the
+    framing should match the pack's shape. The 9-max Monker pack
+    (``monker_nlhe``: 9-handed, 4x opens, 10%/3bb cap = a $6 cap at $1/$2)
+    reads as a Live $1/$2 game; every other pack keeps the original Online
+    $0.25/$0.50 framing. Both the Generate page (as the widget default) and
+    the Compare page (which has no venue widget) call this, so a pack frames
+    identically wherever it's generated -- the source-of-truth that keeps
+    the two paths from drifting (they did: Compare used to hardcode Online).
+    """
+    is_live = pack.grammar_name == "monker_nlhe"
+    return ("Live", 2.00) if is_live else ("Online", 0.50)
+
+
 def _select_preflop_pack(widget_key: str) -> PreflopPack | None:
     """Render the pack selector and return the chosen pack.
 
@@ -1519,10 +1535,9 @@ def _render_generate_page_preflop() -> None:
         )
         return f"{sb_str}/{bb_str}"
 
-    _is_live_style_pack = pack.grammar_name == "monker_nlhe"
+    _default_venue, _stake_default = _pack_display_framing(pack)
     col3, col4 = st.columns(2)
     with col3:
-        _stake_default = 2.00 if _is_live_style_pack else 0.50
         _stake_bb = st.selectbox(
             "Stakes (rendered in output)",
             options=list(COMMON_STAKE_LEVELS_BB_DOLLARS),
@@ -1541,7 +1556,7 @@ def _render_generate_page_preflop() -> None:
         _venue = st.radio(
             "Venue (Live or Online column)",
             options=["Online", "Live"],
-            index=1 if _is_live_style_pack else 0,
+            index=["Online", "Live"].index(_default_venue),
             horizontal=True,
             key=f"preflop_venue_{pack.pack_id}",
             help=(
@@ -3976,6 +3991,11 @@ def render_compare_page() -> None:
             )
             return
         pack = cmp_pack  # both sides sample the same selected pack
+        # Venue/stakes are display-only framing. Compare has no venue widget
+        # (it's a prompt A/B test, not a framing tool), so take the pack's
+        # default straight from the shared helper -- without this both sides
+        # silently rendered "Online · 9-Handed" even on the Live Monker pack.
+        cmp_venue, cmp_stakes_bb = _pack_display_framing(pack)
         model_api_a = _MODEL_LABEL_TO_API.get(model_a_label, model_a_label)
         model_api_b = _MODEL_LABEL_TO_API.get(model_b_label, model_b_label)
         # When the models differ, bake the model into each side's label so
@@ -4010,6 +4030,8 @@ def render_compare_page() -> None:
                 ),
                 answer_style=cmp_style,
                 display_in_bb=cmp_display_in_bb,
+                live_or_online=cmp_venue,
+                stakes_bb_dollars=cmp_stakes_bb,
                 system_prompt=lib.get_text(a_slug),
                 prompt_name=names[a_slug],
                 random_seed=seed,
@@ -4034,6 +4056,8 @@ def render_compare_page() -> None:
                 ),
                 answer_style=cmp_style,
                 display_in_bb=cmp_display_in_bb,
+                live_or_online=cmp_venue,
+                stakes_bb_dollars=cmp_stakes_bb,
                 system_prompt=lib.get_text(b_slug),
                 prompt_name=names[b_slug],
                 random_seed=seed,
