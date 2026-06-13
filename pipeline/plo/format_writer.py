@@ -196,6 +196,17 @@ def build_plo_row(
         "easy_ev": f"{difficulty.easy_ev:.3f}" if difficulty.ev_available else "",
         "easy_concept": f"{difficulty.easy_concept:.3f}",
         "easy_hand": f"{difficulty.easy_hand:.3f}",
+        # Decision-math columns (NLHE-only for now): PLO's equity / blockers
+        # are 4-card and don't map onto the NLHE stat_notes helpers, so these
+        # are blank on PLO rows. The "Show the math" panel hides itself when
+        # stat_notes is empty. Present here purely to satisfy the shared
+        # schema (PLO_CSV_COLUMNS derives from CSV_COLUMNS).
+        "pot_odds": "",
+        "hero_equity": "",
+        "range_equity": "",
+        "blocker_combos": "",
+        "top_villain_combos": "",
+        "stat_notes": "",
     }
     # Defensive: guarantee exact schema coverage (every column, no extras).
     missing = set(PLO_CSV_COLUMNS) - set(row)

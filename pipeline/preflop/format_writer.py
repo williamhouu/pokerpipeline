@@ -78,6 +78,13 @@ from pipeline.preflop.node_enumerator import (
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import PreflopPack
 from pipeline.preflop.position import hero_relative_position
+from pipeline.preflop.stat_notes import (
+    build_stat_notes,
+    format_blockers,
+    format_pct_or_blank,
+    format_top_villain_combos,
+    stat_notes_to_json,
+)
 from pipeline.preflop_ranges import (
     canonical_169_hand_classes,
     parse_range_file,
@@ -838,6 +845,17 @@ def build_preflop_row(
         ),
         "easy_concept": f"{difficulty.easy_concept:.3f}",
         "easy_hand": f"{difficulty.easy_hand:.3f}",
+        # Decision-math columns -- deterministic stats from the Layer-5
+        # facts (pipeline.preflop.stat_notes), surfaced in the app's "Show
+        # the math" panel. Blank on opens (no villain to price/measure
+        # against). stat_notes is the JSON the panel renders; the four
+        # scalar columns are the same numbers as standalone cells.
+        "pot_odds": format_pct_or_blank(facts.break_even_equity),
+        "hero_equity": format_pct_or_blank(facts.hero_equity_vs_villain),
+        "range_equity": format_pct_or_blank(facts.hero_range_equity_vs_villain),
+        "blocker_combos": format_blockers(facts.blockers),
+        "top_villain_combos": format_top_villain_combos(facts.villain_stats),
+        "stat_notes": stat_notes_to_json(build_stat_notes(facts)),
     }
 
 

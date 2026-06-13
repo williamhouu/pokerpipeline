@@ -105,6 +105,21 @@ CSV_COLUMNS = [
     # hand_class duplicated User Cards on preflop rows. `Notes` moved up to
     # sit right before `ev_gap_bb`.)
     "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+    # Decision-math columns (June 2026): the deterministic stats the app
+    # surfaces in the "Show the math" panel under each answer explanation.
+    # All computed by plain Python from the Layer-5 facts (NOT the LLM) in
+    # pipeline.preflop.stat_notes, so they can never disagree with the
+    # solver. Populated on FACING-action preflop spots (need a villain);
+    # blank on opens/first-in and on postflop/PLO rows.
+    #   pot_odds          -- required equity to call, e.g. "31%"
+    #   hero_equity       -- this hand's equity vs villain's range, "47%"
+    #   range_equity      -- hero's RANGE equity vs villain's range, "44%"
+    #   blocker_combos    -- villain combos hero removes, "AKo:6, AA:3"
+    #   top_villain_combos-- coverage digest, "AA, KK, AKs (~70% of 4.2%)"
+    #   stat_notes        -- compact JSON of {key,label,value,note} panel
+    #                        rows (the deterministic phrases); '' when none.
+    "pot_odds", "hero_equity", "range_equity", "blocker_combos",
+    "top_villain_combos", "stat_notes",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -334,6 +349,11 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # When postflop generation is re-architected to use the
         # 4-axis algorithm, this row builder will populate these.
         "easy_freq": "", "easy_ev": "", "easy_concept": "", "easy_hand": "",
+        # Decision-math columns (June 2026) -- preflop-NLHE-only so far;
+        # blank on postflop rows (the preflop row builder populates them
+        # from the Layer-5 facts via pipeline.preflop.stat_notes).
+        "pot_odds": "", "hero_equity": "", "range_equity": "",
+        "blocker_combos": "", "top_villain_combos": "", "stat_notes": "",
     }
 
 

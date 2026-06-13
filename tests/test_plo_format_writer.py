@@ -54,10 +54,10 @@ def _facts(
     return PloFacts(spot=spot, hand_class=classify_plo_hand(AAKK), archetype=archetype, villain_stats=vstats)
 
 
-def test_schema_has_40_columns_and_no_ranges():
+def test_schema_has_46_columns_and_no_ranges():
     assert "ranges" not in PLO_CSV_COLUMNS
-    # 40-col shared template minus `ranges` (39) plus the PLO-only `hand_shape`.
-    assert len(PLO_CSV_COLUMNS) == 40  # noqa: PLR2004
+    # 46-col shared template minus `ranges` (45) plus the PLO-only `hand_shape`.
+    assert len(PLO_CSV_COLUMNS) == 46  # noqa: PLR2004
     # hand_shape sits right after archetype.
     i = PLO_CSV_COLUMNS.index("archetype")
     assert PLO_CSV_COLUMNS[i + 1] == "hand_shape"

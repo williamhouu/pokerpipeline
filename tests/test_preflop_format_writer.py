@@ -257,7 +257,7 @@ def test_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 40
+    assert len(row) == 46
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""

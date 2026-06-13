@@ -65,6 +65,22 @@ DEFAULT_EQUITY_RUNOUTS = 400
 # context window.
 DEFAULT_TOP_COMBO_COUNT = 5
 
+# Coverage-based selection for the user-facing "what you're up against"
+# digest (VillainRangeStats.top_combos_covering): take the heaviest classes
+# by combo share until ~two-thirds of the range is covered, but never fewer
+# than COVERAGE_FLOOR nor more than COVERAGE_CAP. A fixed top-N misleads --
+# it's ~all of a 5-hand 4-bet range but a quarter of a 30-hand flat range.
+COVERAGE_TARGET = 0.67
+COVERAGE_FLOOR = 3
+COVERAGE_CAP = 6
+
+
+def _combos_in_class(hand_class: str) -> int:
+    """Combos in a 169-grid class: pairs 6, suited 4, offsuit 12."""
+    if len(hand_class) == 2:  # a pair, e.g. "AA"
+        return 6
+    return 4 if hand_class.endswith("s") else 12
+
 
 @dataclass(frozen=True)
 class VillainRangeStats:
@@ -83,7 +99,17 @@ class VillainRangeStats:
             percentage in [0, 100]. The "X% of hands" number coaches
             quote.
         top_combos: tuple of ``(hand_class, weight)`` pairs, descending
-            by weight, length up to ``DEFAULT_TOP_COMBO_COUNT``.
+            by weight, length up to ``DEFAULT_TOP_COMBO_COUNT``. Layer 6's
+            data block reads this.
+        top_combos_covering: the most-weighted hand classes (by COMBO
+            share, so AKo's 12 combos outweigh AKs's 4) needed to cover
+            ~two-thirds of the range, capped at 6 / floored at 3. The
+            user-facing "what you're up against" digest -- adaptive to
+            range width where a fixed top-N misleads (a 30-hand flat-call
+            range vs a 5-hand 4-bet range).
+        top_combos_coverage_pct: what % of the range ``top_combos_covering``
+            actually covers, in [0, 100] -- shown so the digest reads as a
+            summary, not the whole range.
     """
 
     position: str
@@ -91,6 +117,8 @@ class VillainRangeStats:
     weighted_combo_count: float
     pct_of_dealt_hands: float
     top_combos: tuple[tuple[str, float], ...] = ()
+    top_combos_covering: tuple[str, ...] = ()
+    top_combos_coverage_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -280,6 +308,28 @@ def compute_villain_range_stats(
     nonzero.sort(key=lambda x: (-x[1], canonical_index.get(x[0], 999)))
     top = tuple(nonzero[:top_n])
 
+    # Coverage-based digest: rank classes by COMBO share (weight x combos)
+    # and take the heaviest until ~COVERAGE_TARGET of the range is covered,
+    # bounded by [COVERAGE_FLOOR, COVERAGE_CAP]. Premium-first ties (same
+    # canonical order as `top`). weighted_combos is the same combo total, so
+    # the running sum / weighted_combos is the true fraction of the range.
+    by_combo_share = sorted(
+        ((c, w * _combos_in_class(c)) for c, w in nonzero),
+        key=lambda x: (-x[1], canonical_index.get(x[0], 999)),
+    )
+    covering: list[str] = []
+    acc = 0.0
+    for hand_class, class_combos in by_combo_share:
+        covering.append(hand_class)
+        acc += class_combos
+        if len(covering) >= COVERAGE_CAP:
+            break
+        if len(covering) >= COVERAGE_FLOOR and weighted_combos > 0 and (
+            acc / weighted_combos >= COVERAGE_TARGET
+        ):
+            break
+    coverage_pct = (acc / weighted_combos * 100.0) if weighted_combos > 0 else 0.0
+
     if villain.action_type is PreflopActionType.RAISE:
         action_label = f"Raise {villain.raise_size_pct:g}%"
     elif villain.action_type is PreflopActionType.ALL_IN:
@@ -293,6 +343,8 @@ def compute_villain_range_stats(
         weighted_combo_count=weighted_combos,
         pct_of_dealt_hands=pct,
         top_combos=top,
+        top_combos_covering=tuple(covering),
+        top_combos_coverage_pct=coverage_pct,
     )
 
 

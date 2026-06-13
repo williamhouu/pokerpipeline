@@ -3129,6 +3129,10 @@ def render_review_page() -> None:
             on_change=_autosave_review_cell,
             args=(csv_path, no, _expl_key, "explanation"),
         )
+        # The deterministic "Show the math" strip, right under the
+        # explanation (the decision-math stats: pot odds, equity, range
+        # advantage, blockers, what you're up against).
+        _render_stat_panel(row)
         # Editable difficulty -- auto-saves into the CSV just like the
         # explanation (no Save button; the on_change callback writes it).
         _diff_key = f"review_diff::{csv_path.name}::{no}"
@@ -3770,6 +3774,28 @@ def _finish_comparison(
     return "Comparison not saved — " + "  •  ".join(bits)
 
 
+def _render_stat_panel(row: dict[str, str]) -> None:
+    """A collapsible "Show the math" strip under an answer explanation.
+
+    One compact row per deterministic decision-math stat (pot odds, your
+    equity, range advantage, blockers, what you're up against), read from
+    the row's ``stat_notes`` cell. The phrases are written in Python by
+    :mod:`pipeline.preflop.stat_notes` -- never the LLM -- so they can't
+    misframe the numbers. No-ops when the cell is empty: open/first-in
+    spots (no villain to price against), PLO, postflop, or batches
+    generated before the column existed.
+    """
+    from pipeline.preflop.stat_notes import parse_stat_notes  # noqa: PLC0415
+
+    notes = parse_stat_notes(row.get("stat_notes", ""))
+    if not notes:
+        return
+    with st.expander("📊 Show the math"):
+        for note in notes:
+            st.markdown(f"**{note.get('label', '')}** · {note.get('value', '')}")
+            st.caption(note.get("note", ""))
+
+
 # --- page: Compare (head-to-head prompt A/B) --------------------------------
 def render_compare_page() -> None:
     """Run two prompts on the SAME spots and judge them side by side.
@@ -4217,6 +4243,10 @@ def render_compare_page() -> None:
                 )
                 if edited_b.strip() != orig_b.strip():
                     st.caption("✏️ Edited — finalizing B saves this text.")
+            # Both sides are the SAME spot, so the deterministic math is
+            # identical -- one shared panel under the pair. (No-ops on PLO,
+            # whose rows carry no stat_notes yet.)
+            _render_stat_panel(row_a)
             cur = verdicts.get(key)
             idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
             choice = st.radio(
@@ -6445,6 +6475,10 @@ def render_plo_compare_page() -> None:
                 )
                 if edited_b.strip() != orig_b.strip():
                     st.caption("✏️ Edited — finalizing B saves this text.")
+            # Both sides are the SAME spot, so the deterministic math is
+            # identical -- one shared panel under the pair. (No-ops on PLO,
+            # whose rows carry no stat_notes yet.)
+            _render_stat_panel(row_a)
             cur = verdicts.get(key)
             idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
             choice = st.radio(

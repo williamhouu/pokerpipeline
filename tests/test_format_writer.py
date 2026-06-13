@@ -63,8 +63,11 @@ def test_column_structure():
       * 40 = -difficulty_bumps (always empty -- BUMP_RULES unpopulated)
              -hand_class (duplicated User Cards on preflop); Notes moved
              to sit right after concept_tags. (June 2026.)
+      * 46 = +6 decision-math columns (pot_odds, hero_equity, range_equity,
+             blocker_combos, top_villain_combos, stat_notes) -- the "Show
+             the math" panel data, appended at the end. (June 2026.)
     """
-    assert len(CSV_COLUMNS) == 40
+    assert len(CSV_COLUMNS) == 46
     assert "hand_class" not in CSV_COLUMNS
     assert "difficulty_bumps" not in CSV_COLUMNS
     assert CSV_COLUMNS[0] == "No"
@@ -87,15 +90,18 @@ def test_column_structure():
     arch_i = CSV_COLUMNS.index("archetype")
     assert CSV_COLUMNS[arch_i:arch_i + 4] == [
         "archetype", "board_texture", "solver_reference", "validation_status"]
-    # The four difficulty diagnostic axes close out the row (hand_class +
-    # difficulty_bumps dropped June 2026).
-    assert CSV_COLUMNS[-4:] == [
+    # The four difficulty diagnostic axes, followed by the six decision-math
+    # columns that now close out the row (June 2026).
+    assert CSV_COLUMNS[-10:-6] == [
         "easy_freq", "easy_ev", "easy_concept", "easy_hand"]
+    assert CSV_COLUMNS[-6:] == [
+        "pot_odds", "hero_equity", "range_equity", "blocker_combos",
+        "top_villain_combos", "stat_notes"]
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 40
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 46
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""
