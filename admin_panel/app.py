@@ -4408,6 +4408,29 @@ def render_prompt_page() -> None:
             PREFLOP_PROMPT_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
             PREFLOP_PROMPT_OVERRIDE_PATH.write_text(active_text, encoding="utf-8")
 
+    # Auto-save callbacks: name / notes / system-prompt all persist to disk
+    # on every edit (blur or Enter), so nothing is ever lost by saving one
+    # field and not another -- the bug where saving the name dropped unsaved
+    # system-prompt edits. on_change fires on COMMIT (blur/Enter), NOT per
+    # keystroke, so it's one small write per edit, no typing lag. Slugs are
+    # stable across rename, so the selection never jumps. (June 2026.)
+    def _autosave_prompt_text(slug: str) -> None:
+        text = st.session_state.get(f"prompt_edit_{slug}")
+        if text is not None and text != lib.get_text(slug):
+            lib.update_text(slug, text)
+            if slug == lib.active_slug():
+                _sync_legacy_override()
+
+    def _autosave_prompt_name(slug: str) -> None:
+        name = str(st.session_state.get(f"rename_{slug}", "")).strip()
+        if name and name != lib.get(slug).name:
+            lib.rename(slug, name)
+
+    def _autosave_prompt_notes(slug: str) -> None:
+        notes = str(st.session_state.get(f"notes_{slug}", ""))
+        if notes != lib.get(slug).notes:
+            lib.update_notes(slug, notes)
+
     # --- create a new prompt ---
     entries = lib.list()
     with st.expander("➕  New prompt", expanded=not entries):
@@ -4500,50 +4523,30 @@ def render_prompt_page() -> None:
             f"{len(entry.text):,} chars · ~{len(entry.text) // 4:,} tokens{updated}"
         )
 
-    # --- rename + notes ---
+    # --- rename + notes (auto-save on edit -- no Save button) ---
     m1, m2 = st.columns(2)
     with m1:
-        new_title = st.text_input("Rename", value=entry.name, key=f"rename_{sel}")
-        if st.button(
-            "Save name",
-            key=f"renamebtn_{sel}",
-            disabled=(not new_title.strip() or new_title == entry.name),
-        ):
-            lib.rename(sel, new_title)
-            st.rerun()
-    with m2:
-        notes = st.text_input(
-            "Notes (what you're trying)", value=entry.notes, key=f"notes_{sel}"
+        st.text_input(
+            "Name", value=entry.name, key=f"rename_{sel}",
+            on_change=_autosave_prompt_name, args=(sel,),
         )
-        if st.button(
-            "Save notes", key=f"notesbtn_{sel}", disabled=notes == entry.notes
-        ):
-            lib.update_notes(sel, notes)
-            st.rerun()
+    with m2:
+        st.text_input(
+            "Notes (what you're trying)", value=entry.notes, key=f"notes_{sel}",
+            on_change=_autosave_prompt_notes, args=(sel,),
+        )
 
-    # --- the editable prompt text ---
+    # --- the editable prompt text (auto-saves on edit) ---
     edited = st.text_area(
         "System prompt",
         value=entry.text,
         height=520,
         key=f"prompt_edit_{sel}",
-        help="Edits are session-local until you click Save prompt.",
+        on_change=_autosave_prompt_text, args=(sel,),
+        help="Saves automatically when you click out of the box or press "
+        "Enter -- no Save button, and switching fields never loses an edit.",
     )
-    if edited != entry.text:
-        st.caption(
-            f"🔵 Unsaved edits ({len(edited) - len(entry.text):+,} chars vs. saved)."
-        )
-    if st.button(
-        "💾  Save prompt",
-        type="primary",
-        key=f"save_{sel}",
-        disabled=(edited == entry.text),
-    ):
-        lib.update_text(sel, edited)
-        if sel == active_slug:
-            _sync_legacy_override()
-        st.success("✅ Saved.")
-        st.rerun()
+    st.caption("✓ Auto-saved — name, notes, and the prompt all save as you edit.")
 
     # --- preview the FULL prompt the model receives (sample spot) ---
     with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
