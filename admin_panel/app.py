@@ -1189,7 +1189,7 @@ def _render_generate_page_preflop() -> None:
         action_contexts = st.multiselect(
             "Action faced",
             options=context_options,
-            default=["Facing single raise", "Facing 3-bet"],
+            default=["Opening", "Facing single raise", "Facing 3-bet"],
             help="What hero is responding to. Empty = include all.",
         )
         count_options = list(range(1, pack.table_size + 1))
@@ -1303,20 +1303,21 @@ def _render_generate_page_preflop() -> None:
             "Solver frequency worthiness window (%)",
             min_value=50,
             max_value=100,
-            value=(55, 95),
+            value=(55, 99),
             key="preflop_worthiness_slider",
             help="Below 55% = no clear best answer to teach; 100% = trivial.",
         )
         exclude_ambiguous_band = st.checkbox(
-            "Exclude ambiguous 90–95% band (recommended)",
-            value=True,
+            "Exclude ambiguous 90–95% band",
+            value=False,
             key="preflop_exclude_ambiguous_band",
             help=(
                 "Spots where the solver takes one action 90–95% of the time "
                 "read as \"mostly\" but sit just under the 95% \"always\" "
                 "line, so a player with the right read can still pick "
-                "\"always\" and be marked wrong. On by default: caps the "
-                "effective ceiling at 90%. Uncheck to allow 90–95% spots in."
+                "\"always\" and be marked wrong. Off by default so the "
+                "worthiness window runs to its full upper bound. Check it to "
+                "cap the effective ceiling at 90% and drop the 90–95% spots."
             ),
         )
         min_ev_gap = st.slider(
