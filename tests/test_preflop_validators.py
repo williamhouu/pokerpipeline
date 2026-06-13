@@ -43,7 +43,6 @@ from pipeline.preflop.validators import (  # noqa: E402
     validate_terminology,
 )
 
-
 # --- fixtures -------------------------------------------------------------
 # Default history: folded to BTN who opens, SB folds, hero BB decides.
 _DEFAULT_HISTORY = (
@@ -432,6 +431,23 @@ def test_blocker_negated_and_unblock_sentences_skipped() -> None:
         prose=(
             "You block almost nothing in villain's value range. "
             "Your hand unblocks the AA and AQs hands that continue."
+        )
+    )
+    assert validate_blocker_claims(generated, facts).is_valid
+
+
+def test_blocker_blocks_zero_combos_is_negation_skipped() -> None:
+    """'blocks ZERO combos of AA' asserts absence, like 'blocks nothing' --
+    it must NOT be policed (June 13 diagnostic: a poker-correct QQ line was
+    being hard-rejected because 'zero' wasn't a negation marker)."""
+    facts = _facts(
+        hero_card_combo="QcQd",
+        blockers={"QQ": 5, "KQs": 2, "AQs": 2},
+    )
+    generated = _gen(
+        prose=(
+            "You hold two queens, which blocks zero combos of AA, KK, and "
+            "AKs, the exact hands crushing you."
         )
     )
     assert validate_blocker_claims(generated, facts).is_valid

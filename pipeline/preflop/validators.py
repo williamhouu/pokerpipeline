@@ -489,9 +489,11 @@ _BLOCK_WORD = re.compile(r"\b(?<!un)(?<!Un)[Bb]lock\w*")
 # bare percentages like "33%" from reading as pocket threes.
 _HAND_CLASS_TOKEN = re.compile(r"\b([AKQJT2-9]{2})(s|o)?\b(?!%)")
 # Sentences whose blocker claims we skip: negated or hedged claims ("you
-# don't block", "blocks almost nothing") can be TRUE precisely because a
-# hand is absent from the blockers fact, so only positive claims are policed.
-_NEGATION_MARKERS = ("not ", "n't", " no ", " nothing", " never", "unblock")
+# don't block", "blocks almost nothing", "blocks zero combos of AA") can be
+# TRUE precisely because a hand is absent from the blockers fact, so only
+# positive claims are policed. "zero" reads as a quantity but means absence --
+# "blocks zero combos of X" is the same assertion as "blocks none of X".
+_NEGATION_MARKERS = ("not ", "n't", " no ", " nothing", " never", " zero", "unblock")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 # Specific-card token: rank immediately followed by a suit emoji (voice
