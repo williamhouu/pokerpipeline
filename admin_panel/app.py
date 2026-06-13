@@ -532,13 +532,18 @@ def _preview_sample_spot() -> tuple[PreflopFacts, list[str], str] | None:
     return None
 
 
-@st.cache_data(ttl=60)
+@st.cache_resource
 def ranges_pack_status() -> tuple[bool, dict[str, int]]:
     """Return (is_complete, per_position_counts) for the 6-max ranges pack.
 
-    Cached for 60s: the sidebar renders this on EVERY rerun of every
-    page, and the underlying glob stats ~20k files. A freshly-extracted
-    pack shows up within a minute, which is plenty for a manual process.
+    Computed ONCE per session (was ``cache_data(ttl=60)``). The sidebar
+    renders this on EVERY rerun of every page, and the underlying glob
+    stats ~20k files. With a 60s TTL, any click more than a minute after
+    the last one re-globbed all 20k files on the spot -- so reviewing at a
+    human pace made every next/prev pay the glob (June 2026 slowness
+    report). The 6-max pack is stable within a session; after a manual
+    re-extraction, restart the panel (or clear caches) to re-check. Same
+    once-per-session pattern as :func:`_monker_pack_file_count`.
     """
     counts = {}
     for pos in POSITION_FOLDERS:
