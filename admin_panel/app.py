@@ -3698,6 +3698,63 @@ def _render_past_comparisons(out_dir: Path, state_key: str) -> dict[str, object]
     return st.session_state.get(state_key)
 
 
+def _finish_comparison(
+    res_a: object,
+    res_b: object,
+    a_name: str,
+    b_name: str,
+    state_key: str,
+) -> str | None:
+    """Persist a finished comparison, or return an error message.
+
+    A real-API side can finish with ZERO rows -- every spot failed
+    generation or validation -- in which case the batch writes no CSV.
+    Persisting the pair anyway left a half-written run that pointed at a
+    missing file (the comparison "didn't save"), and the past-comparisons
+    picker silently skipped it. So: only stash the result when BOTH sides
+    actually wrote rows; otherwise return a message naming the failed side
+    and why. A side that DID write is left in place -- those are real
+    (paid) questions, reviewable as a normal batch -- and the picker hides
+    the incomplete pair on its own (it requires both _A and _B). Returns
+    ``None`` on success. Reads the two result objects via getattr so it
+    works for both the NLHE and PLO batch-result types.
+    """
+    def _wrote(res: object) -> bool:
+        return (
+            getattr(res, "output_path", None) is not None
+            and getattr(res, "questions_written", 0) > 0
+        )
+
+    def _attempted(res: object) -> int:
+        return int(
+            getattr(res, "questions_attempted", None)
+            or getattr(res, "questions_requested", None)
+            or getattr(res, "questions_written", 0)
+        )
+
+    def _reasons(res: object) -> str:
+        raw = getattr(res, "failures", None)
+        if raw is None:
+            raw = getattr(res, "explanation_failure_reasons", ())
+        return "; ".join(str(f) for f in list(raw)[:4])
+
+    a_ok, b_ok = _wrote(res_a), _wrote(res_b)
+    if a_ok and b_ok:
+        st.session_state[state_key] = {
+            "a_csv": str(res_a.output_path),
+            "b_csv": str(res_b.output_path),
+            "a_name": a_name,
+            "b_name": b_name,
+        }
+        return None
+    bits: list[str] = []
+    for ok, name, res in ((a_ok, a_name, res_a), (b_ok, b_name, res_b)):
+        if not ok:
+            why = _reasons(res) or "no spots matched the filters"
+            bits.append(f"**{name}** wrote 0 of {_attempted(res)} ({why})")
+    return "Comparison not saved — " + "  •  ".join(bits)
+
+
 # --- page: Compare (head-to-head prompt A/B) --------------------------------
 def render_compare_page() -> None:
     """Run two prompts on the SAME spots and judge them side by side.
@@ -3940,12 +3997,14 @@ def render_compare_page() -> None:
         # total (no-op for dry runs, where model_used is empty).
         _log_batch_result_usage(res_a)
         _log_batch_result_usage(res_b)
-        st.session_state["cmp_result"] = {
-            "a_csv": str(res_a.output_path or out_a),
-            "b_csv": str(res_b.output_path or out_b),
-            "a_name": a_name,
-            "b_name": b_name,
-        }
+        err = _finish_comparison(res_a, res_b, a_name, b_name, "cmp_result")
+        if err:
+            st.error(err)
+            st.caption(
+                "Nothing was saved. Adjust the prompts / models / filters and "
+                "run again."
+            )
+            return
         st.rerun()
 
     result = _render_past_comparisons(PREFLOP_OUTPUT_DIR, "cmp_result")
@@ -6122,6 +6181,7 @@ def render_plo_compare_page() -> None:
                 questions_written=result.questions_written,
                 output_filename=out_path.name,
             )
+            return result
 
         # When the models differ, bake the model into each side's label so
         # the tally + verdict buttons say exactly what they're crediting.
@@ -6131,16 +6191,18 @@ def render_plo_compare_page() -> None:
 
         with st.status("Running both sides on the same spots…", expanded=True) as status:
             st.write(f"A — {a_label}")
-            _run(out_a, a_cfg[0], a_cfg[1], model_a)
+            res_a = _run(out_a, a_cfg[0], a_cfg[1], model_a)
             st.write(f"B — {b_label}")
-            _run(out_b, b_cfg[0], b_cfg[1], model_b)
+            res_b = _run(out_b, b_cfg[0], b_cfg[1], model_b)
             status.update(label="Comparison ready", state="complete")
-        st.session_state["plo_cmp_result"] = {
-            "a_csv": str(out_a),
-            "b_csv": str(out_b),
-            "a_name": a_label,
-            "b_name": b_label,
-        }
+        err = _finish_comparison(res_a, res_b, a_label, b_label, "plo_cmp_result")
+        if err:
+            st.error(err)
+            st.caption(
+                "Nothing was saved. Adjust the prompts / models / filters and "
+                "run again."
+            )
+            return
         st.rerun()
 
     result = _render_past_comparisons(_PLO_BATCH_DIR, "plo_cmp_result")
