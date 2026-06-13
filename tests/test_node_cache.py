@@ -24,8 +24,8 @@ from pipeline.preflop.grammars.types import (  # noqa: E402
 from pipeline.preflop.node_cache import (  # noqa: E402
     clear_cache,
     descriptor_to_node,
-    lightweight_node,
     load_descriptors,
+    load_metadata,
     node_to_descriptor,
 )
 from pipeline.preflop.node_enumerator import (  # noqa: E402
@@ -126,15 +126,60 @@ def test_descriptors_are_plain_data_and_pickle_small() -> None:
     assert pickle.loads(pickle.dumps(descr)) == descr
 
 
-# --- lightweight node -------------------------------------------------------
-def test_lightweight_node_keeps_history_drops_actions() -> None:
-    node = _node("BB", [("BTN", _RAISE, 60.0)], [(_FOLD, None, "/x/F.txt")])
-    light = lightweight_node(node_to_descriptor(node), "t")
-    assert light.actor == "BB"
-    assert light.history_before == node.history_before
-    assert light.actions == ()
-    # node_id (the lookup key downstream) matches the full node's
-    assert light.node_id == node.node_id
+# --- metadata cache: derive applied once, cached separately -----------------
+def test_load_metadata_applies_derive_and_caches(tmp_path, monkeypatch) -> None:
+    root, nodes = _seed_pack_dir(tmp_path)
+    pack = _pack(root)
+    calls = {"n": 0}
+
+    def fake_enum(_packs):
+        calls["n"] += 1
+        return nodes
+
+    monkeypatch.setattr(node_cache, "enumerate_nodes", fake_enum)
+    cache = tmp_path / "cache"
+
+    rows, fc = load_metadata(pack, cache, lambda n: (n.actor, len(n.history_before)))
+    assert calls["n"] == 1
+    assert fc == 2
+    # derive applied per node, in enumerate order
+    assert rows == (("SB", 0), ("BB", 1))
+    assert (cache / "testpack.meta.pkl").is_file()
+
+    # warm read: cached rows returned, derive NOT re-run
+    rows2, fc2 = load_metadata(pack, cache, lambda n: ("SHOULD NOT RUN",))
+    assert calls["n"] == 1
+    assert rows2 == rows
+    assert fc2 == 2
+
+
+def test_metadata_and_descriptors_are_independent_files(tmp_path, monkeypatch) -> None:
+    root, nodes = _seed_pack_dir(tmp_path)
+    pack = _pack(root)
+    monkeypatch.setattr(node_cache, "enumerate_nodes", lambda _p: nodes)
+    cache = tmp_path / "cache"
+    load_metadata(pack, cache, lambda n: (n.actor,))
+    load_descriptors(pack, cache)
+    assert (cache / "testpack.meta.pkl").is_file()
+    assert (cache / "testpack.nodes.pkl").is_file()
+    # clear_cache removes BOTH the metadata and the node cache
+    assert clear_cache(cache, "testpack") == 2
+
+
+def test_load_metadata_rebuilds_on_signature_change(tmp_path, monkeypatch) -> None:
+    root, nodes = _seed_pack_dir(tmp_path)
+    pack = _pack(root)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        node_cache, "enumerate_nodes",
+        lambda _p: (calls.__setitem__("n", calls["n"] + 1), nodes)[1],
+    )
+    cache = tmp_path / "cache"
+    load_metadata(pack, cache, lambda n: (n.actor,))
+    assert calls["n"] == 1
+    (root / "CO").mkdir()  # new immediate child -> signature moves
+    load_metadata(pack, cache, lambda n: (n.actor,))
+    assert calls["n"] == 2
 
 
 # --- disk cache: build / read / invalidate ----------------------------------

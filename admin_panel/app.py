@@ -122,8 +122,8 @@ from pipeline.preflop.batch import (  # noqa: E402
 from pipeline.preflop.fact_extractor import PreflopFacts  # noqa: E402
 from pipeline.preflop.node_cache import (  # noqa: E402
     descriptor_to_node,
-    lightweight_node,
     load_descriptors,
+    load_metadata,
 )
 from pipeline.preflop.node_enumerator import (  # noqa: E402
     PreflopDecisionNode,
@@ -413,27 +413,30 @@ def _cached_pack_descriptors(pack_id: str) -> tuple[tuple, int]:
     return load_descriptors(packs[0], NODE_CACHE_DIR)
 
 
-@st.cache_resource
-def _cached_node_metadata(
-    pack_id: str,
-) -> dict[str, tuple[tuple[str, str, int], ...]]:
-    """Per-actor ``(node_id, action_context, player_count)`` for every node.
+def _meta_derive(node: PreflopDecisionNode) -> tuple[str, str, int]:
+    """Per-node metadata stored in the fast metadata cache: hero actor,
+    action context, and player count. Runs once per node at cache BUILD
+    time on full walked nodes, so it reuses the real ``node_action_context``
+    / ``active_player_count`` (values match the full-node path exactly). If
+    this logic changes, bump ``node_cache.META_CACHE_VERSION``."""
+    return (node.actor, node_action_context(node), active_player_count(node))
 
-    Built from the compact descriptors via LIGHTWEIGHT nodes (actor +
-    history, no actions), so the list / filter / count views never
-    materialise 44k full node objects -- that materialisation was the
-    multi-second stall the first Generate/Compare/Ranges visit paid each
-    session. Reuses the real ``node_action_context`` / ``active_player_count``
-    so the values match the full-node path exactly.
+
+@st.cache_resource
+def _cached_pack_metadata(pack_id: str) -> tuple[tuple, int]:
+    """ONE pack's precomputed per-node metadata (+ file count) from the
+    small on-disk metadata cache.
+
+    ``rows`` is ``[(actor, context, player_count), ...]`` -- everything the
+    list / filter / count views need WITHOUT materialising a single node.
+    Tens of ms to load (the ~1 MB meta.pkl), versus the ~700ms rebuild or
+    ~6s parse-walk it replaces. The sidebar file-count, Generate, Compare,
+    and the filter recount all read this.
     """
-    descriptors, _ = _cached_pack_descriptors(pack_id)
-    by_actor: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
-    for descr in descriptors:
-        node = lightweight_node(descr, pack_id)
-        by_actor[node.actor].append(
-            (node.node_id, node_action_context(node), active_player_count(node))
-        )
-    return {actor: tuple(rows) for actor, rows in by_actor.items()}
+    packs = [p for p in _cached_preflop_packs() if p.pack_id == pack_id]
+    if not packs:
+        return (), 0
+    return load_metadata(packs[0], NODE_CACHE_DIR, _meta_derive)
 
 
 @st.cache_resource
@@ -446,7 +449,7 @@ def _cached_preflop_nodes_by_actor(
     93k files (~2s vs ~6s, byte-identical to the parse-walk). Only the paths
     that need a complete node -- the Range viewer and the prompt-preview
     sampler -- pull this; the list / filter / count views use the much
-    cheaper :func:`_cached_node_metadata` instead. Per-pack (cached per
+    cheaper :func:`_cached_pack_metadata` instead. Per-pack (cached per
     pack_id) so the 6-max and 9-max trees never mix.
     """
     descriptors, _ = _cached_pack_descriptors(pack_id)
@@ -471,14 +474,16 @@ def _cached_node_filter_meta(
 
     The Generate page recomputes "how many nodes match these filters" on
     EVERY widget interaction; filtering these precomputed tuples takes
-    milliseconds. Derived from :func:`_cached_node_metadata` (which builds
-    only lightweight nodes), so the first build is sub-second rather than a
-    multi-second full-node walk.
+    milliseconds. Grouped from :func:`_cached_pack_metadata` (precomputed on
+    disk), so even the first build is just a group-by, never a node walk.
+    Also the source for the Generate node count + position list and the
+    Compare seat list.
     """
-    return {
-        actor: tuple((ctx, players) for (_node_id, ctx, players) in rows)
-        for actor, rows in _cached_node_metadata(pack_id).items()
-    }
+    rows, _ = _cached_pack_metadata(pack_id)
+    by_actor: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for actor, ctx, players in rows:
+        by_actor[actor].append((ctx, players))
+    return {actor: tuple(metas) for actor, metas in by_actor.items()}
 
 
 @st.cache_resource
@@ -608,10 +613,10 @@ def ranges_pack_status() -> tuple[bool, dict[str, int]]:
 
 
 def _monker_pack_file_count(pack_id: str) -> int:
-    """A pack's range-file count, served from the node cache so the sidebar
-    never re-globs 93k files (the old rglob was ~650ms on every cold
-    render). The count is stored alongside the cached descriptors."""
-    return _cached_pack_descriptors(pack_id)[1]
+    """A pack's range-file count, served from the small metadata cache so the
+    sidebar never re-globs 93k files (the old rglob was ~650ms on every cold
+    render) and never loads the 18 MB descriptors just for a count."""
+    return _cached_pack_metadata(pack_id)[1]
 
 
 # --- page: Files -----------------------------------------------------------
@@ -1208,10 +1213,10 @@ def _render_generate_page_preflop() -> None:
         f"{pack.description}"
     )
 
-    # Metadata only (node ids + context + player count) -- the Generate page
-    # never needs full node objects, so it stays off the ~2s reconstruction
-    # path and uses the sub-second descriptor metadata.
-    node_meta = _cached_node_metadata(pack.pack_id)
+    # Metadata only (context + player count per node, grouped by actor) --
+    # the Generate page never needs full node objects, so it stays off the
+    # reconstruction path and reads the precomputed on-disk metadata cache.
+    node_meta = _cached_node_filter_meta(pack.pack_id)
     total_nodes = sum(len(rows) for rows in node_meta.values())
     st.caption(
         f"Walked the pack: **{total_nodes:,} preflop decision nodes** enumerated."
@@ -3641,7 +3646,7 @@ def render_compare_page() -> None:
         st.error("No range pack found in `ranges/`.")
         return
     # Metadata only -- Compare needs just which seats exist, not full nodes.
-    _cmp_actors = _cached_node_metadata(cmp_pack.pack_id)
+    _cmp_actors = _cached_node_filter_meta(cmp_pack.pack_id)
     _cmp_seat_order = preflop_order(cmp_pack.table_size)
     _cmp_positions = [p for p in _cmp_seat_order if p in _cmp_actors]
     f1, f2 = st.columns(2)
