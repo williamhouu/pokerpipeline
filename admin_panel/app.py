@@ -4245,13 +4245,20 @@ def render_prompt_page() -> None:
 
     # --- preview the FULL prompt the model receives (sample spot) ---
     with st.expander("👁  Preview the FULL prompt sent to Claude (sample spot)"):
-        st.caption(
-            "Everything the model receives for one example question, using the "
-            "text above as the system prompt. The gold examples, the SOLVER "
-            "DATA block, and the instructions around it are assembled per "
-            "question — shown here, but not part of the saved prompt. Note the "
-            "SOLVER DATA block already feeds `concept_tags` and the villain's "
-            "range (`villain_stats.top_combos`); it does NOT feed `skills`."
+        st.info(
+            "**How the two parts fit together.** Each question is ONE API call "
+            "that contains BOTH parts:\n\n"
+            "1. **SYSTEM prompt** — the standing rules (the editable text "
+            "above): how to write, how to frame each archetype, what's banned, "
+            "the output format. **Identical for every question**, so it's "
+            "prompt-cached and cheap to repeat.\n"
+            "2. **USER message** — the gold examples plus the facts for ONE "
+            "specific hand (the SOLVER DATA block + the ask). **Changes every "
+            "question.**\n\n"
+            "Only the SYSTEM prompt is saved/edited here; the USER message is "
+            "built automatically by the deterministic pipeline for each hand. "
+            "The SOLVER DATA block feeds `concept_tags` and the villain's range "
+            "(`villain_stats.top_combos`); it does NOT feed `skills`."
         )
         sample = _preview_sample_spot()
         if sample is None:
@@ -4265,7 +4272,26 @@ def render_prompt_page() -> None:
             parts = build_explanation_prompt_parts(
                 s_facts, s_options, s_correct, system_prompt=edited
             )
-            st.code(parts["assembled"])
+            st.markdown("**1. SYSTEM prompt** (the editable text above)")
+            st.code(parts["system_prompt"], language="markdown")
+            st.markdown(
+                "**2. USER message, part A — gold examples** (cached; identical "
+                "every question):"
+            )
+            st.code(parts["gold_block"])
+            st.markdown(
+                "**2. USER message, part B — this hand**: the scenario framing, "
+                "the options, the SOLVER DATA block, and the ask. This is the "
+                "per-question input the software builds:"
+            )
+            st.code(parts["live_block"])
+            st.markdown(
+                "**The SOLVER DATA block on its own** — exactly the structured "
+                "facts the deterministic pipeline computes and feeds the LLM. "
+                "Every number and claim in the explanation must trace back to a "
+                "field here:"
+            )
+            st.json(parts["solver_data"])
 
     # --- compare against the built-in default ---
     with st.expander("👁  Compare with built-in default"):
