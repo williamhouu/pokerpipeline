@@ -828,44 +828,81 @@ def validate_card_suit_consistency(
 
 
 # --- soft validators (flag, never fail) --------------------------------------
+# Position phrases + subject cues for the soft position check. A phrase only
+# contradicts hero_position when it describes HERO. "the small blind 3-bets
+# out of position" is about the villain and must NOT flag -- that false
+# positive showed up on the first batch run through the new in-depth prompt
+# (June 2026). We read the SUBJECT slot: the sentence text BEFORE the phrase.
+# Hero-bound when a hero pronoun precedes it; other-bound when only a seat
+# name / villain word does.
+_POS_IN = re.compile(r"\bin position\b", re.I)
+_POS_OUT = re.compile(r"\bout of position\b", re.I)
+_HERO_SUBJECT = re.compile(r"\b(?:you|your|yourself)\b", re.I)
+_OTHER_SUBJECT = re.compile(
+    r"\b(?:villain|opponent|the raiser|the opener|the limper|small blind|"
+    r"big blind|under the gun|lojack|hijack|cutoff|button|UTG\+?[12]?|LJ|HJ|"
+    r"CO|BTN|SB|BB)\b",
+    re.I,
+)
+# A negation right before the phrase ("not in position", "isn't in position")
+# AGREES with an OOP hero, so it must not flag.
+_POS_NEGATED = re.compile(r"(?:\bnot|n't)\s+$", re.I)
+
+
+def _position_claim_is_hero_bound(before: str) -> bool:
+    """Whether a position phrase describes hero, judged from its subject slot.
+
+    ``before`` is the sentence text preceding the phrase. Hero-bound when a
+    hero pronoun appears in it; other-bound (False) when only a seat name or
+    villain word does. Subjectless text reads as hero-bound -- the verdict
+    sentences are about hero by default.
+    """
+    if _HERO_SUBJECT.search(before):
+        return True
+    return not _OTHER_SUBJECT.search(before)
+
+
 def soft_validate_position_words(
     generated: GeneratedExplanation,
     facts: PreflopFacts,
 ) -> list[str]:
-    """Warn when prose position words contradict the hero_position fact.
+    """Warn when a HERO-bound position word contradicts the hero_position fact.
 
-    SOFT on purpose: "out of position" in an In Position spot is *usually*
-    the round-2 garble (#15's "Sorry, you're in the HJ"), but can be a
-    legitimate multiway-realization claim ("you'd be out of position
-    against the callers behind"), so it flags for review instead of
-    failing the generation.
+    SOFT on purpose: a contradiction is *usually* the round-2 garble (#15's
+    "Sorry, you're in the HJ"), but can be a legitimate multiway-realization
+    note ("you'd be out of position against the callers behind"), so it flags
+    for review instead of failing the generation. Only fires when the
+    phrase's SUBJECT is hero -- describing the VILLAIN as out of position
+    (extremely common and correct) no longer false-positives.
     """
     from pipeline.preflop.position import (  # noqa: PLC0415
         hero_relative_position,
     )
 
-    text = (generated.answer_explanation or "").lower()
+    text = generated.answer_explanation or ""
     if not text:
         return []
 
     relative = hero_relative_position(facts)
-    warnings: list[str] = []
-    if relative == "In Position" and "out of position" in text:
-        warnings.append(
-            "prose says 'out of position' but hero is In Position vs the "
-            "villain. May be a multiway-realization claim about callers "
-            "behind: review."
-        )
-    if (
-        relative == "Out of Position"
-        and "in position" in text.replace("out of position", "")
-        and "not in position" not in text
-    ):
-        warnings.append(
-            "prose says 'in position' but hero is Out of Position vs the "
-            "villain: review."
-        )
-    return warnings
+    if relative == "In Position":
+        phrase_re, claim = _POS_OUT, "out of position"
+    elif relative == "Out of Position":
+        phrase_re, claim = _POS_IN, "in position"
+    else:
+        return []
+
+    for sentence in _SENTENCE_SPLIT.split(text):
+        for m in phrase_re.finditer(sentence):
+            before = sentence[: m.start()]
+            if _POS_NEGATED.search(before):
+                continue
+            if _position_claim_is_hero_bound(before):
+                return [
+                    f"prose says '{claim}' about hero, but hero is "
+                    f"{relative} vs the villain. Review (may be a legit note "
+                    "about players still to act behind)."
+                ]
+    return []
 
 
 def run_preflop_soft_validators(

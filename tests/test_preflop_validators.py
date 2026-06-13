@@ -672,6 +672,28 @@ def test_soft_position_consistent_prose_is_silent() -> None:
     assert run_preflop_soft_validators(generated, facts) == []
 
 
+def test_soft_position_villain_described_oop_not_flagged() -> None:
+    """First-batch false positive (June 2026): hero IP, prose correctly says
+    the VILLAIN (SB) 3-bets out of position. Must NOT flag -- the phrase's
+    subject is the small blind, not hero."""
+    facts = _facts(actor="BTN", villain_position="SB")  # hero IP
+    generated = _gen(
+        prose=(
+            "When the small blind 3-bets out of position, they need a tight "
+            "range to do it."
+        )
+    )
+    assert soft_validate_position_words(generated, facts) == []
+
+
+def test_soft_position_negated_claim_not_flagged() -> None:
+    """'You are not in position' AGREES with an OOP hero -- the negation
+    guard before the phrase must keep it quiet."""
+    facts = _facts()  # BB vs BTN: hero OOP
+    generated = _gen(prose="You are not in position here, so play it safe.")
+    assert soft_validate_position_words(generated, facts) == []
+
+
 # --- runner picks up the round-2 validators ----------------------------------
 def test_runner_catches_round2_defects() -> None:
     facts = _facts(hero_card_combo="Ks5s")
