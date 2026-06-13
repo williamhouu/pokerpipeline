@@ -69,3 +69,6 @@ test_output/*
 # (handoff deliverable for downstream consumers), so it stays tracked while
 # the per-batch verification CSVs (v7, v7_1, v7_3, ...) stay local.
 !test_output/tier1_consolidated.csv
+
+# Disk cache of enumerated preflop pack nodes (pipeline.preflop.node_cache)
+.node_cache/

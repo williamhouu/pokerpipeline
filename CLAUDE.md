@@ -231,6 +231,29 @@ via the admin Generate/Compare/Ranges pack selector (choice persists to
   9-max batches default to **Live $1/$2** framing (stakes/venue
   selectors in Generate §7; bb display drops stakes from Context).
 
+### Admin-panel node cache (June 2026 perf fix)
+
+Walking the 9-max pack (93,235 files → 44,058 nodes) takes ~6s, and it
+is **I/O/parse-bound** (the panel sat near 0% CPU during the multi-second
+"first Generate/Compare/Ranges visit" stall). `pipeline/preflop/node_cache.py`
+persists the enumeration to disk (gitignored `.node_cache/`, keyed by a
+cheap `scandir`-of-root signature so re-extracting a pack auto-rebuilds;
+`CACHE_VERSION` + corrupt-fallback for safety). It caches **compact
+descriptors** (plain strings/floats, ~18 MB, ~90ms load) NOT full node
+objects — pickling the 44k nested dataclasses was a 57 MB / 6.5s load, no
+faster than re-parsing, because *materialising* the objects is the real
+cost. From the descriptors the admin builds: lightweight nodes for the
+list/filter/count views (`_cached_node_metadata` → Generate/Compare/filter,
+sub-second) and full byte-identical nodes only where one is actually
+needed (`descriptor_to_node` → Range viewer, prompt sampler). Net: first
+pack-page visit ~1.1s (was ~5.8s); the sidebar file-count is served from
+the cache (was a ~650ms 93k-file rglob every render); `ranges_pack_status`
+is `cache_resource` (was a 20k-file glob every 60s). NOTE: batch
+generation still walks the pack in-process per run — a future option is to
+have `generate_preflop_batch` reuse this cache. Generation also runs as an
+in-process thread (`admin_panel/jobs.py`), so a live batch can still
+contend with the UI; subprocess jobs remain the documented future step.
+
 ### Preflop quality loop (June 2026)
 
 The batch-audit protocol + severity taxonomy live in
