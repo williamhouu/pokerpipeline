@@ -1308,16 +1308,18 @@ def _render_generate_page_preflop() -> None:
             help="Below 55% = no clear best answer to teach; 100% = trivial.",
         )
         exclude_ambiguous_band = st.checkbox(
-            "Exclude ambiguous 90–95% band",
-            value=False,
+            "Exclude ambiguous 90–95% band (recommended)",
+            value=True,
             key="preflop_exclude_ambiguous_band",
             help=(
                 "Spots where the solver takes one action 90–95% of the time "
                 "read as \"mostly\" but sit just under the 95% \"always\" "
                 "line, so a player with the right read can still pick "
-                "\"always\" and be marked wrong. Off by default so the "
-                "worthiness window runs to its full upper bound. Check it to "
-                "cap the effective ceiling at 90% and drop the 90–95% spots."
+                "\"always\" and be marked wrong. On by default: punches a "
+                "hole at 90–95% in the worthiness window. It does NOT cap the "
+                "ceiling, so genuinely pure spots at 95% and up still qualify "
+                "-- with the window at 99% you get 55–90% plus 95–99%. "
+                "Uncheck to let the 90–95% spots in too."
             ),
         )
         min_ev_gap = st.slider(
