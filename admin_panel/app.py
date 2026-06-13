@@ -3596,6 +3596,108 @@ def render_ranges_page() -> None:
             )
 
 
+# --- compare-run persistence (shared by NLHE + PLO compare pages) -----------
+def _compare_side_name(csv_path: Path) -> str:
+    """A display name for one side of a past comparison, read from its
+    ``.meta.json`` sidecar (prompt name + model), falling back to the stem."""
+    meta = csv_path.with_suffix(".meta.json")
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return csv_path.stem
+    name = str(data.get("prompt_name") or csv_path.stem)
+    model = str(data.get("model") or "")
+    return f"{name} · {model}" if model else name
+
+
+def _compare_runs(out_dir: Path) -> list[dict[str, object]]:
+    """Past A/B comparison runs in ``out_dir``, newest first.
+
+    Each run wrote ``compare_<ts>_A.csv`` + ``compare_<ts>_B.csv`` (plus
+    their meta/verdict sidecars), so prior comparisons survive tab switches
+    AND panel restarts on disk -- this powers the "load a past comparison"
+    picker. Returns the same shape the live run stashes in session_state
+    (``a_csv``/``b_csv``/``a_name``/``b_name``) plus a ``ts`` for labeling.
+    """
+    if not out_dir.is_dir():
+        return []
+    runs: list[dict[str, object]] = []
+    for a_csv in out_dir.glob("compare_*_A.csv"):
+        b_csv = a_csv.with_name(a_csv.name.replace("_A.csv", "_B.csv"))
+        if not b_csv.is_file():
+            continue
+        ts = a_csv.stem[len("compare_"):-len("_A")]
+        runs.append({
+            "a_csv": str(a_csv),
+            "b_csv": str(b_csv),
+            "a_name": _compare_side_name(a_csv),
+            "b_name": _compare_side_name(b_csv),
+            "ts": ts,
+            "mtime": a_csv.stat().st_mtime,
+        })
+    runs.sort(key=lambda r: r["mtime"], reverse=True)  # type: ignore[arg-type,return-value]
+    return runs
+
+
+def _compare_run_label(run: dict[str, object]) -> str:
+    """Human label for the past-comparison picker."""
+    ts = str(run["ts"])
+    try:
+        when = datetime.strptime(ts, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        when = ts
+    return f"{when}  —  A: {run['a_name']}  vs  B: {run['b_name']}"
+
+
+def _render_past_comparisons(out_dir: Path, state_key: str) -> dict[str, object] | None:
+    """Render the past-comparison picker + auto-restore the latest run.
+
+    Returns the comparison to display (the live/just-run one, the
+    auto-restored latest, or a user-picked older one), or ``None`` when no
+    comparison exists yet. ``state_key`` is the session_state slot the page
+    uses for its current result (``cmp_result`` / ``plo_cmp_result``).
+    """
+    runs = _compare_runs(out_dir)
+    result = st.session_state.get(state_key)
+    # Auto-restore the newest run when session_state is empty (e.g. after a
+    # tab switch that reset state, or a panel restart) so a comparison is
+    # never lost just by leaving the page.
+    if result is None and runs:
+        result = {k: runs[0][k] for k in ("a_csv", "b_csv", "a_name", "b_name")}
+        st.session_state[state_key] = result
+    if runs:
+        with st.expander(f"📂 Past comparisons ({len(runs)})"):
+            st.caption(
+                "Every comparison is saved to disk, so it stays here after you "
+                "switch tabs or restart. Pick one to reopen its side-by-side "
+                "view, verdicts, and finalize buttons."
+            )
+            cur = st.session_state.get(state_key) or {}
+            ts_options = [str(r["ts"]) for r in runs]
+            cur_ts = next(
+                (str(r["ts"]) for r in runs if r["a_csv"] == cur.get("a_csv")),
+                ts_options[0],
+            )
+            pick = st.selectbox(
+                "Load a past comparison",
+                options=ts_options,
+                index=ts_options.index(cur_ts),
+                format_func=lambda t: next(
+                    _compare_run_label(r) for r in runs if str(r["ts"]) == t
+                ),
+                key=f"{state_key}_load_pick",
+            )
+            if pick != cur_ts and st.button(
+                "Load this comparison", key=f"{state_key}_load_btn"
+            ):
+                chosen = next(r for r in runs if str(r["ts"]) == pick)
+                st.session_state[state_key] = {
+                    k: chosen[k] for k in ("a_csv", "b_csv", "a_name", "b_name")
+                }
+                st.rerun()
+    return st.session_state.get(state_key)
+
+
 # --- page: Compare (head-to-head prompt A/B) --------------------------------
 def render_compare_page() -> None:
     """Run two prompts on the SAME spots and judge them side by side.
@@ -3846,11 +3948,11 @@ def render_compare_page() -> None:
         }
         st.rerun()
 
-    result = st.session_state.get("cmp_result")
+    result = _render_past_comparisons(PREFLOP_OUTPUT_DIR, "cmp_result")
     if not result:
         return
-    a_csv = Path(result["a_csv"])
-    b_csv = Path(result["b_csv"])
+    a_csv = Path(str(result["a_csv"]))
+    b_csv = Path(str(result["b_csv"]))
     if not (a_csv.is_file() and b_csv.is_file()):
         st.info("Run a comparison above to see results.")
         return
@@ -6041,11 +6143,11 @@ def render_plo_compare_page() -> None:
         }
         st.rerun()
 
-    result = st.session_state.get("plo_cmp_result")
+    result = _render_past_comparisons(_PLO_BATCH_DIR, "plo_cmp_result")
     if not result:
         return
-    a_csv = Path(result["a_csv"])
-    b_csv = Path(result["b_csv"])
+    a_csv = Path(str(result["a_csv"]))
+    b_csv = Path(str(result["b_csv"]))
     if not (a_csv.is_file() and b_csv.is_file()):
         st.info("Run a comparison above to see results.")
         return
