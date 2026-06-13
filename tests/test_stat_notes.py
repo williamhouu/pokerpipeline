@@ -62,26 +62,20 @@ def test_format_top_villain_combos() -> None:
     assert s == "AA, KK, AKs (~70% of 4.2%)"
 
 
-# --- pot odds ---------------------------------------------------------------
-def test_pot_odds_profitable() -> None:
-    note = _note(_facts(break_even_equity=0.31, hero_equity_vs_villain=0.47), "pot_odds")
-    assert note is not None and note.value == "need 31%"
-    assert "profitable" in note.note and "16%" in note.note
+# --- pot odds (just the price -- no call-quality verdict, no "need to call") -
+def test_pot_odds_states_price_only() -> None:
+    # Same note no matter the hand's equity. It never frames "equity needed
+    # to call" -- implied odds can make a sub-threshold call correct.
+    note = _note(_facts(break_even_equity=0.41, hero_equity_vs_villain=0.40), "pot_odds")
+    assert note is not None and note.value == "41%"
+    assert note.note == "Your pot odds here are 41%."
+    for banned in ("profitable", "losing", "marginal", "breakeven", "to call", "need"):
+        assert banned not in note.note.lower()
 
 
-def test_pot_odds_losing() -> None:
-    note = _note(_facts(break_even_equity=0.40, hero_equity_vs_villain=0.30), "pot_odds")
-    assert note is not None and "short" in note.note and "losing" in note.note
-
-
-def test_pot_odds_breakeven_band() -> None:
-    note = _note(_facts(break_even_equity=0.40, hero_equity_vs_villain=0.41), "pot_odds")
-    assert note is not None and "breakeven" in note.note
-
-
-def test_pot_odds_without_equity() -> None:
+def test_pot_odds_same_note_without_equity() -> None:
     note = _note(_facts(break_even_equity=0.33), "pot_odds")
-    assert note is not None and note.note == "You need 33% equity to call profitably."
+    assert note is not None and note.note == "Your pot odds here are 33%."
 
 
 # --- your equity vs range average -------------------------------------------
@@ -90,7 +84,7 @@ def test_hero_equity_above_range_average() -> None:
         _facts(hero_equity_vs_villain=0.55, hero_range_equity_vs_villain=0.48),
         "hero_equity",
     )
-    assert note is not None and note.value == "55%" and "above" in note.note
+    assert note is not None and note.value == "55%" and "stronger" in note.note
 
 
 def test_hero_equity_below_range_average() -> None:
@@ -98,7 +92,7 @@ def test_hero_equity_below_range_average() -> None:
         _facts(hero_equity_vs_villain=0.40, hero_range_equity_vs_villain=0.50),
         "hero_equity",
     )
-    assert note is not None and "below" in note.note
+    assert note is not None and "weaker" in note.note
 
 
 def test_hero_equity_at_range_average_and_no_range() -> None:
@@ -106,25 +100,29 @@ def test_hero_equity_at_range_average_and_no_range() -> None:
         _facts(hero_equity_vs_villain=0.50, hero_range_equity_vs_villain=0.49),
         "hero_equity",
     )
-    assert at is not None and "about at" in at.note
+    assert at is not None and "about average" in at.note
     bare = _note(_facts(hero_equity_vs_villain=0.50), "hero_equity")
-    assert bare is not None and bare.note == "Your hand has 50% equity against their range."
+    assert bare is not None
+    assert bare.note == "Your hand has about 50% equity against their range."
 
 
 # --- range advantage --------------------------------------------------------
 def test_range_advantage_disadvantage_even() -> None:
     adv = _note(_facts(hero_range_equity_vs_villain=0.58), "range_advantage")
-    assert adv is not None and "advantage" in adv.note and "ahead" in adv.note
+    assert adv is not None and "ahead" in adv.note
     dis = _note(_facts(hero_range_equity_vs_villain=0.40), "range_advantage")
-    assert dis is not None and "disadvantage" in dis.note
+    assert dis is not None and "behind" in dis.note
     even = _note(_facts(hero_range_equity_vs_villain=0.50), "range_advantage")
-    assert even is not None and "roughly even" in even.note
+    assert even is not None and "about even" in even.note
+    # No strategic prescription -- the explanation owns what to DO.
+    assert "raise" not in dis.note and "pressure" not in adv.note
 
 
 # --- blockers ---------------------------------------------------------------
 def test_blockers_present_and_absent() -> None:
     present = _note(_facts(blockers={"AA": 2, "AKs": 3}), "blockers")
-    assert present is not None and present.value == "remove 5 combos"
+    assert present is not None and present.value == "5 combos"
+    # The full per-class breakdown with counts, most-blocked first.
     assert "AKs:3, AA:2" in present.note
     assert _note(_facts(blockers={}), "blockers") is None
     assert _note(_facts(blockers={"AA": 0}), "blockers") is None  # zero -> skip
@@ -133,9 +131,9 @@ def test_blockers_present_and_absent() -> None:
 # --- what you're up against -------------------------------------------------
 def test_villain_range_width_buckets() -> None:
     tight = _note(_facts(villain_stats=_villain(("AA", "KK"), 80.0, 3.0)), "villain_range")
-    assert tight is not None and "tight, value-heavy" in tight.note
+    assert tight is not None and "a tight range" in tight.note
     moderate = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 10.0)), "villain_range")
-    assert moderate is not None and "moderately wide" in moderate.note
+    assert moderate is not None and "a fairly wide range" in moderate.note
     wide = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 22.0)), "villain_range")
     assert wide is not None and "a wide range" in wide.note
 
@@ -145,6 +143,23 @@ def test_villain_range_absent_when_no_covering() -> None:
 
 
 # --- assembly + serialization -----------------------------------------------
+def test_notes_use_no_em_or_en_dashes() -> None:
+    # The team bans em dashes in copy; stat notes follow the same rule
+    # (covers em dash, en dash, and the "--" ASCII stand-in).
+    facts = _facts(
+        break_even_equity=0.41,
+        hero_equity_vs_villain=0.40,
+        hero_range_equity_vs_villain=0.32,
+        blockers={"AA": 3, "AKo": 3},
+        villain_stats=_villain(("AA", "KK", "AKs"), 70.0, 3.5),
+    )
+    notes = sn.build_stat_notes(facts)
+    assert len(notes) == 5
+    for n in notes:
+        for dash in ("—", "–", "--"):
+            assert dash not in n.note, f"{n.key} note has a dash: {n.note!r}"
+
+
 def test_open_spot_yields_no_notes() -> None:
     assert sn.build_stat_notes(_facts()) == []
 

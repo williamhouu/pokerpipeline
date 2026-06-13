@@ -31,10 +31,8 @@ from pipeline.preflop.fact_extractor import PreflopFacts
 RANGE_ADVANTAGE = 0.53
 RANGE_DISADVANTAGE = 0.47
 # Hand-vs-range-average band: this-hand equity this much above/below hero's
-# RANGE equity reads as "above / below your range's average".
+# RANGE equity reads as "stronger / weaker than your average hand".
 HAND_VS_RANGE_BAND = 0.03
-# Pot-odds edge band: |hero_equity - break_even| under this is "breakeven".
-POT_ODDS_BAND = 0.02
 # Villain range-width buckets (pct of dealt hands) for the "what you face" note.
 RANGE_WIDTH_TIGHT = 6.0
 RANGE_WIDTH_MODERATE = 15.0
@@ -90,105 +88,90 @@ def format_top_villain_combos(stats: object) -> str:
 
 
 # --- the panel rows ---------------------------------------------------------
-def _pot_odds_note(be: float, eq: float | None) -> StatNote:
-    value = f"need {_pct(be)}"
-    if eq is None:
-        note = f"You need {_pct(be)} equity to call profitably."
-        return StatNote("pot_odds", "Pot odds", value, note)
-    edge = eq - be
-    if edge >= POT_ODDS_BAND:
-        note = (
-            f"You have {_pct(eq)} vs their range -- {_pct(edge)} over the "
-            f"{_pct(be)} you need, a profitable call on raw equity (before "
-            "position and realization)."
-        )
-    elif edge <= -POT_ODDS_BAND:
-        note = (
-            f"You have {_pct(eq)} vs their range -- {_pct(-edge)} short of the "
-            f"{_pct(be)} you need, a losing call on raw equity."
-        )
-    else:
-        note = (
-            f"Your {_pct(eq)} is right at the {_pct(be)} you need -- a "
-            "breakeven, marginal call."
-        )
-    return StatNote("pot_odds", "Pot odds", value, note)
+def _pot_odds_note(be: float) -> StatNote:
+    # Just state the pot odds. Whether THIS hand should call is context the
+    # answer explanation owns -- implied odds can make a sub-threshold call
+    # correct -- so the panel never frames it as "equity needed to call".
+    # No em dashes in any note: the team bans them in copy. (Zach, 6/26.)
+    pct = _pct(be)
+    return StatNote("pot_odds", "Pot odds", pct, f"Your pot odds here are {pct}.")
 
 
 def _hero_equity_note(eq: float, range_eq: float | None) -> StatNote:
-    value = _pct(eq)
+    pct = _pct(eq)
     if range_eq is None:
-        note = f"Your hand has {_pct(eq)} equity against their range."
-        return StatNote("hero_equity", "Your equity", value, note)
-    diff = eq - range_eq
-    if diff >= HAND_VS_RANGE_BAND:
+        note = f"Your hand has about {pct} equity against their range."
+    elif eq - range_eq >= HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand ({_pct(eq)}) is above your range's {_pct(range_eq)} "
-            "average here -- one of your stronger holdings in this spot."
+            f"Your hand has about {pct} equity against their range, a bit "
+            f"stronger than your average hand here (your range is around "
+            f"{_pct(range_eq)})."
         )
-    elif diff <= -HAND_VS_RANGE_BAND:
+    elif eq - range_eq <= -HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand ({_pct(eq)}) is below your range's {_pct(range_eq)} "
-            "average here -- toward the weaker end of what you continue with."
+            f"Your hand has about {pct} equity against their range, a bit "
+            f"weaker than your average hand here (your range is around "
+            f"{_pct(range_eq)})."
         )
     else:
         note = (
-            f"Your hand ({_pct(eq)}) sits about at your range's "
-            f"{_pct(range_eq)} average here."
+            f"Your hand has about {pct} equity against their range, about "
+            f"average for your range here ({_pct(range_eq)})."
         )
-    return StatNote("hero_equity", "Your equity", value, note)
+    return StatNote("hero_equity", "Your equity", pct, note)
 
 
 def _range_advantage_note(range_eq: float) -> StatNote:
-    villain = 1.0 - range_eq
-    value = f"your range {_pct(range_eq)} vs theirs {_pct(villain)}"
+    rpct, vpct = _pct(range_eq), _pct(1.0 - range_eq)
     if range_eq >= RANGE_ADVANTAGE:
         note = (
-            f"Your whole range is ahead ({_pct(range_eq)} vs {_pct(villain)}) "
-            "-- a range advantage, so you can apply pressure."
+            f"As a whole, your hands are ahead of theirs here ({rpct} vs "
+            f"{vpct}), a range advantage."
         )
     elif range_eq <= RANGE_DISADVANTAGE:
         note = (
-            f"Your whole range is behind ({_pct(range_eq)} vs {_pct(villain)}) "
-            "-- a range disadvantage, which is why you fold and call more "
-            "than you raise."
+            f"As a whole, your hands are behind theirs here ({rpct} vs "
+            f"{vpct}), a range disadvantage."
         )
     else:
         note = (
-            f"The ranges are roughly even ({_pct(range_eq)} vs "
-            f"{_pct(villain)}) -- neither side has a clear edge."
+            f"As a whole, your hands are about even with theirs here ({rpct} "
+            f"vs {vpct})."
         )
-    return StatNote("range_advantage", "Range advantage", value, note)
+    return StatNote(
+        "range_advantage", "Range advantage", f"your range {rpct} vs theirs {vpct}", note
+    )
 
 
 def _blockers_note(blockers: dict[str, int]) -> StatNote | None:
     total = sum(n for n in blockers.values() if n > 0)
     if total <= 0:
         return None
+    # Show every blocked class with its combo count -- the per-combo detail
+    # is the point. format_blockers sorts most-blocked first.
     breakdown = format_blockers(blockers)
     note = (
-        f"Your cards remove {total} combos from their range ({breakdown}) -- "
-        "fewer of those hands left for them to have."
+        f"Your cards remove {total} combos from their range ({breakdown}), "
+        "so they're a little less likely to hold those."
     )
-    return StatNote("blockers", "Blockers", f"remove {total} combos", note)
+    return StatNote("blockers", "Blockers", f"{total} combos", note)
 
 
 def _villain_range_note(stats: object) -> StatNote | None:
     covering = getattr(stats, "top_combos_covering", ())
     if not covering:
         return None
-    cov = getattr(stats, "top_combos_coverage_pct", 0.0)
     width = getattr(stats, "pct_of_dealt_hands", 0.0)
     hands = ", ".join(covering)
     if width < RANGE_WIDTH_TIGHT:
-        shape = "a tight, value-heavy range"
+        shape = "tight"
     elif width < RANGE_WIDTH_MODERATE:
-        shape = "a moderately wide range"
+        shape = "fairly wide"
     else:
-        shape = "a wide range"
+        shape = "wide"
     note = (
-        f"You're mainly up against {hands} (~{cov:.0f}% of a "
-        f"{width:.1f}%-of-hands range) -- {shape}."
+        f"Most of their range is these hands, a {shape} range "
+        f"({width:.1f}% of all hands)."
     )
     return StatNote("villain_range", "You're up against", hands, note)
 
@@ -201,9 +184,7 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     """
     notes: list[StatNote] = []
     if facts.break_even_equity is not None:
-        notes.append(
-            _pot_odds_note(facts.break_even_equity, facts.hero_equity_vs_villain)
-        )
+        notes.append(_pot_odds_note(facts.break_even_equity))
     if facts.hero_equity_vs_villain is not None:
         notes.append(
             _hero_equity_note(
