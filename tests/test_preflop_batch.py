@@ -858,5 +858,70 @@ def test_filter_nodes_by_player_count() -> None:
     assert kept == [open_node, three_way]
 
 
+# --- _incoming_villain_line_pct: limped-pot premise gate (June 2026) ---------
+def test_incoming_villain_line_pct_measures_limp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limped pot (no raiser) gets the completer's call frequency measured.
+
+    identify_villain only sees raises, so a rare limp (the SB completes
+    ~0.1% on the 9-max pack) used to slip the premise gate and produce a
+    bb-vs-limp question built on a near-never action."""
+    from pipeline.preflop import batch as B
+    from pipeline.preflop.spot_sampler import PreflopSpot
+
+    folds = tuple(
+        ParsedAction(p, PreflopActionType.FOLD)
+        for p in ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
+    )
+    limper_hist = folds  # everything before the SB acts
+    hero_hist = folds + (ParsedAction("SB", PreflopActionType.CALL),)
+    hero_node = PreflopDecisionNode(
+        pack_id="t", actor="BB", history_before=hero_hist, actions=()
+    )
+    limper_node = PreflopDecisionNode(
+        pack_id="t", actor="SB", history_before=limper_hist, actions=()
+    )
+    node_index = {("SB", limper_hist): limper_node}
+
+    # No raiser in the line.
+    monkeypatch.setattr(B, "identify_villain", lambda n: None)
+    # SB limps 52s half the time, raise-or-folds everything else.
+    fake_spots = [
+        PreflopSpot(
+            node=limper_node, hero_hand_class="52s", hero_card_combo="5s2s",
+            action_frequencies={"Call": 0.5, "Raise 60%": 0.0, "Fold": 0.5},
+            dominant_action="Fold", dominant_frequency=0.5, presence=1.0,
+        ),
+        PreflopSpot(
+            node=limper_node, hero_hand_class="AA", hero_card_combo="AsAh",
+            action_frequencies={"Call": 0.0, "Raise 60%": 1.0, "Fold": 0.0},
+            dominant_action="Raise 60%", dominant_frequency=1.0, presence=1.0,
+        ),
+    ]
+    monkeypatch.setattr(B, "enumerate_spots_for_node", lambda n: fake_spots)
+
+    pct = B._incoming_villain_line_pct(hero_node, node_index, pack=None)
+    # 52s: presence 1.0 * call 0.5 * 4 combos = 2.0 ; AA: 0 -> total 2.0.
+    assert pct == pytest.approx(100.0 * 2.0 / 1326.0, abs=1e-6)
+    assert pct < 0.25  # below the default floor -> the spot is gated
+
+
+def test_incoming_villain_line_pct_delegates_to_raiser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When there IS a raiser, delegate to _villain_line_pct unchanged."""
+    from pipeline.preflop import batch as B
+
+    node = PreflopDecisionNode(
+        pack_id="t", actor="BB",
+        history_before=(ParsedAction("BTN", PreflopActionType.RAISE, 60.0),),
+        actions=(),
+    )
+    monkeypatch.setattr(B, "identify_villain", lambda n: n.history_before[-1])
+    monkeypatch.setattr(B, "_villain_line_pct", lambda n, p: 7.5)
+    assert B._incoming_villain_line_pct(node, {}, pack=None) == 7.5
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

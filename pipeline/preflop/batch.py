@@ -490,6 +490,56 @@ def _villain_line_pct(
     return 100.0 * total / 1326.0
 
 
+def _incoming_villain_line_pct(
+    node: PreflopDecisionNode,
+    node_index: dict[tuple[str, tuple], PreflopDecisionNode],
+    pack: PreflopPack,
+) -> float | None:
+    """% of dealt hands the action hero is FACING actually occurs.
+
+    Generalises :func:`_villain_line_pct` past the most-recent raiser to
+    also cover a LIMPED pot. ``identify_villain`` only sees raises and
+    all-ins, so a completer (e.g. the SB limping to the BB) had no line
+    measured. On the 9-max pack the SB completes ~0.1% of the time, so
+    those bb-vs-limp spots (labelled "Opening", since there is no raise)
+    slipped the premise gate and produced a question built on an action
+    the villain almost never takes (June 2026 review finding). Here:
+
+      * a raise / all-in incoming action -> :func:`_villain_line_pct`
+        (cheap range-file mass, unchanged);
+      * a CALL (limp) incoming action -> the completer's combo-weighted
+        call frequency at the node where they completed;
+      * no voluntary villain action (hero opens unraised) -> ``None`` so
+        the gate passes.
+    """
+    if identify_villain(node) is not None:
+        return _villain_line_pct(node, pack)
+    # No raiser: find the most-recent completer (limp) hero is facing.
+    for i in range(len(node.history_before) - 1, -1, -1):
+        action = node.history_before[i]
+        if action.action_type is PreflopActionType.FOLD:
+            continue
+        if action.action_type is not PreflopActionType.CALL:
+            return None
+        limper_node = node_index.get(
+            (action.position, node.history_before[:i])
+        )
+        if limper_node is None:
+            return None
+        call_mass = sum(
+            sp.presence
+            * sp.action_frequencies.get("Call", 0.0)
+            * (
+                6 if len(sp.hero_hand_class) == 2
+                else 4 if sp.hero_hand_class.endswith("s")
+                else 12
+            )
+            for sp in enumerate_spots_for_node(limper_node)
+        )
+        return 100.0 * call_mass / 1326.0
+    return None
+
+
 def _hero_premise_min_freq(
     spot: PreflopSpot,
     node_index: dict[tuple[str, tuple], PreflopDecisionNode],
@@ -733,7 +783,7 @@ def generate_preflop_batch(
             if nid in _node_villain_pct:
                 vpct = _node_villain_pct[nid]
             else:
-                vpct = _villain_line_pct(spot.node, pack)
+                vpct = _incoming_villain_line_pct(spot.node, node_index, pack)
                 _node_villain_pct[nid] = vpct
             if vpct is not None and vpct < min_villain_line_pct:
                 rare_line_filtered_out += 1
