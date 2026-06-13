@@ -3050,7 +3050,9 @@ def render_review_page() -> None:
             "Answer Explanation",
             value=_cell(row, "Answer Explanation"),
             key=_expl_key,
-            height=200,
+            # Tall enough to show a full in-depth explanation (250-400 words)
+            # without scrolling -- the in-depth prompts run long.
+            height=500,
             label_visibility="collapsed",
             on_change=_autosave_review_cell,
             args=(csv_path, no, _expl_key, "explanation"),
