@@ -3800,6 +3800,12 @@ def render_compare_page() -> None:
     # Spot filters — applied IDENTICALLY to both prompts so the A/B stays fair.
     # Both sides run on the SAME pack (a 6-max-vs-9-max comparison would
     # confound the prompt A/B with a tree change).
+    # Default the pack selector to the 9-max pack (the one in active use),
+    # seeded before the widget exists so it takes on first visit.
+    if "cmp_pack" not in st.session_state and any(
+        p.pack_id == NLHE9_PACK_ID for p in _cached_preflop_packs()
+    ):
+        st.session_state["cmp_pack"] = NLHE9_PACK_ID
     cmp_pack = _select_preflop_pack("cmp_pack")
     if cmp_pack is None:
         st.error("No range pack found in `ranges/`.")
@@ -3827,7 +3833,7 @@ def render_compare_page() -> None:
                 "Facing 4-bet+",
                 "After call(s)",
             ],
-            default=["Facing single raise", "Facing 3-bet"],
+            default=["Opening", "Facing single raise", "Facing 3-bet"],
             key="cmp_ctx",
             help="Empty = all action types.",
         )
@@ -3911,6 +3917,37 @@ def render_compare_page() -> None:
     with s5:
         dry = st.toggle("Dry run", key="cmp_dry", help="No API calls — flow check.")
 
+    # Advanced filters — the same worthiness-window + EV-gap gates the
+    # Generate page uses, so the spots a comparison samples match a real
+    # batch (both sides still see IDENTICAL spots). Defaults mirror Generate
+    # (55-99 window, 90-95% trap band excluded).
+    with st.expander("Advanced filters (worthiness window · EV-gap gate)"):
+        cmp_freq_low, cmp_freq_high = st.slider(
+            "Solver frequency worthiness window (%)",
+            min_value=50,
+            max_value=100,
+            value=(55, 99),
+            key="cmp_worthiness_slider",
+            help="Below 55% = no clear best answer; 100% = trivial.",
+        )
+        cmp_exclude_band = st.checkbox(
+            "Exclude ambiguous 90–95% band (recommended)",
+            value=True,
+            key="cmp_exclude_ambiguous_band",
+            help="Punches a hole at 90–95% (the 'mostly that reads as always' "
+            "trap). Does NOT cap the ceiling — pure 95%+ spots still qualify.",
+        )
+        cmp_min_ev_gap = st.slider(
+            "Minimum EV gap (bb) — 0 = off",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.05,
+            key="cmp_min_ev_gap",
+            help="Drops call/fold spots whose EV gap to the 2nd-best action "
+            "is below this. Raise spots (no computed EV) always pass.",
+        )
+
     # Side-identity checks: identical sides = pointless; two variables at
     # once = a confounded verdict.
     same_content = a_slug == b_slug
@@ -3965,6 +4002,12 @@ def render_compare_page() -> None:
                 action_contexts=contexts or None,
                 min_difficulty=band_low,
                 max_difficulty=band_high,
+                min_frequency=cmp_freq_low / 100.0,
+                max_frequency=cmp_freq_high / 100.0,
+                exclude_ambiguous_band=cmp_exclude_band,
+                min_ev_gap_bb=(
+                    None if cmp_min_ev_gap == 0.0 else float(cmp_min_ev_gap)
+                ),
                 answer_style=cmp_style,
                 display_in_bb=cmp_display_in_bb,
                 system_prompt=lib.get_text(a_slug),
@@ -3983,6 +4026,12 @@ def render_compare_page() -> None:
                 action_contexts=contexts or None,
                 min_difficulty=band_low,
                 max_difficulty=band_high,
+                min_frequency=cmp_freq_low / 100.0,
+                max_frequency=cmp_freq_high / 100.0,
+                exclude_ambiguous_band=cmp_exclude_band,
+                min_ev_gap_bb=(
+                    None if cmp_min_ev_gap == 0.0 else float(cmp_min_ev_gap)
+                ),
                 answer_style=cmp_style,
                 display_in_bb=cmp_display_in_bb,
                 system_prompt=lib.get_text(b_slug),
@@ -4043,6 +4092,44 @@ def render_compare_page() -> None:
     # into the cross-batch "Approved questions" pool. Loaded once per rerun.
     reviews_a = review.load_reviews(a_csv)
     reviews_b = review.load_reviews(b_csv)
+
+    # --- batch finalize: send an ENTIRE side to the approved pool at once ---
+    def _approve_all(win_csv: Path, lose_csv: Path, side: str) -> None:
+        # Exclusive per spot (like the per-spot buttons): approve the winning
+        # side and drop the other's approval, so the pool keeps one side per
+        # spot. Uses each row's as-generated prose (per-spot edits are not
+        # captured -- use the per-spot buttons for those).
+        for _k, r_a, r_b in pairs:
+            win_row = r_a if win_csv == a_csv else r_b
+            lose_row = r_b if win_csv == a_csv else r_a
+            review.save_review(
+                win_csv, str(win_row.get("No", "")), "approved",
+                f"batch-approved ({side}) from compare",
+            )
+            review.remove_review(lose_csv, str(lose_row.get("No", "")))
+
+    ba1, ba2 = st.columns(2)
+    if ba1.button(
+        f"✅ Approve all of A — {result['a_name']} ({len(pairs)})",
+        key="cmp_approve_all_a",
+        use_container_width=True,
+    ):
+        _approve_all(a_csv, b_csv, "A")
+        st.success(f"Sent all {len(pairs)} A-side questions to the approved pool.")
+        st.rerun()
+    if ba2.button(
+        f"✅ Approve all of B — {result['b_name']} ({len(pairs)})",
+        key="cmp_approve_all_b",
+        use_container_width=True,
+    ):
+        _approve_all(b_csv, a_csv, "B")
+        st.success(f"Sent all {len(pairs)} B-side questions to the approved pool.")
+        st.rerun()
+    st.caption(
+        "Approves every spot's chosen side into the Approved pool (download at "
+        "the bottom of this page or on the Review page). The per-spot buttons "
+        "below override individual picks and keep any edits you made."
+    )
 
     for key, row_a, row_b in pairs:
         with st.container(border=True):
@@ -6241,6 +6328,40 @@ def render_plo_compare_page() -> None:
     # the shared cross-batch "Approved questions" pool. Loaded once per rerun.
     reviews_a = review.load_reviews(a_csv)
     reviews_b = review.load_reviews(b_csv)
+
+    # --- batch finalize: send an ENTIRE side to the approved pool at once ---
+    def _approve_all_plo(win_csv: Path, lose_csv: Path, side: str) -> None:
+        for _k, r_a, r_b in pairs:
+            win_row = r_a if win_csv == a_csv else r_b
+            lose_row = r_b if win_csv == a_csv else r_a
+            review.save_review(
+                win_csv, str(win_row.get("No", "")), "approved",
+                f"batch-approved ({side}) from compare",
+            )
+            review.remove_review(lose_csv, str(lose_row.get("No", "")))
+
+    bap1, bap2 = st.columns(2)
+    if bap1.button(
+        f"✅ Approve all of A — {result['a_name']} ({len(pairs)})",
+        key="plo_cmp_approve_all_a",
+        use_container_width=True,
+    ):
+        _approve_all_plo(a_csv, b_csv, "A")
+        st.success(f"Sent all {len(pairs)} A-side questions to the approved pool.")
+        st.rerun()
+    if bap2.button(
+        f"✅ Approve all of B — {result['b_name']} ({len(pairs)})",
+        key="plo_cmp_approve_all_b",
+        use_container_width=True,
+    ):
+        _approve_all_plo(b_csv, a_csv, "B")
+        st.success(f"Sent all {len(pairs)} B-side questions to the approved pool.")
+        st.rerun()
+    st.caption(
+        "Approves every spot's chosen side into the Approved pool (download at "
+        "the bottom of this page or on the PLO Review page). The per-spot "
+        "buttons below override individual picks and keep any edits you made."
+    )
 
     for key, row_a, row_b in pairs:
         with st.container(border=True):
