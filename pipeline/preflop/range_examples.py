@@ -41,6 +41,10 @@ _MIN_PRESENCE = 0.05
 _MAX_EXAMPLES = 3
 # Above this lean the qualifier reads "mostly <verb>", below it "often <verb>".
 _MOSTLY_FLOOR = 0.60
+# Group floor: a BUCKET is only listed as "preferring the other action" when a
+# real majority of it does (>= 50%), so "ace-broadways (call 46%)" -- which
+# actually folds 54% -- never reads as preferring to call. (June 2026.)
+_GROUP_LEAN_MIN = 0.50
 
 _VERB = {
     "Fold": "folds",
@@ -121,12 +125,79 @@ def hands_leaning_to_option(
     return result
 
 
+def leaning_groups_to_option(
+    node: PreflopDecisionNode, raw_label: str, action_word: str
+) -> tuple[str, ...]:
+    """Hand-class BUCKETS in hero's range leaning toward ``raw_label``, each
+    with the bucket's GROUP frequency for that action ("wheel aces (fold 64%)").
+
+    Avoids the over-generalization trap of tagging one hand with its bucket: a
+    bucket is described as a group ONLY when 2+ of its classes are present; a
+    lone present class names the specific hand ("A8s (fold 71%)"). The ``other``
+    catch-all is skipped (no meaningful type to describe). The group frequency
+    is combo-weighted over the bucket's present classes (AKo's 12 combos count
+    3x a suited hand's), so it is the bucket's true average -- "your wheel aces
+    fold 64%" is then a measured fact, not extrapolated from one example.
+    """
+    from pipeline.preflop.hand_categories import (  # noqa: PLC0415
+        CATEGORY_LABEL_PLURAL,
+        OTHER,
+        categorize_hand_class,
+        combos_in_class,
+    )
+
+    weights = {opt.label: _cached_parse_range_file(str(opt.range_file.path))
+               for opt in node.actions}
+    target = weights.get(raw_label)
+    if target is None:
+        return ()
+    # Per bucket: combos taking raw_label, combos present, and each present
+    # member class with its own lean (for the single-member guardrail).
+    runner: dict[str, float] = {}
+    present: dict[str, float] = {}
+    members: dict[str, list[tuple[str, float]]] = {}
+    for hand_class in canonical_169_hand_classes():
+        presence = sum(w.get(hand_class, 0.0) for w in weights.values())
+        if presence < _MIN_PRESENCE:
+            continue
+        bucket = categorize_hand_class(hand_class)
+        if bucket == OTHER:
+            continue  # no meaningful type to describe -- skip the junk
+        combos = combos_in_class(hand_class)
+        runner[bucket] = runner.get(bucket, 0.0) + combos * target.get(hand_class, 0.0)
+        present[bucket] = present.get(bucket, 0.0) + combos * presence
+        members.setdefault(bucket, []).append(
+            (hand_class, target.get(hand_class, 0.0) / presence)
+        )
+
+    rows: list[tuple[float, str, int]] = []  # (presence_score, label, pct)
+    for bucket, present_combos in present.items():
+        if present_combos <= 0:
+            continue
+        agg = runner[bucket] / present_combos
+        if not (_GROUP_LEAN_MIN <= agg <= _LEAN_MAX):
+            continue
+        if len(members[bucket]) >= 2:
+            label = CATEGORY_LABEL_PLURAL.get(bucket, bucket.replace("_", " "))
+            pct = round(agg * 100)
+        else:  # one class present -> name the hand (agg == that hand's lean)
+            label, lean = members[bucket][0]
+            pct = round(lean * 100)
+        rows.append((present_combos, label, pct))
+    rows.sort(key=lambda r: -r[0])
+    return tuple(
+        f"{label} ({action_word} {pct}%)" for _score, label, pct in rows[:_MAX_EXAMPLES]
+    )
+
+
 def leaning_examples_for_spot(facts: PreflopFacts) -> dict[str, object] | None:
     """The data-block fact for one spot, or ``None`` when nothing qualifies.
 
-    Shape: ``{"action": "<display label>", "hands": ["AJo (mostly calls)",
-    ...]}`` -- the runner-up option by hero's own frequencies plus up to 3
-    borderline hand classes from hero's range that lean toward it.
+    Shape: ``{"action": "<display label>", "hands": ["wheel aces (fold 64%)",
+    "A8s (fold 71%)", ...]}`` -- the runner-up option by hero's own
+    frequencies, plus up to 3 hand-class BUCKETS in hero's range that lean
+    toward it, each with the bucket's group frequency. Buckets with a single
+    present class name that hand instead (no false generalization).
     """
     freqs = facts.spot.action_frequencies
     if len(freqs) < 2:  # noqa: PLR2004 -- no second option, no contrast
@@ -141,8 +212,7 @@ def leaning_examples_for_spot(facts: PreflopFacts) -> dict[str, object] | None:
         raise_level=_hero_raise_level(facts),
         check_spot=is_check_spot(facts),
     )
-    verb = _VERB.get(display, f"takes the {display.lower()}")
-    hands = hands_leaning_to_option(facts.spot.node, runner_raw, verb)
+    hands = leaning_groups_to_option(facts.spot.node, runner_raw, display.lower())
     if not hands:
         return None
     return {"action": display, "hands": list(hands)}

@@ -13,8 +13,38 @@ from pipeline.preflop.node_enumerator import PreflopDecisionNode  # noqa: E402
 from pipeline.preflop.range_examples import (  # noqa: E402
     format_examples,
     leaning_examples_for_spot,
+    leaning_groups_to_option,
 )
 from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402
+
+
+def _mock_node(option_weights: dict[str, dict[str, float]]):
+    """A node whose options' range files return ``option_weights[label]``."""
+    from types import SimpleNamespace
+
+    actions = [
+        SimpleNamespace(label=label, range_file=SimpleNamespace(path=label))
+        for label in option_weights
+    ]
+    return SimpleNamespace(actions=actions), option_weights
+
+
+def test_leaning_groups_combo_weighted_with_guardrail(monkeypatch):
+    # Call vs Fold. premium_broadways (AKo/AKs) split 50/50 -> a 2-member
+    # group at exactly the floor; wheel aces lean fold (40% call) -> dropped;
+    # QQ alone calls 80% -> single member, named as the hand (not "premium
+    # pairs"). Combo weighting: AKo's 12 combos count 3x AKs's 4.
+    node, weights = _mock_node({
+        "Call": {"AKo": 0.5, "AKs": 0.5, "A5s": 0.4, "A4s": 0.4, "QQ": 0.8},
+        "Fold": {"AKo": 0.5, "AKs": 0.5, "A5s": 0.6, "A4s": 0.6, "QQ": 0.2},
+    })
+    monkeypatch.setattr(
+        range_examples, "_cached_parse_range_file", lambda path: weights[path]
+    )
+    out = leaning_groups_to_option(node, "Call", "call")
+    assert "QQ (call 80%)" in out  # single present class -> named hand
+    assert "premium broadways (call 50%)" in out  # 2 members -> group
+    assert all("wheel aces" not in s for s in out)  # 40% < 50% floor -> dropped
 
 
 def test_format_examples_band_cap_and_wording():
@@ -61,21 +91,22 @@ def _facts(freqs: dict[str, float]) -> PreflopFacts:
 def test_leaning_examples_picks_runner_up(monkeypatch):
     seen: dict[str, str] = {}
 
-    def _fake(node, raw_label, verb):
-        seen["raw"], seen["verb"] = raw_label, verb
-        return ("KQs (mostly calls)",)
+    def _fake(node, raw_label, action_word):
+        seen["raw"], seen["word"] = raw_label, action_word
+        return ("wheel aces (call 64%)",)
 
-    monkeypatch.setattr(range_examples, "hands_leaning_to_option", _fake)
+    monkeypatch.setattr(range_examples, "leaning_groups_to_option", _fake)
     out = leaning_examples_for_spot(
         _facts({"Fold": 0.93, "Call": 0.05, "Raise 76%": 0.02})
     )
     assert seen["raw"] == "Call"  # runner-up by hero's frequencies
-    assert out == {"action": "Call", "hands": ["KQs (mostly calls)"]}
+    assert seen["word"] == "call"  # lowercased action for the group strings
+    assert out == {"action": "Call", "hands": ["wheel aces (call 64%)"]}
 
 
 def test_leaning_examples_none_paths(monkeypatch):
     assert leaning_examples_for_spot(_facts({"Fold": 1.0})) is None
     monkeypatch.setattr(
-        range_examples, "hands_leaning_to_option", lambda *a: ()
+        range_examples, "leaning_groups_to_option", lambda *a: ()
     )
     assert leaning_examples_for_spot(_facts({"Fold": 0.9, "Call": 0.1})) is None

@@ -204,12 +204,15 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "Never name a blocked hand from memory: a hand with no ace blocks "
     "zero AA combos, a hand with no king blocks zero KK combos.",
     # 13. Never invent WHY the solver prefers other hands (round-2 audit:
-    # garbled/reversed blocker rationales for the alternative-action hands)
-    "When `hands_in_your_range_that_prefer_the_other_action` names hands, "
-    "you may cite them as the hands that take the other line, but NEVER "
-    "invent the reason the solver prefers them. No blocker, playability, "
-    "or balance rationale of your own for those specific hands: state "
-    "that they prefer the other action and move on.",
+    # garbled/reversed blocker rationales for the alternative-action hands).
+    # The field now lists hand-class GROUPS with a measured group frequency.
+    "When `hands_in_your_range_that_prefer_the_other_action` is present, it "
+    "lists hand-class GROUPS (e.g. \"wheel aces (fold 64%)\") -- or a single "
+    "named hand when only one of a group is in range -- each with how often "
+    "that group takes the other line. Cite them exactly as written, with the "
+    "frequency, but NEVER invent the reason the solver prefers them: no "
+    "blocker, playability, or balance rationale of your own. State which "
+    "groups lean the other way and how often, then move on.",
     # 14. Position wording comes from the position fact (round-2 audit:
     # "Calling out of position... Sorry, you're in the HJ" garbles)
     "Describe your position only as `hero_position` states: In Position "
