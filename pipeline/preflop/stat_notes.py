@@ -53,6 +53,17 @@ def _pct(x: float) -> str:
     return f"{x:.0%}"
 
 
+def _villain_poss(stats: object) -> str:
+    """Possessive name for the opponent we're comparing against, e.g.
+    "UTG+1's". The villain is the most-recent raiser, so in a multiway pot
+    (UTG opens, UTG+1 3-bets, hero on the button) this makes explicit that the
+    equity and range numbers are measured against UTG+1, not UTG. Falls back to
+    "their" when no position is recorded.
+    """
+    pos = getattr(stats, "position", "") or ""
+    return f"{pos}'s" if pos else "their"
+
+
 # --- standalone CSV-column formatters (one value each) ----------------------
 def format_pct_or_blank(x: float | None) -> str:
     """``hero_equity`` / ``range_equity`` / ``pot_odds`` cell: '47%' or ''."""
@@ -97,53 +108,66 @@ def _pot_odds_note(be: float) -> StatNote:
     return StatNote("pot_odds", "Pot odds", pct, f"Your pot odds here are {pct}.")
 
 
-def _hero_equity_note(eq: float, range_eq: float | None) -> StatNote:
+def _hero_equity_note(eq: float, range_eq: float | None, villain: str = "their") -> StatNote:
     pct = _pct(eq)
     if range_eq is None:
-        note = f"Your hand has about {pct} equity against their range."
+        note = f"Your hand has about {pct} equity against {villain} range."
     elif eq - range_eq >= HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand has about {pct} equity against their range, a bit "
+            f"Your hand has about {pct} equity against {villain} range, a bit "
             f"stronger than your average hand here (your range is around "
             f"{_pct(range_eq)})."
         )
     elif eq - range_eq <= -HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand has about {pct} equity against their range, a bit "
+            f"Your hand has about {pct} equity against {villain} range, a bit "
             f"weaker than your average hand here (your range is around "
             f"{_pct(range_eq)})."
         )
     else:
         note = (
-            f"Your hand has about {pct} equity against their range, about "
+            f"Your hand has about {pct} equity against {villain} range, about "
             f"average for your range here ({_pct(range_eq)})."
         )
     return StatNote("hero_equity", "Your equity", pct, note)
 
 
-def _range_advantage_note(range_eq: float) -> StatNote:
+def _range_advantage_note(range_eq: float, villain: str = "their") -> StatNote:
     rpct, vpct = _pct(range_eq), _pct(1.0 - range_eq)
     if range_eq >= RANGE_ADVANTAGE:
-        note = (
-            f"As a whole, your hands are ahead of theirs here ({rpct} vs "
-            f"{vpct}), a range advantage."
-        )
+        tag = "a range advantage"
     elif range_eq <= RANGE_DISADVANTAGE:
-        note = (
-            f"As a whole, your hands are behind theirs here ({rpct} vs "
-            f"{vpct}), a range disadvantage."
-        )
+        tag = "a range disadvantage"
     else:
-        note = (
-            f"As a whole, your hands are about even with theirs here ({rpct} "
-            f"vs {vpct})."
-        )
+        tag = "about even"
+    # Plain English, both sides named explicitly: "Your range has X% equity
+    # here and UTG+1's range has Y%."
+    note = (
+        f"Your range has about {rpct} equity here and {villain} range has "
+        f"about {vpct}, {tag}."
+    )
     return StatNote(
         "range_advantage", "Range advantage", f"your range {rpct} vs theirs {vpct}", note
     )
 
 
-def _blockers_note(blockers: dict[str, int]) -> StatNote | None:
+def _ev_gap_note(facts: PreflopFacts) -> StatNote | None:
+    gap = facts.ev_gap_bb
+    if gap is None:
+        return None
+    val = f"{round(gap, 2):g}"
+    # ev_gap is only computed for fold-or-call decisions (see ev_engine), so
+    # the two actions are always folding and calling. State how far apart they
+    # are in EV and what that means in plain English, without prescribing which
+    # is right -- the answer explanation owns the decision.
+    note = (
+        f"Folding and calling are about {val}bb apart in EV here, so getting "
+        f"this decision right is worth about {val} big blinds."
+    )
+    return StatNote("ev_gap", "EV", f"{val}bb", note)
+
+
+def _blockers_note(blockers: dict[str, int], villain: str = "their") -> StatNote | None:
     total = sum(n for n in blockers.values() if n > 0)
     if total <= 0:
         return None
@@ -151,7 +175,7 @@ def _blockers_note(blockers: dict[str, int]) -> StatNote | None:
     # is the point. format_blockers sorts most-blocked first.
     breakdown = format_blockers(blockers)
     note = (
-        f"Your cards remove {total} combos from their range ({breakdown}), "
+        f"Your cards remove {total} combos from {villain} range ({breakdown}), "
         "so they're a little less likely to hold those."
     )
     return StatNote("blockers", "Blockers", f"{total} combos", note)
@@ -169,11 +193,16 @@ def _villain_range_note(stats: object) -> StatNote | None:
         shape = "fairly wide"
     else:
         shape = "wide"
+    # Name the seat we're up against (the most-recent raiser) so a multiway
+    # spot makes clear WHICH opponent this range belongs to.
+    pos = getattr(stats, "position", "") or ""
+    poss = _villain_poss(stats)
+    label = f"You're up against {pos}" if pos else "You're up against"
     note = (
-        f"Most of their range is these hands, a {shape} range "
+        f"Most of {poss} range is these hands, a {shape} range "
         f"({width:.1f}% of all hands)."
     )
-    return StatNote("villain_range", "You're up against", hands, note)
+    return StatNote("villain_range", label, hands, note)
 
 
 def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
@@ -183,17 +212,25 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     spots (no villain) yield an empty list, and the panel hides itself.
     """
     notes: list[StatNote] = []
+    # Possessive name for the opponent (the most-recent raiser) so multiway
+    # spots make clear which seat the numbers are measured against.
+    villain = _villain_poss(facts.villain_stats) if facts.villain_stats else "their"
     if facts.break_even_equity is not None:
         notes.append(_pot_odds_note(facts.break_even_equity))
     if facts.hero_equity_vs_villain is not None:
         notes.append(
             _hero_equity_note(
-                facts.hero_equity_vs_villain, facts.hero_range_equity_vs_villain
+                facts.hero_equity_vs_villain,
+                facts.hero_range_equity_vs_villain,
+                villain,
             )
         )
     if facts.hero_range_equity_vs_villain is not None:
-        notes.append(_range_advantage_note(facts.hero_range_equity_vs_villain))
-    blockers_note = _blockers_note(facts.blockers)
+        notes.append(_range_advantage_note(facts.hero_range_equity_vs_villain, villain))
+    ev_note = _ev_gap_note(facts)
+    if ev_note is not None:
+        notes.append(ev_note)
+    blockers_note = _blockers_note(facts.blockers, villain)
     if blockers_note is not None:
         notes.append(blockers_note)
     if facts.villain_stats is not None:

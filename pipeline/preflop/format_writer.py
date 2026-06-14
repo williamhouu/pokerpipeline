@@ -69,6 +69,8 @@ from pipeline.preflop.concept_tags import (
     compute_concept_tags,
 )
 from pipeline.preflop.difficulty import DifficultyResult
+from pipeline.preflop.domination import dominating_map
+from pipeline.preflop.exploit import exploit_adjustments, exploit_notes_to_json
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
 from pipeline.preflop.node_enumerator import (
@@ -686,6 +688,28 @@ def _context_column(
 
 
 # --- the main row builder ----------------------------------------------------
+def _exploit_notes_for_facts(facts: PreflopFacts) -> str:
+    """Deterministic exploitative adjustments for the CSV ``exploit_notes``
+    column, computed from the archetype + this hand's facts (equity, domination
+    vs villain's heaviest in-range classes, blockers). "" when the archetype
+    has no exploit role. Same computation the admin exploit panel shows."""
+    if facts.villain_stats is not None:
+        dom = dominating_map(
+            facts.spot.hero_hand_class,
+            [c for c, _ in facts.villain_stats.top_combos],
+        )
+    else:
+        dom = {"dominated_by": [], "you_dominate": [], "coinflips": []}
+    notes = exploit_adjustments(
+        facts.archetype,
+        hero_equity=facts.hero_equity_vs_villain,
+        dominated_by=dom["dominated_by"] or None,
+        you_dominate=dom["you_dominate"] or None,
+        blockers=list(facts.blockers.keys()) or None,
+    )
+    return exploit_notes_to_json(notes)
+
+
 def build_preflop_row(
     facts: PreflopFacts,
     explanation: GeneratedExplanation,
@@ -698,6 +722,7 @@ def build_preflop_row(
     game_format: str = "cash",
     display_in_bb: bool = False,
     validation_status: str = "auto_approved",
+    claim_check: str = "",
 ) -> dict[str, str]:
     """Turn one populated PreflopFacts + its LLM-written explanation into a CSV row.
 
@@ -856,6 +881,10 @@ def build_preflop_row(
         "blocker_combos": format_blockers(facts.blockers),
         "top_villain_combos": format_top_villain_combos(facts.villain_stats),
         "stat_notes": stat_notes_to_json(build_stat_notes(facts)),
+        # Layer-7 claim-checker output (opt-in); "" when the checker didn't run.
+        "claim_check": claim_check,
+        # Deterministic exploitative adjustments (vs nit/station/maniac).
+        "exploit_notes": _exploit_notes_for_facts(facts),
     }
 
 
@@ -870,6 +899,7 @@ def write_preflop_csv(
     game_format: str = "cash",
     display_in_bb: bool = False,
     row_statuses: Iterable[str | None] | None = None,
+    claim_checks: Iterable[str] | None = None,
 ) -> int:
     """Write preflop question rows to a CSV at ``path``; return rows written.
 
@@ -899,6 +929,7 @@ def write_preflop_csv(
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     status_list = list(row_statuses) if row_statuses is not None else []
+    claim_list = list(claim_checks) if claim_checks is not None else []
     written = 0
     # utf-8-sig writes a BOM so Excel on Windows auto-detects UTF-8 instead
     # of falling back to cp1252 and mojibake-ing the suit emoji bytes.
@@ -923,6 +954,10 @@ def write_preflop_csv(
                 game_format=game_format,
                 display_in_bb=display_in_bb,
                 validation_status=status,
+                claim_check=(
+                    claim_list[number - 1]
+                    if number - 1 < len(claim_list) else ""
+                ),
             )
             writer.writerow(row)
             written += 1

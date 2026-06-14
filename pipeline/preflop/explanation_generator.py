@@ -67,11 +67,13 @@ from pipeline.explanation_generator import (
     frequency_to_verb_prefix,
     parse_response,
 )
+from pipeline.preflop.domination import dominating_map
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.gold_examples import load_preflop_gold_examples
 from pipeline.preflop.grammars.types import PreflopActionType
 from pipeline.preflop.options import canonicalize_strategy
 from pipeline.preflop.pack import get_pack
+from pipeline.preflop.playability import hand_playability
 from pipeline.preflop.position import hero_relative_position
 from pipeline.preflop.range_examples import leaning_examples_for_spot
 
@@ -131,19 +133,17 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     'Address the reader directly in second person ("you", "your hand", '
     '"you\'re holding"). Never refer to "the player" or "hero" -- the '
     "student IS hero.",
-    # 3. Structure: verdict -> reasoning -> optional exploit caveat
-    "Structure the body as: (a) verdict, (b) the reasoning (your hand "
-    "class, position, prior action, villain's range, equity), (c) an "
-    "optional one-line exploit note when the spot is population-sensitive. "
-    "Skip (c) if it doesn't apply. The exploit note describes a deviation "
-    "against a SPECIFIC opponent tendency, so it MAY point to an action the "
-    "solver shows at 0% (deviating toward a non-GTO action is exactly what "
-    "exploiting a non-GTO opponent means) -- but you must name the read "
-    "(e.g. 'against a nitty SB who opens far tighter than this') and the "
-    "deviation has to follow logically from it. Never misstate the solver's "
-    "own numbers: the SOLVER DATA action_frequencies are the GTO baseline, "
-    "so do not call the GTO line 'a fold' or claim the solver mixes an "
-    "action it shows at 0%.",
+    # 3. Structure: verdict -> reasoning (no exploit asides -- those are an
+    #    unanchored, error-prone aside, handled by the deterministic exploit
+    #    panel instead).
+    "Structure the body as: (a) the verdict, then (b) the reasoning (your "
+    "hand class, position, prior action, villain's range, equity). Do NOT "
+    "add opponent-type or exploitative advice such as 'against a nit, "
+    "deviate' -- a separate deterministic panel handles exploits, and an "
+    "unanchored read is a common source of small errors. Never misstate the "
+    "solver's own numbers: the SOLVER DATA action_frequencies are the GTO "
+    "baseline, so do not call the GTO line 'a fold' or claim the solver "
+    "mixes an action it shows at 0%.",
     # 4. Length: as long as the spot needs, no hard sentence count
     "Be as long as the spot genuinely needs and no longer. Lead tight and "
     "get to the point, but if a spot has real nuance, take the room and "
@@ -695,10 +695,21 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         # in specific strategic concepts (e.g. "ace_blocker" makes
         # 3-bet bluff prose more concrete).
         "concept_tags": _compute_concept_tags_for_prompt(facts),
+        # Deterministic postflop-playability profile of hero's hand (flush /
+        # straight connectivity / sets / kicker domination), computed purely
+        # from the 169-class. The model may describe how the hand plays after
+        # the flop ONLY from these facts -- this is what stops it inventing
+        # claims like A9s having "wheelish straights" (it is disconnected).
+        "postflop_playability": hand_playability(spot.hero_hand_class),
     }
     if facts.break_even_equity is not None:
         # Pot-odds threshold to call -- cite this instead of doing the math.
         out["break_even_equity_to_call"] = round(facts.break_even_equity, 4)
+    if facts.ev_gap_bb is not None:
+        # "Cost of the mistake": bb lost by the 2nd-best (tempting wrong)
+        # action vs the best one. Omitted on raise-involved spots (no raise
+        # EVs in v1) -- the prompt is told to cite it only if present.
+        out["cost_of_mistake_bb"] = round(facts.ev_gap_bb, 2)
     # Deterministic range examples: which hand classes in hero's OWN range
     # at this node lean toward the runner-up action -- real pack data, so
     # prose can name contrast hands without inventing them. Borderline band
@@ -719,6 +730,13 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
                 for hand_class, weight in v.top_combos
             ],
         }
+        # Domination map: which of villain's heaviest in-range classes have
+        # hero dominated, and which hero dominates. Names come ONLY from these
+        # weight-gated classes, so the prose can't invent a dominator villain
+        # doesn't hold. Surfaced only when something fires.
+        dom = dominating_map(spot.hero_hand_class, [c for c, _ in v.top_combos])
+        if dom["dominated_by"] or dom["you_dominate"]:
+            out["domination_vs_villain_range"] = dom
     # Two DISTINCT equity numbers, named unambiguously so the model can't
     # conflate them: cite hand-equity for "your hand has X%", and use
     # range-equity only for range-vs-range advantage claims.

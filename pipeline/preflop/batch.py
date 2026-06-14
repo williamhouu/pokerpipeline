@@ -63,6 +63,11 @@ from pipeline.explanation_generator import (
     ExplanationValidationError,
     GeneratedExplanation,
 )
+from pipeline.preflop.claim_checker import (
+    CHECKER_SYSTEM_PROMPT,
+    check_explanation_claims,
+    claim_check_to_json,
+)
 from pipeline.preflop.difficulty import (
     compute_difficulty,
 )
@@ -71,6 +76,7 @@ from pipeline.preflop.ev_engine import (
     compute_ev_gap_bb,
 )
 from pipeline.preflop.explanation_generator import (
+    _trim_facts_for_prompt,
     build_explanation_prompt_parts,
     build_shared_prompt_parts,
     generate_preflop_answer_explanation,
@@ -602,6 +608,8 @@ def generate_preflop_batch(
     system_prompt: str | None = None,
     prompt_name: str = "",
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
     dry_run: bool = False,
     client: object | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -716,6 +724,9 @@ def generate_preflop_batch(
     # ``rows``: None = auto_approved, "flagged" = a soft validator warned
     # (warning text goes into the row's meta record below).
     row_statuses: list[str | None] = []
+    # Per-row claim-checker output (Layer 7, opt-in), positionally aligned with
+    # ``rows``: "" = checker not run, "[]" = run and clean, JSON list = flagged.
+    claim_checks: list[str] = []
     # Per-spot prompt inputs (framing / options / correct / solver-data /
     # live block), captured in row order for the meta sidecar + inspector.
     prompt_records: list[dict[str, object]] = []
@@ -809,6 +820,9 @@ def generate_preflop_batch(
                 facts, break_even_equity=compute_break_even_equity(facts, pack)
             )
             ev_gap = compute_ev_gap_bb(facts, pack)
+            # Carry the gap on the facts so Layer 6's data block can cite the
+            # "cost of the mistake" (None for raise-involved spots -> omitted).
+            facts = replace(facts, ev_gap_bb=ev_gap)
             difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap)
         except Exception as exc:  # noqa: BLE001
             failures.append(
@@ -868,7 +882,31 @@ def generate_preflop_batch(
                 [] if dry_run
                 else run_preflop_soft_validators(explanation, facts)
             )
-            row_statuses.append("flagged" if soft_warnings else None)
+            # Layer-7 claim checker (opt-in extra LLM call). Audits the prose
+            # against the data block and flags suspect claims; never rejects.
+            # Wrapped so a checker failure never drops an otherwise-good row.
+            claim_check_json = ""
+            claim_issues: list[str] = []
+            if run_claim_checker and not dry_run:
+                try:
+                    cc = check_explanation_claims(
+                        explanation.answer_explanation,
+                        _trim_facts_for_prompt(facts),
+                        client,
+                        model=model,
+                        system_prompt=claim_checker_prompt or CHECKER_SYSTEM_PROMPT,
+                    )
+                    claim_check_json = claim_check_to_json(cc)
+                    claim_issues = [f"{i.claim} -- {i.problem}" for i in cc.issues]
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "batch: claim checker failed for %s: %s",
+                        spot.node.node_id, exc,
+                    )
+            claim_checks.append(claim_check_json)
+            row_statuses.append(
+                "flagged" if (soft_warnings or claim_issues) else None
+            )
             # Record the exact (deterministic) inputs that produced this row,
             # in the same order rows are written to the CSV. Cheap + no API:
             # gold examples are lru-cached and the parts are pure functions.
@@ -880,6 +918,8 @@ def generate_preflop_batch(
             )
             if soft_warnings:
                 record["validator_warnings"] = soft_warnings
+            if claim_issues:
+                record["claim_check_issues"] = claim_issues
             prompt_records.append(record)
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
@@ -912,6 +952,7 @@ def generate_preflop_batch(
             game_format=game_format,
             display_in_bb=display_in_bb,
             row_statuses=row_statuses,
+            claim_checks=claim_checks,
         )
         final_out = out_path
         # Sidecar metadata: which prompt produced these rows + the exact
@@ -942,6 +983,7 @@ def generate_preflop_batch(
                 "min_villain_line_pct": min_villain_line_pct,
                 "min_hero_premise_freq": min_hero_premise_freq,
                 "equity_runouts": equity_runouts,
+                "run_claim_checker": run_claim_checker,
                 "display_in_bb": display_in_bb,
                 "stakes_bb_dollars": stakes_bb_dollars,
                 "live_or_online": live_or_online,

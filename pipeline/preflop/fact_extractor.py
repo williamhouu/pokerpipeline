@@ -169,6 +169,13 @@ class PreflopFacts:
     # geometry); None when hero faces no bet to call or it isn't computable.
     break_even_equity: float | None = None
 
+    # EV gap (in bb) between the dominant action and the second-best action --
+    # the cost of taking the tempting wrong answer. Populated by the batch
+    # (compute_ev_gap_bb, which needs the pack). None for raise-involved spots
+    # (we don't model raise EVs in v1) or when equity isn't computable, so
+    # Layer 6 must treat it as "cite only if present". See ev_engine.py.
+    ev_gap_bb: float | None = None
+
 
 # --- villain identification -------------------------------------------------
 def identify_villain(

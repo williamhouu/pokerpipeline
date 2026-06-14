@@ -207,6 +207,8 @@ def build_plo_row(
         "blocker_combos": "",
         "top_villain_combos": "",
         "stat_notes": "",
+        "claim_check": "",  # NLHE claim checker not wired for PLO yet
+        "exploit_notes": "",  # NLHE exploit tagger not wired for PLO yet
     }
     # Defensive: guarantee exact schema coverage (every column, no extras).
     missing = set(PLO_CSV_COLUMNS) - set(row)

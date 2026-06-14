@@ -21,6 +21,7 @@ def _facts(**kw: object) -> object:
         break_even_equity=None,
         hero_equity_vs_villain=None,
         hero_range_equity_vs_villain=None,
+        ev_gap_bb=None,
         blockers={},
         villain_stats=None,
     )
@@ -108,10 +109,13 @@ def test_hero_equity_at_range_average_and_no_range() -> None:
 
 # --- range advantage --------------------------------------------------------
 def test_range_advantage_disadvantage_even() -> None:
+    # Plain English names both sides: "Your range has X% ... and their range
+    # has Y%, a range advantage/disadvantage/about even".
     adv = _note(_facts(hero_range_equity_vs_villain=0.58), "range_advantage")
-    assert adv is not None and "ahead" in adv.note
+    assert adv is not None and "a range advantage" in adv.note
+    assert "Your range has about 58%" in adv.note and "their range has about 42%" in adv.note
     dis = _note(_facts(hero_range_equity_vs_villain=0.40), "range_advantage")
-    assert dis is not None and "behind" in dis.note
+    assert dis is not None and "a range disadvantage" in dis.note
     even = _note(_facts(hero_range_equity_vs_villain=0.50), "range_advantage")
     assert even is not None and "about even" in even.note
     # No strategic prescription -- the explanation owns what to DO.
@@ -164,17 +168,29 @@ def test_open_spot_yields_no_notes() -> None:
     assert sn.build_stat_notes(_facts()) == []
 
 
+def test_ev_gap_note_present_only_when_ev_exists() -> None:
+    assert _note(_facts(), "ev_gap") is None            # no EV computed -> no note
+    ev = _note(_facts(ev_gap_bb=1.7), "ev_gap")
+    assert ev is not None
+    assert ev.value == "1.7bb"
+    assert "Folding and calling are about 1.7bb apart" in ev.note
+    assert "worth about 1.7 big blinds" in ev.note
+    # tidy formatting of round values
+    assert _note(_facts(ev_gap_bb=2.0), "ev_gap").value == "2bb"
+
+
 def test_full_spot_order_and_round_trip() -> None:
     facts = _facts(
         break_even_equity=0.31,
         hero_equity_vs_villain=0.47,
         hero_range_equity_vs_villain=0.44,
+        ev_gap_bb=0.8,
         blockers={"AA": 2},
         villain_stats=_villain(("AA", "KK", "AKs"), 70.0, 4.2),
     )
     notes = sn.build_stat_notes(facts)
     assert [n.key for n in notes] == [
-        "pot_odds", "hero_equity", "range_advantage", "blockers", "villain_range"
+        "pot_odds", "hero_equity", "range_advantage", "ev_gap", "blockers", "villain_range"
     ]
     blob = sn.stat_notes_to_json(notes)
     parsed = sn.parse_stat_notes(blob)

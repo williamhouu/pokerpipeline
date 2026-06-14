@@ -120,6 +120,17 @@ CSV_COLUMNS = [
     #                        rows (the deterministic phrases); '' when none.
     "pot_odds", "hero_equity", "range_equity", "blocker_combos",
     "top_villain_combos", "stat_notes",
+    # Layer-7 claim-checker output (opt-in): JSON list of {claim, problem} the
+    # checker flagged in the answer explanation. "" = checker not run for this
+    # row; "[]" = run and clean; a non-empty list = flagged claims. Rendered
+    # under the explanation in the admin panel. (June 2026.)
+    "claim_check",
+    # Exploitative adjustments (deterministic, preflop): JSON list of per-
+    # opponent-type (nit/station/maniac) deviations for this hand, keyed on the
+    # archetype and refined by equity/domination/blockers
+    # (pipeline.preflop.exploit). Directional guidance, not solver-exact.
+    # Closes out the row. (June 2026.)
+    "exploit_notes",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -354,6 +365,8 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # from the Layer-5 facts via pipeline.preflop.stat_notes).
         "pot_odds": "", "hero_equity": "", "range_equity": "",
         "blocker_combos": "", "top_villain_combos": "", "stat_notes": "",
+        "claim_check": "",  # postflop rows: claim checker is preflop-only for now
+        "exploit_notes": "",  # postflop rows: exploit tags are preflop-only for now
     }
 
 
