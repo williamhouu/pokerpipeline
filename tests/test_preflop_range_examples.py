@@ -47,6 +47,24 @@ def test_leaning_groups_combo_weighted_with_guardrail(monkeypatch):
     assert all("wheel aces" not in s for s in out)  # 40% < 50% floor -> dropped
 
 
+def test_leaning_groups_skips_heros_own_bucket(monkeypatch):
+    # Hero holds A5o (weak_offsuit_aces). A2o/A3o (same bucket) lean 3-bet, but
+    # the bucket is skipped so the contrast never describes hero's own type;
+    # small pairs (a different bucket) still shows.
+    node, weights = _mock_node({
+        "Call": {"A2o": 0.3, "A3o": 0.3, "22": 0.4, "33": 0.4},
+        "3-bet": {"A2o": 0.7, "A3o": 0.7, "22": 0.6, "33": 0.6},
+    })
+    monkeypatch.setattr(
+        range_examples, "_cached_parse_range_file", lambda path: weights[path]
+    )
+    out = leaning_groups_to_option(
+        node, "3-bet", "3-bet", skip_bucket="weak_offsuit_aces"
+    )
+    assert all("offsuit aces" not in s for s in out)  # hero's bucket excluded
+    assert any("small pairs" in s for s in out)  # other buckets still shown
+
+
 def test_format_examples_band_cap_and_wording():
     rows = [
         (0.9, 0.99, "AA"),  # too pure -> obvious, excluded
@@ -91,7 +109,7 @@ def _facts(freqs: dict[str, float]) -> PreflopFacts:
 def test_leaning_examples_picks_runner_up(monkeypatch):
     seen: dict[str, str] = {}
 
-    def _fake(node, raw_label, action_word):
+    def _fake(node, raw_label, action_word, skip_bucket=None):
         seen["raw"], seen["word"] = raw_label, action_word
         return ("wheel aces (call 64%)",)
 
@@ -107,6 +125,6 @@ def test_leaning_examples_picks_runner_up(monkeypatch):
 def test_leaning_examples_none_paths(monkeypatch):
     assert leaning_examples_for_spot(_facts({"Fold": 1.0})) is None
     monkeypatch.setattr(
-        range_examples, "leaning_groups_to_option", lambda *a: ()
+        range_examples, "leaning_groups_to_option", lambda *a, **k: ()
     )
     assert leaning_examples_for_spot(_facts({"Fold": 0.9, "Call": 0.1})) is None

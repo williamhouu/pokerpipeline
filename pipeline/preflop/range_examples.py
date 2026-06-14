@@ -126,10 +126,18 @@ def hands_leaning_to_option(
 
 
 def leaning_groups_to_option(
-    node: PreflopDecisionNode, raw_label: str, action_word: str
+    node: PreflopDecisionNode,
+    raw_label: str,
+    action_word: str,
+    skip_bucket: str | None = None,
 ) -> tuple[str, ...]:
     """Hand-class BUCKETS in hero's range leaning toward ``raw_label``, each
     with the bucket's GROUP frequency for that action ("wheel aces (fold 64%)").
+
+    ``skip_bucket`` drops one bucket (hero's OWN) so the contrast never
+    describes the hand-type hero is holding -- "weak offsuit aces 3-bet" makes
+    no sense as a contrast when hero's A5o is itself a weak offsuit ace that
+    calls.
 
     Avoids the over-generalization trap of tagging one hand with its bucket: a
     bucket is described as a group ONLY when 2+ of its classes are present; a
@@ -161,8 +169,8 @@ def leaning_groups_to_option(
         if presence < _MIN_PRESENCE:
             continue
         bucket = categorize_hand_class(hand_class)
-        if bucket == OTHER:
-            continue  # no meaningful type to describe -- skip the junk
+        if bucket == OTHER or bucket == skip_bucket:
+            continue  # junk, or hero's OWN bucket (would contradict the hand)
         combos = combos_in_class(hand_class)
         runner[bucket] = runner.get(bucket, 0.0) + combos * target.get(hand_class, 0.0)
         present[bucket] = present.get(bucket, 0.0) + combos * presence
@@ -212,7 +220,17 @@ def leaning_examples_for_spot(facts: PreflopFacts) -> dict[str, object] | None:
         raise_level=_hero_raise_level(facts),
         check_spot=is_check_spot(facts),
     )
-    hands = leaning_groups_to_option(facts.spot.node, runner_raw, display.lower())
+    # Drop hero's OWN bucket: a contrast like "weak offsuit aces (3-bet 60%)"
+    # contradicts the hand in question when hero holds A5o (a weak offsuit ace
+    # that calls). The contrast is about OTHER hand-types in the range.
+    from pipeline.preflop.hand_categories import (  # noqa: PLC0415
+        categorize_hand_class,
+    )
+
+    hero_bucket = categorize_hand_class(facts.spot.hero_hand_class)
+    hands = leaning_groups_to_option(
+        facts.spot.node, runner_raw, display.lower(), skip_bucket=hero_bucket
+    )
     if not hands:
         return None
     return {"action": display, "hands": list(hands)}
