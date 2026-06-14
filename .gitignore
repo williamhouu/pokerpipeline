@@ -22,6 +22,10 @@ plo_ranges/
 # solve (the 3.4GB .mkr) stays in the team Dropbox.
 nlhe9_ranges/
 
+# NLHE 6-max Monker packs (June 2026) — short-stack family (20/30/...bb,
+# rake 5%/0.5bb cap), MonkerViewer .rng exports, local-only like the others.
+nlhe6_ranges/
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]
