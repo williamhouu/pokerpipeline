@@ -1687,6 +1687,32 @@ def _render_generate_page_preflop() -> None:
     st.divider()
 
     # --- 10. Generate button (kicks off a BACKGROUND job) ---
+    # --- Layer-7 claim checker (opt-in) -------------------------------------
+    run_claim_checker = st.checkbox(
+        "Run claim checker (Layer 7)",
+        value=False,
+        key="preflop_run_claim_checker",
+        help="After each explanation is written, a second LLM pass audits it "
+        "against the data block and flags suspect poker claims. Adds ONE API "
+        "call per question. It only flags (never rejects); flags show under the "
+        "explanation in Review and Compare.",
+    )
+    claim_checker_prompt: str | None = None
+    if run_claim_checker:
+        ck_key = "preflop_claim_checker_prompt"
+        if ck_key not in st.session_state:
+            st.session_state[ck_key] = _load_claim_checker_prompt()
+        with st.expander("Claim-checker prompt (editable)"):
+            edited = st.text_area(
+                "System prompt the claim checker runs with",
+                height=320,
+                key=ck_key,
+            )
+            if edited.strip() and edited != _load_claim_checker_prompt():
+                _save_claim_checker_prompt(edited)
+                st.caption("Saved.")
+        claim_checker_prompt = st.session_state[ck_key]
+
     # Inputs ready when: at least one position selected AND at least one
     # action context AND the filters match >= 1 node AND total > 0.
     # Disabled while another job is in flight -- the active-job panel
@@ -1760,6 +1786,8 @@ def _render_generate_page_preflop() -> None:
             prompt_name=_prompt_name,
             random_seed=_seed_val,
             temperature=_temp_val,
+            run_claim_checker=run_claim_checker,
+            claim_checker_prompt=claim_checker_prompt,
         )
 
 
@@ -1789,6 +1817,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     prompt_name: str = "",
     random_seed: int | None = None,
     temperature: float = DEFAULT_TEMPERATURE,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
 ) -> None:
     """Kick off a preflop batch on a background thread and rerun.
 
@@ -1859,6 +1889,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             prompt_name=prompt_name,
             dry_run=dry_run,
             random_seed=random_seed,
+            run_claim_checker=run_claim_checker,
+            claim_checker_prompt=claim_checker_prompt,
         )
     except RuntimeError as exc:
         # Another job is already running. The button-disable check
@@ -3133,6 +3165,8 @@ def render_review_page() -> None:
         # explanation (the decision-math stats: pot odds, equity, range
         # advantage, blockers, what you're up against).
         _render_stat_panel(row)
+        _render_exploit_panel(row)
+        _render_claim_check_panel(row)
         # Editable difficulty -- auto-saves into the CSV just like the
         # explanation (no Save button; the on_change callback writes it).
         _diff_key = f"review_diff::{csv_path.name}::{no}"
@@ -3774,6 +3808,201 @@ def _finish_comparison(
     return "Comparison not saved — " + "  •  ".join(bits)
 
 
+def _render_equity_bar(row: dict[str, str]) -> None:
+    """A small visual of hero's hand equity and range equity vs villain's
+    range, with the break-even-to-call threshold marked. Reads the
+    deterministic decision-math columns (hero_equity / range_equity /
+    pot_odds); no-ops when they're blank (open/first-in spots, PLO, postflop,
+    or batches generated before those columns existed). Shows the numbers
+    only -- never a "you have the price" verdict, since implied odds can make
+    a sub-threshold call correct (the answer explanation owns the decision).
+    """
+    def _pct(key: str) -> float | None:
+        raw = (row.get(key) or "").strip().rstrip("%")
+        try:
+            v = float(raw)
+        except ValueError:
+            return None
+        return v if 0.0 <= v <= 100.0 else None
+
+    hand_eq, range_eq, be = _pct("hero_equity"), _pct("range_equity"), _pct("pot_odds")
+    if hand_eq is None and range_eq is None:
+        return
+
+    # Name the seat we're measured against (the most-recent raiser) so a
+    # multiway pot makes clear WHICH opponent. Position Matchup is
+    # "HERO_vs_VILLAIN" (e.g. "BTN_vs_UTG+1"); fall back to "villain's".
+    matchup = (row.get("Position Matchup") or "").strip()
+    villain = f"{matchup.split('_vs_')[1]}'s" if "_vs_" in matchup else "villain's"
+
+    def _bar(label: str, val: float | None) -> str:
+        if val is None:
+            return ""
+        marker = (
+            f'<div style="position:absolute;top:-3px;bottom:-3px;left:{be:.1f}%;'
+            'width:2px;background:#D62728;"></div>'
+            if be is not None
+            else ""
+        )
+        return (
+            f'<div style="font-size:0.8em;color:#444;margin:6px 0 1px;">{label}</div>'
+            '<div style="position:relative;background:#E9E9E9;border-radius:3px;'
+            'height:20px;width:100%;">'
+            f'<div style="background:#4C78A8;height:100%;width:{val:.1f}%;'
+            'border-radius:3px;"></div>'
+            f'<div style="position:absolute;top:0;left:6px;line-height:20px;'
+            f'font-size:0.8em;color:#fff;font-weight:600;">{val:.0f}%</div>'
+            f"{marker}</div>"
+        )
+
+    html = _bar(f"Your hand vs {villain} range", hand_eq)
+    html += _bar(f"Your whole range vs {villain} range", range_eq)
+    if be is not None:
+        html += (
+            f'<div style="font-size:0.75em;color:#D62728;margin-top:3px;">'
+            f"Red line = {be:.0f}% break-even to call</div>"
+        )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _user_cards_to_class(cards: str) -> str:
+    """'A-spades, 9-spades' -> 'A9s'; 'A-spades, A-hearts' -> 'AA'; '' on failure."""
+    parts = [p.strip() for p in (cards or "").split(",") if p.strip()]
+    if len(parts) != 2:
+        return ""
+    suit_i = {"spades": "s", "hearts": "h", "diamonds": "d", "clubs": "c"}
+    order = "23456789TJQKA"
+    pc: list[tuple[str, str]] = []
+    for p in parts:
+        bits = p.split("-")
+        if len(bits) != 2:
+            return ""
+        rank, suit = bits[0].strip().upper(), suit_i.get(bits[1].strip().lower())
+        if not suit or rank not in order:
+            return ""
+        pc.append((rank, suit))
+    (r1, s1), (r2, s2) = pc
+    if r1 == r2:
+        return r1 + r2
+    if order.index(r1) < order.index(r2):
+        r1, s1, r2, s2 = r2, s2, r1, s1
+    return f"{r1}{r2}{'s' if s1 == s2 else 'o'}"
+
+
+def _parse_top_villain_classes(cell: str) -> list[str]:
+    """'AA, KK, AKs (~70% of 4.2%)' -> ['AA','KK','AKs']."""
+    head = (cell or "").split("(")[0]
+    return [c.strip() for c in head.split(",") if c.strip()]
+
+
+def _parse_blocker_classes(cell: str) -> list[str]:
+    """'AKo:6, AA:3' -> ['AKo','AA']."""
+    out: list[str] = []
+    for part in (cell or "").split(","):
+        part = part.strip()
+        if ":" in part:
+            out.append(part.split(":")[0].strip())
+    return out
+
+
+def _render_exploit_panel(row: dict[str, str]) -> None:
+    """A "🎯 Exploit adjustments" strip: how to deviate from GTO vs a nit /
+    station / maniac, computed deterministically from this hand's archetype
+    (its strategic role), refined with its equity, domination, and blockers.
+    Directional guidance, not solver-exact frequencies. No-ops on rows with no
+    archetype (an open spot still has one; only blank / unclassified skip).
+    """
+    from pipeline.preflop.domination import dominating_map  # noqa: PLC0415
+    from pipeline.preflop.exploit import (  # noqa: PLC0415
+        exploit_adjustments,
+        parse_exploit_notes,
+    )
+
+    # Prefer the baked exploit_notes column (new batches) so the displayed
+    # notes match the CSV export exactly; fall back to on-the-fly for older
+    # batches generated before the column existed.
+    notes: list[dict[str, str]] = parse_exploit_notes(row.get("exploit_notes", ""))
+    if not notes:
+        archetype = (row.get("archetype") or "").strip()
+        if not archetype or archetype == "unclassified":
+            return
+        raw_eq = (row.get("hero_equity") or "").strip().rstrip("%")
+        try:
+            hero_equity: float | None = float(raw_eq) / 100.0
+        except ValueError:
+            hero_equity = None
+        dominated_by = you_dominate = None
+        hand_class = _user_cards_to_class(row.get("User Cards", ""))
+        villain_classes = _parse_top_villain_classes(row.get("top_villain_combos", ""))
+        if hand_class and villain_classes:
+            dm = dominating_map(hand_class, villain_classes)
+            dominated_by = dm["dominated_by"] or None
+            you_dominate = dm["you_dominate"] or None
+        blockers = _parse_blocker_classes(row.get("blocker_combos", "")) or None
+        notes = [
+            {"label": n.label, "headline": n.headline, "detail": n.detail}
+            for n in exploit_adjustments(
+                archetype,
+                hero_equity=hero_equity,
+                dominated_by=dominated_by,
+                you_dominate=you_dominate,
+                blockers=blockers,
+            )
+        ]
+    if not notes:
+        return
+    with st.expander("🎯 Exploit adjustments (vs player types)"):
+        st.caption(
+            "Directional deviations from GTO for this hand, computed from its "
+            "role. Not solver-exact frequencies."
+        )
+        for n in notes:
+            st.markdown(f"**{n.get('label', '')}** · {n.get('headline', '')}")
+            st.caption(n.get("detail", ""))
+
+
+def _claim_checker_prompt_path() -> Path:
+    """File backing the editable claim-checker system prompt (gitignored, like
+    the other prompt files under admin_panel/prompts/)."""
+    return Path(__file__).resolve().parent / "prompts" / "claim_checker_system.txt"
+
+
+def _load_claim_checker_prompt() -> str:
+    """The saved editable claim-checker prompt, or the built-in default."""
+    from pipeline.preflop.claim_checker import CHECKER_SYSTEM_PROMPT  # noqa: PLC0415
+
+    path = _claim_checker_prompt_path()
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return CHECKER_SYSTEM_PROMPT
+
+
+def _save_claim_checker_prompt(text: str) -> None:
+    path = _claim_checker_prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _render_claim_check_panel(row: dict[str, str]) -> None:
+    """Layer-7 claim-checker output under the explanation. The ``claim_check``
+    cell is "" when the checker did not run (no panel), "[]" when it ran and
+    found nothing, or a JSON list of {claim, problem} it flagged.
+    """
+    from pipeline.preflop.claim_checker import parse_claim_check  # noqa: PLC0415
+
+    cell = (row.get("claim_check") or "").strip()
+    if not cell:
+        return
+    issues = parse_claim_check(cell)
+    if not issues:
+        st.caption("✅ Claim check: no issues found")
+        return
+    with st.expander(f"⚠️ Claim check flagged {len(issues)} claim(s)", expanded=True):
+        for it in issues:
+            st.markdown(f"**{it.get('claim', '')}**")
+            st.caption(it.get("problem", ""))
+
+
 def _render_stat_panel(row: dict[str, str]) -> None:
     """A collapsible "Show the math" strip under an answer explanation.
 
@@ -3791,6 +4020,7 @@ def _render_stat_panel(row: dict[str, str]) -> None:
     if not notes:
         return
     with st.expander("📊 Show the math"):
+        _render_equity_bar(row)
         for note in notes:
             st.markdown(f"**{note.get('label', '')}** · {note.get('value', '')}")
             st.caption(note.get("note", ""))
@@ -4247,6 +4477,8 @@ def render_compare_page() -> None:
             # identical -- one shared panel under the pair. (No-ops on PLO,
             # whose rows carry no stat_notes yet.)
             _render_stat_panel(row_a)
+            _render_exploit_panel(row_a)
+            _render_claim_check_panel(row_a)
             cur = verdicts.get(key)
             idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
             choice = st.radio(
@@ -6482,6 +6714,8 @@ def render_plo_compare_page() -> None:
             # identical -- one shared panel under the pair. (No-ops on PLO,
             # whose rows carry no stat_notes yet.)
             _render_stat_panel(row_a)
+            _render_exploit_panel(row_a)
+            _render_claim_check_panel(row_a)
             cur = verdicts.get(key)
             idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
             choice = st.radio(
