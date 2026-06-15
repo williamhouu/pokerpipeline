@@ -363,7 +363,9 @@ def test_sample_spot_against_real_pack():
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present under ranges/")
-    nodes = enumerate_nodes(packs)
+    # Only the Ryan pack (packs[0]): other registered packs (9-max,
+    # short-stack 6-max) share node geometry and would be picked first.
+    nodes = enumerate_nodes([packs[0]])
     # Pick a clear node: BTN facing UTG fold, HJ open 60%, CO fold (so BTN
     # is acting after a single open from HJ).
     node = next(
@@ -398,7 +400,9 @@ def test_real_pack_question_worthy_count():
     packs = discover_packs(ranges)
     if not packs:
         pytest.skip("Ryan pack not present under ranges/")
-    nodes = enumerate_nodes(packs)
+    # Only the Ryan pack (packs[0]): other registered packs (9-max,
+    # short-stack 6-max) share node geometry and would be picked first.
+    nodes = enumerate_nodes([packs[0]])
     # Mid-game node where we'd expect some genuinely mixed strategies.
     node = next(
         n

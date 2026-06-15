@@ -47,6 +47,20 @@ def _ryan_pack() -> PreflopPack:
     )
 
 
+def _monker_6max_short() -> PreflopPack:
+    """The registered short-stack 6-max shape (min-raise opens, 0.5bb grid)."""
+    return PreflopPack(
+        pack_id="monker_6max_test",
+        root_path=Path("/tmp/fake"),
+        grammar_name="monker_nlhe",
+        table_size=6,
+        stack_depth_bb=20,
+        open_size_bb=2.0,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+    )
+
+
 def _history(stem: str, pack: PreflopPack):
     """Decode a Monker stem into its full action tuple (incl. final action)."""
     return parse(Path(f"/x/{stem}.rng"), pack).action_history
@@ -120,6 +134,60 @@ def test_monker_raise_to_bb_hypothetical_option():
     assert raise_to_bb(
         state, position="BB", raise_size_pct=84.0, pack=pack
     ) == pytest.approx(11.14)
+
+
+# --- Monker min-raise (`5`) + BB-iso (`14`), the short-stack 6-max tokens -----
+def test_monker_min_raise_open_is_2bb():
+    """`5` open: min-raise to twice the 1bb BB = 2bb (UTG, nothing posted)."""
+    pack = _monker_6max_short()
+    state = resolve_preflop_history(_history("5", pack), pack)
+    assert state.sizes_bb == (2.0,)
+    assert state.high_bet_bb == 2.0
+    assert state.committed_bb["UTG"] == 2.0
+    assert state.pot_bb == pytest.approx(0.5 + 1.0 + 2.0)  # SB + BB + open
+    assert state.raise_level == 1
+
+
+def test_monker_sb_min_raise_open_is_2bb():
+    """SB `5` open after folds: raise-to is still 2bb (2x the 1bb bet); the
+    0.5 already posted is part of the 2bb, not added on top."""
+    pack = _monker_6max_short()
+    state = resolve_preflop_history(_history("0.0.0.0.5", pack), pack)
+    assert state.sizes_bb[-1] == 2.0
+    assert state.committed_bb["SB"] == 2.0
+    assert state.pot_bb == pytest.approx(2.0 + 1.0)  # SB raise-to + BB
+
+
+def test_monker_bb_iso_token_14_is_2_5bb():
+    """`14`: SB limps to 1, BB iso to 2.5bb (75% of the 2bb limped pot)."""
+    pack = _monker_6max_short()
+    state = resolve_preflop_history(_history("0.0.0.0.1.14", pack), pack)
+    assert state.sizes_bb[-2] is None  # the SB limp is a call, no "to" size
+    assert state.sizes_bb[-1] == 2.5
+    assert state.pot_bb == pytest.approx(1.0 + 2.5)  # SB limp + BB iso
+    assert state.call_cost_bb("SB") == pytest.approx(1.5)  # owes 2.5 - its 1
+
+
+def test_monker_min_raise_then_pot_pct_3bet():
+    """A pot-% 3-bet sizes off the resolved min-raise-open state:
+    UTG opens to 2, folds to BTN, BTN 3-bets 55%: 2 + 0.55x(3.5+2)=5.025->5.0."""
+    pack = _monker_6max_short()
+    state = resolve_preflop_history(_history("5.0.0.40055", pack), pack)
+    assert state.sizes_bb[0] == 2.0  # the min-raise open
+    assert state.sizes_bb[-1] == 5.0  # quantized 3-bet
+    assert state.raise_level == 2
+
+
+def test_monker_raise_to_bb_min_raise_option():
+    """Sizing hero's min-raise option AT a node uses 2x the current bet."""
+    from pipeline.preflop.grammars.types import MIN_RAISE_PCT  # noqa: PLC0415
+
+    pack = _monker_6max_short()
+    # First-in node: nobody has raised, current bet is the 1bb BB.
+    state = resolve_preflop_history(_history("0.0", pack), pack)  # UTG, HJ fold
+    assert raise_to_bb(
+        state, position="CO", raise_size_pct=MIN_RAISE_PCT, pack=pack
+    ) == pytest.approx(2.0)
 
 
 # --- size quantization (size_round_bb, the registered 9-max pack's 0.5) -------

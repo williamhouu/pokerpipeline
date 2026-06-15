@@ -34,7 +34,11 @@ from typing import Any
 
 from pipeline.action_history import format_action_history, preflop_order
 from pipeline.preflop.fact_extractor import PreflopFacts
-from pipeline.preflop.grammars.types import ParsedAction, PreflopActionType
+from pipeline.preflop.grammars.types import (
+    MIN_RAISE_PCT,
+    ParsedAction,
+    PreflopActionType,
+)
 from pipeline.preflop.pack import PreflopPack
 
 # Documented Ryan-pack raise sizes. Indexed by (raise_size_pct, raise_level)
@@ -153,6 +157,21 @@ class ResolvedPreflopState:
         return max(0.0, self.high_bet_bb - self.committed_bb.get(position, 0.0))
 
 
+def _monker_min_raise_to_bb(high_bet: float) -> float:
+    """Monker's ``5`` min-raise, in bb: raise to twice the current bet.
+
+    Unlike the ``40<pct>`` pot-relative tokens, the min-raise is sized
+    *relative to the running bet*, not as a fraction of the pot. For an
+    open (the current bet is the 1bb big blind) this is the 2bb min-raise;
+    ``5`` is only ever the open in the registered short-stack 6-max packs,
+    so in practice this resolves the 2bb opens. The "twice the current bet"
+    rule is exact for an open and is the documented convention for these
+    packs; a true min-raise (current bet + last raise increment) would only
+    diverge on a *re-raise* by ``5``, which does not occur.
+    """
+    return 2.0 * high_bet
+
+
 def _monker_raise_to_bb(
     raise_size_pct: float,
     *,
@@ -228,15 +247,20 @@ def resolve_preflop_history(
             continue
         # RAISE
         if is_monker:
-            raise_to = _quantize_raise(
-                _monker_raise_to_bb(
-                    parsed.raise_size_pct or 100.0,
-                    committed=committed,
-                    high_bet=high_bet,
-                    position=pos,
-                ),
-                pack,
-            )
+            if parsed.raise_size_pct == MIN_RAISE_PCT:
+                raise_to = _quantize_raise(
+                    _monker_min_raise_to_bb(high_bet), pack
+                )
+            else:
+                raise_to = _quantize_raise(
+                    _monker_raise_to_bb(
+                        parsed.raise_size_pct or 100.0,
+                        committed=committed,
+                        high_bet=high_bet,
+                        position=pos,
+                    ),
+                    pack,
+                )
         else:
             raise_to = _raise_size_bb(parsed, raise_level, pack)
         committed[pos] = raise_to
@@ -343,6 +367,10 @@ def raise_to_bb(
     packs hit the token lookup at ``state.raise_level + 1``.
     """
     if pack.grammar_name == _MONKER_GRAMMAR:
+        if raise_size_pct == MIN_RAISE_PCT:
+            return _quantize_raise(
+                _monker_min_raise_to_bb(state.high_bet_bb), pack
+            )
         return _quantize_raise(
             _monker_raise_to_bb(
                 raise_size_pct or 100.0,

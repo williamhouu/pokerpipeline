@@ -36,6 +36,7 @@ from pipeline.preflop.grammars.types import (
     ParsedAction,
     ParsedRangeFile,
     PreflopActionType,
+    render_raise_size_token,
 )
 from pipeline.preflop.pack import PreflopPack
 
@@ -59,9 +60,14 @@ class PreflopActionOption:
 
     @property
     def label(self) -> str:
-        """Short human-readable label, e.g. ``'Fold'`` or ``'Raise 60%'``."""
+        """Short human-readable label, e.g. ``'Fold'`` or ``'Raise 60%'``.
+
+        Min-raises render as ``'Raise min'`` (the Monker ``5`` token has no
+        pot-% size); see :func:`~pipeline.preflop.grammars.types.
+        render_raise_size_token`.
+        """
         if self.action_type is PreflopActionType.RAISE:
-            return f"Raise {self.raise_size_pct:g}%"
+            return f"Raise {render_raise_size_token(self.raise_size_pct)}"
         return self.action_type.value
 
 
@@ -101,7 +107,7 @@ class PreflopDecisionNode:
         parts = []
         for a in self.history_before:
             verb = (
-                f"{a.raise_size_pct:g}%"
+                render_raise_size_token(a.raise_size_pct)
                 if a.action_type is PreflopActionType.RAISE
                 else a.action_type.value
             )

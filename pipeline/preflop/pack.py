@@ -144,6 +144,40 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
             "(see docs/nlhe9_pack_notes.md)."
         ),
     ),
+    # NLHE 6-max short-stack Monker packs (gitignored sibling dir, like the
+    # 9-max pack). Opens are the min-raise token `5` (2bb); the BvB iso over
+    # a limp is token `14` (2.5bb). Both decoded + locked in
+    # scripts/audit_nlhe6_pack.py; details in docs/nlhe6_pack_notes.md.
+    PreflopPackSignature(
+        pack_id="monker_nlhe_6max_20bb",
+        relative_pack_root="../nlhe6_ranges/ranges/Hold'em/6-way/20bb(5p-0.5bb)",
+        grammar_name="monker_nlhe",
+        table_size=6,
+        stack_depth_bb=20,
+        open_size_bb=2.0,  # the `5` min-raise open = 2bb
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # pot-% 3-bets -> snap rendered sizes to 0.5bb
+        description=(
+            "NLHE 6-max 20bb Monker pack -- min-raise (2bb) opens, "
+            "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
+        ),
+    ),
+    PreflopPackSignature(
+        pack_id="monker_nlhe_6max_30bb",
+        relative_pack_root="../nlhe6_ranges/ranges/Hold'em/6-way/30bb(5p-0.5bb)",
+        grammar_name="monker_nlhe",
+        table_size=6,
+        stack_depth_bb=30,
+        open_size_bb=2.0,  # the `5` min-raise open = 2bb
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # pot-% 3-bets -> snap rendered sizes to 0.5bb
+        description=(
+            "NLHE 6-max 30bb Monker pack -- min-raise (2bb) opens, "
+            "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
+        ),
+    ),
 )
 
 

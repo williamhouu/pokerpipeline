@@ -91,7 +91,10 @@ from pipeline.preflop.format_writer import (
     format_preflop_question,
     write_preflop_csv,
 )
-from pipeline.preflop.grammars.types import PreflopActionType
+from pipeline.preflop.grammars.types import (
+    PreflopActionType,
+    render_raise_size_token,
+)
 from pipeline.preflop.node_enumerator import (
     PreflopDecisionNode,
     enumerate_nodes,
@@ -570,7 +573,7 @@ def _hero_premise_min_freq(
         if prior is None:
             continue
         if a.action_type is PreflopActionType.RAISE:
-            label = f"Raise {a.raise_size_pct:g}%"
+            label = f"Raise {render_raise_size_token(a.raise_size_pct)}"
         else:
             label = a.action_type.value
         freq = sample_spot(prior, spot.hero_hand_class).action_frequencies.get(label)

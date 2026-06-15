@@ -37,6 +37,7 @@ from pipeline.preflop.equity import (
 from pipeline.preflop.grammars.types import (
     ParsedAction,
     PreflopActionType,
+    render_raise_size_token,
 )
 from pipeline.preflop.node_enumerator import PreflopDecisionNode
 from pipeline.preflop.pack import PreflopPack
@@ -338,7 +339,7 @@ def compute_villain_range_stats(
     coverage_pct = (acc / weighted_combos * 100.0) if weighted_combos > 0 else 0.0
 
     if villain.action_type is PreflopActionType.RAISE:
-        action_label = f"Raise {villain.raise_size_pct:g}%"
+        action_label = f"Raise {render_raise_size_token(villain.raise_size_pct)}"
     elif villain.action_type is PreflopActionType.ALL_IN:
         action_label = "AllIn"
     else:

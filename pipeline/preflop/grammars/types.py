@@ -11,6 +11,32 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+# Sentinel ``raise_size_pct`` meaning "minimum legal raise" rather than a
+# percent-of-pot. Monker's ``5`` token (a min-raise, used by the
+# short-stack 6-max packs) carries this: there is no pot fraction to apply
+# -- the bb amount is the minimum legal raise, sized relative to the
+# running bet in ``pipeline.preflop.action_history.resolve_preflop_history``.
+# A negative value is impossible for a real pot-% token, so every size and
+# label site can test for it unambiguously without a separate field (which
+# would force a node-cache schema bump).
+MIN_RAISE_PCT: float = -1.0
+
+
+def render_raise_size_token(raise_size_pct: float | None) -> str:
+    """Human/debug rendering of a raise's size token.
+
+    Returns ``"min"`` for the min-raise sentinel (:data:`MIN_RAISE_PCT`),
+    otherwise the percent-of-pot form (``"60%"``). Used everywhere a raise
+    is labelled -- option labels, node ids, villain action labels -- so the
+    sentinel never leaks as ``"-1%"`` and the labels stay mutually
+    consistent. (The premise-realism gate in ``pipeline.preflop.batch``
+    matches option labels by exact string, so the option label and that
+    gate's lookup label must render the same way.)
+    """
+    if raise_size_pct == MIN_RAISE_PCT:
+        return "min"
+    return f"{raise_size_pct:g}%"
+
 
 class PreflopActionType(StrEnum):
     """The four kinds of preflop actions a player can take.

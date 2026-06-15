@@ -546,9 +546,12 @@ def test_ranges_full_mix_against_real_pack() -> None:
         pytest.skip("Ryan pack not present under ranges/")
     pack = packs[0]
     # HJ facing a single UTG open -> exactly one live villain (the opener).
+    # Enumerate only the pack under test: other registered packs (9-max,
+    # short-stack 6-max) share node geometry and must not be picked with
+    # this pack object.
     node = next(
         n
-        for n in enumerate_nodes(packs)
+        for n in enumerate_nodes([pack])
         if n.actor == "HJ"
         and len(n.history_before) == 1
         and n.history_before[0].position == "UTG"

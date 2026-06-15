@@ -255,7 +255,10 @@ def test_extract_facts_against_real_pack():
     if not packs:
         pytest.skip("Ryan pack not present")
     pack = packs[0]
-    nodes = enumerate_nodes(packs)
+    # Enumerate only the pack under test: other registered packs (9-max,
+    # the short-stack 6-max packs) can share node geometry and would
+    # otherwise be picked by the predicate below with the wrong pack object.
+    nodes = enumerate_nodes([pack])
     # Pick BTN facing exactly UTG open (no 3-bet).
     node = next(
         n
@@ -298,7 +301,10 @@ def test_extract_facts_villain_range_stats_sanity():
     if not packs:
         pytest.skip("Ryan pack not present")
     pack = packs[0]
-    nodes = enumerate_nodes(packs)
+    # Enumerate only the pack under test: other registered packs (9-max,
+    # the short-stack 6-max packs) can share node geometry and would
+    # otherwise be picked by the predicate below with the wrong pack object.
+    nodes = enumerate_nodes([pack])
     node = next(
         n
         for n in nodes
@@ -572,7 +578,10 @@ def test_extract_facts_populates_chunk2_fields_real_pack():
     if not packs:
         pytest.skip("Ryan pack not present")
     pack = packs[0]
-    nodes = enumerate_nodes(packs)
+    # Enumerate only the pack under test: other registered packs (9-max,
+    # the short-stack 6-max packs) can share node geometry and would
+    # otherwise be picked by the predicate below with the wrong pack object.
+    nodes = enumerate_nodes([pack])
     node = next(
         n
         for n in nodes

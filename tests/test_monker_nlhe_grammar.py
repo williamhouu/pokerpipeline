@@ -23,7 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop import grammars  # noqa: E402
 from pipeline.preflop.grammars.monker_nlhe import parse  # noqa: E402
-from pipeline.preflop.grammars.types import PreflopActionType  # noqa: E402
+from pipeline.preflop.grammars.types import (  # noqa: E402
+    MIN_RAISE_PCT,
+    PreflopActionType,
+)
 from pipeline.preflop.node_enumerator import enumerate_nodes  # noqa: E402
 from pipeline.preflop.pack import PreflopPack  # noqa: E402
 from pipeline.preflop_ranges import (  # noqa: E402
@@ -135,6 +138,38 @@ def test_parse_six_max_rotation():
     assert r.actor_action == PreflopActionType.CALL
 
 
+# --- short-stack 6-max tokens: `5` (min-raise) and `14` (BB iso) -------------
+def test_parse_min_raise_open_token_5():
+    """`5` is the short-stack min-raise open; it carries the MIN_RAISE_PCT
+    sentinel (no pot fraction -- sized relative to the bet downstream)."""
+    r = parse(Path("/x/5.rng"), _pack(table_size=6))
+    assert r.actor == "UTG"
+    assert r.actor_action == PreflopActionType.RAISE
+    assert r.actor_raise_size_pct == MIN_RAISE_PCT
+
+
+def test_parse_min_raise_reopens_action():
+    """A `5` min-raise rotates the raiser to the back (re-raise reopens it):
+    UTG opens `5`, folds to BB, BB jams over it."""
+    r = parse(Path("/x/5.0.0.0.0.3.rng"), _pack(table_size=6))
+    positions = [a.position for a in r.action_history]
+    assert positions == ["UTG", "HJ", "CO", "BTN", "SB", "BB"]
+    assert r.action_history[0].action_type == PreflopActionType.RAISE
+    assert r.action_history[0].raise_size_pct == MIN_RAISE_PCT
+    assert r.actor == "BB"
+    assert r.actor_action == PreflopActionType.ALL_IN
+
+
+def test_parse_bb_iso_token_14():
+    """`14` = BB iso over a single SB limp, emitted as a 75%-pot raise
+    (folds to SB, SB limps, BB raises)."""
+    r = parse(Path("/x/0.0.0.0.1.14.rng"), _pack(table_size=6))
+    assert r.actor == "BB"
+    assert r.actor_action == PreflopActionType.RAISE
+    assert r.actor_raise_size_pct == 75.0
+    assert r.action_history[-2].action_type == PreflopActionType.CALL  # SB limp
+
+
 def test_parse_via_registry_dispatch():
     """grammars.parse routes grammar_name='monker_nlhe' to this parser."""
     r = grammars.parse(Path("/x/40120.rng"), pack=_pack())
@@ -142,14 +177,57 @@ def test_parse_via_registry_dispatch():
     assert r.actor == "UTG"
 
 
+def test_render_raise_size_token():
+    """The sentinel renders 'min' (never '-1%'); real pcts render '<n>%'.
+
+    The min-raise option label and the premise-realism gate's lookup label
+    both go through this, so they must agree on the same string."""
+    from pipeline.preflop.grammars.types import (  # noqa: PLC0415
+        render_raise_size_token,
+    )
+
+    assert render_raise_size_token(MIN_RAISE_PCT) == "min"
+    assert render_raise_size_token(75.0) == "75%"
+    assert render_raise_size_token(120.0) == "120%"
+
+
+def test_min_raise_node_id_and_label_render_min():
+    """A min-raise leaks neither '-1%' into the option label nor the node id:
+    the option reads 'Raise min', a min-raise in history reads '<seat>_min'."""
+    from pipeline.preflop.grammars.types import ParsedAction  # noqa: PLC0415
+    from pipeline.preflop.node_enumerator import (  # noqa: PLC0415
+        PreflopActionOption,
+        PreflopDecisionNode,
+    )
+
+    # Hero (BB) faces a UTG min-raise open: the option offered is a fold,
+    # the history carries UTG's min-raise.
+    r5 = parse(Path("/x/5.rng"), _pack(table_size=6))  # the UTG open file
+    opt = PreflopActionOption(
+        action_type=PreflopActionType.RAISE,
+        raise_size_pct=MIN_RAISE_PCT,
+        range_file=r5,
+    )
+    node = PreflopDecisionNode(
+        pack_id="monker_test",
+        actor="BB",
+        history_before=(
+            ParsedAction("UTG", PreflopActionType.RAISE, MIN_RAISE_PCT),
+        ),
+        actions=(opt,),
+    )
+    assert opt.label == "Raise min"
+    assert node.node_id == "UTG_min_BB_decision"
+
+
 # --- stem decoding: rejections ----------------------------------------------
 @pytest.mark.parametrize(
     "stem",
     [
-        "5",        # Monker min-raise token: unsupported by design
         "40",       # raise prefix with no percent digits
         "400",      # 0% raise is nonsense
         "2",        # unknown special token
+        "15",       # only `14` is special, not the whole 1x family
         "abc",      # garbage
         "40120.x",  # garbage mid-chain
     ],
