@@ -3164,9 +3164,15 @@ def render_review_page() -> None:
         # The deterministic "Show the math" strip, right under the
         # explanation (the decision-math stats: pot odds, equity, range
         # advantage, blockers, what you're up against).
-        _render_stat_panel(row)
-        _render_exploit_panel(row)
-        _render_claim_check_panel(row)
+        # The panels expect a clean {str: str} dict; the raw Series carries
+        # NaN floats for empty cells (the review page's read_csv doesn't
+        # fillna), which would crash a `.get(col).strip()`. _cell coerces
+        # NaN -> "" and everything to str.
+        row_strs = {str(c): _cell(row, c) for c in row.index}
+        _render_stat_panel(row_strs)
+        _render_why_factors_panel(row_strs)
+        _render_exploit_panel(row_strs)
+        _render_claim_check_panel(row_strs)
         # Editable difficulty -- auto-saves into the CSV just like the
         # explanation (no Save button; the on_change callback writes it).
         _diff_key = f"review_diff::{csv_path.name}::{no}"
@@ -3959,6 +3965,48 @@ def _render_exploit_panel(row: dict[str, str]) -> None:
         for n in notes:
             st.markdown(f"**{n.get('label', '')}** · {n.get('headline', '')}")
             st.caption(n.get("detail", ""))
+
+
+def _render_why_factors_panel(row: dict[str, str]) -> None:
+    """A "🧭 Why this action" strip: the deterministic factors pushing toward
+    each action, computed from this row's tags / archetype / equity /
+    position (pipeline.preflop.why_factors). Grouped for/against the answer,
+    like the app's "Why this action?" view. Lean is deterministic; the
+    strengths are coarse, not solver-exact. No-ops when the row has neither
+    an archetype nor concept tags to reason from.
+    """
+    from pipeline.preflop.why_factors import why_factors_from_row  # noqa: PLC0415
+
+    has_signal = (row.get("archetype") or "").strip() or (
+        row.get("concept_tags") or ""
+    ).strip()
+    if not has_signal:
+        return
+    breakdown = why_factors_from_row(row)
+    if not breakdown.factors:
+        return
+    strength_word = {1: "weak", 2: "moderate", 3: "strong"}
+    for_answer = [f for f in breakdown.factors if f.favors == breakdown.answer]
+    against = [f for f in breakdown.factors if f.favors != breakdown.answer]
+    with st.expander("🧭 Why this action — factor breakdown"):
+        st.caption(
+            "Deterministic factors and which action each leans toward, from "
+            "the solver's facts. The lean is deterministic; the strengths are "
+            "coarse buckets, not solver-exact magnitudes."
+        )
+        if for_answer:
+            st.markdown(f"**Arguing for {breakdown.answer}**")
+            for f in for_answer:
+                st.markdown(
+                    f"- **{f.label}** ({strength_word[f.strength]}) — {f.detail}"
+                )
+        if against:
+            st.markdown(f"**Arguing for {breakdown.alternative}**")
+            for f in against:
+                st.markdown(
+                    f"- **{f.label}** ({strength_word[f.strength]}) — {f.detail}"
+                )
+        st.info(breakdown.summary)
 
 
 def _claim_checker_prompt_path() -> Path:
