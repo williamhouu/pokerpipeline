@@ -90,11 +90,14 @@ A fold's EV equals minus the chips already committed, and:
 
 Re-runnable as `scripts/audit_nlhe6_pack.py --section sizes`.
 
-**Current consumption: NONE.** As with the other packs, no file EV reaches
-any pipeline math — `ev_gap_bb`, the worthiness gate, and the difficulty
-`easy_ev` axis all come from the analytic `ev_engine`. The milli-sb unit
-matters only if file EVs are ever wired in (use `gap_sb = (ev_a − ev_b) /
-1000`, then `/2` for bb, and mind the post-rake skew).
+**Consumption (June 2026): the `action_ev_bb` CSV column.** The per-action
+file EVs feed the `action_ev_bb` column via `pack.ev_units_per_bb = 2000`
+(milli-sb → bb), giving the per-action EV breakdown. DISPLAY only — the
+pipeline's *math* (`ev_gap_bb`, the worthiness gate, the difficulty
+`easy_ev` axis) still comes from the analytic `ev_engine`, so no file EV
+feeds a filter or a score. The `2000` divisor (1sb = 0.5bb) is verified by
+`scripts/audit_nlhe6_pack.py --section sizes` (the BB-iso fold reads
+−2.5bb).
 
 ## 5. Rake and ranges
 

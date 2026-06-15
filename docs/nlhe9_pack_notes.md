@@ -95,13 +95,17 @@ unit = bb/1000**. Because the baseline is per-hand constant, EV
 *differences* between actions at one node are baseline-free:
 `gap_bb = (ev_a − ev_b) / 1000`.
 
-**Current consumption: NONE.** The pipeline's `ev_gap_bb`, the EV-gap
-worthiness gate, and the difficulty `easy_ev` axis all come from the
-ANALYTIC engine (`pipeline/preflop/ev_engine.py`, call/fold spots only)
-for both packs — no file EV reaches any pipeline math. If pack EVs are
-ever wired in (they would unlock raise-spot EV gaps), use the gap formula
-above and mind the rake skew (file EVs are post-rake; the analytic engine
-is rake-blind).
+**Consumption (June 2026): the `action_ev_bb` CSV column.** The per-hand,
+per-action file EVs are now read straight into the `action_ev_bb` column
+(the preflop format writer, via `pack.ev_units_per_bb` = 1000 here),
+giving a per-action EV breakdown including raise spots — the "best action
+highest, mixed actions ~equal" view. DISPLAY data only. The pipeline's
+*math* — `ev_gap_bb`, the EV-gap worthiness gate, the difficulty
+`easy_ev` axis — still comes from the ANALYTIC engine
+(`pipeline/preflop/ev_engine.py`, call/fold spots only), so no file EV
+feeds a filter or a score. The two can differ (the analytic engine is
+rake-blind; file EVs are post-rake) — the column is the more accurate
+where present.
 
 ## 5. Rake and what it does to ranges
 

@@ -85,6 +85,7 @@ def build_pack(depth: int) -> PreflopPack:
         open_size_bb=2.0,
         file_glob="*.rng",
         size_round_bb=0.5,
+        ev_units_per_bb=2000.0,  # milli-sb; the size lock below verifies it
     )
 
 
@@ -227,6 +228,24 @@ def audit_token_sizes(pack: PreflopPack) -> None:
     print(
         f"  `14` BB-iso via 0.0.0.0.1.14.3.0.rng: BB committed {iso_sb!r} sb "
         f"(expect 5.0 = 2.5bb) {'OK' if ok else 'FAIL'}"
+    )
+
+    # 4. The pack's ev_units_per_bb converts file EVs to bb correctly: the
+    #    BB-iso fold (5.0 sb committed) must read 2.5bb through the divisor
+    #    the format writer uses for the action_ev_bb column.
+    units = pack.ev_units_per_bb
+    iso_raw = None
+    iso_path = root / "0.0.0.0.1.14.3.0.rng"
+    if iso_path.exists():
+        data = parse_monker_rng_file(iso_path)
+        evs = [ev for _h, (p, ev) in data.items() if p > 0.05]
+        iso_raw = sorted(evs)[len(evs) // 2] if evs else None
+    iso_bb = None if (iso_raw is None or not units) else iso_raw / units
+    ok = iso_bb is not None and abs(iso_bb - (-2.5)) < 0.05
+    failures += not ok
+    print(
+        f"  ev_units_per_bb={units}: BB-iso fold -> {iso_bb!r} bb "
+        f"(expect -2.5) {'OK' if ok else 'FAIL'}"
     )
 
     print(f"  {'ALL TOKEN SIZES LOCKED' if failures == 0 else f'{failures} FAILURES'}")

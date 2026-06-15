@@ -227,9 +227,9 @@ def _explanation() -> GeneratedExplanation:
     )
 
 
-# --- 43-column structure (post-reorg) -------------------------------------
+# --- column structure (post-reorg) ----------------------------------------
 def test_column_structure() -> None:
-    """Every preflop row covers all 43 CSV_COLUMNS.
+    """Every preflop row covers all 49 CSV_COLUMNS.
 
     Column-count history:
       * 38: baseline schema (~Apr 2026)
@@ -257,7 +257,7 @@ def test_column_structure() -> None:
         number=1,
     )
     assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 48
+    assert len(row) == 49
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
     # classifier). One of 16 labels or "unclassified".
     assert row["archetype"] != ""
@@ -1174,6 +1174,66 @@ def test_context_live_venue_and_omits_rake_when_unlisted(
     )
     assert row["Context"].startswith("Live · ")
     assert "Rake" not in row["Context"]
+
+
+# --- action_ev_bb column (per-action solver EV) ---------------------------
+def test_action_ev_bb_blank_when_pack_has_no_evs() -> None:
+    """The EV-less Ryan-style pack (ev_units_per_bb=None) leaves the column
+    blank -- the column is present, just empty (no per-action EV data, and
+    no file read is attempted)."""
+    row = build_preflop_row(
+        _facing_open_facts(), _explanation(),
+        pack=_pack(), difficulty=_difficulty(), number=1,
+    )
+    assert "action_ev_bb" in row
+    assert row["action_ev_bb"] == ""
+
+
+def test_format_action_evs_orders_by_freq_with_signed_bb() -> None:
+    """The formatter orders by descending frequency and shows signed bb."""
+    from pipeline.preflop.format_writer import _format_action_evs
+
+    evs = {"Fold": -1.0, "Call": 0.146, "All-in": 0.528}
+    strategy = {"All-in": 1.0, "Call": 0.0, "Fold": 0.0}
+    out = _format_action_evs(evs, strategy)
+    assert out.startswith("All-in: +0.53")  # highest frequency first
+    assert "Call: +0.15" in out and "Fold: -1.00" in out
+    # None (pack has no EVs) and an empty dict both render blank.
+    assert _format_action_evs(None, strategy) == ""
+    assert _format_action_evs({}, strategy) == ""
+
+
+def test_action_ev_bb_populated_on_real_monker_pack() -> None:
+    """On a real Monker pack (per-action EVs present) the column populates
+    with signed bb values that parse; AA's best action is +EV."""
+    ranges = Path(__file__).resolve().parent.parent / "ranges"
+    if not ranges.is_dir():
+        pytest.skip("ranges/ not present locally")
+    from pipeline.preflop.fact_extractor import extract_facts
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+    from pipeline.preflop.pack import clear_registry, discover_packs
+    from pipeline.preflop.spot_sampler import sample_spot
+
+    clear_registry()
+    packs = discover_packs(ranges)
+    monker = next((p for p in packs if p.ev_units_per_bb is not None), None)
+    if monker is None:
+        pytest.skip("no Monker pack with per-action EVs present locally")
+    # A first-in open node (always present); AA always reaches it.
+    node = next(n for n in enumerate_nodes([monker]) if len(n.history_before) == 0)
+    facts = extract_facts(sample_spot(node, "AA"), monker, equity_runouts=20)
+    row = build_preflop_row(
+        facts, _explanation(), pack=monker, difficulty=_difficulty(), number=1,
+    )
+    cell = row["action_ev_bb"]
+    assert cell, "expected populated per-action EVs on a Monker pack"
+    values = []
+    for part in cell.split(", "):
+        label, val = part.rsplit(": ", 1)
+        assert label  # non-empty action label
+        values.append(float(val))  # every value parses as a number
+    assert len(values) >= 2  # at least fold + raise at an open node
+    assert max(values) > 0  # AA's best action is clearly +EV
 
 
 if __name__ == "__main__":

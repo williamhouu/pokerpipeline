@@ -65,6 +65,14 @@ class PreflopPack:
             never touches all-ins (always the effective stack) and is
             display-game quantization only -- the solver's frequencies are
             from the exact tree.
+        ev_units_per_bb: How many raw file-EV units equal one big blind, or
+            ``None`` when the pack carries no per-action EVs (the PioViewer
+            Ryan pack stores weights only). Monker packs ship a per-hand EV
+            per action, but the unit differs by pack: the 9-max pack is
+            milli-big-blinds (1000 units = 1bb), the short-stack 6-max packs
+            are milli-small-blinds (2000 units = 1bb, since 1sb = 0.5bb).
+            Used by the preflop format writer to fill the ``action_ev_bb``
+            column; verified per-pack in the audit scripts.
         description: Short human-readable description for the admin panel.
     """
 
@@ -78,6 +86,7 @@ class PreflopPack:
     file_glob: str = "*.txt"
     size_round_bb: float | None = None
     description: str = ""
+    ev_units_per_bb: float | None = None
 
     def __post_init__(self) -> None:
         if not 2 <= self.table_size <= 10:
@@ -89,6 +98,10 @@ class PreflopPack:
         if not 0 < self.sb_to_bb_ratio <= 1:
             raise ValueError(
                 f"sb_to_bb_ratio must be in (0, 1], got {self.sb_to_bb_ratio}"
+            )
+        if self.ev_units_per_bb is not None and self.ev_units_per_bb <= 0:
+            raise ValueError(
+                f"ev_units_per_bb must be > 0 or None, got {self.ev_units_per_bb}"
             )
 
 
@@ -111,6 +124,7 @@ class PreflopPackSignature:
     file_glob: str = "*.txt"
     size_round_bb: float | None = None
     description: str = ""
+    ev_units_per_bb: float | None = None
 
 
 # Known packs ship pre-registered here. Adding a new pack = appending a
@@ -139,6 +153,7 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         sb_to_bb_ratio=0.5,
         file_glob="*.rng",
         size_round_bb=0.5,  # pot-% tree -> snap rendered sizes to 0.5bb
+        ev_units_per_bb=1000.0,  # file EVs are milli-bb (see nlhe9_pack_notes.md)
         description=(
             "NLHE 9-max 100bb Monker pack -- 4x opens, rake 10%/3bb cap "
             "(see docs/nlhe9_pack_notes.md)."
@@ -158,6 +173,7 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         sb_to_bb_ratio=0.5,
         file_glob="*.rng",
         size_round_bb=0.5,  # pot-% 3-bets -> snap rendered sizes to 0.5bb
+        ev_units_per_bb=2000.0,  # file EVs are milli-sb (see nlhe6_pack_notes.md)
         description=(
             "NLHE 6-max 20bb Monker pack -- min-raise (2bb) opens, "
             "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
@@ -173,6 +189,7 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         sb_to_bb_ratio=0.5,
         file_glob="*.rng",
         size_round_bb=0.5,  # pot-% 3-bets -> snap rendered sizes to 0.5bb
+        ev_units_per_bb=2000.0,  # file EVs are milli-sb (see nlhe6_pack_notes.md)
         description=(
             "NLHE 6-max 30bb Monker pack -- min-raise (2bb) opens, "
             "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
@@ -265,6 +282,7 @@ def discover_packs(
             file_glob=sig.file_glob,
             size_round_bb=sig.size_round_bb,
             description=sig.description,
+            ev_units_per_bb=sig.ev_units_per_bb,
         )
         register_pack(pack)
         found.append(pack)

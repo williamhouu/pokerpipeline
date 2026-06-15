@@ -209,6 +209,7 @@ def build_plo_row(
         "stat_notes": "",
         "claim_check": "",  # NLHE claim checker not wired for PLO yet
         "exploit_notes": "",  # NLHE exploit tagger not wired for PLO yet
+        "action_ev_bb": "",  # per-action EV column not wired for PLO yet
     }
     # Defensive: guarantee exact schema coverage (every column, no extras).
     missing = set(PLO_CSV_COLUMNS) - set(row)

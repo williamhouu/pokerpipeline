@@ -129,8 +129,20 @@ CSV_COLUMNS = [
     # opponent-type (nit/station/maniac) deviations for this hand, keyed on the
     # archetype and refined by equity/domination/blockers
     # (pipeline.preflop.exploit). Directional guidance, not solver-exact.
-    # Closes out the row. (June 2026.)
+    # (June 2026.)
     "exploit_notes",
+    # Per-action solver EV for the hero hand, in big blinds, e.g.
+    # "Call: +0.15, Raise: +0.31, Fold: -1.00" (same action labels +
+    # order as action_frequencies). Read straight from the solver's
+    # per-hand-per-action file EVs, so the "best" action has the highest
+    # value and mixed actions read ~equal (GTO indifference). Measured
+    # from the start of the hand -- folding shows minus the chips already
+    # committed; the GAPS between actions are the baseline-free signal.
+    # Populated only for packs that ship per-action EVs (the Monker NLHE
+    # packs); BLANK for the EV-less PioViewer Ryan pack and for postflop
+    # rows. Distinct from ev_gap_bb (one number, the analytic call/fold
+    # gap). (June 2026.)
+    "action_ev_bb",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -367,6 +379,7 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         "blocker_combos": "", "top_villain_combos": "", "stat_notes": "",
         "claim_check": "",  # postflop rows: claim checker is preflop-only for now
         "exploit_notes": "",  # postflop rows: exploit tags are preflop-only for now
+        "action_ev_bb": "",  # postflop rows: per-action EVs await postflop solves
     }
 
 

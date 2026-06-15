@@ -68,10 +68,13 @@ def test_column_structure():
              the math" panel data, appended at the end. (June 2026.)
       * 47 = +claim_check (Layer-7 claim-checker output, opt-in). (June 2026.)
       * 48 = +exploit_notes (deterministic exploit adjustments). (June 2026.)
+      * 49 = +action_ev_bb (per-action solver EV for the hero hand, bb).
+             (June 2026.)
     """
-    assert len(CSV_COLUMNS) == 48
-    assert CSV_COLUMNS[-1] == "exploit_notes"
-    assert CSV_COLUMNS[-2] == "claim_check"
+    assert len(CSV_COLUMNS) == 49
+    assert CSV_COLUMNS[-1] == "action_ev_bb"
+    assert CSV_COLUMNS[-2] == "exploit_notes"
+    assert CSV_COLUMNS[-3] == "claim_check"
     assert "hand_class" not in CSV_COLUMNS
     assert "difficulty_bumps" not in CSV_COLUMNS
     assert CSV_COLUMNS[0] == "No"
@@ -96,17 +99,17 @@ def test_column_structure():
         "archetype", "board_texture", "solver_reference", "validation_status"]
     # The four difficulty diagnostic axes, followed by the six decision-math
     # columns that now close out the row (June 2026).
-    assert CSV_COLUMNS[-12:-8] == [
+    assert CSV_COLUMNS[-13:-9] == [
         "easy_freq", "easy_ev", "easy_concept", "easy_hand"]
-    assert CSV_COLUMNS[-8:-2] == [
+    assert CSV_COLUMNS[-9:-3] == [
         "pot_odds", "hero_equity", "range_equity", "blocker_combos",
         "top_villain_combos", "stat_notes"]
-    assert CSV_COLUMNS[-2:] == ["claim_check", "exploit_notes"]
+    assert CSV_COLUMNS[-3:] == ["claim_check", "exploit_notes", "action_ev_bb"]
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 48
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 49
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""

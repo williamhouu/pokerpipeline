@@ -77,7 +77,11 @@ from pipeline.preflop.node_enumerator import (
     PreflopActionOption,
     PreflopDecisionNode,
 )
-from pipeline.preflop.options import canonicalize_strategy
+from pipeline.preflop.options import (
+    canonicalize_action_label,
+    canonicalize_strategy,
+    is_check_spot,
+)
 from pipeline.preflop.pack import PreflopPack
 from pipeline.preflop.position import hero_relative_position
 from pipeline.preflop.stat_notes import (
@@ -89,6 +93,7 @@ from pipeline.preflop.stat_notes import (
 )
 from pipeline.preflop_ranges import (
     canonical_169_hand_classes,
+    parse_monker_rng_file,
     parse_range_file,
 )
 
@@ -222,6 +227,74 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
         for i, (label, floor, _) in enumerate(floors)
     ]
     return ", ".join(parts)
+
+
+def _hero_raise_level_for_node(facts: PreflopFacts) -> int:
+    """How many raises hero's prospective raise would be the (1+N)-th of.
+
+    Mirrors ``pipeline.preflop.options._hero_raise_level`` (kept local to
+    avoid importing a private helper) -- counts raises + all-ins in the
+    history so raise labels canonicalise to the right verb level.
+    """
+    return 1 + sum(
+        1
+        for a in facts.spot.node.history_before
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    )
+
+
+def _action_evs_bb(facts: PreflopFacts, pack: PreflopPack) -> dict[str, float] | None:
+    """Per-action solver EV (bb) for the hero hand, keyed by canonical label.
+
+    Reads each action's range file at hero's node and pulls the hero
+    hand's solver EV, converting from the pack's raw unit to bb via
+    ``pack.ev_units_per_bb``. Keyed by the same canonical labels as
+    ``canonicalize_strategy`` so it lines up with ``action_frequencies``.
+
+    Returns ``None`` when the pack carries no per-action EVs
+    (``ev_units_per_bb`` is ``None`` -- e.g. the PioViewer Ryan pack stores
+    weights only), so the ``action_ev_bb`` column is left blank. A file
+    that can't be read (a ``.txt`` pack slipping through, or a gap) is
+    skipped defensively rather than crashing the row.
+    """
+    units = pack.ev_units_per_bb
+    if units is None:
+        return None
+    raise_level = _hero_raise_level_for_node(facts)
+    check_spot = is_check_spot(facts)
+    hero = facts.spot.hero_hand_class
+    evs: dict[str, float] = {}
+    for option in facts.spot.node.actions:
+        try:
+            data = parse_monker_rng_file(option.range_file.path)
+        except (OSError, ValueError):
+            continue
+        entry = data.get(hero)
+        if entry is None:
+            continue
+        label = canonicalize_action_label(
+            option.label, raise_level=raise_level, check_spot=check_spot
+        )
+        # Preflop nodes carry one raise size, so canonical labels are 1:1
+        # with options; if two ever collided, keep the first (deterministic).
+        evs.setdefault(label, entry[1] / units)
+    return evs or None
+
+
+def _format_action_evs(
+    evs: dict[str, float] | None,
+    strategy: dict[str, float],
+) -> str:
+    """The ``action_ev_bb`` CSV value, e.g. ``"Call: +0.15, Fold: -1.00"``.
+
+    Ordered by descending action frequency so it aligns column-for-column
+    with ``action_frequencies``. Each EV is in bb to two decimals with an
+    explicit sign. ``None`` (pack has no EVs) -> empty string.
+    """
+    if not evs:
+        return ""
+    ordered = sorted(evs.keys(), key=lambda label: -strategy.get(label, 0.0))
+    return ", ".join(f"{label}: {evs[label]:+.2f}" for label in ordered)
 
 
 # --- pot reconstruction ------------------------------------------------------
@@ -885,6 +958,12 @@ def build_preflop_row(
         "claim_check": claim_check,
         # Deterministic exploitative adjustments (vs nit/station/maniac).
         "exploit_notes": _exploit_notes_for_facts(facts),
+        # Per-action solver EV (bb) for the hero hand, ordered to match
+        # action_frequencies. Populated only for packs that ship per-action
+        # EVs (the Monker packs); blank for the EV-less Ryan pack.
+        "action_ev_bb": _format_action_evs(
+            _action_evs_bb(facts, pack), canonicalize_strategy(facts)
+        ),
     }
 
 
