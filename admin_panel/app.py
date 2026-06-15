@@ -4057,6 +4057,10 @@ def _render_claim_check_panel(row: dict[str, str]) -> None:
     """Layer-7 claim-checker output under the explanation. The ``claim_check``
     cell is "" when the checker did not run (no panel), "[]" when it ran and
     found nothing, or a JSON list of {claim, problem} it flagged.
+
+    Both verdicts render as a dropdown so the checker's output is visible under
+    every question it ran on -- a flagged expander opens by default (it needs
+    attention); a clean one stays collapsed (reassurance, one click away).
     """
     from pipeline.preflop.claim_checker import parse_claim_check  # noqa: PLC0415
 
@@ -4065,7 +4069,11 @@ def _render_claim_check_panel(row: dict[str, str]) -> None:
         return
     issues = parse_claim_check(cell)
     if not issues:
-        st.caption("✅ Claim check: no issues found")
+        with st.expander("✅ Claim check: no issues found"):
+            st.caption(
+                "The Layer-7 claim checker audited this explanation against the "
+                "SOLVER DATA block and flagged nothing."
+            )
         return
     with st.expander(f"⚠️ Claim check flagged {len(issues)} claim(s)", expanded=True):
         for it in issues:
@@ -4290,6 +4298,21 @@ def render_compare_page() -> None:
             "is below this. Raise spots (no computed EV) always pass.",
         )
 
+    # --- Layer-7 claim checker (opt-in, runs on BOTH sides) -----------------
+    cmp_run_claim_checker = st.checkbox(
+        "Run claim checker (Layer 7) on both sides",
+        value=False,
+        key="cmp_run_claim_checker",
+        help="After each explanation is written, a second LLM pass audits it "
+        "against the data block and flags suspect poker claims. Adds ONE API "
+        "call per question per side. Its verdict (clean or flagged) shows in a "
+        "dropdown under each spot below. Uses the prompt saved on the Generate "
+        "page.",
+    )
+    cmp_claim_checker_prompt = (
+        _load_claim_checker_prompt() if cmp_run_claim_checker else None
+    )
+
     # Side-identity checks: identical sides = pointless; two variables at
     # once = a confounded verdict.
     same_content = a_slug == b_slug
@@ -4364,6 +4387,8 @@ def render_compare_page() -> None:
                 random_seed=seed,
                 temperature=0.0,
                 model=model_api_a,
+                run_claim_checker=cmp_run_claim_checker,
+                claim_checker_prompt=cmp_claim_checker_prompt,
                 dry_run=dry,
             )
             st.write(f"B — {b_name}")
@@ -4390,6 +4415,8 @@ def render_compare_page() -> None:
                 random_seed=seed,
                 temperature=0.0,
                 model=model_api_b,
+                run_claim_checker=cmp_run_claim_checker,
+                claim_checker_prompt=cmp_claim_checker_prompt,
                 dry_run=dry,
             )
             status.update(label="Comparison ready", state="complete")
