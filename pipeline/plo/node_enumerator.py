@@ -239,7 +239,11 @@ PLO_ACTION_CONTEXTS: tuple[str, ...] = (
     "Facing single raise",
     "Facing 3-bet",
     "Facing 4-bet+",
-    "After call(s)",
+    # "After call(s)" was split (June 2026) to match the NLHE buckets: one live
+    # flat-caller is a tame, well-solved spot (a squeeze opportunity / a single
+    # overcall); two or more is the noisy multiway territory.
+    "After one call",
+    "After multiple calls",
 )
 
 
@@ -249,12 +253,15 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
     One of :data:`PLO_ACTION_CONTEXTS`. Port of
     :func:`pipeline.preflop.batch.node_action_context`:
 
-      * ``"Opening"``             -- no prior raise in the history
-      * ``"After call(s)"``       -- a prior raise AND a call afterwards
-                                     (a squeeze / over-limp spot)
-      * ``"Facing single raise"`` -- exactly one prior raise
-      * ``"Facing 3-bet"``        -- exactly two prior raises
-      * ``"Facing 4-bet+"``       -- three or more prior raises
+      * ``"Opening"``              -- no prior raise in the history
+      * ``"After one call"``       -- a prior raise AND at most one LIVE
+                                      flat-caller (a squeeze opportunity / a
+                                      single overcall)
+      * ``"After multiple calls"`` -- a prior raise AND two or more live
+                                      flat-callers (the multiway territory)
+      * ``"Facing single raise"``  -- exactly one prior raise, no calls
+      * ``"Facing 3-bet"``         -- exactly two prior raises, no calls
+      * ``"Facing 4-bet+"``        -- three or more prior raises, no calls
     """
     n_raises = sum(1 for a in node.history_before if a.action in _AGGRESSIVE)
     n_calls = sum(
@@ -263,7 +270,18 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
     if n_raises == 0:
         return "Opening"
     if n_calls > 0:
-        return "After call(s)"
+        # Split by the number of LIVE flat-callers -- distinct non-hero seats
+        # whose LAST action is a call (a caller who later folded doesn't count,
+        # nor hero's own earlier call). Raw n_calls over-counts both.
+        last: dict[str, PloActionType] = {}
+        for a in node.history_before:
+            last[a.seat] = a.action
+        live_callers = sum(
+            1
+            for seat, t in last.items()
+            if t is PloActionType.CALL and seat != node.actor
+        )
+        return "After one call" if live_callers <= 1 else "After multiple calls"
     if n_raises == 1:
         return "Facing single raise"
     if n_raises == 2:  # noqa: PLR2004

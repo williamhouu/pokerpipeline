@@ -160,10 +160,30 @@ def test_action_context_all_in_counts_as_a_raise():
     assert plo_node_action_context(node) == "Facing single raise"
 
 
-def test_action_context_after_calls_is_squeeze():
-    # A raise then a call before hero acts = a squeeze / after-call(s) spot.
+def test_action_context_after_one_call():
+    # A raise then a single live flat-caller before hero acts = a tame squeeze.
     node = _node_with("BB", _act("LJ", R, 100), _act("CO", C))
-    assert plo_node_action_context(node) == "After call(s)"
+    assert plo_node_action_context(node) == "After one call"
+
+
+def test_action_context_after_multiple_calls():
+    # Two or more live flat-callers = the multiway bucket.
+    node = _node_with("BB", _act("LJ", R, 100), _act("CO", C), _act("BU", C))
+    assert plo_node_action_context(node) == "After multiple calls"
+
+
+def test_action_context_folded_caller_is_not_live():
+    # A caller who later folds doesn't count -- live callers = 1, so this stays
+    # "After one call" rather than "multiple". (Mirrors the NLHE split test.)
+    node = _node_with(
+        "BB",
+        _act("LJ", R, 100),
+        _act("CO", C),
+        _act("BU", C),
+        _act("SB", R, 100),
+        _act("CO", F),  # one of the two callers folds to the squeeze
+    )
+    assert plo_node_action_context(node) == "After one call"
 
 
 def test_all_contexts_are_in_the_catalog(tmp_path):
