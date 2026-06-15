@@ -206,7 +206,7 @@ def _rounded_pack() -> PreflopPack:
 
 def test_quantized_raise_snaps_and_pot_follows():
     """CO opens 3.5, BB 3-bets 135% = 13.625 exact -> 13.5 rendered, and
-    the pot/call-cost accumulate from the ROUNDED size (Zach's June-11
+    the pot/call-cost accumulate from the ROUNDED size (the team's June-11
     call: prose, POT, and pot odds describe the same quantized game)."""
     stem = "0.0.0.0.0.40100.0.0.40135"
     pack = _rounded_pack()

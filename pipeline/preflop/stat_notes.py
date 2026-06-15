@@ -99,7 +99,7 @@ def _pot_odds_note(be: float) -> StatNote:
     # Just state the pot odds. Whether THIS hand should call is context the
     # answer explanation owns -- implied odds can make a sub-threshold call
     # correct -- so the panel never frames it as "equity needed to call".
-    # No em dashes in any note: the team bans them in copy. (Zach, 6/26.)
+    # No em dashes in any note: the team bans them in copy. (the team, 6/26.)
     pct = _pct(be)
     return StatNote("pot_odds", "Pot odds", pct, f"Your pot odds here are {pct}.")
 

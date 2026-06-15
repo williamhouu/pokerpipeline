@@ -736,10 +736,10 @@ def _context_column(
     Core (cash, dollar display): ``"<n>-Handed, <stakes>"``; tournament:
     ``"<n>-Handed"``. The stack size is intentionally NOT shown here -- the
     dedicated ``Default Stack`` column already carries it, so repeating it
-    in the Context was redundant (dropped June 2026 per Zach's feedback).
+    in the Context was redundant (dropped June 2026 per the team's feedback).
 
     When the question renders in big blinds (``display_in_bb``), the
-    stakes are dropped too (June 2026, Zach's call): every amount the
+    stakes are dropped too (June 2026, the team's call): every amount the
     player sees is in bb, so "$1/$2" is irrelevant noise -- the Context
     reads ``"Live · 9-Handed · Rake 10% / 3bb cap"``.
     """

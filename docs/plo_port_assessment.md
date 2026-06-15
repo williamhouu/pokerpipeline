@@ -101,7 +101,7 @@ What's left (tuning + optional, not blocking a first batch):
   synchronously), prompt workshop, Compare A/B, and PLO Layer 7 validators
   (NLHE's are stubbed too).
 
-**PLO skills catalog (designed with Zach):**
+**PLO skills catalog (designed with the team):**
 - *A — carry-over preflop decisions:* Preflop Hand Selection, 3-Betting, Facing
   a 3-Bet, 4-Betting, Facing a 4-Bet, Squeezing, Facing a Squeeze, Blind
   Defense, Blind vs Blind, Pot Odds, In/Out of Position, Multiway Pot Strategy.

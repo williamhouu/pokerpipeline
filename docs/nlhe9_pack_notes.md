@@ -66,7 +66,7 @@ the PLO pack):
   `pipeline.preflop.action_history.resolve_preflop_history`:
   `raise_to = high_bet + pct × (pot + to_call)`.
 - **Rendered sizes are quantized to 0.5bb** (`size_round_bb=0.5` on the
-  registered pack, June 11 — Zach's call): the exact tree's 13.625bb
+  registered pack, June 11 — the team's call): the exact tree's 13.625bb
   3-bet renders as 13.5bb and the pot accounting follows the ROUNDED
   sizes, so prose/POT/pot-odds describe one consistent game. The audit
   script (`build_pack()`) deliberately stays exact — its EV-anchor

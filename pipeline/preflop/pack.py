@@ -61,7 +61,7 @@ class PreflopPack:
             so exact sizes come out like 13.625bb; with ``0.5`` the rendered
             game plays "raise to 13.5bb" and the pot math follows the
             ROUNDED sizes, so prose, POT column, Seats tokens, and pot-odds
-            all stay mutually consistent (June 2026, Zach's call). Rounding
+            all stay mutually consistent (June 2026, the team's call). Rounding
             never touches all-ins (always the effective stack) and is
             display-game quantization only -- the solver's frequencies are
             from the exact tree.

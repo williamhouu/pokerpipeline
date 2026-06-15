@@ -1,4 +1,4 @@
-"""Bucket a 169-class hand label into a named category (Zach's taxonomy).
+"""Bucket a 169-class hand label into a named category (the team's taxonomy).
 
 Deterministic, explicit membership -- every class is listed by hand so there
 is zero rule-inference to get subtly wrong. Used to describe a set of hands

@@ -48,7 +48,7 @@ from pipeline.fact_extractor.archetypes import (
 )
 from pipeline.fact_extractor.spot_data import SpotData
 
-# Default Anthropic model. Opus 4.7 is the default (June 2026, Zach's call):
+# Default Anthropic model. Opus 4.7 is the default (June 2026, the team's call):
 # near-Fable prose at half Fable's price. Callers (admin panel, scripts) can
 # override `model`: Fable 5 (a tier above Opus, 2x price, adaptive thinking +
 # max effort applied automatically) for the highest-quality prose, Sonnet 4.6

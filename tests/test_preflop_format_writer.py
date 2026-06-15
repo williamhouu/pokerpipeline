@@ -401,7 +401,7 @@ def test_display_in_bb_renders_big_blinds_but_keeps_cash_label() -> None:
     assert row["Cash/Tourney"] == "Cash"          # semantics unchanged
     # Venue leads (default Online); this pack_id carries a rake note.
     # In bb display the stakes are DROPPED from the Context (June 2026,
-    # Zach's call): every visible amount is in bb, so "$0.25/$0.50" is
+    # the team's call): every visible amount is in bb, so "$0.25/$0.50" is
     # irrelevant noise there.
     assert row["Context"] == "Online · 6-Handed · Rake 4% / 0.3bb cap"
     assert row["User Seat"] == "SB-99.5BB-0.5BB"

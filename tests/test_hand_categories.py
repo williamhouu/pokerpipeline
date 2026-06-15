@@ -1,4 +1,4 @@
-"""Pins Zach's exact hand-bucket taxonomy. If a hand moves buckets, this
+"""Pins the team's exact hand-bucket taxonomy. If a hand moves buckets, this
 fails loudly -- the taxonomy is a product decision, not an implementation
 detail."""
 
@@ -16,7 +16,7 @@ from pipeline.preflop.hand_categories import (  # noqa: E402
     categorize_hand_class,
 )
 
-# The source-of-truth table, transcribed from Zach's message.
+# The source-of-truth table, transcribed from the team's message.
 EXPECTED: dict[str, list[str]] = {
     "premium_pairs": ["AA", "KK", "QQ"],
     "medium_pairs": ["JJ", "TT", "99"],
