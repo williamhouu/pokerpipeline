@@ -171,6 +171,27 @@ USAGE_LOG_PATH = (
     Path(__file__).resolve().parent.parent / "test_output" / "usage_log.jsonl"
 )
 
+
+@st.cache_data(show_spinner=False)
+def _read_csv_cached(path: str, _mtime: float, *, as_str: bool = False) -> pd.DataFrame:
+    """A batch CSV parsed once per (path, mtime) instead of on every rerun.
+
+    Streamlit re-runs the whole page script on every interaction, so the
+    Review / Compare / Browse pages were re-reading and re-parsing their CSV
+    on each keystroke or click. This keys on the file's ``_mtime`` (passed
+    in, not read here) so an edit -- the auto-save bumps mtime -- misses the
+    cache and re-reads fresh, while plain navigation reuses the parse.
+    ``cache_data`` returns a COPY each call, so callers may mutate the frame
+    without corrupting the cache.
+
+    ``as_str``: load every cell as a string with ``""`` for blanks (the
+    Compare pages need that; the Review page coerces per-cell via ``_cell``).
+    """
+    if as_str:
+        return pd.read_csv(path, encoding="utf-8-sig", dtype=str).fillna("")
+    return pd.read_csv(path, encoding="utf-8-sig")
+
+
 @st.cache_resource
 def _logged_job_ids() -> set[str]:
     """Job ids already appended to the usage log -- for at-most-once logging.
@@ -2860,7 +2881,7 @@ def render_browse_page() -> None:
         st.error(f"No CSV at {TIER1_CSV}")
         return
 
-    df = pd.read_csv(TIER1_CSV, encoding="utf-8-sig")
+    df = _read_csv_cached(str(TIER1_CSV), TIER1_CSV.stat().st_mtime)
     st.metric("Questions in dataset", len(df))
 
     # --- Filters ---
@@ -3033,7 +3054,7 @@ def render_review_page() -> None:
     csv_path = Path(paths_by_name[picked_name])
 
     try:
-        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        df = _read_csv_cached(str(csv_path), csv_path.stat().st_mtime)
     except (OSError, ValueError) as exc:
         st.error(f"Couldn't read {csv_path.name}: {exc}")
         return
@@ -4393,8 +4414,8 @@ def render_compare_page() -> None:
         st.info("Run a comparison above to see results.")
         return
 
-    df_a = pd.read_csv(a_csv, encoding="utf-8-sig", dtype=str).fillna("")
-    df_b = pd.read_csv(b_csv, encoding="utf-8-sig", dtype=str).fillna("")
+    df_a = _read_csv_cached(str(a_csv), a_csv.stat().st_mtime, as_str=True)
+    df_b = _read_csv_cached(str(b_csv), b_csv.stat().st_mtime, as_str=True)
     rows_a = [{str(k): str(v) for k, v in r.items()} for r in df_a.to_dict("records")]
     rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
     pairs = compare.join_by_spot(rows_a, rows_b)
@@ -6638,8 +6659,8 @@ def render_plo_compare_page() -> None:
         st.info("Run a comparison above to see results.")
         return
 
-    df_a = pd.read_csv(a_csv, encoding="utf-8-sig", dtype=str).fillna("")
-    df_b = pd.read_csv(b_csv, encoding="utf-8-sig", dtype=str).fillna("")
+    df_a = _read_csv_cached(str(a_csv), a_csv.stat().st_mtime, as_str=True)
+    df_b = _read_csv_cached(str(b_csv), b_csv.stat().st_mtime, as_str=True)
     rows_a = [{str(k): str(v) for k, v in r.items()} for r in df_a.to_dict("records")]
     rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
     pairs = compare.join_by_spot(rows_a, rows_b)
