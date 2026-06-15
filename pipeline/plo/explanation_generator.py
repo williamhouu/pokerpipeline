@@ -80,12 +80,14 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     'Address the reader directly in second person ("you", "your hand", '
     '"you\'re holding"). Never refer to "the player" or "hero" -- the '
     "student IS hero.",
-    "Structure the body as: (a) verdict, (b) the reasoning (your hand's "
-    "shape, position, prior action, villain's range, equity), (c) an optional "
-    "one-line exploit note when the spot is population-sensitive. Skip (c) if "
-    "it doesn't apply. Never misstate the solver's own numbers: the SOLVER "
-    "DATA action_strategy is the GTO baseline, so do not call the GTO line 'a "
-    "fold' or claim the solver mixes an action it shows at 0%.",
+    "Structure the body as: (a) the verdict, then (b) the reasoning (your "
+    "hand's shape, position, prior action, villain's range, equity). Do NOT "
+    "add opponent-type or exploitative advice such as 'against a nit, "
+    "deviate' -- a separate deterministic panel handles exploits, and an "
+    "unanchored read is a common source of small errors. Never misstate the "
+    "solver's own numbers: the SOLVER DATA action_strategy is the GTO "
+    "baseline, so do not call the GTO line 'a fold' or claim the solver "
+    "mixes an action it shows at 0%.",
     "Be as long as the spot genuinely needs and no longer. Lead tight and get "
     "to the point, but if a spot has real nuance, take the room and break it "
     "into a few short paragraphs, separated by a blank line, where that helps "
