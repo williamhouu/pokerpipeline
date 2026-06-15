@@ -1283,7 +1283,8 @@ def _render_generate_page_preflop() -> None:
             "Facing single raise",
             "Facing 3-bet",
             "Facing 4-bet+",
-            "After call(s)",
+            "After one call",
+            "After multiple calls",
         ]
         action_contexts = st.multiselect(
             "Action faced",
@@ -4171,7 +4172,8 @@ def render_compare_page() -> None:
                 "Facing single raise",
                 "Facing 3-bet",
                 "Facing 4-bet+",
-                "After call(s)",
+                "After one call",
+                "After multiple calls",
             ],
             default=["Opening", "Facing single raise", "Facing 3-bet"],
             key="cmp_ctx",

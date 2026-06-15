@@ -73,7 +73,7 @@ CACHE_VERSION = 2
 # (the admin derives node_action_context / active_player_count); the cached
 # values would otherwise go stale. Blast radius is UI-only -- the
 # generation path never reads this cache, only the list/filter/count views.
-META_CACHE_VERSION = 1
+META_CACHE_VERSION = 2
 
 # One node, as pickle-cheap data:
 #   (actor, history, actions)

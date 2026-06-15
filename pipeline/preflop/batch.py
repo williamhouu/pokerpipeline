@@ -135,7 +135,11 @@ ACTION_CONTEXTS: tuple[str, ...] = (
     "Facing single raise",
     "Facing 3-bet",
     "Facing 4-bet+",
-    "After call(s)",
+    # "After call(s)" was split (June 2026): one live flat-caller produces
+    # tame, well-solved spots (squeeze opportunities, a single overcall);
+    # two or more is the multiway territory that gets noisy / unsolved.
+    "After one call",
+    "After multiple calls",
 )
 
 
@@ -274,12 +278,15 @@ def node_action_context(node: PreflopDecisionNode) -> str:
     Public so the admin panel and the orchestrator share one source of
     truth. Returns one of :data:`ACTION_CONTEXTS`.
 
-      * "Opening"             -- no prior raise in history
-      * "After call(s)"       -- at least one prior raise AND at least
-                                  one call afterwards (squeeze spot)
-      * "Facing single raise" -- exactly one prior raise
-      * "Facing 3-bet"        -- exactly two prior raises
-      * "Facing 4-bet+"       -- three or more prior raises
+      * "Opening"              -- no prior raise in history
+      * "After one call"       -- a prior raise AND at most one LIVE
+                                   flat-caller (one overcall, a squeeze
+                                   opportunity, facing a single-caller squeeze)
+      * "After multiple calls" -- a prior raise AND two or more live
+                                   flat-callers (the multiway territory)
+      * "Facing single raise"  -- exactly one prior raise, no calls
+      * "Facing 3-bet"         -- exactly two prior raises, no calls
+      * "Facing 4-bet+"        -- three or more prior raises, no calls
     """
     n_raises = sum(
         1
@@ -292,7 +299,20 @@ def node_action_context(node: PreflopDecisionNode) -> str:
     if n_raises == 0:
         return "Opening"
     if n_calls > 0:
-        return "After call(s)"
+        # Split by the number of LIVE flat-callers -- distinct non-hero
+        # positions whose LAST action is a call (so a caller who later folded
+        # doesn't count, nor hero's own earlier call, nor a caller calling
+        # twice). Raw n_calls over-counts all three. <= 1 (incl. the rare
+        # "the only caller folded" case) is the tame end.
+        last: dict[str, PreflopActionType] = {}
+        for a in node.history_before:
+            last[a.position] = a.action_type
+        live_callers = sum(
+            1
+            for pos, t in last.items()
+            if t is PreflopActionType.CALL and pos != node.actor
+        )
+        return "After one call" if live_callers <= 1 else "After multiple calls"
     if n_raises == 1:
         return "Facing single raise"
     if n_raises == 2:
@@ -399,21 +419,40 @@ _PREMIUM_MONOTONIC_TOL = 0.10
 # divide by ~0. Same idea as the spot sampler's presence filter.
 _CANARY_MIN_PRESENCE = 0.005
 
+# Uniform-default tell: a node the solver never refined leaves many hands at
+# an equal split across every action (1/N each -- e.g. fold/call/all-in all
+# ~0.333). A hand "reaches" the node if its weight summed over every option
+# exceeds _UNIFORM_REACH_EPS; it's "uniform-default" if its per-action
+# weights are within _UNIFORM_TOL of each other. A node is rejected when more
+# than _UNIFORM_DEFAULT_MAX_FRAC of its reaching hands are uniform-default.
+# Measured (June 2026): the four raise-ladder buckets (Opening / Facing
+# single raise / 3-bet / 4-bet+) are uniformly 0% here, so a 30% bar has zero
+# false-positive risk on well-solved nodes; only the deep "after calls"
+# multiway tail trips it (the spot that motivated this read ~36%).
+_UNIFORM_REACH_EPS = 0.01
+_UNIFORM_TOL = 0.005
+_UNIFORM_DEFAULT_MAX_FRAC = 0.30
+
 
 def node_is_unconverged(node: PreflopDecisionNode) -> bool:
     """True if a node's solver strategy is detectably non-GTO (unconverged).
 
     These show up on near-zero-reach lines (deep multiway limp/jam pots)
-    the solver never converged, and they produce nonsense questions. Two
-    clean tells, both computed as CONDITIONAL frequencies (continue mass
-    divided by the hand's presence at the node):
+    the solver never converged, and they produce nonsense questions. Three
+    clean tells:
 
     * **AA canary** -- given AA reaches this node at all, it must continue
       ~100% of the time: AA never folds preflop in cash. A conditional
-      continue meaningfully below 1 means the node is garbage.
+      continue (continue mass / presence) meaningfully below 1 means the
+      node is garbage.
     * **Premium-pair monotonicity** -- facing the same action AA must
       continue at least as often as KK, and KK at least as often as QQ; an
       inversion (a stronger pair continuing LESS) is unconverged.
+    * **Uniform default** -- too large a share of the reaching range is split
+      equally across every action (1/N each), which is what the solver
+      leaves on a node it never refined. Catches deep multiway nodes where
+      AA isn't even present to canary on (the original case: a 4-way squeeze
+      line ~36% uniform-default). See :data:`_UNIFORM_DEFAULT_MAX_FRAC`.
 
     The normalisation matters: range files store JOINT weights (reach x
     action), so at any node hero reached by an earlier call/limp/raise,
@@ -436,9 +475,12 @@ def node_is_unconverged(node: PreflopDecisionNode) -> bool:
         return False  # nothing but fold -> no continue strategy to check
     from pipeline.preflop_ranges import parse_range_file  # noqa: PLC0415
 
-    # Per-premium: presence (all options) and continue mass (non-fold).
+    # One parse of every option file feeds both tells: per-premium
+    # presence/continue mass (the AA canary) and the full per-hand action mix
+    # (the uniform-default check).
     presence = {"AA": 0.0, "KK": 0.0, "QQ": 0.0}
     cont = {"AA": 0.0, "KK": 0.0, "QQ": 0.0}
+    mixes: dict[str, list[float]] = {}
     for opt in node.actions:
         try:
             weights = parse_range_file(opt.range_file.path)
@@ -450,6 +492,20 @@ def node_is_unconverged(node: PreflopDecisionNode) -> bool:
             presence[hand] += w
             if is_continue:
                 cont[hand] += w
+        for hand, w in weights.items():
+            mixes.setdefault(hand, []).append(w)
+
+    # Uniform-default tell: too much of the reaching range is an equal split
+    # across every action (the solver's never-refined default). Checked
+    # before the AA-presence gate below, because these deep multiway nodes
+    # often have AA essentially absent yet are still garbage. Needs >= 2
+    # actions to have a split to judge.
+    if len(node.actions) >= 2:
+        reaching = [m for m in mixes.values() if sum(m) > _UNIFORM_REACH_EPS]
+        if reaching:
+            uniform = sum(1 for m in reaching if max(m) - min(m) < _UNIFORM_TOL)
+            if uniform / len(reaching) >= _UNIFORM_DEFAULT_MAX_FRAC:
+                return True
 
     if presence["AA"] < _CANARY_MIN_PRESENCE:
         return False  # AA effectively never here; nothing to judge

@@ -170,13 +170,80 @@ def test_node_action_context_facing_4bet() -> None:
     assert node_action_context(_node_with_history(history)) == "Facing 4-bet+"
 
 
-def test_node_action_context_after_calls() -> None:
-    """An open followed by a caller before hero acts = squeeze spot."""
+def test_node_action_context_after_one_call() -> None:
+    """An open + a single live flat-caller before hero = a tame squeeze spot."""
     history = (
         ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
         ParsedAction("CO", PreflopActionType.CALL),
     )
-    assert node_action_context(_node_with_history(history)) == "After call(s)"
+    assert node_action_context(_node_with_history(history)) == "After one call"
+
+
+def test_node_action_context_after_multiple_calls() -> None:
+    """Two or more live flat-callers = the multiway bucket."""
+    history = (
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
+        ParsedAction("CO", PreflopActionType.CALL),
+        ParsedAction("BTN", PreflopActionType.CALL),
+    )
+    assert node_action_context(_node_with_history(history)) == "After multiple calls"
+
+
+def test_node_action_context_folded_caller_is_not_live() -> None:
+    """A caller who later folds doesn't count -- the live caller count is 1,
+    so this stays 'After one call' rather than 'multiple'."""
+    history = (
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
+        ParsedAction("CO", PreflopActionType.CALL),
+        ParsedAction("BTN", PreflopActionType.CALL),
+        ParsedAction("SB", PreflopActionType.RAISE, 165.0),
+        ParsedAction("CO", PreflopActionType.FOLD),  # one of the two callers folds
+    )
+    assert node_action_context(_node_with_history(history)) == "After one call"
+
+
+def test_node_is_unconverged_flags_uniform_default(tmp_path: Path) -> None:
+    """A node where most reaching hands split equally across every action
+    (the solver's unrefined default) is flagged -- even when AA behaves, so
+    this isolates the uniform-default tell from the AA canary."""
+    from pipeline.preflop.batch import node_is_unconverged
+    from pipeline.preflop.grammars.types import ParsedRangeFile
+    from pipeline.preflop.node_enumerator import (
+        PreflopActionOption,
+        PreflopDecisionNode,
+    )
+    from pipeline.preflop_ranges import canonical_169_hand_classes
+
+    hands = canonical_169_hand_classes()
+    # AA continues 100% (so the AA canary is satisfied); every OTHER hand is
+    # 1/3 in each of fold/call/raise -- the uniform default.
+    w = {"Fold": {}, "Call": {}, "Raise": {}}
+    for h in hands:
+        if h == "AA":
+            w["Fold"][h], w["Call"][h], w["Raise"][h] = 0.0, 1.0, 0.0
+        else:
+            w["Fold"][h] = w["Call"][h] = w["Raise"][h] = 1 / 3
+    opts = []
+    for label, act in (
+        ("Fold", PreflopActionType.FOLD),
+        ("Call", PreflopActionType.CALL),
+        ("Raise", PreflopActionType.RAISE),
+    ):
+        p = tmp_path / f"{label}.txt"
+        p.write_text(
+            ",".join(f"{h}:{w[label][h]:.4f}" for h in hands), encoding="utf-8"
+        )
+        rf = ParsedRangeFile(
+            pack_id="t", path=p, actor="BTN", actor_action=act,
+            actor_raise_size_pct=None, action_history=(),
+        )
+        opts.append(
+            PreflopActionOption(action_type=act, raise_size_pct=None, range_file=rf)
+        )
+    node = PreflopDecisionNode(
+        pack_id="t", actor="BTN", history_before=(), actions=tuple(opts)
+    )
+    assert node_is_unconverged(node) is True
 
 
 def test_action_contexts_constant_matches_ui_options() -> None:
@@ -187,7 +254,8 @@ def test_action_contexts_constant_matches_ui_options() -> None:
         "Facing single raise",
         "Facing 3-bet",
         "Facing 4-bet+",
-        "After call(s)",
+        "After one call",
+        "After multiple calls",
     )
 
 
