@@ -226,7 +226,7 @@ def test_system_prompt_includes_every_preflop_voice_rule() -> None:
     # (blocker discipline, no invented reasons for alternative hands,
     # position wording from the fact, full-range-only equity talk,
     # cold-call/squeeze/open-fold/ladder terminology) from round 2.
-    assert len(VOICE_RULES_PREFLOP) == 16
+    assert len(VOICE_RULES_PREFLOP) == 17
     for rule in VOICE_RULES_PREFLOP:
         # Rules are long; assert on the leading clause so a future
         # word-tweak doesn't break the test.
@@ -689,6 +689,34 @@ def test_normalize_prose_normalizes_crlf() -> None:
     raw = "A.\r\n\r\nB."
     assert _normalize_prose(raw) == "A.\n\nB."
     assert "\r" not in _normalize_prose(raw)
+
+
+def test_normalize_prose_breaks_inline_bullets_onto_lines() -> None:
+    """The run-on case: inline ' - ' bullets after a sentence/colon become
+    newline bullets (the LLM sometimes emits the reason list on one line)."""
+    raw = (
+        "The best play is to fold. Here's why: - LJ opens tight. "
+        "- Your equity is low. - You're out of position."
+    )
+    out = _normalize_prose(raw)
+    assert out == (
+        "The best play is to fold. Here's why:\n"
+        "- LJ opens tight.\n"
+        "- Your equity is low.\n"
+        "- You're out of position."
+    )
+
+
+def test_normalize_prose_leaves_hyphens_and_ranges_alone() -> None:
+    """Hyphenated tokens and numeric ranges (no sentence boundary before the
+    dash) must not be split into bullets."""
+    raw = "You should 3-bet ace-jacks. SB opens 44% - 50% here."
+    assert _normalize_prose(raw) == "You should 3-bet ace-jacks. SB opens 44% - 50% here."
+
+
+def test_normalize_prose_does_not_touch_already_formatted_bullets() -> None:
+    raw = "Verdict.\n\nHere's why:\n- one\n- two\n\nClosing."
+    assert _normalize_prose(raw) == raw
 
 
 # --- prompt-workshop support: explicit system_prompt + inspection preview ---

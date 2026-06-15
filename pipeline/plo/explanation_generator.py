@@ -146,6 +146,16 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "factor that does not move this spot. Two questions of the same type should "
     "not read the same: vary your opening sentence and the order you make "
     "points.",
+    # 14. Calibrated hedging on range-vs-hand claims (a range is a
+    # distribution, not one hand -- a flat "a range that has you beat"
+    # overstates a "mostly").
+    "Qualify range-versus-hand claims by frequency. When you say what "
+    "villain's RANGE does to your hand -- dominates it, has you behind, "
+    "runs you down -- write it as often, usually, or mostly rather than as "
+    "a flat certainty, unless it is near-total. A range is many hands, so "
+    "it only does these things some of the time. Keep the verdict and your "
+    "own holding stated plainly; this hedge is only for what a RANGE does "
+    "to your hand, not for your action or your cards.",
 )
 
 # Concise strategic frame per PLO archetype (one line the LLM reads fast).

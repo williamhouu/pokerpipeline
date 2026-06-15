@@ -237,6 +237,17 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "one caller. Open-fold = folding when the action folds TO you "
     "unopened, never when facing a raise. Count raises in order (open, "
     "3-bet, 4-bet, 5-bet) and never name a level the line cannot reach.",
+    # 17. Calibrated hedging on range-vs-hand claims (a range is a
+    # distribution, not one hand -- "a range that has you outkicked"
+    # overstates a "mostly"; tracks the same overstatement class the
+    # claim-checker flags).
+    "Qualify range-versus-hand claims by frequency. When you say what "
+    "villain's RANGE does to your hand -- dominates it, has you behind, "
+    "outkicks you -- write it as often, usually, or mostly rather than as "
+    "a flat certainty, unless it is near-total. A range is many hands, so "
+    "it only does these things some of the time. Keep the verdict and your "
+    "own holdings stated plainly; this hedge is only for what a RANGE does "
+    "to your hand, not for your action or your cards.",
 )
 
 
@@ -1204,17 +1215,28 @@ def build_explanation_prompt_parts(
 def _normalize_prose(text: str) -> str:
     """Tidy LLM prose so it pastes cleanly from the CSV into Sheets.
 
-    Fixes two recurring cosmetic issues:
+    Fixes three recurring cosmetic issues:
+      * inline ``-`` bullets some models emit instead of newline-separated
+        ones ("...range. - J5s is... - You hold...") which render as a
+        run-on paragraph,
       * a stray leading space some models put at the start of each
         paragraph ("...call.\\n\\n You opened HJ..."), and
       * inconsistent blank-line runs between paragraphs.
 
-    Normalizes line endings to ``\\n``, strips whitespace from every line
-    (killing leading/trailing spaces), collapses any run of blank lines to
-    a single blank line, and trims the whole string. Result: paragraphs
-    separated by exactly one blank line, none with a leading space.
+    Normalizes line endings to ``\\n``, breaks inline bullets onto their own
+    lines, strips whitespace from every line (killing leading/trailing
+    spaces), collapses any run of blank lines to a single blank line, and
+    trims the whole string. Result: paragraphs separated by exactly one
+    blank line, bullets each on their own line, none with a leading space.
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Put inline " - " bullets on their own line. A space-dash-space bullet
+    # that follows sentence-ending punctuation or a colon becomes a newline
+    # bullet. The spaced pattern never matches hyphenated tokens ("3-bet",
+    # "ace-jacks" -- no surrounding spaces), and the fixed-width lookbehind
+    # skips mid-sentence em-dashes / numeric ranges ("42% - 48%"), which
+    # follow a letter or "%", not "."/":"/"?"/"!".
+    text = re.sub(r"(?<=[.:?!]) +- ", "\n- ", text)
     stripped = "\n".join(line.strip() for line in text.split("\n"))
     collapsed = re.sub(r"\n{3,}", "\n\n", stripped)
     return collapsed.strip()
