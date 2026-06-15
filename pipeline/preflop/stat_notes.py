@@ -26,10 +26,6 @@ from dataclasses import asdict, dataclass
 from pipeline.preflop.fact_extractor import PreflopFacts
 
 # --- framing thresholds (v1 -- tune against reviewer feedback) --------------
-# Range advantage: hero range equity at/above ADVANTAGE => "advantage", at/
-# below DISADVANTAGE => "disadvantage", between => "roughly even".
-RANGE_ADVANTAGE = 0.53
-RANGE_DISADVANTAGE = 0.47
 # Hand-vs-range-average band: this-hand equity this much above/below hero's
 # RANGE equity reads as "stronger / weaker than your average hand".
 HAND_VS_RANGE_BAND = 0.03
@@ -132,25 +128,6 @@ def _hero_equity_note(eq: float, range_eq: float | None, villain: str = "their")
     return StatNote("hero_equity", "Your equity", pct, note)
 
 
-def _range_advantage_note(range_eq: float, villain: str = "their") -> StatNote:
-    rpct, vpct = _pct(range_eq), _pct(1.0 - range_eq)
-    if range_eq >= RANGE_ADVANTAGE:
-        tag = "a range advantage"
-    elif range_eq <= RANGE_DISADVANTAGE:
-        tag = "a range disadvantage"
-    else:
-        tag = "about even"
-    # Plain English, both sides named explicitly: "Your range has X% equity
-    # here and UTG+1's range has Y%."
-    note = (
-        f"Your range has about {rpct} equity here and {villain} range has "
-        f"about {vpct}, {tag}."
-    )
-    return StatNote(
-        "range_advantage", "Range advantage", f"your range {rpct} vs theirs {vpct}", note
-    )
-
-
 def _ev_gap_note(facts: PreflopFacts) -> StatNote | None:
     gap = facts.ev_gap_bb
     if gap is None:
@@ -225,8 +202,13 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
                 villain,
             )
         )
-    if facts.hero_range_equity_vs_villain is not None:
-        notes.append(_range_advantage_note(facts.hero_range_equity_vs_villain, villain))
+    # NOTE: the standalone range-vs-range "Range advantage" row was dropped
+    # from the player panel (June 2026) -- it answers a RANGE-level question
+    # next to hand-level stats, which conflates "my hand's equity" with "my
+    # range's equity" (a premium hand can sit in a range that's behind). The
+    # hand-relative framing in _hero_equity_note ("stronger than your average
+    # hand here") keeps the useful part; the `range_equity` CSV column still
+    # carries the number for QA/analytics.
     ev_note = _ev_gap_note(facts)
     if ev_note is not None:
         notes.append(ev_note)

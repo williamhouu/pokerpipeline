@@ -108,18 +108,16 @@ def test_hero_equity_at_range_average_and_no_range() -> None:
 
 
 # --- range advantage --------------------------------------------------------
-def test_range_advantage_disadvantage_even() -> None:
-    # Plain English names both sides: "Your range has X% ... and their range
-    # has Y%, a range advantage/disadvantage/about even".
-    adv = _note(_facts(hero_range_equity_vs_villain=0.58), "range_advantage")
-    assert adv is not None and "a range advantage" in adv.note
-    assert "Your range has about 58%" in adv.note and "their range has about 42%" in adv.note
-    dis = _note(_facts(hero_range_equity_vs_villain=0.40), "range_advantage")
-    assert dis is not None and "a range disadvantage" in dis.note
-    even = _note(_facts(hero_range_equity_vs_villain=0.50), "range_advantage")
-    assert even is not None and "about even" in even.note
-    # No strategic prescription -- the explanation owns what to DO.
-    assert "raise" not in dis.note and "pressure" not in adv.note
+def test_range_advantage_row_is_not_shown_to_players() -> None:
+    """The standalone range-vs-range row was dropped from the panel (June
+    2026): it conflated range equity with this hand's equity. The hand-level
+    'Your equity' row stays; nothing carries a 'range advantage' verdict."""
+    facts = _facts(hero_equity_vs_villain=0.45, hero_range_equity_vs_villain=0.40)
+    notes = sn.build_stat_notes(facts)
+    assert _note(facts, "range_advantage") is None
+    assert not any("range advantage" in n.note.lower() for n in notes)
+    # The hand-relative framing is retained on the hero_equity row.
+    assert any(n.key == "hero_equity" for n in notes)
 
 
 # --- blockers ---------------------------------------------------------------
@@ -158,7 +156,7 @@ def test_notes_use_no_em_or_en_dashes() -> None:
         villain_stats=_villain(("AA", "KK", "AKs"), 70.0, 3.5),
     )
     notes = sn.build_stat_notes(facts)
-    assert len(notes) == 5
+    assert len(notes) == 4
     for n in notes:
         for dash in ("—", "–", "--"):
             assert dash not in n.note, f"{n.key} note has a dash: {n.note!r}"
@@ -190,7 +188,7 @@ def test_full_spot_order_and_round_trip() -> None:
     )
     notes = sn.build_stat_notes(facts)
     assert [n.key for n in notes] == [
-        "pot_odds", "hero_equity", "range_advantage", "ev_gap", "blockers", "villain_range"
+        "pot_odds", "hero_equity", "ev_gap", "blockers", "villain_range"
     ]
     blob = sn.stat_notes_to_json(notes)
     parsed = sn.parse_stat_notes(blob)
