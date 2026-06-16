@@ -37,7 +37,11 @@ from pipeline.preflop.node_enumerator import (
     PreflopActionOption,
     PreflopDecisionNode,
 )
-from pipeline.preflop_ranges import canonical_169_hand_classes, parse_range_file
+from pipeline.preflop_ranges import (
+    CANONICAL_169_HAND_CLASS_SET,
+    canonical_169_hand_classes,
+    parse_range_file,
+)
 
 
 @dataclass(frozen=True)
@@ -220,7 +224,7 @@ def sample_spot(
         ValueError: if ``hero_hand_class`` isn't among the 169 canonical
             classes.
     """
-    if hero_hand_class not in canonical_169_hand_classes():
+    if hero_hand_class not in CANONICAL_169_HAND_CLASS_SET:
         raise ValueError(
             f"unknown hand_class {hero_hand_class!r} "
             f"(expected one of the 169 canonical classes)"

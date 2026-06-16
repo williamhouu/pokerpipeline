@@ -140,22 +140,13 @@ from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E40
 
 # Map admin-panel model-radio labels to Anthropic API model identifiers.
 # Display strings stay human-readable; the API call needs the ID string.
-# Opus 4.7 first = the default everywhere (June 2026): near-Fable prose at
-# half the price. Fable 5 stays selectable for maximum quality (adaptive
-# thinking + max effort are applied automatically by the pipeline).
+# Opus 4.7 first = the default everywhere (June 2026) and the production
+# model for every batch. Sonnet 4.6 is the cheap/fast option for iterating
+# on prompts before committing to a real batch.
 _MODEL_LABEL_TO_API: dict[str, str] = {
     "Opus 4.7 (high fidelity, the default)": "claude-opus-4-7",
-    "Fable 5 (best quality, 2× Opus price)": "claude-fable-5",
     "Sonnet 4.6 (cheapest, fastest)": "claude-sonnet-4-6",
 }
-
-# One-line note shown wherever Fable 5 is selectable: it has no temperature
-# control (the pipeline drops the param) and self-manages its reasoning.
-_FABLE_NOTE = (
-    "Fable 5 ignores the temperature setting (the API removed it) and runs "
-    "with adaptive thinking at max effort automatically — the "
-    "highest-quality configuration."
-)
 
 # Where preflop generation writes its CSV output. Sibling of test_output/
 # tier1_consolidated.csv but kept in its own subdir so the Browse page's
@@ -1142,12 +1133,9 @@ def render_generate_page() -> None:
             "Model",
             options=list(_MODEL_LABEL_TO_API),
             index=0,
-            help="Opus 4.7 is the default (near-Fable prose at half the "
-            "price); Fable 5 for the highest-quality explanations, Sonnet 4.6 "
+            help="Opus 4.7 is the default (the production model); Sonnet 4.6 "
             "for cheap experimentation.",
         )
-        if "Fable" in model:
-            st.caption(_FABLE_NOTE)
     # (A "Questions per API call" selector used to sit here -- it was never
     # wired to anything. Generation is one question per API call by design:
     # per-spot validators + retries need surgical failures, and prompt
@@ -1158,11 +1146,8 @@ def render_generate_page() -> None:
             help="Show what would be generated without spending API tokens.",
         )
 
-    # Estimated cost (rough per-question figures by model tier; Fable 5 is
-    # 2x Opus list price plus thinking tokens).
-    if "Fable" in model:
-        est_cost_per_q = 0.45
-    elif model.startswith("Opus"):
+    # Estimated cost (rough per-question figures by model tier).
+    if model.startswith("Opus"):
         est_cost_per_q = 0.15
     else:
         est_cost_per_q = 0.08
@@ -1780,8 +1765,6 @@ def _render_generate_page_preflop() -> None:
             index=0,  # Opus 4.7 -- the default model
             key="preflop_model",
         )
-        if "Fable" in _model:
-            st.caption(_FABLE_NOTE)
     # (A "Questions per API call" selector used to sit here -- it was never
     # wired to anything. Generation is one question per API call by design:
     # per-spot validators + retries need surgical failures, and prompt
@@ -1792,9 +1775,8 @@ def _render_generate_page_preflop() -> None:
             key="preflop_dry_run",
         )
 
-    # Cost estimate (rough per-question by model tier; Fable 5 is 2x Opus
-    # list price plus thinking tokens).
-    cost_per_q = 0.45 if "Fable" in _model else (0.15 if "Opus" in _model else 0.08)
+    # Cost estimate (rough per-question by model tier).
+    cost_per_q = 0.15 if "Opus" in _model else 0.08
     est_cost = total * cost_per_q
     st.info(
         f"**Estimated**: {total} questions · ~${est_cost:.2f} · "
@@ -2088,7 +2070,11 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     )
 
     try:
-        jobs.start_job(
+        # Subprocess (not thread): batch generation runs in its own
+        # interpreter so it never contends with the Streamlit UI for the
+        # GIL. All kwargs below are picklable; the child re-creates the
+        # Anthropic client itself from ANTHROPIC_API_KEY in the env.
+        jobs.start_subprocess_job(
             generate_preflop_batch,
             label=label,
             pack=pack,
@@ -2500,6 +2486,11 @@ def _render_active_job_progress() -> None:
         f"job id `{job.id}` · elapsed {job.elapsed_seconds:.0f}s · "
         "this keeps running if you switch tabs."
     )
+    if job.cancellable and st.button(
+        "⛔ Cancel batch", key=f"cancel_job_{job.id}"
+    ):
+        if jobs.request_cancel_current_job():
+            st.warning("Cancelling… the batch will stop in a moment.")
 
 
 def _render_preflop_job_panel() -> None:
@@ -2538,6 +2529,16 @@ def _render_preflop_job_panel() -> None:
                 "Configure and click GENERATE BATCH below to run another."
             )
             if st.button("Hide last result", key=f"clear_job_{job.id}"):
+                jobs.clear_current_job()
+                st.rerun()
+        elif job.status is jobs.JobStatus.CANCELLED:
+            st.warning(f"**⛔ Batch cancelled:** {job.label}")
+            st.caption(
+                f"Stopped after {job.elapsed_seconds:.0f}s. The batch writes "
+                "its CSV only when it finishes, so a cancelled run saves "
+                "nothing — start a new batch when ready."
+            )
+            if st.button("Dismiss", key=f"dismiss_cancel_{job.id}"):
                 jobs.clear_current_job()
                 st.rerun()
         else:  # FAILED
@@ -4622,11 +4623,6 @@ def render_compare_page() -> None:
             format_func=_short_lbl,
             key="cmp_model_b",
         )
-        if "Fable" in model_a_label or "Fable" in model_b_label:
-            st.caption(
-                "Fable 5 has no temperature control, so 'deterministic' runs "
-                "may still vary slightly in wording."
-            )
     band_low, band_high = difficulty_bands[preset]
 
     o1, o2 = st.columns(2)
@@ -5354,7 +5350,7 @@ def render_prompt_page() -> None:
   banned phrases, archetype framing, the May 2026 Ryan-feedback fixes.
   Treat big rewrites as research, not casual editing.
 - **Iterate cheap.** Experiment on Sonnet 4.6 (the cheap tier) and only
-  validate the winners on Fable 5 (the production model).
+  validate the winners on Opus 4.7 (the production model).
 - **The library is gitignored** -- copy prompts you want to keep across
   machines somewhere safe.
         """
@@ -5507,7 +5503,7 @@ _PLO_DIFFICULTY_BANDS = {
     "Mixed": (400, 3200),
 }
 # Opus first = the default in every PLO picker (Generate + both Compare sides).
-_PLO_MODELS = ["claude-opus-4-7", "claude-fable-5", "claude-sonnet-4-6"]
+_PLO_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6"]
 
 # --- PLO Generate settings persistence ---------------------------------------
 # The page's widget state is snapshotted to disk when a batch launches and
@@ -5643,7 +5639,6 @@ def _seed_plo_generate_settings() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 _PLO_MODEL_NAMES = {
-    "claude-fable-5": "Fable 5 (best quality, 2x Opus price)",
     "claude-opus-4-7": "Opus 4.7 (high fidelity)",
     "claude-sonnet-4-6": "Sonnet 4.6 (cheapest, fastest)",
 }
@@ -5951,19 +5946,15 @@ def render_plo_generate_page() -> None:
         key="plo_gen_model",
         format_func=lambda m: _PLO_MODEL_NAMES.get(m, m),
     )
-    _is_fable = "fable" in model
     temperature = ms2.slider(
         "Temperature",
         0.0,
         1.0,
         step=0.05,
         key="plo_gen_temperature",
-        disabled=_is_fable,
         help="Higher = more varied prose. 0.6 is a good start with no "
-        "examples. Fable 5 has no temperature control (ignored).",
+        "examples. (Opus ignores temperature; it affects Sonnet.)",
     )
-    if _is_fable:
-        st.caption(_FABLE_NOTE)
     compute_eq = st.checkbox(
         "Compute hand equity for the explanation (~1s/spot; real generate only)",
         key="plo_gen_compute_eq",
@@ -5973,9 +5964,8 @@ def render_plo_generate_page() -> None:
         "equity is ~60x heavier than Hold'em). The preview is always "
         "equity-off regardless.",
     )
-    # Rough per-question estimates by model tier (Fable 5 = 2x Opus list
-    # price plus thinking tokens).
-    _cost_per_q = 0.45 if "fable" in model else (0.15 if "opus" in model else 0.08)
+    # Rough per-question estimates by model tier.
+    _cost_per_q = 0.15 if "opus" in model else 0.08
     st.info(
         f"**Estimated**: {int(count)} questions · "
         f"~${int(count) * _cost_per_q:.2f} · {_matching:,} nodes available"
@@ -6907,7 +6897,7 @@ def render_plo_compare_page() -> None:
     with s3:
         # Per-side models: same cost as a single-model compare (still two
         # batches) and it unlocks model-vs-model A/B -- same spots, same
-        # prompt, e.g. Fable 5 vs Opus 4.7.
+        # prompt, e.g. Opus 4.7 vs Sonnet 4.6.
         _short_model = lambda m: _PLO_MODEL_NAMES.get(m, str(m)).split(" (")[0]  # noqa: E731
         model_a = st.selectbox(
             "Model A",
@@ -6923,11 +6913,6 @@ def render_plo_compare_page() -> None:
             format_func=_short_model,
             key="plo_cmp_model_b",
         )
-        if "fable" in model_a or "fable" in model_b:
-            st.caption(
-                "Fable 5 has no temperature control, so A/B runs may vary "
-                "slightly in wording between reruns."
-            )
     band_low, band_high = _PLO_DIFFICULTY_BANDS[preset]
 
     o1, o2 = st.columns(2)

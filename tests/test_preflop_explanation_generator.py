@@ -208,10 +208,10 @@ def _mock_client(responses: list[str]) -> SimpleNamespace:
         *,
         model: str,
         max_tokens: int,
-        temperature: float | None = None,  # Fable/Opus 4.x dropped this kwarg
+        temperature: float | None = None,  # Opus 4.x dropped this kwarg
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
-        **_extra: Any,  # thinking / output_config (added for Fable 5)
+        **_extra: Any,  # defensively swallow any future per-model kwargs
     ) -> SimpleNamespace:
         calls.append(
             {"model": model, "system": system, "messages": messages,

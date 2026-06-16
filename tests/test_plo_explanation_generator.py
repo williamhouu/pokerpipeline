@@ -275,7 +275,7 @@ def test_villain_action_is_a_bb_size_not_a_percent():
 
 
 def test_extract_text_skips_thinking_blocks():
-    # Fable 5 / adaptive thinking: the response starts with thinking block(s)
+    # A thinking-enabled model starts its response with thinking block(s)
     # (no .text attribute) before the text block. _extract_text must scan,
     # not take content[0].
     from types import SimpleNamespace

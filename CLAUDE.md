@@ -81,10 +81,10 @@ Each layer is a Python module with clear inputs and outputs:
    must trace back to here. See "Concept tags" below.
 6. **Explanation Generator** (`pipeline/explanation_generator.py`) — the **only**
    layer that calls an external LLM. One Anthropic API call per spot (Claude
-   Fable 5 `claude-fable-5` by default since June 2026 — run with adaptive
-   thinking + `effort: max` automatically by `call_messages_create`, which also
-   drops `temperature` for Fable/Opus-4.x models that reject it; Opus 4.7 and
-   Sonnet 4.6 selectable in the admin panel); reads `ANTHROPIC_API_KEY` from the
+   Opus 4.7 `claude-opus-4-7` by default since June 2026 — the production
+   model for every batch; `call_messages_create` drops `temperature` for
+   Opus 4.x models that reject it. Sonnet 4.6 is selectable in the admin
+   panel for cheap prompt iteration); reads `ANTHROPIC_API_KEY` from the
    environment. Inputs: a populated SpotData, the 8 voice rules distilled from
    the gold examples in `docs/output_format_examples.xlsx` Sheet 2, the brief's
    banned-phrase list, and ~8 in-context gold examples. Output: a

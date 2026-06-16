@@ -93,15 +93,7 @@ def combo_str_to_hand_class(combo: str) -> str:
 _RYAN_PIVOT_ORDER = "A23456789TJQK"
 
 
-def canonical_169_hand_classes() -> list[str]:
-    """The 169 preflop hand-class labels in Ryan's pack canonical ordering.
-
-    Used by Layer 8's ip_range / oop_range CSV columns (May 2026 Ryan ask)
-    so the serialized order matches the team's existing preflop pack format
-    -- enables future UI to consume both interchangeably without re-sorting.
-
-    Total = 25 (A row) + 23 (2) + 21 (3) + ... + 1 (K) = 169.
-    """
+def _build_canonical_169_hand_classes() -> list[str]:
     rank_values = {r: i for i, r in enumerate(_RANKS)}
     classes: list[str] = []
     for i, pivot in enumerate(_RYAN_PIVOT_ORDER):
@@ -112,6 +104,36 @@ def canonical_169_hand_classes() -> list[str]:
             classes.append(high + low + "s")
             classes.append(high + low + "o")
     return classes
+
+
+# The 169 labels are a fixed constant -- build them ONCE at import. This used
+# to be rebuilt on every canonical_169_hand_classes() call, which a generation
+# run hits millions of times (the per-spot membership check in
+# spot_sampler.sample_spot, plus the per-node enumeration loop): ~180s of pure
+# list-building per batch on the 9-max pack. Built once here; the public
+# function hands back a fresh copy (callers may treat the result as owned and
+# mutable), and hot-path membership tests use the frozenset for O(1) lookup.
+_CANONICAL_169_HAND_CLASSES: tuple[str, ...] = tuple(
+    _build_canonical_169_hand_classes()
+)
+CANONICAL_169_HAND_CLASS_SET: frozenset[str] = frozenset(
+    _CANONICAL_169_HAND_CLASSES
+)
+
+
+def canonical_169_hand_classes() -> list[str]:
+    """The 169 preflop hand-class labels in Ryan's pack canonical ordering.
+
+    Used by Layer 8's ip_range / oop_range CSV columns (May 2026 Ryan ask)
+    so the serialized order matches the team's existing preflop pack format
+    -- enables future UI to consume both interchangeably without re-sorting.
+
+    Total = 25 (A row) + 23 (2) + 21 (3) + ... + 1 (K) = 169. Returns a
+    fresh list each call (safe to mutate); the order is a module-level
+    constant computed once at import (see :data:`CANONICAL_169_HAND_CLASS_SET`
+    for O(1) membership tests).
+    """
+    return list(_CANONICAL_169_HAND_CLASSES)
 
 
 def aggregate_combo_range_to_classes(combo_range: dict[str, float],
@@ -319,6 +341,7 @@ def _format_weight(w: float) -> str:
 
 
 __all__ = [
+    "CANONICAL_169_HAND_CLASS_SET",
     "CARD_COUNT",
     "HAND_COUNT",
     "aggregate_combo_range_to_classes",

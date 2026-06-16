@@ -48,11 +48,10 @@ from pipeline.fact_extractor.archetypes import (
 )
 from pipeline.fact_extractor.spot_data import SpotData
 
-# Default Anthropic model. Opus 4.7 is the default (June 2026, the team's call):
-# near-Fable prose at half Fable's price. Callers (admin panel, scripts) can
-# override `model`: Fable 5 (a tier above Opus, 2x price, adaptive thinking +
-# max effort applied automatically) for the highest-quality prose, Sonnet 4.6
-# as the cheap/fast option for iterating on prompts before a real batch.
+# Default Anthropic model. Opus 4.7 is the default (June 2026, the team's
+# call) and the production model for every batch. Callers (admin panel,
+# scripts) can override `model` with Sonnet 4.6 as the cheap/fast option for
+# iterating on prompts before committing to a real batch.
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
 DEFAULT_MAX_TOKENS = 2000                  # 4 short options + a multi-paragraph explanation
@@ -62,43 +61,23 @@ GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"
 # Anthropic API returns 400 invalid_request_error if you include
 # `temperature` when calling any of these. We drop the param at call time
 # and let the model use its default sampling. Add new entries as
-# deprecations land. (Fable 5 and Opus 4.7+ remove top_p/top_k too -- we
-# never send those.)
+# deprecations land. (Opus 4.x also removes top_p/top_k -- we never send
+# those.)
 MODELS_WITHOUT_TEMPERATURE: frozenset[str] = frozenset({
-    "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-5",
 })
-
-# Fable 5 quality configuration. Fable 5 supports adaptive thinking (the
-# model decides when/how much to reason before writing) and the `effort`
-# parameter; "max" is the highest-quality setting -- we run it there since
-# explanation quality is the whole point of paying for this tier. Thinking
-# tokens share the `max_tokens` budget, so the cap gets a higher floor (a
-# cap, not a spend -- unused headroom costs nothing).
-_FABLE_MODEL_PREFIX = "claude-fable"
-_FABLE_THINKING = {"type": "adaptive"}
-_FABLE_OUTPUT_CONFIG = {"effort": "max"}
-_FABLE_MIN_MAX_TOKENS = 16000
 
 
 def call_messages_create(client, *, model, max_tokens, temperature, system, messages):
     """Wrapper around ``client.messages.create`` that handles per-model
     parameter compatibility.
 
-    Two quirks today:
-
-    1. Fable 5 / Opus 4.x removed ``temperature`` -- including it 400s the
-       whole batch. Dropped for models in :data:`MODELS_WITHOUT_TEMPERATURE`
-       (passed through unchanged for Sonnet etc.).
-    2. Fable 5 gets the maximum-quality configuration: adaptive thinking +
-       ``effort: max`` (we pay for the top tier precisely for explanation
-       quality, so it runs at the ceiling). Thinking shares the
-       ``max_tokens`` budget, so the cap is floored at
-       :data:`_FABLE_MIN_MAX_TOKENS` (a cap, not a spend). Note Fable 5
-       also 400s on an explicit ``thinking: disabled`` -- for non-Fable
-       models we simply omit the param, which is valid everywhere.
+    One quirk today: Opus 4.x removed ``temperature`` -- including it 400s
+    the whole batch. We drop the param for models in
+    :data:`MODELS_WITHOUT_TEMPERATURE` (passed through unchanged for Sonnet
+    etc.).
 
     Lives here (not in batch.py or per-call site) so every Layer 6
     entry point -- postflop, preflop full, preflop answer-only, PLO --
@@ -113,10 +92,6 @@ def call_messages_create(client, *, model, max_tokens, temperature, system, mess
     }
     if model not in MODELS_WITHOUT_TEMPERATURE:
         kwargs["temperature"] = temperature
-    if model.startswith(_FABLE_MODEL_PREFIX):
-        kwargs["thinking"] = dict(_FABLE_THINKING)
-        kwargs["output_config"] = dict(_FABLE_OUTPUT_CONFIG)
-        kwargs["max_tokens"] = max(max_tokens, _FABLE_MIN_MAX_TOKENS)
     return client.messages.create(**kwargs)
 GOLD_XLSX = (Path(__file__).resolve().parent.parent
              / "docs" / "output_format_examples.xlsx")

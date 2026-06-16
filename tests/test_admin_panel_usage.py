@@ -36,16 +36,6 @@ def test_cost_opus_basic() -> None:
     assert cost == pytest.approx(30.0)
 
 
-def test_cost_fable_basic() -> None:
-    """1M input + 1M output on Fable 5 = $10 + $50 = $60 (2x Opus)."""
-    cost = usage.compute_cost_usd(
-        model="claude-fable-5",
-        input_tokens=1_000_000,
-        output_tokens=1_000_000,
-    )
-    assert cost == pytest.approx(60.0)
-
-
 def test_cost_with_cache_tokens_sonnet() -> None:
     """Cache write is 1.25x input; cache read is 0.1x input.
     For Sonnet ($3/M input):
