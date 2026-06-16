@@ -2677,6 +2677,96 @@ def _render_preflop_failures(failures: list) -> None:
             st.caption(f"_node_id: `{failure.node_id}`_")
 
 
+def _render_review_failures(
+    csv_path: Path, present_keys: set[tuple[str, str]]
+) -> None:
+    """Routed-to-human-review queue on the Review page.
+
+    Lists the spots a validator rejected during generation (persisted in the
+    batch's ``.meta.json`` -- they never reached the CSV), each with the full
+    deterministic context, the LLM's rejected explanation, and the rejection
+    reason. A one-click **Approve into batch** appends the spot KEEPING that
+    exact explanation (see :func:`review.promote_failure`) and marks it
+    approved. ``present_keys`` = the (solver_reference, User Cards) already in
+    the CSV, so an already-promoted spot reads as added, not offered again.
+    """
+    failures = review.load_failures(csv_path)
+    if not failures:
+        return
+    n = len(failures)
+    with st.expander(
+        f"⚠️ Routed to human review — {n} spot{'s' if n != 1 else ''} "
+        "(rejected during generation, not in the CSV)",
+        expanded=False,
+    ):
+        st.caption(
+            "A validator rejected these during generation, so they never made "
+            "the CSV. Read each one -- if the explanation is good (validators "
+            "do misfire), **Approve into batch** appends it KEEPING this exact "
+            "text and marks it approved, so it flows into the approved pool."
+        )
+        for i, f in enumerate(failures):
+            pos = str(f.get("hero_position", ""))
+            hc = str(f.get("hand_class", ""))
+            err = str(f.get("error_message", "")).strip()
+            err_short = (
+                err.split("last error:", 1)[-1].strip().replace("\n", " ")[:90]
+            )
+            with st.container(border=True):
+                st.markdown(f"**#{i + 1}**  {pos} {hc}  ·  _{err_short}_")
+                qtext = str(f.get("question_text", ""))
+                if qtext:
+                    st.text(qtext)
+                opts = f.get("options") or []
+                correct = str(f.get("correct_answer", ""))
+                if isinstance(opts, list):
+                    for j, opt in enumerate(opts, start=1):
+                        if opt:
+                            mark = "✅" if opt == correct else "·"
+                            st.text(f"  {mark} option {j}: {opt}")
+                freqs = f.get("action_frequencies") or {}
+                if isinstance(freqs, dict) and freqs:
+                    pretty = ", ".join(
+                        f"{k}: {float(v):.0%}"
+                        for k, v in sorted(freqs.items(), key=lambda kv: -kv[1])
+                        if float(v) > 0
+                    )
+                    if pretty:
+                        st.caption(f"_Solver strategy at this node: {pretty}_")
+                fe = str(f.get("failed_explanation", ""))
+                if fe:
+                    st.markdown("**LLM's explanation (this is what gets kept):**")
+                    st.info(fe)
+                st.markdown("**Why it was rejected:**")
+                st.error(err)
+
+                row = f.get("row")
+                row_dict = row if isinstance(row, dict) else {}
+                row_key = (
+                    str(row_dict.get("solver_reference", "")),
+                    str(row_dict.get("User Cards", "")),
+                )
+                if not row_dict:
+                    st.caption(
+                        "_No rebuilt row for this one (a pre-LLM failure), so "
+                        "it can't be one-click added -- re-generate it on the "
+                        "Generate page if you want it._"
+                    )
+                elif row_key in present_keys:
+                    st.success("✅ Already added to this batch.")
+                elif st.button(
+                    "➕ Approve into batch (keep this explanation)",
+                    key=f"promote::{csv_path.name}::{i}",
+                    type="primary",
+                ):
+                    ok, msg = review.promote_failure(csv_path, f)
+                    if ok:
+                        st.success(f"Added: {msg}")
+                        st.rerun()
+                    else:
+                        st.warning(msg)
+
+
 def _render_preflop_result_ui(result: BatchResult) -> None:
     """Render the per-batch result UI: cost, summary, failures, download, preview.
 
@@ -3318,6 +3408,17 @@ def render_review_page() -> None:
         help="The full batch CSV, with any explanation edits you've saved baked in.",
     )
 
+    # Routed-to-human-review queue: spots a validator rejected during
+    # generation (persisted in the batch meta). Surfaced here so they're no
+    # longer invisible once you leave the Generate page -- with one-click
+    # promote that keeps the rejected explanation. present_keys lets an
+    # already-added spot read as added instead of offering the button again.
+    _present_keys = {
+        (_cell(r, "solver_reference"), _cell(r, "User Cards"))
+        for _, r in df.iterrows()
+    }
+    _render_review_failures(csv_path, _present_keys)
+
     st.divider()
 
     # --- per-file navigation state ---
@@ -3374,6 +3475,38 @@ def render_review_page() -> None:
                 "Current grade: "
                 + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
             )
+
+        # Soft-flag visibility: a row that SHIPPED but a soft validator or the
+        # claim checker warned on (validation_status "flagged") -- surface the
+        # warning here so it's as clear on Review as it was on Generate. The
+        # warning text lives in the meta question record.
+        _vstatus = _cell(row, "validation_status")
+        if _vstatus in ("flagged", "needs_review"):
+            _qmeta = (
+                review.meta_question_for(
+                    _meta,
+                    user_cards=_cell(row, "User Cards"),
+                    solver_reference=_cell(row, "solver_reference"),
+                )
+                if _meta
+                else None
+            )
+            _warn_bits: list[str] = []
+            if _qmeta:
+                _warn_bits += [str(w) for w in (_qmeta.get("validator_warnings") or [])]
+                _warn_bits += [str(w) for w in (_qmeta.get("claim_check_issues") or [])]
+            _badge = (
+                "🟠 Flagged by a soft validator"
+                if _vstatus == "flagged"
+                else "⚠️ Marked needs-review"
+            )
+            if _warn_bits:
+                st.warning(
+                    f"**{_badge}** — shipped to the CSV but flagged:\n\n"
+                    + "\n".join(f"- {w}" for w in _warn_bits)
+                )
+            else:
+                st.warning(f"**{_badge}.**")
 
         ctx = _cell(row, "Context")
         if ctx:
@@ -4072,7 +4205,23 @@ def _render_equity_bar(row: dict[str, str]) -> None:
         return v if 0.0 <= v <= 100.0 else None
 
     hand_eq, range_eq, be = _pct("hero_equity"), _pct("range_equity"), _pct("pot_odds")
-    if hand_eq is None and range_eq is None:
+
+    # Multi-way all-in: the hero_equity COLUMN is the HEADS-UP number (vs one
+    # opponent), which overstates a multi-way pot. stat_notes carry the FIELD
+    # equity (beat everyone) under a "(multi-way)" label -- prefer it here so
+    # the bar isn't misleading, and relabel.
+    from pipeline.preflop.stat_notes import parse_stat_notes  # noqa: PLC0415
+
+    multiway_eq: float | None = None
+    for sn in parse_stat_notes(row.get("stat_notes", "")):
+        if sn.get("key") == "hero_equity" and "multi-way" in sn.get("label", "").lower():
+            try:
+                multiway_eq = float((sn.get("value", "") or "").rstrip("%"))
+            except ValueError:
+                multiway_eq = None
+            break
+
+    if hand_eq is None and range_eq is None and multiway_eq is None:
         return
 
     # Name the seat we're measured against (the most-recent raiser) so a
@@ -4100,6 +4249,24 @@ def _render_equity_bar(row: dict[str, str]) -> None:
             f'font-size:0.8em;color:#fff;font-weight:600;">{val:.0f}%</div>'
             f"{marker}</div>"
         )
+
+    if multiway_eq is not None:
+        # Multi-way all-in: show the field equity (beat everyone) and skip the
+        # heads-up range bar -- it's apples-to-oranges next to a field number.
+        html = _bar("Your equity vs the WHOLE field (you must beat everyone)", multiway_eq)
+        if be is not None:
+            html += (
+                f'<div style="font-size:0.75em;color:#D62728;margin-top:3px;">'
+                f"Red line = {be:.0f}% break-even to call</div>"
+            )
+        html += (
+            '<div style="font-size:0.75em;color:#444;margin-top:4px;">'
+            "Multi-way all-in: this is your equity against everyone still in. "
+            "Heads-up against any one of them you'd have more, but here you "
+            "have to beat them all on the same board.</div>"
+        )
+        st.markdown(html, unsafe_allow_html=True)
+        return
 
     html = _bar(f"Your hand vs {villain} range", hand_eq)
     html += _bar(f"Your whole range vs {villain} range", range_eq)
@@ -4320,6 +4487,18 @@ def _render_stat_panel(row: dict[str, str]) -> None:
         for note in notes:
             st.markdown(f"**{note.get('label', '')}** · {note.get('value', '')}")
             st.caption(note.get("note", ""))
+        # Plain-English methodology, shown only on multi-way all-ins (where a
+        # multi-way equity note is present) so it explains the number in context
+        # without cluttering ordinary heads-up spots.
+        if any("multi-way" in n.get("label", "").lower() for n in notes):
+            st.caption(
+                "ℹ️ **Heads-up vs multi-way equity:** heads-up equity is your "
+                "chance to win against ONE opponent's range. Multi-way equity "
+                "is your chance against EVERYONE all-in at once — always lower, "
+                "because each extra player is another hand that can beat you. "
+                "On a multi-way all-in we use the multi-way number, since you "
+                "have to beat them all to win the pot."
+            )
 
 
 # --- page: Compare (head-to-head prompt A/B) --------------------------------

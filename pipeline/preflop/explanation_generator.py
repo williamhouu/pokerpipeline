@@ -176,12 +176,14 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "rule only applies when you actually name specific cards.",
     # 10. Name specific villain hand classes (preflop analogue of postflop rule 10)
     "When the explanation discusses villain's range, name 2 to 3 SPECIFIC "
-    "hand classes from `villain_stats.top_combos` in the SOLVER DATA "
-    "block. Use the 169-class labels (e.g. \"villain's 3-bet range here is "
-    'dense with AA, KK, and AKs at full weight, plus some QQ and AKo"). '
-    "Do not describe villain's range abstractly with only generic phrases "
-    'like "value hands" or "top of range" -- anchor abstract phrases '
-    "to actual hand classes from the data block.",
+    "hand classes from `villain_stats.most_common_combos` in the SOLVER "
+    "DATA block -- these are the hands villain is MOST LIKELY to hold "
+    "(ranked by how often they show up: combos times frequency), which is "
+    "not the same as their strongest hands. Use the 169-class labels (e.g. "
+    "\"villain's 3-bet range here is weighted toward AKo, AKs, and the big "
+    'pairs"). Do not describe villain\'s range abstractly with only generic '
+    'phrases like "value hands" or "top of range" -- anchor abstract '
+    "phrases to actual hand classes from the data block.",
     # 11. One villain's range only; everyone else is actions-only (June 2026
     # audit: the model invented other players' holdings in multiway pots and
     # claimed folded players could still act)
@@ -248,6 +250,21 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "it only does these things some of the time. Keep the verdict and your "
     "own holdings stated plainly; this hedge is only for what a RANGE does "
     "to your hand, not for your action or your cards.",
+    # 18. Multi-way equity: field vs per-opponent depends on all-in or not
+    "When `players_in_pot` lists two or more players, you are in a MULTI-WAY "
+    "pot. You have both `your_hand_equity_vs_whole_field` (your chance to beat "
+    "EVERYONE) and `your_hand_equity_vs_each_opponent` (your equity against "
+    "each player alone, by position). Never present your equity against a "
+    "single opponent as your overall chance to win the pot. WHICH number "
+    "leads depends on `multiway_pot_is_all_in`: if true (everyone is all-in), "
+    "the FIELD number is the decision -- you must beat all of them at "
+    "showdown. If false (e.g. you are SQUEEZING or 3-betting over an open plus "
+    "a caller), your edge is FOLD EQUITY, and the relevant equity is against "
+    "whoever is most likely to continue -- usually the original raiser, from "
+    "`your_hand_equity_vs_each_opponent` -- because the caller's capped range "
+    "folds often and you are usually heads-up when called; treat the "
+    "whole-field showdown number as context, not the decision, and build the "
+    "explanation around the squeeze/3-bet archetype frame.",
 )
 
 
@@ -736,9 +753,12 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
             "action": _villain_action_label(facts) or v.action_label,
             "weighted_combo_count": round(v.weighted_combo_count, 2),
             "pct_of_dealt_hands": round(v.pct_of_dealt_hands, 2),
-            "top_combos": [
+            # The hands villain is MOST LIKELY to hold, ranked by combo share
+            # (weight x combo count), NOT by weight (see VillainRangeStats):
+            # "what they show up with", not "their strongest hands".
+            "most_common_combos": [
                 {"hand_class": hand_class, "weight": round(weight, 4)}
-                for hand_class, weight in v.top_combos
+                for hand_class, weight in v.most_common_combos
             ],
         }
         # Domination map: which of villain's heaviest in-range classes have
@@ -748,10 +768,37 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         dom = dominating_map(spot.hero_hand_class, [c for c, _ in v.top_combos])
         if dom["dominated_by"] or dom["you_dominate"]:
             out["domination_vs_villain_range"] = dom
-    # Two DISTINCT equity numbers, named unambiguously so the model can't
-    # conflate them: cite hand-equity for "your hand has X%", and use
-    # range-equity only for range-vs-range advantage claims.
-    if facts.hero_equity_vs_villain is not None:
+    # Hand equity. Two cases, named unambiguously so the model can't conflate
+    # them with range equity:
+    #  * MULTI-WAY pot (2+ opponents still in): the heads-up-vs-one-villain
+    #    number overstates it -- hero must beat EVERYONE. Surface the field
+    #    equity (vs all) + the per-opponent breakdown (vs each) + who's in the
+    #    pot, and DROP the single-villain key so the prose can't frame a
+    #    multi-way pot as heads-up. (Voice rule 18.)
+    #  * Heads-up: the single vs-villain number.
+    multiway = (
+        facts.hero_equity_vs_field is not None
+        and len(facts.showdown_opponents) >= 2
+    )
+    if multiway:
+        # All-in vs not changes what the field number MEANS: all-in -> it's
+        # the decision (beat everyone); not all-in (e.g. a squeeze / 3-bet
+        # with a caller) -> it's just "if it all goes in", and fold equity +
+        # equity vs the likely continuer matter more. (Voice rule 18.)
+        all_in_pot = any(
+            a.action_type is PreflopActionType.ALL_IN
+            for a in facts.spot.node.history_before
+        )
+        out["players_in_pot"] = list(facts.showdown_opponents)
+        out["multiway_pot_is_all_in"] = all_in_pot
+        out["your_hand_equity_vs_whole_field"] = round(
+            facts.hero_equity_vs_field, 4
+        )
+        out["your_hand_equity_vs_each_opponent"] = {
+            pos: round(eq, 4) for pos, eq in facts.per_opponent_equity.items()
+        }
+        out["hand_equity_sample_size"] = facts.hero_equity_runouts_used
+    elif facts.hero_equity_vs_villain is not None:
         out["your_hand_equity_vs_villain_range"] = round(
             facts.hero_equity_vs_villain, 4
         )

@@ -20,6 +20,9 @@ def _facts(**kw: object) -> object:
     base = dict(
         break_even_equity=None,
         hero_equity_vs_villain=None,
+        hero_equity_vs_field=None,
+        showdown_opponents=(),
+        per_opponent_equity={},
         hero_range_equity_vs_villain=None,
         ev_gap_bb=None,
         blockers={},
@@ -39,6 +42,63 @@ def _villain(covering=(), coverage_pct=0.0, pct_of_dealt_hands=0.0) -> object:
 
 def _note(facts: object, key: str) -> sn.StatNote | None:
     return next((n for n in sn.build_stat_notes(facts) if n.key == key), None)
+
+
+# --- multi-way all-in equity note -------------------------------------------
+def test_multiway_equity_note_shows_field_and_per_opponent_breakdown() -> None:
+    """2+ players in the pot -> the equity row names WHO else is in, breaks
+    down equity vs each one, and shows the field number as the headline. The
+    fake carries no all-in in its (absent) history, so it reads as the
+    not-all-in (squeeze-style) framing -> fold equity."""
+    facts = _facts(
+        hero_equity_vs_field=0.38,     # vs the whole field (the truth)
+        per_opponent_equity={"BTN": 0.42, "HJ": 0.55},
+        showdown_opponents=("BTN", "HJ"),
+    )
+    note = _note(facts, "hero_equity")
+    assert note is not None
+    assert "multi-way" in note.label.lower()
+    assert note.value == "38%"             # field equity is the headline value
+    assert "BTN, HJ" in note.note          # names who else is in the pot
+    assert "BTN 42%" in note.note          # per-opponent breakdown
+    assert "HJ 55%" in note.note
+    assert "fold equity" in note.note.lower()   # not-all-in -> fold-equity frame
+
+
+def test_field_equity_note_all_in_frames_beat_everyone() -> None:
+    """All-in multi-way: the field number IS the decision -- beat everyone."""
+    note = sn._hero_field_equity_note(
+        0.33, {"BTN": 0.44, "HJ": 0.64}, ("BTN", "HJ"), is_all_in=True
+    )
+    assert note.value == "33%"
+    assert "BTN 44%" in note.note and "HJ 64%" in note.note
+    assert "beat all 2" in note.note.lower()
+    assert "fold equity" not in note.note.lower()
+
+
+def test_field_equity_note_not_all_in_frames_fold_equity() -> None:
+    """Squeeze / non-all-in multi-way: field is context, edge is fold equity
+    and equity vs whoever continues -- not beating everyone at showdown."""
+    note = sn._hero_field_equity_note(
+        0.33, {"BTN": 0.44, "HJ": 0.64}, ("BTN", "HJ"), is_all_in=False
+    )
+    assert note.value == "33%"
+    assert "BTN 44%" in note.note
+    assert "fold equity" in note.note.lower()
+    assert "continues" in note.note.lower()
+
+
+def test_heads_up_allin_uses_plain_equity_note() -> None:
+    """One opponent -> not multi-way -> the standard heads-up equity row."""
+    facts = _facts(
+        hero_equity_vs_villain=0.44,
+        hero_equity_vs_field=0.44,
+        showdown_opponents=("BTN",),       # only one -> heads-up
+    )
+    note = _note(facts, "hero_equity")
+    assert note is not None
+    assert "multi-way" not in note.label.lower()
+    assert note.value == "44%"
 
 
 # --- column formatters ------------------------------------------------------

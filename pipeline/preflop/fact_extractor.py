@@ -31,6 +31,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from pipeline.preflop.equity import (
+    preflop_equity_vs_field,
     preflop_equity_vs_range,
     preflop_range_vs_range_equity,
 )
@@ -100,8 +101,20 @@ class VillainRangeStats:
             percentage in [0, 100]. The "X% of hands" number coaches
             quote.
         top_combos: tuple of ``(hand_class, weight)`` pairs, descending
-            by weight, length up to ``DEFAULT_TOP_COMBO_COUNT``. Layer 6's
-            data block reads this.
+            by WEIGHT (ties broken premium-first), length up to
+            ``DEFAULT_TOP_COMBO_COUNT``. Internal use only -- the input to
+            the domination map (where a full-weight AA/KK must surface even
+            though it's only 6 combos) and the exploit/capped-range checks.
+            NOT what Layer 6 names as "villain's likely hands" -- use
+            ``most_common_combos`` for that.
+        most_common_combos: tuple of ``(hand_class, weight)`` pairs ranked
+            by COMBO SHARE (weight x combo count), so the hands villain is
+            most LIKELY to actually hold lead -- AKo's 12 combos outrank a
+            pair's 6. Length up to ``DEFAULT_TOP_COMBO_COUNT``. This is the
+            LLM-facing "most common combos" the SOLVER DATA block reads;
+            distinct from ``top_combos`` (weight-sorted) which would mislead
+            ("AA, A5s, A8s, ..." on a wide range -- all full weight, premium-
+            and alpha-first, but not the bulk of the range).
         top_combos_covering: the most-weighted hand classes (by COMBO
             share, so AKo's 12 combos outweigh AKs's 4) needed to cover
             ~two-thirds of the range, capped at 6 / floored at 3. The
@@ -118,6 +131,7 @@ class VillainRangeStats:
     weighted_combo_count: float
     pct_of_dealt_hands: float
     top_combos: tuple[tuple[str, float], ...] = ()
+    most_common_combos: tuple[tuple[str, float], ...] = ()
     top_combos_covering: tuple[str, ...] = ()
     top_combos_coverage_pct: float = 0.0
 
@@ -137,9 +151,35 @@ class PreflopFacts:
     # there is no clear villain (e.g. hero is first to act preflop).
     villain_stats: VillainRangeStats | None = None
 
-    # Hero hand's equity vs villain's range, in [0.0, 1.0]. None if no
-    # villain or equity couldn't be computed.
+    # Hero hand's equity vs the PRIMARY villain's range, in [0.0, 1.0]. None
+    # if no villain or equity couldn't be computed. NOTE: this is a HEADS-UP
+    # number -- hero vs the single most-recent raiser. On a MULTI-WAY all-in
+    # (two or more players already all-in / called the jam) it OVERSTATES
+    # hero's real chance, because hero must beat everyone, not just the
+    # shover -- use hero_equity_vs_field for the true equity-to-call there.
     hero_equity_vs_villain: float | None = None
+
+    # Hero hand's equity (pot share) vs the FULL field of all-in opponents,
+    # in [0.0, 1.0] -- the CORRECT equity to call when 2+ players are all-in
+    # at showdown (hero must out-rank ALL of them). None on heads-up spots
+    # (where hero_equity_vs_villain already is the right number) and when it
+    # couldn't be computed. See showdown_opponents for who's in the field.
+    hero_equity_vs_field: float | None = None
+
+    # Positions of every opponent still in the pot with hero (the raiser plus
+    # everyone who called / shoved and hasn't folded), e.g. ``("BTN", "HJ")``.
+    # Length >= 2 means a MULTI-WAY pot (all-in or not) -- hero_equity_vs_field
+    # is the equity vs everyone. Empty on heads-up / first-in spots.
+    showdown_opponents: tuple[str, ...] = ()
+
+    # Per-opponent equity breakdown: ``{position: hero's heads-up equity vs
+    # that opponent's range}``, e.g. ``{"BTN": 0.42, "HJ": 0.55}``. Measured
+    # on the same boards as hero_equity_vs_field (so they're consistent) and
+    # populated alongside it on multi-way pots. Each value is >= the field
+    # number (beating one opponent is easier than beating them all). Empty on
+    # heads-up / first-in spots. Layer 6 uses it to say "X% vs BTN, Y% vs HJ,
+    # Z% against both" instead of pretending the pot is heads-up.
+    per_opponent_equity: dict[str, float] = field(default_factory=dict)
 
     # Sampling-noise estimate on hero_equity_vs_villain (rough ~1-2% at
     # DEFAULT_EQUITY_RUNOUTS). Carried so Layer 6 can avoid claiming
@@ -196,6 +236,41 @@ def identify_villain(
         ):
             return action
     return None
+
+
+def identify_showdown_opponents(
+    node: PreflopDecisionNode,
+) -> list[ParsedAction]:
+    """Every live opponent's last COMMITTING action -- the field hero faces
+    at showdown if they call.
+
+    An opponent is "live" when their MOST RECENT action in the history is a
+    commitment (raise / call / all-in), not a fold. Keying on the last
+    action per position is what makes this correct: a player who raised then
+    folded to a re-jam (the opener folding to a squeeze-jam) drops out, while
+    a player who called the jam stays in. Hero is excluded.
+
+    Each returned ParsedAction is that opponent's last commit, so the caller
+    can resolve the range file at the node where THEY acted (the shover's
+    jamming range, a caller's call-the-jam range, ...). On a multi-way all-in
+    this has length >= 2; heads-up it has length <= 1. This is the multi-way
+    analogue of :func:`identify_villain` (which returns only the single most
+    recent raiser).
+    """
+    hero = node.actor
+    last_by_pos: dict[str, ParsedAction] = {}
+    for action in node.history_before:
+        last_by_pos[action.position] = action  # later action overwrites earlier
+    committed = (
+        PreflopActionType.RAISE,
+        PreflopActionType.CALL,
+        PreflopActionType.ALL_IN,
+    )
+    return [
+        a
+        for pos, a in last_by_pos.items()
+        if pos != hero and a.action_type in committed
+    ]
 
 
 # --- villain range file path -----------------------------------------------
@@ -316,6 +391,24 @@ def compute_villain_range_stats(
     nonzero.sort(key=lambda x: (-x[1], canonical_index.get(x[0], 999)))
     top = tuple(nonzero[:top_n])
 
+    # "Most common combos": the hands villain is most LIKELY to be holding,
+    # ranked by COMBO SHARE (weight x combo count) so a 12-combo offsuit hand
+    # outranks a single 6-combo pair at the same weight. This is what coaches
+    # mean by "what they show up with" -- distinct from `top` above, which
+    # sorts by weight alone and so degenerates to premium-/alpha-first when
+    # most of the range is full weight (e.g. "AA, A5s, A8s, A9s, ATs" on a
+    # wide open). Premium-first tie-break only matters between equal combo
+    # shares. Layer 6's data block reads this; `top` stays internal.
+    most_common = tuple(
+        sorted(
+            nonzero,
+            key=lambda x: (
+                -(x[1] * _combos_in_class(x[0])),
+                canonical_index.get(x[0], 999),
+            ),
+        )[:top_n]
+    )
+
     # Coverage-based digest: rank classes by COMBO share (weight x combos)
     # and take the heaviest until ~COVERAGE_TARGET of the range is covered,
     # bounded by [COVERAGE_FLOOR, COVERAGE_CAP]. Premium-first ties (same
@@ -351,6 +444,7 @@ def compute_villain_range_stats(
         weighted_combo_count=weighted_combos,
         pct_of_dealt_hands=pct,
         top_combos=top,
+        most_common_combos=most_common,
         top_combos_covering=tuple(covering),
         top_combos_coverage_pct=coverage_pct,
     )
@@ -467,10 +561,22 @@ def extract_facts(
         )
         blockers = compute_blockers(spot.hero_card_combo, villain_combos)
         archetype = classify_archetype(spot, villain, hero_eq)
+        # Multi-way field equity. When 2+ opponents are still in the pot (all-in
+        # OR not), hero's heads-up-vs-the-raiser number (hero_eq) overstates the
+        # truth -- hero must beat the WHOLE field. Compute equity vs every
+        # opponent's range, plus the per-opponent breakdown. Done AFTER the
+        # heads-up calc (reusing the same seeded rng) so every existing field
+        # stays byte-identical; only the new fields are added.
+        hero_field_eq, per_opp_eq, showdown_positions = (
+            _compute_multiway_field_equity(spot, pack, rng, equity_runouts)
+        )
         return PreflopFacts(
             spot=spot,
             villain_stats=villain_stats,
             hero_equity_vs_villain=hero_eq,
+            hero_equity_vs_field=hero_field_eq,
+            showdown_opponents=showdown_positions,
+            per_opponent_equity=per_opp_eq,
             hero_equity_runouts_used=equity_runouts,
             hero_range_equity_vs_villain=hero_range_eq,
             blockers=blockers,
@@ -483,6 +589,55 @@ def extract_facts(
             exc,
         )
         return PreflopFacts(spot=spot)
+
+
+def _compute_multiway_field_equity(
+    spot: PreflopSpot,
+    pack: PreflopPack,
+    rng: random.Random,
+    equity_runouts: int,
+) -> tuple[float | None, dict[str, float], tuple[str, ...]]:
+    """Hero's equity vs the FULL field, the per-opponent breakdown, and the
+    field's positions -- on ANY multi-way pot (all-in or not).
+
+    Returns ``(None, {}, ())`` unless 2+ opponents are still in the pot with
+    hero (the raiser plus everyone who called / shoved and hasn't folded). On
+    a heads-up pot (one opponent) ``hero_equity_vs_villain`` is already the
+    right number, so we skip. Returns ``(None, {}, ())`` too if any opponent's
+    range file can't be resolved -- the caller keeps the heads-up number.
+
+    Fires for multi-way all-ins AND non-all-in multi-way pots (3-bet-plus-a-
+    caller, squeezes, ...). On all-in pots the field number IS the decision;
+    on non-all-in pots it is hero's RAW showdown equity (accurate, but
+    postflop play still matters, so the archetype frame -- not this number
+    alone -- drives a non-all-in decision).
+
+    Each opponent's range is the action-conditional range at the node where
+    they last committed (the same source the heads-up path uses for the
+    primary villain). ``n_samples`` scales with ``equity_runouts`` so fast-test
+    mode stays fast, floored so the estimate stays stable.
+    """
+    opponents = identify_showdown_opponents(spot.node)
+    if len(opponents) < 2:
+        return None, {}, ()  # heads-up -> hero_equity_vs_villain is correct
+    opp_ranges: list[dict[str, float]] = []
+    for opp in opponents:
+        try:
+            opp_path = construct_villain_range_path(spot.node, opp, pack)
+        except ValueError:
+            return None, {}, ()
+        if not opp_path.is_file():
+            return None, {}, ()
+        opp_ranges.append(_cached_load_combo_weights(str(opp_path)))
+    field_eq, per_opp = preflop_equity_vs_field(
+        [spot.hero_card_combo[:2], spot.hero_card_combo[2:]],
+        opp_ranges,
+        n_samples=max(1500, equity_runouts * 5),
+        rng=rng,
+    )
+    positions = tuple(opp.position for opp in opponents)
+    per_opp_dict = {pos: per_opp[i] for i, pos in enumerate(positions)}
+    return field_eq, per_opp_dict, positions
 
 
 # --- chunk 2: hero's full range at this node -------------------------------

@@ -333,6 +333,33 @@ def test_no_postflop_on_allin_passes_pot_odds_prose() -> None:
     assert result.is_valid, result.error_message
 
 
+def test_no_postflop_on_allin_allows_negated_phrases() -> None:
+    """The flagged screenshot bug: prose that says there is NO postflop play /
+    NO future streets is CORRECT showdown framing, not a violation. The
+    negation guard must let it pass (it was a false rejection before)."""
+    facts = _facts(archetype="call_allin")
+    generated = _gen(
+        prose="There's no postflop play to save you and there are no future "
+              "streets to navigate; the chips go in now and the hand is "
+              "decided at showdown, so all that matters is the price versus "
+              "your raw equity.")
+    result = validate_no_postflop_on_allin(generated, facts)
+    assert result.is_valid, result.error_message
+
+
+def test_no_postflop_on_allin_still_fails_mixed_negated_and_real() -> None:
+    """A genuine violation isn't laundered by a negated phrase elsewhere:
+    'no future streets' is fine, but 'you have implied odds' (un-negated) in
+    the same prose still fails."""
+    facts = _facts(archetype="call_allin")
+    generated = _gen(
+        prose="There are no future streets, but you still have implied odds "
+              "to chase a flush here.")
+    result = validate_no_postflop_on_allin(generated, facts)
+    assert not result.is_valid
+    assert "implied odds" in result.error_message.lower()
+
+
 def test_no_postflop_on_allin_skips_non_allin_spots() -> None:
     """On a normal (non-all-in) call, 'implied odds' is fine -> validator skips."""
     facts = _facts(archetype="call_for_implied_odds")  # facing a raise, not a jam

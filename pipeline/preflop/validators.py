@@ -428,6 +428,27 @@ _BANNED_ON_ALLIN = (
     "future streets",
 )
 
+# A negation right before a banned phrase flips it into CORRECT all-in framing
+# -- "there's NO postflop play", "there are NO future streets", "NO implied
+# odds" -- which is exactly the pot-odds-vs-equity frame this validator wants,
+# not a violation. We scan a short window before each hit for a negation cue,
+# stopping at sentence punctuation so a negation in a prior clause can't
+# license a real violation. Erring toward ALLOW is deliberate: a false
+# rejection burns a retry and routes a good question to human review (the bug
+# this guard fixes), whereas a genuine "you have implied odds / play postflop"
+# framing carries no negation and still fails. The `n't` arm (no leading word
+# boundary) catches contractions like "isn't"/"aren't"/"won't".
+_ALLIN_NEGATION = re.compile(
+    r"(\b(no|not|never|without|zero|nor|cannot)\b|n't)[^.;:!?]{0,24}$",
+    re.IGNORECASE,
+)
+
+
+def _allin_phrase_is_negated(text: str, phrase_start: int) -> bool:
+    """True if the banned phrase at ``phrase_start`` sits in a negating
+    context -- correct showdown framing ("no postflop play"), not a violation."""
+    return bool(_ALLIN_NEGATION.search(text[:phrase_start]))
+
 
 def validate_no_postflop_on_allin(
     generated: GeneratedExplanation,
@@ -455,7 +476,17 @@ def validate_no_postflop_on_allin(
         return PreflopValidationResult.ok()
 
     text = (generated.answer_explanation or "").lower()
-    hits = [phrase for phrase in _BANNED_ON_ALLIN if phrase in text]
+    # Flag a phrase only when it appears in a NON-negated spot. "There are no
+    # future streets" / "no postflop play to save you" are the correct frame,
+    # not the banned one, so they must not trip this.
+    hits: list[str] = []
+    for phrase in _BANNED_ON_ALLIN:
+        start = text.find(phrase)
+        while start != -1:
+            if not _allin_phrase_is_negated(text, start):
+                hits.append(phrase)
+                break  # one un-negated use is enough to flag this phrase
+            start = text.find(phrase, start + 1)
     if hits:
         return PreflopValidationResult.fail(
             "this is an ALL-IN spot -- the hand is decided at showdown with no "

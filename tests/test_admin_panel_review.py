@@ -468,3 +468,109 @@ def test_approved_rows_to_csv_round_trips(tmp_path: Path) -> None:
     parsed = list(csv.DictReader(text.splitlines()))
     assert parsed[0]["User Cards"] == "A,A"
     assert "extra" not in parsed[0]  # keys outside fieldnames are dropped
+
+
+# --- load_failures / promote_failure (routed-to-human-review recovery) -----
+_FAIL_COLS = [
+    "No", "User Cards", "solver_reference", "Correct Answer",
+    "validation_status", "Answer Explanation",
+]
+
+
+def _write_fail_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_FAIL_COLS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_meta(csv_path: Path, failures: list[dict]) -> None:
+    meta = {"prompt_name": "p", "questions": [], "failures": failures}
+    review.batch_meta_path(csv_path).write_text(
+        json.dumps(meta), encoding="utf-8"
+    )
+
+
+def _failure(row: dict | None = None, **over: object) -> dict:
+    f: dict = {
+        "node_id": "UTG_120%_HJ_Call_CO_Call_BTN_AllIn_HJ_Call_CO_decision",
+        "hand_class": "QQ",
+        "hero_position": "CO",
+        "options": ["Always Fold", "Mostly Fold", "Mostly Call", "Always Call"],
+        "correct_answer": "Mostly Call",
+        "failed_explanation": "Mostly call: the price clears your equity.",
+        "error_message": "ALL-IN spot framing ... Spot routed to human review.",
+        "row": row,
+    }
+    f.update(over)
+    return f
+
+
+def test_load_failures_missing_meta_returns_empty(tmp_path: Path) -> None:
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [])
+    assert review.load_failures(csv_path) == []
+
+
+def test_load_failures_reads_meta(tmp_path: Path) -> None:
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [])
+    _write_meta(csv_path, [_failure()])
+    out = review.load_failures(csv_path)
+    assert len(out) == 1
+    assert out[0]["hand_class"] == "QQ"
+
+
+def test_promote_failure_appends_row_and_approves(tmp_path: Path) -> None:
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [{
+        "No": "1", "User Cards": "A,A", "solver_reference": "p/CO/n0",
+        "Correct Answer": "Call", "validation_status": "auto_approved",
+        "Answer Explanation": "good",
+    }])
+    row = {
+        "No": "0", "User Cards": "Q,Q", "solver_reference": "p/CO/qq",
+        "Correct Answer": "Mostly Call", "validation_status": "needs_review",
+        "Answer Explanation": "Mostly call: the price clears.",
+    }
+    fail = _failure(row=row)
+
+    ok, msg = review.promote_failure(csv_path, fail)
+    assert ok, msg
+    # Appended with a fresh No (max 1 -> 2) and validation_status flipped to
+    # approved.
+    assert _read_nos(csv_path) == ["1", "2"]
+    with csv_path.open(encoding="utf-8-sig") as fh:
+        added = [r for r in csv.DictReader(fh) if r["User Cards"] == "Q,Q"][0]
+    assert added["No"] == "2"
+    assert added["validation_status"] == "approved"
+    # Graded approved in the sidecar, and flows into the approved pool with the
+    # kept explanation.
+    assert review.load_reviews(csv_path)["2"]["status"] == "approved"
+    _f, pool = review.collect_approved_rows(tmp_path)
+    assert any(r["User Cards"] == "Q,Q" for r in pool)
+
+
+def test_promote_failure_is_idempotent(tmp_path: Path) -> None:
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [])
+    row = {
+        "No": "0", "User Cards": "Q,Q", "solver_reference": "p/CO/qq",
+        "Correct Answer": "Mostly Call", "validation_status": "needs_review",
+        "Answer Explanation": "Mostly call.",
+    }
+    fail = _failure(row=row)
+    ok1, _m1 = review.promote_failure(csv_path, fail)
+    ok2, msg2 = review.promote_failure(csv_path, fail)
+    assert ok1
+    assert not ok2
+    assert "already" in msg2.lower()
+    assert _read_nos(csv_path).count("1") == 1  # added exactly once
+
+
+def test_promote_failure_without_row_returns_false(tmp_path: Path) -> None:
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [])
+    ok, msg = review.promote_failure(csv_path, _failure(row=None))
+    assert not ok
+    assert "nothing to promote" in msg.lower()

@@ -432,6 +432,87 @@ def assembled_prompt(meta: dict[str, object], question: dict[str, object]) -> st
     )
 
 
+def load_failures(csv_path: Path) -> list[dict[str, object]]:
+    """Return the routed-to-human-review failures for a batch.
+
+    Read from the batch's ``.meta.json`` (the ``failures`` key, persisted by
+    the generator). Each entry carries the deterministic question/options/
+    correct-answer context, the LLM's rejected explanation, the rejection
+    reason, and an optional ``row`` -- the COMPLETE CSV row built from the
+    rejected explanation, which :func:`promote_failure` appends. Returns
+    ``[]`` when there is no meta, no failures, or it's malformed (a batch made
+    before failure-persistence simply has none, handled gracefully).
+    """
+    meta = load_batch_meta(csv_path)
+    if not meta:
+        return []
+    failures = meta.get("failures")
+    if not isinstance(failures, list):
+        return []
+    return [f for f in failures if isinstance(f, dict)]
+
+
+def promote_failure(csv_path: Path, failure: dict[str, object]) -> tuple[bool, str]:
+    """Append a routed-to-review spot into its batch CSV, keeping the exact
+    rejected explanation, and mark it approved in the sidecar.
+
+    Uses the ``row`` the generator pre-built from the rejected explanation
+    (every CSV column). Assigns the next ``No`` (max existing + 1), stamps
+    ``validation_status='approved'``, appends it, and records an ``approved``
+    grade in ``.review.json`` so it flows into the approved pool like any
+    other approval -- with the rejected explanation stored as the override so
+    that exact text ships. Idempotent: a spot already present (same
+    ``solver_reference`` + ``User Cards``) is not added twice.
+
+    Returns ``(ok, message)``.
+    """
+    row = failure.get("row")
+    if not isinstance(row, dict) or not row:
+        return False, "no rebuilt row for this spot -- nothing to promote"
+    if not csv_path.is_file():
+        return False, f"batch CSV not found: {csv_path.name}"
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if not fieldnames:
+        return False, "batch CSV has no header row"
+    # Idempotency: same spot (solver_reference + User Cards) already present?
+    key = (str(row.get("solver_reference", "")), str(row.get("User Cards", "")))
+    for existing in rows:
+        if (
+            str(existing.get("solver_reference", "")),
+            str(existing.get("User Cards", "")),
+        ) == key:
+            return False, "this spot is already in the batch"
+    # Next No = max existing integer No + 1 (fall back to count+1). Gaps from
+    # removed questions are fine; we only need a fresh, unused id.
+    nums: list[int] = []
+    for r in rows:
+        try:
+            nums.append(int(str(r.get("No", "")).strip()))
+        except (TypeError, ValueError):
+            continue
+    new_no = (max(nums) + 1) if nums else (len(rows) + 1)
+    new_row = {col: str(row.get(col, "")) for col in fieldnames}
+    new_row["No"] = str(new_no)
+    if "validation_status" in fieldnames:
+        new_row["validation_status"] = "approved"
+    rows.append(new_row)
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    save_review(
+        csv_path,
+        new_no,
+        "approved",
+        "Promoted from the human-review queue (kept the rejected explanation).",
+        explanation=str(row.get("Answer Explanation", "")) or None,
+    )
+    return True, f"added as #{new_no} and approved"
+
+
 def range_player_count(ranges_json: str) -> int:
     """Number of players in a ``ranges`` JSON cell (0 if empty/malformed)."""
     if not ranges_json:
@@ -453,7 +534,9 @@ __all__ = [
     "collect_approved_rows",
     "collect_approved_sources",
     "load_batch_meta",
+    "load_failures",
     "load_reviews",
+    "promote_failure",
     "meta_question_for",
     "range_player_count",
     "remove_question",

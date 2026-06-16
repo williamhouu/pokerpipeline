@@ -161,6 +161,15 @@ def _frequency_facts() -> PreflopFacts:
                 ("AKo", 1.0),
                 ("QQ", 1.0),
             ),
+            # Combo-weighted order (what the data block surfaces): AKo's 12
+            # combos lead the 6-combo pairs and the 4-combo suited AKs.
+            most_common_combos=(
+                ("AKo", 1.0),
+                ("AA", 1.0),
+                ("KK", 1.0),
+                ("QQ", 1.0),
+                ("AKs", 1.0),
+            ),
         ),
         hero_equity_vs_villain=0.474,
         hero_equity_runouts_used=200,
@@ -221,12 +230,14 @@ def _mock_client(responses: list[str]) -> SimpleNamespace:
 # --- system prompt carries voice rules + archetypes + banned phrases --------
 def test_system_prompt_includes_every_preflop_voice_rule() -> None:
     system = build_preflop_system_prompt()
-    # 16 rules since June 2026: rule 11 (one villain's range only +
+    # 18 rules since June 2026: rule 11 (one villain's range only +
     # still-to-act discipline) from the round-1 audit; rules 12-16
     # (blocker discipline, no invented reasons for alternative hands,
     # position wording from the fact, full-range-only equity talk,
-    # cold-call/squeeze/open-fold/ladder terminology) from round 2.
-    assert len(VOICE_RULES_PREFLOP) == 17
+    # cold-call/squeeze/open-fold/ladder terminology) from round 2;
+    # rule 17 (range-vs-hand hedging); rule 18 (multi-way all-in: cite the
+    # field equity, not the heads-up number).
+    assert len(VOICE_RULES_PREFLOP) == 18
     for rule in VOICE_RULES_PREFLOP:
         # Rules are long; assert on the leading clause so a future
         # word-tweak doesn't break the test.
@@ -381,9 +392,12 @@ def test_trim_facts_canonical_strategy_keeps_zeros_and_keeps_villain_stats() -> 
     # Villain stats present, with a bet-level action label (not raw token).
     assert trimmed["villain_stats"]["position"] == "BTN"
     assert trimmed["villain_stats"]["action"] == "open"  # BTN's raise = the open
-    assert any(
-        combo["hand_class"] == "AA" for combo in trimmed["villain_stats"]["top_combos"]
-    )
+    # The block surfaces MOST-COMMON combos (combo-weighted), not the old
+    # weight-sorted top_combos key. AKo (12 combos) leads the equal-weight set.
+    mc = trimmed["villain_stats"]["most_common_combos"]
+    assert "top_combos" not in trimmed["villain_stats"]
+    assert mc[0]["hand_class"] == "AKo"
+    assert any(combo["hand_class"] == "AA" for combo in mc)
     # Two distinct, unambiguously-named equity fields.
     assert trimmed["your_hand_equity_vs_villain_range"] == 0.474
     assert "hero_equity_vs_villain" not in trimmed  # old ambiguous key gone
@@ -401,6 +415,29 @@ def test_trim_facts_no_villain_skips_villain_stats() -> None:
     assert "your_hand_equity_vs_villain_range" not in trimmed
     assert "blockers" not in trimmed
     assert trimmed["archetype"] == "fold_outranged"
+
+
+def test_trim_facts_multiway_emits_field_and_breakdown_not_single_villain() -> None:
+    """Multi-way pot: the data block carries who's in, the field equity, and
+    the per-opponent breakdown -- and DROPS the single-villain equity key so
+    the LLM can't frame a multi-way pot as heads-up (voice rule 18)."""
+    import dataclasses
+
+    facts = dataclasses.replace(
+        _frequency_facts(),
+        hero_equity_vs_field=0.33,
+        per_opponent_equity={"BTN": 0.42, "HJ": 0.55},
+        showdown_opponents=("BTN", "HJ"),
+    )
+    trimmed = _trim_facts_for_prompt(facts)
+    assert trimmed["players_in_pot"] == ["BTN", "HJ"]
+    assert trimmed["your_hand_equity_vs_whole_field"] == 0.33
+    assert trimmed["your_hand_equity_vs_each_opponent"] == {"BTN": 0.42, "HJ": 0.55}
+    # The single-opponent key is gone so the model can't cite it as overall.
+    assert "your_hand_equity_vs_villain_range" not in trimmed
+    # The 3-bet fixture has no all-in in its history -> a squeeze-style pot,
+    # so the field number is flagged as NOT the all-in decision.
+    assert trimmed["multiway_pot_is_all_in"] is False
 
 
 # --- validation ------------------------------------------------------------

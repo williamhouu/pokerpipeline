@@ -672,6 +672,59 @@ def test_per_spot_failure_does_not_abort_batch(tmp_path: Path) -> None:
     assert result.questions_attempted == 2
     assert result.questions_written == 1
     assert len(result.failures) == 1
+    # The malformed response never parsed into a candidate, so there's no
+    # rebuilt row -- this spot is viewable on Review but not one-click
+    # promotable (you'd re-generate it). See the next test for the parsed case.
+    assert result.failures[0].row is None
+
+
+def test_build_failure_builds_row_from_rejected_candidate(tmp_path: Path) -> None:
+    """When the rejected attempt PARSED (a candidate exists), the failure
+    carries the COMPLETE CSV row built from that exact explanation -- the
+    'keep the exact explanation' path the Review page promotes."""
+    from dataclasses import asdict
+
+    from pipeline.preflop.batch import _build_failure
+    from pipeline.preflop.difficulty import compute_difficulty
+    from pipeline.preflop.explanation_generator import (
+        ExplanationValidationError,
+        GeneratedExplanation,
+    )
+    from pipeline.preflop.fact_extractor import extract_facts
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+    from pipeline.preflop.options import build_options
+    from pipeline.preflop.spot_sampler import sample_spot
+
+    pack = _build_open_only_pack(tmp_path)
+    node = enumerate_nodes([pack])[0]
+    spot = sample_spot(node, "AA")
+    facts = extract_facts(spot, pack, equity_runouts=20)
+    difficulty = compute_difficulty(facts)
+    options, correct = build_options(facts)
+    padded = (list(options) + ["", "", "", ""])[:4]
+    candidate = GeneratedExplanation(
+        option_1=padded[0],
+        option_2=padded[1],
+        option_3=padded[2],
+        option_4=padded[3],
+        correct_answer=correct,
+        answer_explanation="Kept-verbatim coaching prose.",
+    )
+    exc = ExplanationValidationError(
+        "rejected by a content validator",
+        last_attempt_text="{...}",
+        last_attempt_candidate=candidate,
+    )
+    failure = _build_failure(
+        spot, facts, options, correct, exc,
+        pack=pack, stakes_bb_dollars=0.5, live_or_online="Online",
+        game_format="cash", difficulty=difficulty, display_in_bb=False,
+    )
+    assert failure.row is not None
+    assert failure.row["Answer Explanation"] == "Kept-verbatim coaching prose."
+    assert failure.row["validation_status"] == "needs_review"
+    # Serializes for the meta sidecar exactly as the batch persists it.
+    json.loads(json.dumps(asdict(failure), default=str))
 
 
 def test_batch_result_is_frozen_and_carries_intermediate_counts(tmp_path: Path) -> None:

@@ -128,6 +128,49 @@ def _hero_equity_note(eq: float, range_eq: float | None, villain: str = "their")
     return StatNote("hero_equity", "Your equity", pct, note)
 
 
+def _hero_field_equity_note(
+    field_eq: float,
+    per_opponent: dict[str, float],
+    opponents: tuple[str, ...],
+    is_all_in: bool,
+) -> StatNote:
+    """Multi-way equity row: spell out equity vs WHOM and how it breaks down --
+    your equity against each player alone, then against the whole field.
+
+    The framing depends on whether the money is all-in. ALL-IN: the field
+    number IS the decision (you must beat everyone at showdown). NOT all-in
+    (a squeeze / 3-bet with a caller): the field number is just "if it all
+    goes in" -- your edge is fold equity and your equity vs whoever continues,
+    so the field-at-showdown figure is context, not the whole story. Plain
+    English so a reviewer sees why a 'mixed' multi-way spot isn't a coin-flip.
+    """
+    n = len(opponents)
+    pct = _pct(field_eq)
+    seats = ", ".join(opponents)
+    breakdown = ", ".join(
+        f"{pos} {_pct(per_opponent.get(pos, 0.0))}" for pos in opponents
+    )
+    head = (
+        f"You're up against {n} players in this pot ({seats}). Against each "
+        f"one alone your equity is {breakdown}."
+    )
+    if is_all_in:
+        tail = (
+            f" To win you have to beat all {n} on the same board, so your real "
+            f"equity is about {pct} -- lower than against any one of them, "
+            "because every extra player is another hand that can beat you."
+        )
+    else:
+        tail = (
+            f" If all the money went in you'd have about {pct} to win the pot, "
+            "but the pot isn't all-in here -- your edge is also fold equity and "
+            "how the hand plays out, so the number that matters most is your "
+            "equity against whoever continues (usually the original raiser), "
+            "not beating everyone at showdown."
+        )
+    return StatNote("hero_equity", "Your equity (multi-way)", pct, head + tail)
+
+
 def _ev_gap_note(facts: PreflopFacts) -> StatNote | None:
     gap = facts.ev_gap_bb
     if gap is None:
@@ -194,7 +237,30 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     villain = _villain_poss(facts.villain_stats) if facts.villain_stats else "their"
     if facts.break_even_equity is not None:
         notes.append(_pot_odds_note(facts.break_even_equity))
-    if facts.hero_equity_vs_villain is not None:
+    # Multi-way all-in: show the FIELD equity (beat everyone) as the headline,
+    # since the heads-up number overstates hero's real chance. Otherwise the
+    # standard heads-up equity row.
+    if facts.hero_equity_vs_field is not None and len(facts.showdown_opponents) >= 2:
+        # All-in or not changes the framing (decision vs context). Read it
+        # defensively from the action history (duck-typed so test fakes that
+        # carry no spot simply read as not-all-in).
+        history = getattr(
+            getattr(getattr(facts, "spot", None), "node", None),
+            "history_before",
+            (),
+        )
+        is_all_in = any(
+            getattr(a.action_type, "name", "") == "ALL_IN" for a in (history or ())
+        )
+        notes.append(
+            _hero_field_equity_note(
+                facts.hero_equity_vs_field,
+                facts.per_opponent_equity,
+                facts.showdown_opponents,
+                is_all_in,
+            )
+        )
+    elif facts.hero_equity_vs_villain is not None:
         notes.append(
             _hero_equity_note(
                 facts.hero_equity_vs_villain,

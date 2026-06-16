@@ -11,10 +11,59 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.equity import (  # noqa: E402
+    preflop_equity_vs_field,
     preflop_equity_vs_range,
     preflop_hand_equity,
     preflop_range_vs_range_equity,
 )
+
+
+# --- preflop_equity_vs_field (multi-way all-in) -----------------------------
+def test_field_equity_is_lower_than_heads_up_and_returns_breakdown() -> None:
+    """Hero must beat EVERY opponent, so three-way equity is strictly below
+    the same hand's heads-up equity vs one of them -- and the per-opponent
+    breakdown comes back aligned with the input order."""
+    hero = ("Ah", "Ad")  # pocket aces
+    hu = preflop_equity_vs_range(hero, {"KsKc": 1.0}, n_samples=600, rng=random.Random(1))
+    field, per_opp = preflop_equity_vs_field(
+        hero, [{"KsKc": 1.0}, {"QsQc": 1.0}], n_samples=4000, rng=random.Random(1)
+    )
+    assert 0.0 <= field <= 1.0
+    assert field < hu            # three-way is lower than heads-up
+    assert field > 0.5           # AA is still a favourite three-way vs KK + QQ
+    # Breakdown: one entry per opponent, aligned to input order, and each
+    # heads-up number is higher than the field number (beating one is easier
+    # than beating both). AA is ~81% vs either pair (the two are within MC
+    # noise of each other, so we don't assert an order between them).
+    assert len(per_opp) == 2
+    assert per_opp[0] > field    # vs KK alone
+    assert per_opp[1] > field    # vs QQ alone
+    assert min(per_opp) > 0.75   # AA crushes a single underpair
+
+
+def test_field_equity_more_opponents_lowers_it() -> None:
+    """Adding a third opponent can only lower (or hold) hero's share."""
+    hero = ("Ah", "Ad")
+    two, _ = preflop_equity_vs_field(
+        hero, [{"KsKc": 1.0}, {"QsQc": 1.0}], n_samples=4000, rng=random.Random(7)
+    )
+    three, _ = preflop_equity_vs_field(
+        hero,
+        [{"KsKc": 1.0}, {"QsQc": 1.0}, {"JsJc": 1.0}],
+        n_samples=4000,
+        rng=random.Random(7),
+    )
+    assert three < two + 0.01    # monotone down (small MC slack)
+
+
+def test_field_equity_empty_or_blank_range_is_zero() -> None:
+    assert preflop_equity_vs_field(("Ah", "Ad"), [], rng=random.Random(0)) == (0.0, [])
+    # An opponent with no range -> no showdown can be formed.
+    field, per_opp = preflop_equity_vs_field(
+        ("Ah", "Ad"), [{"KsKc": 1.0}, {}], rng=random.Random(0)
+    )
+    assert field == 0.0
+    assert per_opp == [0.0, 0.0]
 
 
 # --- preflop_hand_equity ----------------------------------------------------

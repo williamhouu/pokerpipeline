@@ -108,12 +108,27 @@ def ev_call_bb(facts: PreflopFacts, pack: PreflopPack) -> float | None:
 
     Returns ``None`` if no equity data is available (e.g. open spot
     where there's no villain to compute equity against).
+
+    On a MULTI-WAY all-in (2+ players all-in) the correct equity is hero's
+    share of the whole field -- ``hero_equity_vs_field`` -- not the heads-up
+    number, which overstates it. (For packs with solver per-action EVs the
+    batch uses those instead of this analytic EV; this keeps the analytic
+    fallback right too.)
     """
-    if facts.hero_equity_vs_villain is None:
+    eq = _equity_for_call(facts)
+    if eq is None:
         return None
     pot_bb, call_cost_bb = _pot_and_call_cost_bb(facts, pack)
-    eq = facts.hero_equity_vs_villain
     return eq * (pot_bb + call_cost_bb) - call_cost_bb
+
+
+def _equity_for_call(facts: PreflopFacts) -> float | None:
+    """Hero's equity to use in the call-EV: the multi-way FIELD equity when
+    2+ players are all-in (hero must beat everyone), else the heads-up number.
+    None when no equity was computed."""
+    if facts.hero_equity_vs_field is not None and len(facts.showdown_opponents) >= 2:
+        return facts.hero_equity_vs_field
+    return facts.hero_equity_vs_villain
 
 
 def compute_break_even_equity(

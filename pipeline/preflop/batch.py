@@ -52,7 +52,7 @@ import json
 import logging
 import random
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -88,6 +88,7 @@ from pipeline.preflop.fact_extractor import (
     identify_villain,
 )
 from pipeline.preflop.format_writer import (
+    build_preflop_row,
     format_preflop_question,
     write_preflop_csv,
 )
@@ -184,6 +185,15 @@ class PreflopFailure:
     failed_explanation: str = ""
     action_frequencies: dict[str, float] = field(default_factory=dict)
     error_message: str = ""
+
+    # The COMPLETE CSV row (all columns) this spot would have produced, built
+    # from the LLM's rejected-but-parsed explanation + the spot's facts. This
+    # is what lets the Review page "keep the exact explanation" and promote a
+    # human-review spot into the batch with one click -- no re-generation, no
+    # re-sampling. None when the row couldn't be built (a pre-LLM failure with
+    # no facts, or an attempt whose prose never parsed into a candidate), in
+    # which case the spot is viewable on Review but not one-click promotable.
+    row: dict[str, str] | None = None
 
     def __str__(self) -> str:
         """Backward-compat one-line form for logs / old print loops."""
@@ -1107,6 +1117,7 @@ def generate_preflop_batch(
                     spot, facts, options, correct, exc,
                     pack=pack, stakes_bb_dollars=stakes_bb_dollars,
                     live_or_online=live_or_online, game_format=game_format,
+                    difficulty=difficulty, display_in_bb=display_in_bb,
                 )
             )
             logger.warning(
@@ -1183,6 +1194,7 @@ def generate_preflop_batch(
                 "questions_written": written,
                 "soft_flagged_rows": sum(1 for s in row_statuses if s),
             },
+            failures=failures,
         )
         meta_path = out_path.with_suffix(".meta.json")
         meta_path.write_text(
@@ -1255,6 +1267,7 @@ def _build_batch_meta(
     pack: PreflopPack | None = None,
     run_settings: dict[str, object] | None = None,
     counters: dict[str, object] | None = None,
+    failures: list[PreflopFailure] | None = None,
 ) -> dict[str, object]:
     """Assemble the ``<stem>.meta.json`` payload for one batch.
 
@@ -1280,6 +1293,11 @@ def _build_batch_meta(
         "counters": counters or {},
         "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "questions": prompt_records,
+        # Spots that didn't make the CSV (validation rejected after the retry
+        # budget). Persisted with full context + the rebuilt row so the Review
+        # page can show them and promote good ones -- they used to live only
+        # in the live Generate result and vanish on navigation.
+        "failures": [asdict(f) for f in (failures or [])],
     }
 
 
@@ -1316,6 +1334,8 @@ def _build_failure(
     stakes_bb_dollars: float,
     live_or_online: str,
     game_format: str,
+    difficulty: object | None = None,
+    display_in_bb: bool = False,
 ) -> PreflopFailure:
     """Build a PreflopFailure with as much context as available.
 
@@ -1355,6 +1375,7 @@ def _build_failure(
     # context on (the last LLM attempt's parsed candidate), pull it
     # for the failed_explanation field.
     failed_explanation = ""
+    candidate = None
     if isinstance(exc, ExplanationValidationError):
         candidate = getattr(exc, "last_attempt_candidate", None)
         if candidate is not None:
@@ -1365,6 +1386,32 @@ def _build_failure(
             failed_explanation = (
                 f"(raw text, did not parse) {exc.last_attempt_text}"
             )
+
+    # Build the COMPLETE CSV row keeping the rejected explanation, so the
+    # Review page can promote it with one click ("keep the exact
+    # explanation"). Needs the parsed candidate (a structurally valid
+    # GeneratedExplanation -- it passed the format/correct-answer checks and
+    # tripped a CONTENT validator), the facts, and the difficulty. number=0 is
+    # a placeholder -- the promote step assigns the real No on append.
+    # validation_status="needs_review" stamps its provenance. Wrapped so a
+    # row-build hiccup can never lose the failure record itself.
+    row: dict[str, str] | None = None
+    if candidate is not None and facts is not None and difficulty is not None:
+        try:
+            row = build_preflop_row(
+                facts,  # type: ignore[arg-type]
+                candidate,
+                pack=pack,
+                difficulty=difficulty,  # type: ignore[arg-type]
+                number=0,
+                stakes_bb_dollars=stakes_bb_dollars,
+                live_or_online=live_or_online,
+                game_format=game_format,
+                display_in_bb=display_in_bb,
+                validation_status="needs_review",
+            )
+        except Exception:  # noqa: BLE001
+            row = None
 
     return PreflopFailure(
         node_id=spot.node.node_id,
@@ -1378,6 +1425,7 @@ def _build_failure(
         failed_explanation=failed_explanation,
         action_frequencies=action_frequencies,
         error_message=str(exc),
+        row=row,
     )
 
 

@@ -13,8 +13,10 @@ from pipeline.preflop.fact_extractor import (  # noqa: E402
     VillainRangeStats,
     classify_archetype,
     compute_blockers,
+    compute_villain_range_stats,
     construct_villain_range_path,
     extract_facts,
+    identify_showdown_opponents,
     identify_villain,
 )
 from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402, F811
@@ -105,6 +107,38 @@ def test_identify_villain_none_for_empty_history():
 
 
 # --- construct_villain_range_path -----------------------------------------
+def test_identify_showdown_opponents_multiway_allin():
+    """Hero (BTN, the _node actor) faces a multi-way all-in. The opener
+    raises then FOLDS to a jam (drops out); CO jams; HJ calls the jam
+    (stays in); SB folds. The field = the still-committed seats, with each
+    one's LAST action (so HJ's jam-call, not its earlier call)."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 120.0),
+        ParsedAction("HJ", PreflopActionType.CALL),
+        ParsedAction("CO", PreflopActionType.ALL_IN),
+        ParsedAction("SB", PreflopActionType.FOLD),
+        ParsedAction("UTG", PreflopActionType.FOLD),   # opener folds to the jam
+        ParsedAction("HJ", PreflopActionType.CALL),    # HJ calls the jam
+    )
+    opps = identify_showdown_opponents(_node(history))
+    by_pos = {o.position: o for o in opps}
+    assert sorted(by_pos) == ["CO", "HJ"]              # UTG/SB folded out
+    assert by_pos["CO"].action_type is PreflopActionType.ALL_IN
+    assert by_pos["HJ"].action_type is PreflopActionType.CALL
+
+
+def test_identify_showdown_opponents_excludes_hero_and_handles_headsup():
+    """Hero's own prior action is never an opponent; a lone jammer = 1
+    opponent (heads-up, so the multi-way path won't fire)."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 100.0),
+        ParsedAction("BTN", PreflopActionType.CALL),   # hero (BTN) called earlier
+        ParsedAction("UTG", PreflopActionType.ALL_IN),  # UTG jams over the call
+    )
+    opps = identify_showdown_opponents(_node(history))
+    assert [o.position for o in opps] == ["UTG"]        # BTN (hero) excluded
+
+
 def test_construct_villain_path_simple_open(tmp_path):
     """UTG opens, hero (BTN) decides. Villain range path = UTG/UTG_60%.txt."""
     pack = PreflopPack(
@@ -324,6 +358,31 @@ def test_extract_facts_villain_range_stats_sanity():
     assert v.weighted_combo_count == pytest.approx(
         (v.pct_of_dealt_hands / 100.0) * 1326, rel=0.01
     )
+
+
+def test_most_common_combos_is_combo_weighted_not_weight_sorted(tmp_path):
+    """`most_common_combos` ranks by combo SHARE (weight x combos), so a
+    12-combo offsuit hand leads equal-weight pairs/suited -- while `top_combos`
+    stays weight-sorted (premium-first). This is the fix for the data block
+    reading like "the premium hands" instead of "what villain shows up with"."""
+    # Tight jam range: all full weight, QQ partial. By combos: AKo(12) >
+    # AA/KK(6) > AKs(4) > QQ at 0.5 (3). By weight: AA/KK/AKs/AKo tie at 1.0
+    # (premium-first), QQ last.
+    rng = {"AA": 1.0, "KK": 1.0, "QQ": 0.5, "AKs": 1.0, "AKo": 1.0}
+    path = tmp_path / "jam.txt"
+    _write_full_range(path, rng)
+    villain = ParsedAction("BTN", PreflopActionType.ALL_IN)
+    stats = compute_villain_range_stats(villain, path, top_n=5)
+
+    most_common = [c for c, _w in stats.most_common_combos]
+    top = [c for c, _w in stats.top_combos]
+    # Most-common: AKo first (12 combos), QQ last (0.5*6 = 3 weighted combos).
+    assert most_common[0] == "AKo"
+    assert most_common[-1] == "QQ"
+    # Weight-sorted top_combos buries AKo behind the equal-weight premiums and
+    # is a genuinely different order -- proving the two stats aren't aliases.
+    assert top[0] != "AKo"
+    assert most_common != top
 
 
 # --- chunk 2: compute_blockers --------------------------------------------
