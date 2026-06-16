@@ -248,6 +248,21 @@ EXPECTED_RANGE_COUNTS = {
 NLHE9_PACK_ID = "monker_nlhe_9max_100bb"
 EXPECTED_NLHE9_RANGE_COUNT = 93_235
 
+# Shared "Action faced" tooltip. The bucket rule isn't obvious: it's the
+# HIGHEST raise hero faces, so a 3-bet / 4-bet pot keeps that label even when
+# someone flat-called along the way -- the "After ... call(s)" buckets are
+# specifically a single open that picked up flat-callers (squeeze / overcall).
+# Multiway-ness is the separate "Players in the pot" filter's job. (Before the
+# June 2026 reorder, any line with a caller was lumped into "After one call",
+# so picking that bucket silently pulled in 4-bet pots.)
+ACTION_FACED_HELP = (
+    "The bucket is the HIGHEST raise you face: a 3-bet or 4-bet pot stays "
+    "'Facing 3-bet' / 'Facing 4-bet+' even if someone flat-called earlier in "
+    "the hand. 'After one/multiple call(s)' means a SINGLE open that picked up "
+    "flat-callers (a squeeze / overcall spot). Empty = all. Use 'Players in "
+    "the pot' to control how multiway any bucket is."
+)
+
 # Board-texture filter options. The composite descriptor values are produced
 # by pipeline/fact_extractor/board_texture.py:_composite() -- six categories
 # spanning the dryness ladder. Suit + pair status are separate axes the user
@@ -1204,6 +1219,69 @@ def render_generate_page() -> None:
             )
 
 
+# NLHE Generate-page widgets whose selections persist across tab-switches /
+# panel restarts (the PLO page already does this; the NLHE page didn't, so
+# every restart silently reset style + filters to defaults -- which is how a
+# batch ends up on Basic style + all-player-counts when GTO was picked).
+_PREFLOP_GEN_SAVED_KEYS: tuple[str, ...] = (
+    "preflop_gen_pack",
+    "preflop_gen_positions",
+    "preflop_gen_contexts",
+    "preflop_gen_player_counts",
+    "preflop_answer_style",
+)
+
+
+def _seed_preflop_generate_settings(
+    *,
+    positions_available: list[str],
+    context_options: list[str],
+    count_options: list[int],
+) -> None:
+    """Re-seed the NLHE Generate filter/style widgets from the last run's
+    snapshot. Only fills keys ABSENT from session state (live edits always
+    win), and sanitizes every saved value against the CURRENT options so a
+    stale file can never crash a widget. Mirror of
+    :func:`_seed_plo_generate_settings`.
+    """
+    saved = gen_settings.load_settings(PREFLOP_GEN_SETTINGS_PATH)
+
+    def _subset(value: object, options: list, default: list) -> list:
+        if not isinstance(value, list):
+            return default
+        return [x for x in value if x in options]  # empty = a real "any" choice
+
+    def _choice(value: object, options: list, default: str) -> str:
+        return value if isinstance(value, str) and value in options else default
+
+    style_labels = list(ANSWER_STYLE_FROM_RADIO_LABEL.keys())
+    restored: dict[str, object] = {
+        "preflop_gen_positions": _subset(
+            saved.get("preflop_gen_positions"),
+            positions_available,
+            positions_available,
+        ),
+        "preflop_gen_contexts": _subset(
+            saved.get("preflop_gen_contexts"),
+            context_options,
+            ["Opening", "Facing single raise", "Facing 3-bet"],
+        ),
+        # Default to clean spots: open (1) / heads-up (2) / three-way (3).
+        # Deep multiway is opt-in (it floods otherwise). Capped to pack size.
+        "preflop_gen_player_counts": _subset(
+            saved.get("preflop_gen_player_counts"),
+            count_options,
+            [c for c in count_options if c <= 3],  # noqa: PLR2004
+        ),
+        "preflop_answer_style": _choice(
+            saved.get("preflop_answer_style"), style_labels, style_labels[0]
+        ),
+    }
+    for key, value in restored.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
 # --- page: Generate (Preflop mode) ----------------------------------------
 def _render_generate_page_preflop() -> None:
     """Preflop-mode Generate page.
@@ -1216,9 +1294,88 @@ def _render_generate_page_preflop() -> None:
     """
     st.caption(
         "Preflop generation reads from your uploaded preflop pack. "
-        "Filters narrow which decision spots get sampled. The generate "
-        "button activates once Layer 6 wiring lands (~1 day of work)."
+        "Filters narrow which decision spots get sampled."
     )
+
+    # Authoritative plain-English reference for the WHOLE generation pipeline.
+    # Kept here (top of the page, collapsed) as the single place to look up
+    # what every step/gate does -- the per-control tooltips are quick hints,
+    # this is the full explanation.
+    with st.expander(
+        "📖 How question generation works — full plain-English reference"
+    ):
+        st.markdown(
+            "Every batch runs the same pipeline. Each step either **picks** "
+            "spots or **skips** them; whatever survives gets an explanation "
+            "written. How many spots each step skipped always shows in the "
+            "result summary after a run.\n\n"
+
+            "**1. Pick the candidate spots (the filters below).**\n"
+            "- *Hero positions* — which seats you want to be in.\n"
+            "- *Action faced* — the bucket is the **highest raise you face**. A "
+            "3-bet / 4-bet pot stays 'Facing 3-bet' / 'Facing 4-bet+' even if "
+            "someone flat-called earlier in the hand; 'After one/multiple "
+            "call(s)' means a **single open** that picked up flat-callers (a "
+            "squeeze / overcall). Multiway-ness is the next filter's job.\n"
+            "- *Players in the pot* — how many are still in at your decision "
+            "(heads-up vs multiway).\n\n"
+
+            "**2. Worthiness window — is it a real decision?** Keep a spot only "
+            "if the solver takes its best action between the low and high % you "
+            "set (default 55–99%). Below ~55% there's no clear best answer; at "
+            "100% it's trivial. The 90–95% band can be punched out (the 'mostly "
+            "that reads as always' trap).\n\n"
+
+            "**3. Premise-realism gates — is the STORY natural?** Two checks, "
+            "both tunable, both run before any LLM spend:\n"
+            "- *Min villain line frequency* — skip if the OPPONENT's whole line "
+            "is something the solver almost never does (a question built on a "
+            "line that essentially never happens).\n"
+            "- *Min hero premise frequency* — skip if one of YOUR OWN earlier "
+            "actions in the story is a play the solver almost never makes with "
+            "this hand. Example: 'you call from UTG+2 with AKs' when the solver "
+            "3-bets AKs there 95% of the time and flats only 5% — at a 15% gate "
+            "that spot is skipped.\n\n"
+
+            "**4. Difficulty band.** Score each spot 400–3200 (four axes: "
+            "frequency, EV gap, concepts, hand class — see the 'How is "
+            "Difficulty calculated?' popover under *Difficulty*) and keep only "
+            "the ones inside the tier you picked (Easy / Medium / Hard / "
+            "Mixed). The **EV gap** here = the solver's OWN EV for the action "
+            "you take most often minus its EV for the next-most-played action "
+            "(from the per-action EVs the Monker packs ship). A near-coinflip "
+            "decision the solver mixes 57/42 has a tiny gap (~0.1bb) → rated "
+            "Hard; a clear decision has a big gap → easier. Only EV-less packs "
+            "(the Ryan pack) fall back to the old approximate gap formula.\n\n"
+
+            "**5. Unconverged-node guard (always on, not tunable).** Drop solver "
+            "nodes the solve never refined: AA folding preflop, premium-pair "
+            "inversions, or more than 30% of the reaching hands split equally "
+            "across every action (the solver's untouched default). This is the "
+            "near-zero-reach multiway 5-bet / jam tail.\n\n"
+
+            "**6. EV-coherence guard (always on, not tunable).** A solver only "
+            "**mixes** between actions that are about **equal in EV** — that's "
+            "what 'indifference' means: if one play were clearly better, it "
+            "would just always take it. So this guard looks at the actions your "
+            "hand plays at least **10%** of the time, reads the solver's OWN "
+            "per-action EV for each, and if the best and worst of those are more "
+            "than about **3bb apart**, the 'mix' isn't a real strategy — it's an "
+            "unconverged node, so the spot is dropped. Example: a hand that "
+            "'calls' an all-in 26% of the time while calling is ~15bb worse than "
+            "folding per the solver's own numbers. (Needs per-action EVs, so it "
+            "only runs on the Monker packs; the EV-less Ryan pack is "
+            "unaffected.) This catches hand-specific noise the unconverged-node "
+            "guard above can't see.\n\n"
+
+            "**7. Write the explanation (the only paid step).** Layer 6 turns "
+            "the solved facts into prose. If **Run claim checker** is on, a "
+            "second LLM pass then audits that prose against the solver data — "
+            "flagging any poker claim that contradicts the data, is poker-wrong, "
+            "is invented, contradicts another sentence, or disagrees with the "
+            "action mix (e.g. calling a spot '3-bet or fold' when the hand also "
+            "calls a real share). It only flags for review, never rejects."
+        )
 
     # Active/last background job panel. Persists across tab switches
     # since the job runs on its own thread.
@@ -1263,46 +1420,54 @@ def _render_generate_page_preflop() -> None:
 
     # --- 2. Hero context ---
     st.subheader("2. Hero context")
+    # Compute the option lists FIRST, then seed last-used selections into
+    # session state BEFORE the widgets render, so the user's choices stick
+    # across tab-switches / panel restarts (the widgets below carry `key=` and
+    # NO `default=` -- they read the seeded session state).
+    seat_order = preflop_order(pack.table_size)  # UTG first; reads like a table
+    positions_available = [p for p in seat_order if p in node_meta]
+    positions_available += sorted(
+        p for p in node_meta if p not in seat_order
+    )  # defensive: never hide a position the pack actually has
+    context_options = [
+        "Opening",
+        "Facing single raise",
+        "Facing 3-bet",
+        "Facing 4-bet+",
+        "After one call",
+        "After multiple calls",
+    ]
+    count_options = list(range(1, pack.table_size + 1))
+    _seed_preflop_generate_settings(
+        positions_available=positions_available,
+        context_options=context_options,
+        count_options=count_options,
+    )
     col1, col2 = st.columns(2)
     with col1:
-        # Seat order (UTG first), not alphabetical -- reads like a table.
-        seat_order = preflop_order(pack.table_size)
-        positions_available = [p for p in seat_order if p in node_meta]
-        positions_available += sorted(
-            p for p in node_meta if p not in seat_order
-        )  # defensive: never hide a position the pack actually has
         hero_positions = st.multiselect(
             "Hero positions",
             options=positions_available,
-            default=positions_available,
+            key="preflop_gen_positions",
             help="Which seats hero is in. Empty = include all positions.",
         )
     with col2:
-        context_options = [
-            "Opening",
-            "Facing single raise",
-            "Facing 3-bet",
-            "Facing 4-bet+",
-            "After one call",
-            "After multiple calls",
-        ]
         action_contexts = st.multiselect(
             "Action faced",
             options=context_options,
-            default=["Opening", "Facing single raise", "Facing 3-bet"],
-            help="What hero is responding to. Empty = include all.",
+            key="preflop_gen_contexts",
+            help=ACTION_FACED_HELP,
         )
-        count_options = list(range(1, pack.table_size + 1))
         player_counts = st.multiselect(
             "Players in the pot",
             options=count_options,
-            default=count_options,
+            key="preflop_gen_player_counts",
             format_func=lambda n: (
                 "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
             ),
-            help="How many players are still in at hero's decision. Narrow "
-                 "this (e.g. just 3) for clean three-way spots instead of deep "
-                 "multiway bloodbaths. Empty = include all.",
+            help="How many players are still in at hero's decision. Defaults to "
+                 "1-3 (open / heads-up / three-way) for clean spots; add 4+ for "
+                 "deep multiway. Empty = include all.",
         )
 
     # Filter the node catalog by all three filters; show a live count.
@@ -1447,15 +1612,28 @@ def _render_generate_page_preflop() -> None:
         )
         min_premise_pct = st.number_input(
             "Min hero premise frequency (%) — 0 = off",
-            min_value=0.0, max_value=50.0, value=5.0, step=1.0,
+            min_value=0.0, max_value=50.0, value=30.0, step=1.0,
             key="preflop_min_premise_pct",
             help=(
-                "Skips spots whose STORY requires you to have made a "
-                "near-never play earlier in the hand (e.g. 'you opened "
-                "K6s from the LJ' when the solver opens it ~1% there). "
-                "Checks each of your own prior actions in the line."
+                "Every question has a STORY -- the line that led to your "
+                "decision, including YOUR own earlier actions in the hand. This "
+                "gate looks at each of your prior actions and skips the spot if "
+                "the LOWEST-frequency one is something the solver does with this "
+                "hand less often than this. Example: a question that starts "
+                "'you call from UTG+2 with AKs' is a weak premise if the solver "
+                "3-bets AKs there 95% of the time and flat-calls only 5% -- at "
+                "30% that spot is skipped before any LLM spend. Higher = "
+                "stricter (only natural, common lines -- a hand the solver "
+                "flats <30% of the time, like QQ at ~16%, gets filtered); 0 = "
+                "off. Skipped spots show as 'premise-realism gate' in the "
+                "result summary."
             ),
         )
+
+    # The two always-on guards (unconverged-node + EV-coherence) are documented
+    # in the "📖 How question generation works" reference at the top of the
+    # page (steps 5 & 6) -- kept there as the single source rather than
+    # duplicated here, so there's one place to maintain.
 
     # Visible settings summary -- exactly what THIS batch will use. Promoted
     # to a prominent info box so the numbers are obvious the moment you pick
@@ -1483,7 +1661,9 @@ def _render_generate_page_preflop() -> None:
     answer_style = st.radio(
         "Style",
         options=list(ANSWER_STYLE_FROM_RADIO_LABEL.keys()),
-        index=0,  # Basic is the natural default for preflop
+        # No index= -- the value is seeded into session state by
+        # _seed_preflop_generate_settings (persists across restarts); falls
+        # back to the first option (Basic) only if seeding ever didn't run.
         key="preflop_answer_style",
         help=(
             "**Basic** -- bare action labels (Fold / Call / Raise 60%). "
@@ -1735,6 +1915,24 @@ def _render_generate_page_preflop() -> None:
                 st.caption("Saved.")
         claim_checker_prompt = st.session_state[ck_key]
 
+    # --- Fast test mode: fewer equity run-outs (default ON) -----------------
+    # ON = 200 run-outs (≈2x faster, for iterating); OFF = 400 (most accurate,
+    # for the real questions you'll ship). Defaults ON per the user's testing
+    # workflow.
+    fast_test_mode = st.toggle(
+        "⚡ Fast test mode (fewer equity run-outs)",
+        value=True,
+        key="preflop_fast_test_mode",
+        help="ON = ~2x faster generation by dealing 200 equity run-outs per "
+        "spot instead of 400. The equity % each question shows gets slightly "
+        "noisier (about ±1 point); that number also feeds the difficulty score "
+        "and a few equity-based tags, but it stays inside the quality bar (the "
+        "number-checker only rejects equity off by >3%). Leave it ON while "
+        "testing. Turn it OFF for the FINAL questions you ship to use the full "
+        "400 run-outs (most accurate equity).",
+    )
+    equity_runouts = 200 if fast_test_mode else 400
+
     # Inputs ready when: at least one position selected AND at least one
     # action context AND the filters match >= 1 node AND total > 0.
     # Disabled while another job is in flight -- the active-job panel
@@ -1776,8 +1974,12 @@ def _render_generate_page_preflop() -> None:
     ):
         # Snapshot the pack choice so the next session (or a panel
         # restart) regenerates against the same tree by default.
+        # Snapshot this batch's pack + filters + style so the page re-seeds
+        # them next time (across tab-switches / panel restarts) -- not just the
+        # pack. Mirrors the PLO page.
         gen_settings.save_settings(
-            PREFLOP_GEN_SETTINGS_PATH, {"preflop_gen_pack": pack.pack_id}
+            PREFLOP_GEN_SETTINGS_PATH,
+            {k: st.session_state.get(k) for k in _PREFLOP_GEN_SAVED_KEYS},
         )
         _start_preflop_job(
             pack=pack,
@@ -1810,6 +2012,7 @@ def _render_generate_page_preflop() -> None:
             temperature=_temp_val,
             run_claim_checker=run_claim_checker,
             claim_checker_prompt=claim_checker_prompt,
+            equity_runouts=equity_runouts,
         )
 
 
@@ -1841,6 +2044,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     temperature: float = DEFAULT_TEMPERATURE,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
+    equity_runouts: int = 400,
 ) -> None:
     """Kick off a preflop batch on a background thread and rerun.
 
@@ -1913,6 +2117,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             random_seed=random_seed,
             run_claim_checker=run_claim_checker,
             claim_checker_prompt=claim_checker_prompt,
+            equity_runouts=equity_runouts,
         )
     except RuntimeError as exc:
         # Another job is already running. The button-disable check
@@ -2511,6 +2716,8 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f"rejected by difficulty/EV filters: "
             f"**{result.difficulty_filtered_out}**, "
             f"skipped as unconverged nodes: **{result.noise_filtered_out}**, "
+            f"skipped as incoherent mixes: "
+            f"**{result.incoherent_mix_filtered_out}**, "
             f"failures: **{len(result.failures)}**. "
             "Try a wider difficulty band, the Mixed preset, or a wider "
             "worthiness window."
@@ -2524,12 +2731,16 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f", {result.noise_filtered_out} skipped as unconverged solver "
             f"nodes" if result.noise_filtered_out else ""
         )
+        _mix_note = (
+            f", {result.incoherent_mix_filtered_out} skipped as incoherent "
+            f"mixes" if result.incoherent_mix_filtered_out else ""
+        )
         st.success(
             f"Wrote **{result.questions_written}** questions to "
             f"`{result.output_path}` "
             f"(attempted {result.questions_attempted}, "
             f"{result.worthy_spots_available} worthy spots available"
-            f"{_band_note}{_noise_note})."
+            f"{_band_note}{_noise_note}{_mix_note})."
         )
         # When the run delivered fewer than requested, say so plainly and
         # break down WHERE the shortfall went -- pre-LLM filter rejections
@@ -2550,6 +2761,13 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
                     f"**{result.noise_filtered_out}** were skipped as "
                     "unconverged solver nodes (AA folding a jam / premium "
                     "inversions -- the noisy multiway tail)"
+                )
+            if result.incoherent_mix_filtered_out:
+                _why_bits.append(
+                    f"**{result.incoherent_mix_filtered_out}** were skipped as "
+                    "incoherent mixes (a meaningfully-played action several bb "
+                    "worse than the best per the solver's own EVs -- "
+                    "unconverged-node noise, not a real mixed strategy)"
                 )
             if result.rare_line_filtered_out:
                 _why_bits.append(
@@ -4185,7 +4403,7 @@ def render_compare_page() -> None:
             ],
             default=["Opening", "Facing single raise", "Facing 3-bet"],
             key="cmp_ctx",
-            help="Empty = all action types.",
+            help=ACTION_FACED_HELP,
         )
 
     difficulty_bands = {
@@ -5370,8 +5588,8 @@ def render_plo_generate_page() -> None:
             "Action faced",
             options=list(PLO_ACTION_CONTEXTS),
             key="plo_gen_contexts",
-            help="What hero is responding to. Empty = all. (With 'Clean lines "
-            "only' on, the 4-bet+ tail stays excluded even if selected.)",
+            help=ACTION_FACED_HELP + " (With 'Clean lines only' on, the 4-bet+ "
+            "tail stays excluded even if selected.)",
         )
         player_counts = st.multiselect(
             "Players in the pot",
@@ -6481,7 +6699,7 @@ def render_plo_compare_page() -> None:
             options=list(PLO_ACTION_CONTEXTS),
             default=["Opening", "Facing single raise", "Facing 3-bet"],
             key="plo_cmp_ctx",
-            help="Empty = all action types.",
+            help=ACTION_FACED_HELP,
         )
     with f2:
         player_counts = st.multiselect(
