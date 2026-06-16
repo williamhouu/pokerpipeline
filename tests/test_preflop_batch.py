@@ -189,17 +189,28 @@ def test_node_action_context_after_multiple_calls() -> None:
     assert node_action_context(_node_with_history(history)) == "After multiple calls"
 
 
-def test_node_action_context_folded_caller_is_not_live() -> None:
-    """A caller who later folds doesn't count -- the live caller count is 1,
-    so this stays 'After one call' rather than 'multiple'."""
+def test_node_action_context_3bet_pot_with_caller_is_facing_3bet() -> None:
+    """Raise level wins over an earlier flat (June 2026 reorder): opened,
+    flat-called, then 3-bet (a squeeze) is 'Facing 3-bet', NOT an after-call
+    bucket. The flat doesn't hide the raise hero faces."""
     history = (
         ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
         ParsedAction("CO", PreflopActionType.CALL),
-        ParsedAction("BTN", PreflopActionType.CALL),
-        ParsedAction("SB", PreflopActionType.RAISE, 165.0),
-        ParsedAction("CO", PreflopActionType.FOLD),  # one of the two callers folds
+        ParsedAction("BTN", PreflopActionType.RAISE, 165.0),  # 3-bet squeeze
     )
-    assert node_action_context(_node_with_history(history)) == "After one call"
+    assert node_action_context(_node_with_history(history)) == "Facing 3-bet"
+
+
+def test_node_action_context_4bet_pot_with_caller_is_facing_4bet() -> None:
+    """A 4-bet pot that contains an early flat is still 'Facing 4-bet+' -- the
+    reorder stops it hiding under 'After one call' (the real #1/#5/#7 bug)."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("UTG+2", PreflopActionType.CALL),
+        ParsedAction("LJ", PreflopActionType.RAISE, 180.0),   # 3-bet
+        ParsedAction("SB", PreflopActionType.RAISE, 460.0),   # 4-bet
+    )
+    assert node_action_context(_node_with_history(history)) == "Facing 4-bet+"
 
 
 def test_node_is_unconverged_flags_uniform_default(tmp_path: Path) -> None:
@@ -244,6 +255,109 @@ def test_node_is_unconverged_flags_uniform_default(tmp_path: Path) -> None:
         pack_id="t", actor="BTN", history_before=(), actions=tuple(opts)
     )
     assert node_is_unconverged(node) is True
+
+
+# --- EV-coherence guard (spot_mix_incoherent) -------------------------------
+def _patch_mix(monkeypatch, *, evs, freqs) -> None:
+    """Patch the two readers spot_mix_incoherent lazily imports at call time,
+    so the gate's threshold logic can be tested without a real pack/EVs."""
+    monkeypatch.setattr(
+        "pipeline.preflop.format_writer.action_evs_bb", lambda f, p: evs
+    )
+    monkeypatch.setattr(
+        "pipeline.preflop.options.canonicalize_strategy", lambda f: freqs
+    )
+
+
+def test_spot_mix_incoherent_flags_large_ev_spread(monkeypatch) -> None:
+    """The 82o case: a 26%-played action ~15bb worse than the fold it mostly
+    takes is unconverged-node noise, not a real mixed strategy."""
+    from pipeline.preflop.batch import spot_mix_incoherent
+
+    _patch_mix(
+        monkeypatch,
+        evs={"Fold": -1.0, "Call": -16.1},
+        freqs={"Fold": 0.737, "Call": 0.263},
+    )
+    assert spot_mix_incoherent(object(), object()) is True
+
+
+def test_spot_mix_incoherent_passes_indifferent_mix(monkeypatch) -> None:
+    """The Q9o case: two actions at equal EV is exactly what GTO mixing is."""
+    from pipeline.preflop.batch import spot_mix_incoherent
+
+    _patch_mix(
+        monkeypatch,
+        evs={"3-bet": -0.96, "Call": -0.96},
+        freqs={"3-bet": 0.805, "Call": 0.195},
+    )
+    assert spot_mix_incoherent(object(), object()) is False
+
+
+def test_spot_mix_incoherent_ignores_sub_threshold_sliver(monkeypatch) -> None:
+    """The AJs case: a ~1.5% sliver on a worse action doesn't make a near-pure
+    fold a 'mix' -- only one action clears the 10% frequency floor."""
+    from pipeline.preflop.batch import spot_mix_incoherent
+
+    _patch_mix(
+        monkeypatch,
+        evs={"Fold": -12.0, "Call": -35.0},
+        freqs={"Fold": 0.985, "Call": 0.015},
+    )
+    assert spot_mix_incoherent(object(), object()) is False
+
+
+def test_spot_mix_incoherent_passes_without_ev_data(monkeypatch) -> None:
+    """Weight-only packs (no per-action EVs) can't be judged -- fail open."""
+    from pipeline.preflop.batch import spot_mix_incoherent
+
+    _patch_mix(monkeypatch, evs=None, freqs={"Fold": 0.6, "Call": 0.4})
+    assert spot_mix_incoherent(object(), object()) is False
+
+
+def test_spot_mix_incoherent_threshold_boundary(monkeypatch) -> None:
+    """A small EV spread (slightly imperfect convergence) passes; a clearly
+    non-indifferent spread fails."""
+    from pipeline.preflop.batch import spot_mix_incoherent
+
+    _patch_mix(
+        monkeypatch,
+        evs={"Call": -0.5, "Raise": -3.0},  # 2.5bb spread (< 3.0 default)
+        freqs={"Call": 0.5, "Raise": 0.5},
+    )
+    assert spot_mix_incoherent(object(), object()) is False
+    _patch_mix(
+        monkeypatch,
+        evs={"Call": -0.5, "Raise": -5.5},  # 5.0bb spread
+        freqs={"Call": 0.5, "Raise": 0.5},
+    )
+    assert spot_mix_incoherent(object(), object()) is True
+
+
+# --- ev_gap_from_action_evs (EV gap from the solver's own per-action EVs) ----
+def test_ev_gap_from_action_evs_uses_solver_evs(monkeypatch) -> None:
+    """The QQ case: dominant-by-frequency EV minus 2nd-most-frequent EV, from
+    the solver's OWN per-action EVs -- 0.11bb, NOT the analytic 12.55bb that
+    used to skew difficulty on multiway 3-bet pots."""
+    from pipeline.preflop.batch import ev_gap_from_action_evs
+
+    _patch_mix(
+        monkeypatch,
+        evs={"Fold": -4.00, "Call": -3.89, "All-in": -5.77},
+        freqs={"Fold": 0.567, "Call": 0.421, "All-in": 0.006},
+    )
+    gap = ev_gap_from_action_evs(object(), object())
+    assert gap is not None
+    assert abs(gap - 0.11) < 1e-6
+
+
+def test_ev_gap_from_action_evs_none_without_file_evs(monkeypatch) -> None:
+    """EV-less packs (the Ryan pack) -> None, so the caller falls back to the
+    analytic engine."""
+    from pipeline.preflop.batch import ev_gap_from_action_evs
+
+    _patch_mix(monkeypatch, evs=None, freqs={"Fold": 0.6, "Call": 0.4})
+    assert ev_gap_from_action_evs(object(), object()) is None
 
 
 def test_action_contexts_constant_matches_ui_options() -> None:

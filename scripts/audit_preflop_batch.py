@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.batch import _placeholder_explanation  # noqa: E402
 from pipeline.preflop.difficulty import compute_difficulty  # noqa: E402
+from pipeline.preflop.batch import ev_gap_from_action_evs  # noqa: E402
 from pipeline.preflop.ev_engine import compute_ev_gap_bb  # noqa: E402
 from pipeline.preflop.fact_extractor import extract_facts  # noqa: E402
 from pipeline.preflop.format_writer import build_preflop_row  # noqa: E402
@@ -100,7 +101,12 @@ def audit_batch(csv_path: Path) -> int:
         combo = combo_from_user_cards(row["User Cards"])
         spot = sample_spot(node, q["hand_class"], combo=combo)
         facts = extract_facts(spot, pack, equity_runouts=300)
-        ev_gap = compute_ev_gap_bb(facts, pack)
+        # Mirror generation: the solver's own per-action EVs (Monker packs),
+        # analytic fallback only for EV-less packs. Must match batch.py or this
+        # re-verification false-flags ev_gap_bb on every Monker row.
+        ev_gap = ev_gap_from_action_evs(facts, pack)
+        if ev_gap is None:
+            ev_gap = compute_ev_gap_bb(facts, pack)
         # Infer the batch's answer style from the option shape (meta does
         # not record it -- noted as a gap): the gto style is the 4-option
         # Always/Mostly spectrum.

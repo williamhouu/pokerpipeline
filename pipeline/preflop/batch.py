@@ -229,6 +229,13 @@ class BatchResult:
     # typically the near-zero-reach multiway 5-bet/jam lines. UI feedback.
     noise_filtered_out: int = 0
 
+    # How many worthy spots were skipped by the EV-coherence guard
+    # (:func:`spot_mix_incoherent`): a "mixed" hand whose meaningfully-played
+    # actions are several bb apart in the solver's OWN per-action EV, i.e. an
+    # unconverged-node noise mix node_is_unconverged can't catch. 0 on
+    # weight-only packs (no per-action EVs to judge). UI feedback.
+    incoherent_mix_filtered_out: int = 0
+
     # Premise-realism gate counts (June 2026): spots skipped because the
     # villain takes their whole line too rarely (rare_line) or because
     # hero's own earlier actions in the story are near-never solver
@@ -278,15 +285,20 @@ def node_action_context(node: PreflopDecisionNode) -> str:
     Public so the admin panel and the orchestrator share one source of
     truth. Returns one of :data:`ACTION_CONTEXTS`.
 
+    The RAISE LEVEL wins: a pot that was opened, flat-called, then 3-bet is
+    "Facing 3-bet" (not an after-call bucket) -- the highest raise hero faces
+    is the intuitive label, and a flat earlier in the line doesn't change it.
+    The "After ... call(s)" buckets are reserved for a SINGLE open that went
+    multiway via flats (the squeeze / overcall texture). How multiway any
+    bucket is, is the player-count filter's job, not this one's.
+
       * "Opening"              -- no prior raise in history
-      * "After one call"       -- a prior raise AND at most one LIVE
-                                   flat-caller (one overcall, a squeeze
-                                   opportunity, facing a single-caller squeeze)
-      * "After multiple calls" -- a prior raise AND two or more live
-                                   flat-callers (the multiway territory)
-      * "Facing single raise"  -- exactly one prior raise, no calls
-      * "Facing 3-bet"         -- exactly two prior raises, no calls
-      * "Facing 4-bet+"        -- three or more prior raises, no calls
+      * "Facing 4-bet+"        -- three or more raises (callers, if any, ignored)
+      * "Facing 3-bet"         -- exactly two raises (callers, if any, ignored)
+      * "After one call"       -- a SINGLE open + at most one live flat-caller
+                                   (an overcall / single-caller squeeze spot)
+      * "After multiple calls" -- a SINGLE open + two or more live flat-callers
+      * "Facing single raise"  -- a single open, no flat-callers
     """
     n_raises = sum(
         1
@@ -298,12 +310,19 @@ def node_action_context(node: PreflopDecisionNode) -> str:
     )
     if n_raises == 0:
         return "Opening"
+    # Raise level takes precedence over any earlier flat: a 3-bet / 4-bet pot
+    # is labeled by the raise hero faces even when someone called along the
+    # way (June 2026 -- the after-call buckets used to absorb these, so a 4-bet
+    # pot with one early caller silently showed up under "After one call").
+    if n_raises >= 3:  # noqa: PLR2004
+        return "Facing 4-bet+"
+    if n_raises == 2:  # noqa: PLR2004
+        return "Facing 3-bet"
+    # Exactly one raise (a single open). Flat-callers make it a squeeze /
+    # overcall spot; split by the number of LIVE flat-callers -- distinct
+    # non-hero positions whose LAST action is a call (hero's own call and a
+    # caller who later folded don't count; raw n_calls over-counts both).
     if n_calls > 0:
-        # Split by the number of LIVE flat-callers -- distinct non-hero
-        # positions whose LAST action is a call (so a caller who later folded
-        # doesn't count, nor hero's own earlier call, nor a caller calling
-        # twice). Raw n_calls over-counts all three. <= 1 (incl. the rare
-        # "the only caller folded" case) is the tame end.
         last: dict[str, PreflopActionType] = {}
         for a in node.history_before:
             last[a.position] = a.action_type
@@ -313,11 +332,7 @@ def node_action_context(node: PreflopDecisionNode) -> str:
             if t is PreflopActionType.CALL and pos != node.actor
         )
         return "After one call" if live_callers <= 1 else "After multiple calls"
-    if n_raises == 1:
-        return "Facing single raise"
-    if n_raises == 2:
-        return "Facing 3-bet"
-    return "Facing 4-bet+"
+    return "Facing single raise"
 
 
 def active_player_count(node: PreflopDecisionNode) -> int:
@@ -524,6 +539,94 @@ def node_is_unconverged(node: PreflopDecisionNode) -> bool:
         and presence["QQ"] >= _CANARY_MIN_PRESENCE
         and cond["KK"] < cond["QQ"] - _PREMIUM_MONOTONIC_TOL
     )
+
+
+# --- EV-coherence guard (a hand-level convergence tell node_is_unconverged
+#     can't see) ------------------------------------------------------------
+# GTO mixing IS indifference: a hand splits its action between two plays only
+# because they're ~equal in EV. So when the solver's OWN per-action EVs say a
+# meaningfully-played action is several bb worse than the best action the hand
+# also takes, the "mix" isn't a real mixed strategy -- it's an unconverged
+# node. This is the noise that produced 82o "calling" an all-in 26% of the
+# time at a ~15bb EV deficit: node_is_unconverged passed it because the tell is
+# hand-specific (one hand's frequencies), not the node-wide uniform-default
+# pattern that function looks for. Needs the pack's per-action EVs, so it is a
+# no-op on weight-only packs (the PioViewer Ryan pack).
+_MIX_MIN_ACTION_FREQ = 0.10   # a <10% sliver isn't a "mix" -- ignore it
+_MIX_MAX_EV_SPREAD_BB = 3.0   # bb spread among mixed actions above which it's noise
+
+
+def spot_mix_incoherent(facts: object, pack: PreflopPack) -> bool:
+    """True when a mixed spot's meaningfully-played actions are far from
+    EV-indifferent per the solver's own per-action EVs.
+
+    Among the actions hero takes at least :data:`_MIX_MIN_ACTION_FREQ` of the
+    time, if the spread between the best and worst per-action EV exceeds
+    :data:`_MIX_MAX_EV_SPREAD_BB`, the spot is flagged: a converged solver only
+    mixes near-indifferent actions, so a large spread means the node never
+    refined this hand. See the module comment above.
+
+    Fails OPEN -- returns False (keep the spot) when the pack ships no
+    per-action EVs, when fewer than two actions clear the frequency floor (a
+    near-pure spot, not a mix), or on any read error. A missing signal must
+    never drop an otherwise-good spot.
+    """
+    from pipeline.preflop.format_writer import action_evs_bb  # noqa: PLC0415
+    from pipeline.preflop.options import canonicalize_strategy  # noqa: PLC0415
+
+    try:
+        evs = action_evs_bb(facts, pack)  # type: ignore[arg-type]
+    except (OSError, ValueError):
+        return False
+    if not evs:
+        return False
+    freqs = canonicalize_strategy(facts)  # type: ignore[arg-type]
+    taken = [
+        label
+        for label, freq in freqs.items()
+        if freq >= _MIX_MIN_ACTION_FREQ and label in evs
+    ]
+    if len(taken) < 2:  # noqa: PLR2004 -- need two played actions to have a "mix"
+        return False
+    spread = max(evs[label] for label in taken) - min(evs[label] for label in taken)
+    return spread > _MIX_MAX_EV_SPREAD_BB
+
+
+def ev_gap_from_action_evs(facts: object, pack: PreflopPack) -> float | None:
+    """EV gap (bb) between the dominant and 2nd-most-frequent action, taken
+    from the SOLVER'S OWN per-action EVs rather than the analytic ev_engine.
+
+    This is the accurate gap -- just the solver's EV for the action hero plays
+    most often minus its EV for the next-most-played action. The analytic
+    :func:`compute_ev_gap_bb` is realization-blind and wildly overstates the
+    gap on multiway 3-bet/4-bet pots (e.g. 12.55bb when the solver's own EVs
+    are 0.11bb apart -- which is exactly why those spots mix near 50/50). That
+    bad number used to feed difficulty's EV axis and rate close multiway
+    decisions as Medium when they should be Hard.
+
+    Returns None when the pack ships no per-action EVs (the EV-less Ryan pack)
+    or fewer than two played actions carry an EV; the caller then falls back to
+    the analytic engine. Same source the EV-coherence gate uses, so the two
+    stay consistent.
+    """
+    from pipeline.preflop.format_writer import action_evs_bb  # noqa: PLC0415
+    from pipeline.preflop.options import canonicalize_strategy  # noqa: PLC0415
+
+    try:
+        evs = action_evs_bb(facts, pack)  # type: ignore[arg-type]
+    except (OSError, ValueError):
+        return None
+    if not evs:
+        return None
+    freqs = canonicalize_strategy(facts)  # type: ignore[arg-type]
+    ranked = sorted(
+        ((freq, label) for label, freq in freqs.items() if label in evs),
+        reverse=True,
+    )
+    if len(ranked) < 2:  # noqa: PLR2004 -- need a dominant + a runner-up to have a gap
+        return None
+    top, second = ranked[0][1], ranked[1][1]
+    return abs(evs[top] - evs[second])
 
 
 def _villain_line_pct(
@@ -820,6 +923,7 @@ def generate_preflop_batch(
     # AA folding preflop / premium-pair inversions). Cached per node so each
     # node is only checked once even though many hands share it.
     noise_filtered_out = 0
+    incoherent_mix_filtered_out = 0
     _node_noise: dict[str, bool] = {}
     # Premise-realism gates (June 2026 audit): spots built on a villain
     # line the solver ~never takes, or on hero prior actions the solver
@@ -878,7 +982,15 @@ def generate_preflop_batch(
             facts = replace(
                 facts, break_even_equity=compute_break_even_equity(facts, pack)
             )
-            ev_gap = compute_ev_gap_bb(facts, pack)
+            # Prefer the solver's OWN per-action EVs (accurate on multiway
+            # pots, and defined for raise-involved spots too); fall back to the
+            # analytic engine only for EV-less packs (the Ryan pack). This is
+            # the same EV source the coherence gate uses, so they agree, and it
+            # stops the analytic gap's multiway overstatement from skewing
+            # difficulty's EV axis.
+            ev_gap = ev_gap_from_action_evs(facts, pack)
+            if ev_gap is None:
+                ev_gap = compute_ev_gap_bb(facts, pack)
             # Carry the gap on the facts so Layer 6's data block can cite the
             # "cost of the mistake" (None for raise-involved spots -> omitted).
             facts = replace(facts, ev_gap_bb=ev_gap)
@@ -905,6 +1017,14 @@ def generate_preflop_batch(
         if (min_ev_gap_bb is not None and ev_gap is not None
                 and ev_gap < min_ev_gap_bb):
             difficulty_filtered_out += 1
+            continue
+        # --- EV-coherence guard (skip incoherent "mixed" spots) ----------
+        # A mix whose meaningfully-played actions are far apart in the solver's
+        # own per-action EV is unconverged-node noise, not a real mixed
+        # strategy (e.g. 82o "calling" a shove at a 15bb EV deficit). Pre-LLM,
+        # so no spend is wasted. No-op on packs without per-action EVs.
+        if spot_mix_incoherent(facts, pack):
+            incoherent_mix_filtered_out += 1
             continue
 
         # --- generation (the paid step) ----------------------------------
@@ -1056,6 +1176,7 @@ def generate_preflop_batch(
                 "nodes_after_filter": len(filtered_nodes),
                 "difficulty_filtered_out": difficulty_filtered_out,
                 "noise_filtered_out": noise_filtered_out,
+                "incoherent_mix_filtered_out": incoherent_mix_filtered_out,
                 "rare_line_filtered_out": rare_line_filtered_out,
                 "rare_premise_filtered_out": rare_premise_filtered_out,
                 "questions_attempted": attempted,
@@ -1077,6 +1198,7 @@ def generate_preflop_batch(
         nodes_after_filter=len(filtered_nodes),
         difficulty_filtered_out=difficulty_filtered_out,
         noise_filtered_out=noise_filtered_out,
+        incoherent_mix_filtered_out=incoherent_mix_filtered_out,
         rare_line_filtered_out=rare_line_filtered_out,
         rare_premise_filtered_out=rare_premise_filtered_out,
         soft_flagged_rows=sum(1 for s in row_statuses if s),

@@ -251,17 +251,17 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
     """Categorize a node by the action hero is facing.
 
     One of :data:`PLO_ACTION_CONTEXTS`. Port of
-    :func:`pipeline.preflop.batch.node_action_context`:
+    :func:`pipeline.preflop.batch.node_action_context` (same raise-level
+    precedence): a 3-bet / 4-bet pot is labeled by the raise hero faces even
+    when someone flat-called earlier; the "After ... call(s)" buckets are
+    reserved for a SINGLE open that went multiway via flats.
 
       * ``"Opening"``              -- no prior raise in the history
-      * ``"After one call"``       -- a prior raise AND at most one LIVE
-                                      flat-caller (a squeeze opportunity / a
-                                      single overcall)
-      * ``"After multiple calls"`` -- a prior raise AND two or more live
-                                      flat-callers (the multiway territory)
-      * ``"Facing single raise"``  -- exactly one prior raise, no calls
-      * ``"Facing 3-bet"``         -- exactly two prior raises, no calls
-      * ``"Facing 4-bet+"``        -- three or more prior raises, no calls
+      * ``"Facing 4-bet+"``        -- three or more raises (callers ignored)
+      * ``"Facing 3-bet"``         -- exactly two raises (callers ignored)
+      * ``"After one call"``       -- a SINGLE open + at most one live flat-caller
+      * ``"After multiple calls"`` -- a SINGLE open + two or more live flat-callers
+      * ``"Facing single raise"``  -- a single open, no flat-callers
     """
     n_raises = sum(1 for a in node.history_before if a.action in _AGGRESSIVE)
     n_calls = sum(
@@ -269,10 +269,17 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
     )
     if n_raises == 0:
         return "Opening"
+    # Raise level wins over any earlier flat (mirrors NLHE): a 3-bet/4-bet pot
+    # is labeled by the raise hero faces, not lumped into an after-call bucket.
+    if n_raises >= 3:  # noqa: PLR2004
+        return "Facing 4-bet+"
+    if n_raises == 2:  # noqa: PLR2004
+        return "Facing 3-bet"
+    # Exactly one raise (a single open). Flat-callers make it a squeeze /
+    # overcall spot; split by the number of LIVE flat-callers -- distinct
+    # non-hero seats whose LAST action is a call (hero's own call and a caller
+    # who later folded don't count; raw n_calls over-counts both).
     if n_calls > 0:
-        # Split by the number of LIVE flat-callers -- distinct non-hero seats
-        # whose LAST action is a call (a caller who later folded doesn't count,
-        # nor hero's own earlier call). Raw n_calls over-counts both.
         last: dict[str, PloActionType] = {}
         for a in node.history_before:
             last[a.seat] = a.action
@@ -282,11 +289,7 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
             if t is PloActionType.CALL and seat != node.actor
         )
         return "After one call" if live_callers <= 1 else "After multiple calls"
-    if n_raises == 1:
-        return "Facing single raise"
-    if n_raises == 2:  # noqa: PLR2004
-        return "Facing 3-bet"
-    return "Facing 4-bet+"
+    return "Facing single raise"
 
 
 def plo_active_player_count(node: PloDecisionNode) -> int:

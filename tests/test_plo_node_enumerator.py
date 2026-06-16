@@ -172,18 +172,12 @@ def test_action_context_after_multiple_calls():
     assert plo_node_action_context(node) == "After multiple calls"
 
 
-def test_action_context_folded_caller_is_not_live():
-    # A caller who later folds doesn't count -- live callers = 1, so this stays
-    # "After one call" rather than "multiple". (Mirrors the NLHE split test.)
-    node = _node_with(
-        "BB",
-        _act("LJ", R, 100),
-        _act("CO", C),
-        _act("BU", C),
-        _act("SB", R, 100),
-        _act("CO", F),  # one of the two callers folds to the squeeze
-    )
-    assert plo_node_action_context(node) == "After one call"
+def test_action_context_3bet_pot_with_caller_is_facing_3bet():
+    # Raise level wins over an earlier flat (June 2026 reorder, mirrors NLHE):
+    # opened, flat-called, then 3-bet is "Facing 3-bet", not an after-call
+    # bucket -- the flat no longer hides the raise hero faces.
+    node = _node_with("BB", _act("LJ", R, 100), _act("CO", C), _act("BU", R, 100))
+    assert plo_node_action_context(node) == "Facing 3-bet"
 
 
 def test_all_contexts_are_in_the_catalog(tmp_path):

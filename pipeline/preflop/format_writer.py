@@ -243,8 +243,12 @@ def _hero_raise_level_for_node(facts: PreflopFacts) -> int:
     )
 
 
-def _action_evs_bb(facts: PreflopFacts, pack: PreflopPack) -> dict[str, float] | None:
+def action_evs_bb(facts: PreflopFacts, pack: PreflopPack) -> dict[str, float] | None:
     """Per-action solver EV (bb) for the hero hand, keyed by canonical label.
+
+    Public so the batch's EV-coherence guard
+    (:func:`pipeline.preflop.batch.spot_mix_incoherent`) can reuse the exact
+    same per-action EV read that fills the ``action_ev_bb`` column.
 
     Reads each action's range file at hero's node and pulls the hero
     hand's solver EV, converting from the pack's raw unit to bb via
@@ -962,7 +966,7 @@ def build_preflop_row(
         # action_frequencies. Populated only for packs that ship per-action
         # EVs (the Monker packs); blank for the EV-less Ryan pack.
         "action_ev_bb": _format_action_evs(
-            _action_evs_bb(facts, pack), canonicalize_strategy(facts)
+            action_evs_bb(facts, pack), canonicalize_strategy(facts)
         ),
     }
 
@@ -1044,6 +1048,7 @@ def write_preflop_csv(
 
 
 __all__ = [
+    "action_evs_bb",
     "build_preflop_row",
     "format_preflop_question",
     "write_preflop_csv",
