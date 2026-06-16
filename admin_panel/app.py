@@ -4467,6 +4467,72 @@ def _render_claim_check_panel(row: dict[str, str]) -> None:
             st.caption(it.get("problem", ""))
 
 
+def _render_action_ev_bars(row: dict[str, str]) -> None:
+    """Per-action solver EV as a small zero-centered bar chart.
+
+    Reads the ``action_ev_bb`` column (e.g. ``"Fold: +0.00, Call: -0.02"``),
+    one bar per action measured from the break-even line (0 bb). Makes the
+    EV gap concrete: when the bars are nearly equal the spot is a
+    near-indifference mix (which is WHY the solver mixes its action); when
+    they're far apart the gap is what the wrong action costs. The ✅ marks
+    the highest-EV action. Hidden when the column is blank -- the PioViewer
+    Ryan pack stores no solver EVs, and older batches predate the column.
+    """
+    cell = (row.get("action_ev_bb") or "").strip()
+    if not cell:
+        return
+    actions: list[tuple[str, float]] = []
+    for part in cell.split(","):
+        label, sep, num = part.strip().partition(":")
+        if not sep:
+            continue
+        try:
+            actions.append((label.strip(), float(num.strip())))
+        except ValueError:
+            continue
+    if not actions:
+        return
+    best = max(bb for _, bb in actions)
+    worst = min(bb for _, bb in actions)
+    # Symmetric scale floored at +-1bb so a genuinely tiny gap reads as tiny
+    # rather than getting stretched to fill the bar.
+    span = max(1.0, max(abs(bb) for _, bb in actions)) * 1.15
+    html = [
+        '<div style="font-size:0.85em;color:#222;font-weight:600;'
+        'margin-top:10px;">EV of each action (solver)</div>'
+    ]
+    for label, bb in actions:
+        half = min(50.0, abs(bb) / span * 50.0)
+        if bb >= 0:
+            seg, color = f"left:50%;width:{half:.1f}%;", "#2CA02C"
+        else:
+            seg, color = f"left:{50.0 - half:.1f}%;width:{half:.1f}%;", "#D62728"
+        mark = " ✅" if abs(bb - best) < 1e-9 else ""
+        html.append(
+            f'<div style="font-size:0.8em;color:#444;margin:6px 0 1px;">'
+            f"{label}{mark} · {bb:+.2f} bb</div>"
+            '<div style="position:relative;background:#E9E9E9;border-radius:3px;'
+            'height:16px;width:100%;">'
+            '<div style="position:absolute;top:-2px;bottom:-2px;left:50%;'
+            'width:1px;background:#888;"></div>'
+            f'<div style="position:absolute;top:0;{seg}height:100%;'
+            f'background:{color};border-radius:2px;"></div></div>'
+        )
+    gap = best - worst
+    tail = (
+        "The bars are nearly equal, so the actions are about the same EV — "
+        "that's why the solver mixes."
+        if gap < 0.10  # noqa: PLR2004
+        else f"The gap between best and worst is about {gap:.2f} bb — what "
+        "picking the wrong action costs."
+    )
+    html.append(
+        '<div style="font-size:0.75em;color:#888;margin-top:3px;">'
+        f"Center line = break-even (0 bb). {tail}</div>"
+    )
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+
 def _render_stat_panel(row: dict[str, str]) -> None:
     """A collapsible "Show the math" strip under an answer explanation.
 
@@ -4485,6 +4551,7 @@ def _render_stat_panel(row: dict[str, str]) -> None:
         return
     with st.expander("📊 Show the math"):
         _render_equity_bar(row)
+        _render_action_ev_bars(row)
         for note in notes:
             st.markdown(f"**{note.get('label', '')}** · {note.get('value', '')}")
             st.caption(note.get("note", ""))

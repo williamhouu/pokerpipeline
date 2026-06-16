@@ -30,8 +30,14 @@ from pipeline.preflop.fact_extractor import PreflopFacts
 # RANGE equity reads as "stronger / weaker than your average hand".
 HAND_VS_RANGE_BAND = 0.03
 # Villain range-width buckets (pct of dealt hands) for the "what you face" note.
-RANGE_WIDTH_TIGHT = 6.0
-RANGE_WIDTH_MODERATE = 15.0
+# Calibrated to preflop reality: a 3-bet range is ~5%, UTG opens ~8%, CO ~20%,
+# BTN/blinds ~30-45%. So < 15% reads as tight, 15-30% fairly wide, 30%+ wide.
+# (Earlier 6/15 cutoffs called an 8% UTG open "fairly wide", which is wrong.)
+RANGE_WIDTH_TIGHT = 15.0
+RANGE_WIDTH_MODERATE = 30.0
+# Below this, folding and calling are EV-equivalent enough that the note frames
+# it as a near-tie / mix rather than implying the decision is worth real bb.
+EV_GAP_NEGLIGIBLE_BB = 0.10
 
 
 @dataclass(frozen=True)
@@ -180,10 +186,21 @@ def _ev_gap_note(facts: PreflopFacts) -> StatNote | None:
     # the two actions are always folding and calling. State how far apart they
     # are in EV and what that means in plain English, without prescribing which
     # is right -- the answer explanation owns the decision.
-    note = (
-        f"Folding and calling are about {val}bb apart in EV here, so getting "
-        f"this decision right is worth about {val} big blinds."
-    )
+    if gap < EV_GAP_NEGLIGIBLE_BB:
+        # A near-zero gap is not a boring question -- it is WHY the solver
+        # mixes. Say so, instead of "worth about 0 big blinds" (which read as
+        # if the spot were pointless).
+        note = (
+            f"Folding and calling are within {val}bb of each other -- "
+            "essentially the same EV. That near-tie is exactly why the solver "
+            "mixes here instead of always doing one thing; either is fine, "
+            "with a small lean toward the more frequent action."
+        )
+    else:
+        note = (
+            f"Folding and calling are about {val}bb apart in EV, so getting "
+            f"this decision right is worth about {val}bb."
+        )
     return StatNote("ev_gap", "EV", f"{val}bb", note)
 
 

@@ -192,11 +192,13 @@ def test_blockers_present_and_absent() -> None:
 
 # --- what you're up against -------------------------------------------------
 def test_villain_range_width_buckets() -> None:
-    tight = _note(_facts(villain_stats=_villain(("AA", "KK"), 80.0, 3.0)), "villain_range")
+    # Calibrated to preflop reality: an 8% UTG open is tight, ~20% (CO) is
+    # fairly wide, 30%+ (BTN / blind battles / defense) is wide.
+    tight = _note(_facts(villain_stats=_villain(("AA", "KK"), 80.0, 8.0)), "villain_range")
     assert tight is not None and "a tight range" in tight.note
-    moderate = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 10.0)), "villain_range")
+    moderate = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 20.0)), "villain_range")
     assert moderate is not None and "a fairly wide range" in moderate.note
-    wide = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 22.0)), "villain_range")
+    wide = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 40.0)), "villain_range")
     assert wide is not None and "a wide range" in wide.note
 
 
@@ -232,9 +234,14 @@ def test_ev_gap_note_present_only_when_ev_exists() -> None:
     assert ev is not None
     assert ev.value == "1.7bb"
     assert "Folding and calling are about 1.7bb apart" in ev.note
-    assert "worth about 1.7 big blinds" in ev.note
+    assert "worth about 1.7bb" in ev.note
     # tidy formatting of round values
     assert _note(_facts(ev_gap_bb=2.0), "ev_gap").value == "2bb"
+    # a near-zero gap is framed as a mix, not "worth ~0bb" (which read as if
+    # the spot were pointless).
+    tiny = _note(_facts(ev_gap_bb=0.0), "ev_gap")
+    assert tiny is not None
+    assert "the same EV" in tiny.note and "mixes" in tiny.note
 
 
 def test_full_spot_order_and_round_trip() -> None:
