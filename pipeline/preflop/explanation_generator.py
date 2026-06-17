@@ -265,6 +265,18 @@ VOICE_RULES_PREFLOP: tuple[str, ...] = (
     "folds often and you are usually heads-up when called; treat the "
     "whole-field showdown number as context, not the decision, and build the "
     "explanation around the squeeze/3-bet archetype frame.",
+    # 19. Calibrated hedging on realization + playability claims (June 2026,
+    #     user feedback: "you won't realize it out of position" overstates a
+    #     tendency as a law).
+    "Qualify realization and playability claims by frequency. When you "
+    "describe how your hand will REALIZE its equity, how it plays out "
+    "postflop, or whether you will be guessing, get outplayed, or be forced "
+    "to fold, write it with often, usually, mostly, or tend to rather than as "
+    "a flat certainty, unless it is near-total. These are frequencies, not "
+    "laws -- out of position you usually realize less of your equity, but not "
+    "never. Keep the verdict, your action, and your own cards stated plainly. "
+    "This hedge is only for how the hand plays out, not for the decision "
+    "itself.",
 )
 
 

@@ -88,11 +88,13 @@ def test_system_prompt_has_rules_and_bans_em_dash():
     assert "VOICE RULES" in prompt
     assert "Never use an em dash" in prompt
     assert "BANNED PHRASES" in prompt
-    assert len(VOICE_RULES_PLO) == 14  # noqa: PLR2004
+    assert len(VOICE_RULES_PLO) == 15  # noqa: PLR2004
     # The clean-final-draft rule (kills the self-correction artifact).
     assert any("clean, final draft" in r for r in VOICE_RULES_PLO)
     # The calibrated range-claim hedging rule (June 2026).
     assert any("Qualify range-versus-hand claims" in r for r in VOICE_RULES_PLO)
+    # The realization + playability hedging rule (June 2026, sibling of 14).
+    assert any("Qualify realization and playability claims" in r for r in VOICE_RULES_PLO)
     # The preflop blocker-framing rule (card removal, not flush math).
     assert any("blockers as preflop CARD REMOVAL" in r for r in VOICE_RULES_PLO)
     # Paragraphs + say-only-what-drives-the-spot.

@@ -230,14 +230,15 @@ def _mock_client(responses: list[str]) -> SimpleNamespace:
 # --- system prompt carries voice rules + archetypes + banned phrases --------
 def test_system_prompt_includes_every_preflop_voice_rule() -> None:
     system = build_preflop_system_prompt()
-    # 18 rules since June 2026: rule 11 (one villain's range only +
+    # 19 rules since June 2026: rule 11 (one villain's range only +
     # still-to-act discipline) from the round-1 audit; rules 12-16
     # (blocker discipline, no invented reasons for alternative hands,
     # position wording from the fact, full-range-only equity talk,
     # cold-call/squeeze/open-fold/ladder terminology) from round 2;
     # rule 17 (range-vs-hand hedging); rule 18 (multi-way all-in: cite the
-    # field equity, not the heads-up number).
-    assert len(VOICE_RULES_PREFLOP) == 18
+    # field equity, not the heads-up number); rule 19 (realization +
+    # playability hedging -- "you often won't realize it OOP", not "won't").
+    assert len(VOICE_RULES_PREFLOP) == 19
     for rule in VOICE_RULES_PREFLOP:
         # Rules are long; assert on the leading clause so a future
         # word-tweak doesn't break the test.

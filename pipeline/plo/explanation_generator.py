@@ -156,6 +156,17 @@ VOICE_RULES_PLO: tuple[str, ...] = (
     "it only does these things some of the time. Keep the verdict and your "
     "own holding stated plainly; this hedge is only for what a RANGE does "
     "to your hand, not for your action or your cards.",
+    # 15. Calibrated hedging on realization + playability (June 2026, user
+    #     feedback): a sibling of rule 14, but for how YOUR hand plays out.
+    "Qualify realization and playability claims by frequency. When you "
+    "describe how your hand will REALIZE its equity, how it plays out "
+    "postflop, or whether you will be guessing, get outplayed, or be forced "
+    "to fold, write it with often, usually, mostly, or tend to rather than as "
+    "a flat certainty, unless it is near-total. These are frequencies, not "
+    "laws -- out of position you usually realize less of your equity, but not "
+    "never. Keep the verdict, your action, and your own cards stated plainly. "
+    "This hedge is only for how the hand plays out, not for the decision "
+    "itself.",
 )
 
 # Concise strategic frame per PLO archetype (one line the LLM reads fast).
