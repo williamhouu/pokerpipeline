@@ -645,6 +645,74 @@ def test_archetype_call_for_implied_odds_when_no_jam():
     assert arch == "call_for_implied_odds"
 
 
+# --- H2: multi-way splits use FIELD equity, not heads-up --------------------
+def test_archetype_multiway_call_uses_field_equity():
+    """A multi-way CALL that's value vs the lone raiser (0.52) but behind the
+    FIELD (0.41) is an implied-odds call, not a value call. H2: the split must
+    use field equity on multi-way must-beat-everyone spots."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.CALL),
+    )
+    spot = _spot_with("Call", {"Call": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(
+        spot, history[0],
+        hero_equity_vs_villain=0.52,   # would be call_for_value heads-up
+        hero_equity_vs_field=0.41,     # but behind the field
+        is_multiway=True,
+    )
+    assert arch == "call_for_implied_odds"
+
+
+def test_archetype_multiway_fold_uses_field_equity():
+    """Heads-up the fold reads as fold_pot_odds (0.42 >= 0.40); vs the field
+    (0.36) it's a domination fold. H2 routes the split to field equity."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.CALL),
+    )
+    spot = _spot_with("Fold", {"Fold": 1.0, "Call": 0.0}, history)
+    arch = classify_archetype(
+        spot, history[0],
+        hero_equity_vs_villain=0.42,
+        hero_equity_vs_field=0.36,
+        is_multiway=True,
+    )
+    assert arch == "fold_dominated"
+
+
+def test_archetype_multiway_squeeze_keeps_headsup_equity():
+    """A RAISE (squeeze) isolates -- hero is usually heads-up vs the raiser
+    when called -- so it KEEPS the heads-up number (0.55 -> value), NOT the
+    field number (0.35, which would wrongly read as a bluff)."""
+    history = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 60.0),
+        ParsedAction("HJ", PreflopActionType.CALL),
+    )
+    spot = _spot_with("Raise 85%", {"Raise 85%": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(
+        spot, history[0],
+        hero_equity_vs_villain=0.55,   # value vs the raiser -> squeeze_for_value
+        hero_equity_vs_field=0.35,     # ignored for a raise
+        is_multiway=True,
+    )
+    assert arch == "squeeze_for_value"
+
+
+def test_archetype_headsup_call_ignores_field_equity():
+    """Heads-up (is_multiway=False), the heads-up number drives the split even
+    if a field number is passed -- backward compatible."""
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
+    spot = _spot_with("Call", {"Call": 1.0, "Fold": 0.0}, history)
+    arch = classify_archetype(
+        spot, history[0],
+        hero_equity_vs_villain=0.52,
+        hero_equity_vs_field=0.30,     # present but ignored (heads-up)
+        is_multiway=False,
+    )
+    assert arch == "call_for_value"
+
+
 def test_archetype_all_in_for_value():
     """Dominant AllIn with positive equity -> all_in_for_value."""
     history = (

@@ -583,7 +583,6 @@ def extract_facts(
         blockers = compute_blockers(
             spot.hero_card_combo, top_value_combos(villain_combos)
         )
-        archetype = classify_archetype(spot, villain, hero_eq)
         # Multi-way field equity. When 2+ opponents are still in the pot (all-in
         # OR not), hero's heads-up-vs-the-raiser number (hero_eq) overstates the
         # truth -- hero must beat the WHOLE field. Compute equity vs every
@@ -592,6 +591,17 @@ def extract_facts(
         # stays byte-identical; only the new fields are added.
         hero_field_eq, per_opp_eq, showdown_positions = (
             _compute_multiway_field_equity(spot, pack, rng, equity_runouts)
+        )
+        # Archetype classified AFTER field equity so the value/bluff + fold
+        # splits can use the FIELD number on multi-way must-beat-everyone spots
+        # (H2). classify_archetype consumes NO rng, so moving it here leaves
+        # every equity value byte-identical -- only the label changes.
+        archetype = classify_archetype(
+            spot,
+            villain,
+            hero_eq,
+            hero_equity_vs_field=hero_field_eq,
+            is_multiway=len(showdown_positions) >= 2,
         )
         return PreflopFacts(
             spot=spot,
@@ -809,12 +819,29 @@ def classify_archetype(
     spot: PreflopSpot,
     villain: ParsedAction | None,
     hero_equity_vs_villain: float | None,
+    *,
+    hero_equity_vs_field: float | None = None,
+    is_multiway: bool = False,
 ) -> str:
     """Pick a strategic archetype label for the spot.
 
     Looks at hero's dominant action + the action context (open, facing
-    raise, 3-bet, 4-bet, squeeze, all-in) + hero's equity vs villain to
-    classify as value vs bluff vs fold reason.
+    raise, 3-bet, 4-bet, squeeze, all-in) + hero's equity to classify as
+    value vs bluff vs fold reason.
+
+    Which equity drives the value/bluff + dominated splits depends on the
+    spot (June 2026, H2):
+
+      * On a MULTI-WAY pot a fold / call / all-in is a "beat the whole field"
+        decision, so the split uses ``hero_equity_vs_field`` (hero must beat
+        EVERYONE). The heads-up-vs-one-villain number overstates equity
+        multi-way and would mislabel near-threshold spots (e.g. a 52%-vs-the-
+        raiser call that is 41% vs the field is an implied-odds call, not a
+        value call).
+      * A RAISE (3-bet / 4-bet / squeeze) isolates -- hero is usually heads-up
+        vs the original raiser when called -- so it keeps
+        ``hero_equity_vs_villain`` (voice rule 18 frames the prose the same
+        way). Heads-up spots use it too.
 
     The full label catalog (with the frame each demands) is
     ``pipeline.preflop.explanation_generator.PREFLOP_ARCHETYPE_GUIDANCE``.
@@ -832,6 +859,19 @@ def classify_archetype(
         return "unclassified"
 
     dominant = spot.dominant_action
+
+    # Which equity drives the value/bluff + dominated splits. On a multi-way
+    # pot, fold/call/all-in are "beat the whole field" decisions -> use the
+    # field number (hero must beat everyone). A raise isolates -> keep the
+    # heads-up-vs-raiser number. Heads-up spots also keep it. (H2.)
+    beats_field_decision = (
+        is_multiway
+        and hero_equity_vs_field is not None
+        and dominant in ("Fold", "Call", "AllIn")
+    )
+    eq_for_split = (
+        hero_equity_vs_field if beats_field_decision else hero_equity_vs_villain
+    )
 
     # Count prior raises in history (excludes hero's own pending action).
     n_prior_raises = sum(
@@ -869,11 +909,13 @@ def classify_archetype(
             return "fold_outranged"
         return "unclassified"
 
-    # Hero is facing a villain action. Classify by hero's dominant action.
+    # Hero is facing a villain action. Classify by hero's dominant action,
+    # using the equity that matches the decision (eq_for_split: field on
+    # multi-way fold/call/all-in, heads-up otherwise -- see the docstring).
     def value_or_bluff(suffix_v: str, suffix_b: str) -> str:
-        if hero_equity_vs_villain is None:
+        if eq_for_split is None:
             return suffix_v  # default to value when equity unknown
-        return suffix_v if hero_equity_vs_villain >= 0.50 else suffix_b
+        return suffix_v if eq_for_split >= 0.50 else suffix_b
 
     if dominant == "Fold":
         # No CALL action offered at this node (e.g. SB facing a 3-bet with
@@ -888,7 +930,7 @@ def classify_archetype(
         # pot-odds frame.
         if "Call" not in spot.action_frequencies:
             return "fold_no_continue"
-        if hero_equity_vs_villain is not None and hero_equity_vs_villain < 0.40:
+        if eq_for_split is not None and eq_for_split < 0.40:
             return "fold_dominated"
         return "fold_pot_odds"  # folding despite some equity = wrong-priced
 
