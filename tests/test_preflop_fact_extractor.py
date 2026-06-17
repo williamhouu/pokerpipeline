@@ -575,11 +575,43 @@ def test_archetype_squeeze_for_value():
 
 
 def test_archetype_fold_dominated():
-    """Dominant Fold with very low equity -> fold_dominated."""
+    """Dominant Fold with very low equity -> fold_dominated.
+
+    A 'Call' action IS offered at the node (a normal facing-an-open fold), so
+    the no-call guard does NOT fire and the equity split applies.
+    """
     history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
     spot = _spot_with("Fold", {"Fold": 1.0, "Call": 0.0}, history)
     arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.25)
     assert arch == "fold_dominated"
+
+
+def test_archetype_fold_pot_odds_when_call_offered():
+    """Dominant Fold with decent equity AND a call offered -> fold_pot_odds."""
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
+    spot = _spot_with("Fold", {"Fold": 1.0, "Call": 0.0}, history)
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.47)
+    assert arch == "fold_pot_odds"
+
+
+def test_archetype_fold_no_continue_when_no_call_offered():
+    """The June 2026 A5o misfire: SB opens, BB 3-bets, hero SB faces a
+    fold-or-4bet spot (NO call action). A dominant Fold here is NOT a pot-odds
+    decision -- there is no price to call -- so it must route to
+    fold_no_continue, never fold_pot_odds (whose 'price you'd need to call'
+    frame produced a reversed equity-vs-price claim). The high equity (47.66%)
+    would otherwise have selected fold_pot_odds."""
+    history = (
+        ParsedAction("BB", PreflopActionType.RAISE, 200.0),  # BB 3-bets the SB open
+    )
+    spot = _spot_with(
+        "Fold",
+        {"Fold": 0.84, "Raise 5x": 0.16},  # 4-bet-or-fold: NO 'Call' key
+        history,
+        actor="SB",
+    )
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.4766)
+    assert arch == "fold_no_continue"
 
 
 def test_archetype_call_for_value():

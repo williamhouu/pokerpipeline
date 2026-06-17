@@ -130,6 +130,10 @@ ARCHETYPE_BASE_EASE: dict[str, float] = {
     # mis-rated as medium). fold_pot_odds stays lower: folding despite
     # decent equity is a closer, more teachable decision.
     "fold_dominated":         0.95,
+    # Folding a hand not strong enough to (re)raise when no call is offered
+    # (e.g. SB junk-ace vs a 3-bet, fold-or-4bet) is an easy, near-trivial
+    # fold -- close to fold_dominated.
+    "fold_no_continue":       0.90,
     "fold_pot_odds":          0.60,
     "call_for_value":         0.60,
     "call_for_implied_odds":  0.55,

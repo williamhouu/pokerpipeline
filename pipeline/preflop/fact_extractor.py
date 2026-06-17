@@ -876,6 +876,18 @@ def classify_archetype(
         return suffix_v if hero_equity_vs_villain >= 0.50 else suffix_b
 
     if dominant == "Fold":
+        # No CALL action offered at this node (e.g. SB facing a 3-bet with
+        # only fold / 4-bet) means there is no price to weigh -- the choice is
+        # raise-or-fold. Framing such a fold around pot odds ("your equity
+        # sits under the price you'd need to call") is category-wrong AND was
+        # observed reversing the equity-vs-price relationship (June 2026 A5o
+        # SB-vs-3bet misfire). Route these to a domination/realization frame
+        # that never mentions a calling price. Detected by the node's action
+        # set, not hero's frequency, so a hand that folds 100% at a node that
+        # DOES offer a call (a normal BB-vs-open fold) still gets the
+        # pot-odds frame.
+        if "Call" not in spot.action_frequencies:
+            return "fold_no_continue"
         if hero_equity_vs_villain is not None and hero_equity_vs_villain < 0.40:
             return "fold_dominated"
         return "fold_pot_odds"  # folding despite some equity = wrong-priced
