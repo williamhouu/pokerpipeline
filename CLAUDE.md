@@ -306,6 +306,41 @@ subject-bound ladder slips inside the reachable bound ("CO folds to a
 5-bet" where only CO could make it) and equity-vs-named-hand claims
 (rule 15 is prompt-only).
 
+## Postflop pipeline (`pipeline/postflop/`, June 2026)
+
+A **separate, self-contained** flop/turn/river generator, kept apart from the
+preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
+`pipeline/postflop/README.md`. Key facts:
+
+- **Solver-agnostic IR.** Everything runs on `pipeline/postflop/solve.py`
+  (`PostflopSolve` / `PostflopNode` / `NodeAction`), NOT a vendor format. A
+  thin adapter per source populates the IR; `pipeline/postflop/fixtures.py`
+  builds an in-memory BTN-vs-BB SRP `2c Js 7s` solve so the whole pipeline
+  runs/tests with **no solver file and no API key** (this Mac can't run Pio;
+  the trial `.cfr`/`.db` solves live outside the repo). `validate_solve` is
+  the adapter contract.
+- **Reuses only pure leaf utilities** (`cards`, `fact_extractor.hand_class` /
+  `board_texture` / `equity`, `action_history.format_card`, and
+  `explanation_generator.{call_messages_create, GeneratedExplanation,
+  BANNED_LITERAL_PHRASES}`). Imports no other pipeline's batch/facts/
+  validators/writer; modifies no shared module.
+- **Layers**: `spot_sampler` → `question_extractor` (worthy: dominant freq
+  55–95% AND EV gap ≥ 0.5bb) → `facts` (equity, hand class, board texture,
+  SPR, pot odds, EV gap, archetype, `concept_tags`) → `action_history`
+  (**multi-street**: a turn question renders preflop + flop + turn ahead of
+  it) → `options`/`difficulty` → `explanation_generator` (Layer 6, dry-run
+  placeholder OR real Anthropic call + 1 retry) → `validators` (deterministic
+  hard + soft) → `format_writer` (35-col team CSV) → `batch.generate_postflop_batch`
+  (+ `meta.json`). CLI: `scripts/generate_postflop.py --dry-run`.
+- **Deterministic**: seeded per-spot equity + sorted spot order + no
+  meta timestamps ⇒ byte-identical CSV (guarded by a test). 39 tests in
+  `tests/test_postflop_pipeline.py`.
+- **NOT done (seamed extension points)**: real-solve adapters (`.cfr` via the
+  Pio UPI client / the third-party `.db`), the admin Generate/Review pages
+  (mirror the preflop ones; reuse `jobs.start_subprocess_job` unchanged), LLM
+  prompt tuning against gold examples, and exact Runout app table-state token
+  formatting. See the README's "Done vs. next".
+
 ## Build phases & status
 
 Each phase ships something usable on its own. Check-in milestones gate phases 2, 3, 4.

@@ -1,0 +1,111 @@
+# Postflop question pipeline
+
+A **separate, self-contained** pipeline that generates flop / turn / river
+training questions, mirroring `pipeline/preflop/` but kept apart from the
+preflop NLHE and PLO generators so work here cannot change their behaviour.
+
+The governing rule is the repo's: **the LLM never thinks about poker, it only
+writes the words.** Every strategic fact (correct action, equity, frequencies,
+hand class, board texture, concept tags, archetype) is computed
+deterministically; Layer 6 turns that resolved block into prose.
+
+## Why it's built on a solver-agnostic IR
+
+The pipeline never touches a vendor solve format directly. It runs on a clean
+intermediate representation (`solve.py`); a thin **adapter** per solve source
+populates it:
+
+```
+PioSolver .cfr  ─┐
+third-party .db ─┼─► adapter ─► PostflopSolve (IR) ─► pipeline ─► CSV + meta.json
+(future formats)─┘                     ▲
+                          synthetic fixture (fixtures.py) — tests / demo
+```
+
+This is deliberate. This Mac cannot run PioSolver (Windows-only), and the
+trial solves are multi-GB and live outside the repo, so the whole pipeline is
+built and tested against an **in-memory synthetic solve**
+(`fixtures.btn_vs_bb_srp_2cJs7s`). When a real solve is adapted into the IR,
+no pipeline code changes — only the input.
+
+## Layers
+
+| File | Layer | Role |
+|------|-------|------|
+| `solve.py` | 1-2 | The IR: `PostflopSolve` / `PostflopNode` / `NodeAction` (+ `validate_solve`). |
+| `fixtures.py` | 1-2 | Synthetic BTN-vs-BB SRP `2c Js 7s` solve (4 nodes). |
+| `spot_sampler.py` | 3 | `PostflopNode` + a hero combo -> `PostflopSpot` (+ per-spot EV gap). |
+| `question_extractor.py` | 4 | Worthiness gate: dominant freq in 55–95% **and** EV gap ≥ 0.5bb. |
+| `facts.py` | 5 | `PostflopFacts`: equity, hand class, board texture, blockers, SPR, pot odds, EV gap, archetype, concept tags. |
+| `concept_tags.py` | 5 | Postflop concept-tag registry + archetype classifier (pure functions). |
+| `action_history.py` | — | Deterministic **multi-street** Context/Question prose (a turn question shows preflop + flop). |
+| `options.py` | — | The four multiple-choice options + the correct answer. |
+| `difficulty.py` | — | 500–3000 difficulty from the frequency + EV-gap axes. |
+| `explanation_generator.py` | 6 | The only LLM step (or a deterministic placeholder for dry runs). |
+| `validators.py` | 7 | Deterministic hard (reject + retry) and soft (flag) checks. |
+| `format_writer.py` | 8 | The team-format CSV row + writer. |
+| `batch.py` | — | `generate_postflop_batch` — the end-to-end driver + `meta.json`. |
+
+## What it reuses (and never modifies)
+
+Only **pure, game-agnostic leaf utilities** from the rest of the repo:
+
+- `pipeline.cards` — card parsing.
+- `pipeline.fact_extractor.hand_class.classify_hand` — made-hand classification.
+- `pipeline.fact_extractor.board_texture.classify_board` — board texture.
+- `pipeline.fact_extractor.equity.equity_vs_range` — the 7-card equity evaluator.
+- `pipeline.action_history.format_card` — the suit-emoji card renderer.
+- `pipeline.explanation_generator` — `call_messages_create`,
+  `GeneratedExplanation`, `BANNED_LITERAL_PHRASES`, `ExplanationValidationError`.
+
+It imports **no** other pipeline's batch driver, fact extractor, validators,
+or format writer.
+
+## Run it
+
+```bash
+# Deterministic dry run — no solver file, no API key:
+venv/bin/python scripts/generate_postflop.py --dry-run --out test_output/postflop_demo.csv
+
+# Real run (needs ANTHROPIC_API_KEY):
+venv/bin/python scripts/generate_postflop.py --out test_output/postflop.csv -n 30
+
+# Tests:
+venv/bin/python -m pytest tests/test_postflop_pipeline.py -q
+```
+
+## Determinism
+
+Equity is seeded per spot (`facts._spot_rng`), the worthy-spot order is sorted
+(not shuffled), and `meta.json` carries no timestamps — so the same solve +
+settings produce a **byte-identical** CSV. `test_batch_is_deterministic`
+guards this; any drift is a regression.
+
+## Done vs. next (extension points, all clearly seamed)
+
+**Done (this pass):** the full deterministic spine + dry-run end-to-end + a
+real-LLM path (mock-tested) + 39 tests + this doc. The pipeline produces a
+CSV of worthy questions with full multi-street action history, difficulty,
+concept tags, archetype, and provenance.
+
+**Next:**
+
+1. **Real-solve adapters.** Write `adapters/<source>.py` that reads a
+   PioSolver `.cfr` (via `pipeline.piosolver` UPI, on a Windows host) or the
+   third-party `.db` and emits a `PostflopSolve`. `validate_solve` is the
+   contract to target. *This is the only place a vendor format is known.*
+   When real flop/turn/river solves arrive, this is the integration point.
+2. **Admin panel.** Add a "Postflop" section in `admin_panel/app.py`
+   (a `_render_generate_page_postflop` mirroring the preflop one) that launches
+   `generate_postflop_batch` via the existing `jobs.start_subprocess_job`
+   (no changes to `jobs.py` / `job_worker.py` — they're generic). The Review
+   page already renders any batch CSV + `meta.json`.
+3. **LLM prompt tuning.** `POSTFLOP_SYSTEM_PROMPT` +
+   `POSTFLOP_ARCHETYPE_GUIDANCE` are a solid first cut; tune against gold
+   postflop examples and grow the soft validators from observed failures
+   (same loop as preflop).
+4. **App table-state format.** `format_writer` renders amounts in bb; porting
+   the preflop `app_table_format` engine would emit the exact Runout
+   chip/seat token strings. A formatting concern only — no layer above changes.
+5. **Richer facts.** Detailed blocker analysis (value/bluff combos blocked) and
+   range-vs-range advantage; the reused `equity` module already supports it.
