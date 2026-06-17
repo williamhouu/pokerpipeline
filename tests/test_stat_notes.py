@@ -228,20 +228,11 @@ def test_open_spot_yields_no_notes() -> None:
     assert sn.build_stat_notes(_facts()) == []
 
 
-def test_ev_gap_note_present_only_when_ev_exists() -> None:
-    assert _note(_facts(), "ev_gap") is None            # no EV computed -> no note
-    ev = _note(_facts(ev_gap_bb=1.7), "ev_gap")
-    assert ev is not None
-    assert ev.value == "1.7bb"
-    assert "Folding and calling are about 1.7bb apart" in ev.note
-    assert "worth about 1.7bb" in ev.note
-    # tidy formatting of round values
-    assert _note(_facts(ev_gap_bb=2.0), "ev_gap").value == "2bb"
-    # a near-zero gap is framed as a mix, not "worth ~0bb" (which read as if
-    # the spot were pointless).
-    tiny = _note(_facts(ev_gap_bb=0.0), "ev_gap")
-    assert tiny is not None
-    assert "the same EV" in tiny.note and "mixes" in tiny.note
+def test_no_ev_gap_note_in_panel() -> None:
+    """The standalone EV row was removed June 2026 (panel + CSV). Even with an
+    EV gap present, build_stat_notes never emits an 'ev_gap' row."""
+    assert _note(_facts(ev_gap_bb=1.7), "ev_gap") is None
+    assert _note(_facts(ev_gap_bb=0.0), "ev_gap") is None
 
 
 def test_full_spot_order_and_round_trip() -> None:
@@ -254,8 +245,9 @@ def test_full_spot_order_and_round_trip() -> None:
         villain_stats=_villain(("AA", "KK", "AKs"), 70.0, 4.2),
     )
     notes = sn.build_stat_notes(facts)
+    # 'ev_gap' is intentionally absent (removed June 2026).
     assert [n.key for n in notes] == [
-        "pot_odds", "hero_equity", "ev_gap", "blockers", "villain_range"
+        "pot_odds", "hero_equity", "blockers", "villain_range"
     ]
     blob = sn.stat_notes_to_json(notes)
     parsed = sn.parse_stat_notes(blob)

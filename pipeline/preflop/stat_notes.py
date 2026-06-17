@@ -35,9 +35,6 @@ HAND_VS_RANGE_BAND = 0.03
 # (Earlier 6/15 cutoffs called an 8% UTG open "fairly wide", which is wrong.)
 RANGE_WIDTH_TIGHT = 15.0
 RANGE_WIDTH_MODERATE = 30.0
-# Below this, folding and calling are EV-equivalent enough that the note frames
-# it as a near-tie / mix rather than implying the decision is worth real bb.
-EV_GAP_NEGLIGIBLE_BB = 0.10
 
 
 @dataclass(frozen=True)
@@ -177,33 +174,6 @@ def _hero_field_equity_note(
     return StatNote("hero_equity", "Your equity (multi-way)", pct, head + tail)
 
 
-def _ev_gap_note(facts: PreflopFacts) -> StatNote | None:
-    gap = facts.ev_gap_bb
-    if gap is None:
-        return None
-    val = f"{round(gap, 2):g}"
-    # ev_gap is only computed for fold-or-call decisions (see ev_engine), so
-    # the two actions are always folding and calling. State how far apart they
-    # are in EV and what that means in plain English, without prescribing which
-    # is right -- the answer explanation owns the decision.
-    if gap < EV_GAP_NEGLIGIBLE_BB:
-        # A near-zero gap is not a boring question -- it is WHY the solver
-        # mixes. Say so, instead of "worth about 0 big blinds" (which read as
-        # if the spot were pointless).
-        note = (
-            f"Folding and calling are within {val}bb of each other -- "
-            "essentially the same EV. That near-tie is exactly why the solver "
-            "mixes here instead of always doing one thing; either is fine, "
-            "with a small lean toward the more frequent action."
-        )
-    else:
-        note = (
-            f"Folding and calling are about {val}bb apart in EV, so getting "
-            f"this decision right is worth about {val}bb."
-        )
-    return StatNote("ev_gap", "EV", f"{val}bb", note)
-
-
 def _blockers_note(blockers: dict[str, int], villain: str = "their") -> StatNote | None:
     total = sum(n for n in blockers.values() if n > 0)
     if total <= 0:
@@ -292,9 +262,11 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     # hand-relative framing in _hero_equity_note ("stronger than your average
     # hand here") keeps the useful part; the `range_equity` CSV column still
     # carries the number for QA/analytics.
-    ev_note = _ev_gap_note(facts)
-    if ev_note is not None:
-        notes.append(ev_note)
+    # (The standalone "EV" row was removed June 2026 -- the team asked to take
+    # the single EV-gap number out of the panel + the CSV stat_notes JSON. The
+    # per-action EV column action_ev_bb, charted on the Review page, is the EV
+    # signal now; the gap is still computed internally for difficulty + the
+    # worthiness gate.)
     blockers_note = _blockers_note(facts.blockers, villain)
     if blockers_note is not None:
         notes.append(blockers_note)
