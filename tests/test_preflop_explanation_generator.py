@@ -416,6 +416,48 @@ def test_trim_facts_no_villain_skips_villain_stats() -> None:
     assert "your_hand_equity_vs_villain_range" not in trimmed
     assert "blockers" not in trimmed
     assert trimmed["archetype"] == "fold_outranged"
+    # M3: on an OPEN (no villain), position is "Opening (first to act)", not a
+    # premature In/Out -- there's no opponent yet.
+    assert trimmed["hero_position"] == "Opening (first to act)"
+    # M4: range equity is NOT in the LLM block.
+    assert "your_range_equity_vs_villain_range" not in trimmed
+
+
+def test_resync_archetype_catalog_injects_current_catalog() -> None:
+    """A saved prompt with a STALE catalog (old wording, missing the newest
+    archetype) gets the CURRENT code catalog spliced in on load, while the
+    user's surrounding voice/structure is preserved."""
+    from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+        PREFLOP_ARCHETYPE_GUIDANCE,
+        _resync_archetype_catalog,
+    )
+
+    stale = (
+        "MY CUSTOM PREAMBLE the user wrote.\n\n"
+        "STRATEGIC ARCHETYPES. The data block carries a `archetype` field. "
+        "The 2 preflop archetypes and the frame each one demands:\n"
+        "  - open_for_value: OLD WORDING.\n"
+        "  - fold_pot_odds: the price is wrong despite some equity (STALE).\n"
+        "\n"
+        "MY CUSTOM TAIL the user wrote.\n"
+    )
+    out = _resync_archetype_catalog(stale)
+    assert "MY CUSTOM PREAMBLE" in out          # preamble preserved
+    assert "MY CUSTOM TAIL" in out              # tail preserved
+    assert "fold_no_continue" in out            # newest archetype injected
+    assert "STALE" not in out                   # stale catalog gone
+    assert f"{len(PREFLOP_ARCHETYPE_GUIDANCE)} preflop" in out  # count refreshed
+
+
+def test_resync_archetype_catalog_without_markers_untouched() -> None:
+    """A prompt with no archetype catalog is returned unchanged (safe fallback
+    -- the per-spot framing block still carries the catalog to the LLM)."""
+    from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+        _resync_archetype_catalog,
+    )
+
+    text = "A custom prompt with voice rules but no archetype section.\n"
+    assert _resync_archetype_catalog(text) == text
 
 
 def test_trim_facts_multiway_emits_field_and_breakdown_not_single_villain() -> None:

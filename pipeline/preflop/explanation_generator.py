@@ -342,10 +342,11 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "price to call, so do NOT frame this around pot odds or 'the equity "
         "you'd need to call' -- that is category-wrong here. Frame it around "
         "why the hand is not strong enough to (re)raise for value and would "
-        "be dominated if it continued: a weak/dominated holding (e.g. a weak "
-        "offsuit ace against a 3-bet built around better aces and big pairs), "
-        "poor postflop playability, and only a thin 4-bet-bluff slice that "
-        "the blocker keeps alive. Never claim hero's raw equity is above or "
+        "be dominated if it continued: a weak or dominated holding and poor "
+        "postflop playability, with only a thin re-raise-bluff slice mixed in. "
+        "Cite a blocker ONLY if it appears in the blockers fact (the "
+        "concept_tags flag it); do not assume an ace-blocker a hand without "
+        "an ace cannot have. Never claim hero's raw equity is above or "
         "below a calling price -- there is no call to make. Do NOT state "
         "whether hero is in or out of position from the seat name; take that "
         "ONLY from the hero_position fact (a button or cutoff hero is IN "
@@ -393,9 +394,10 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     ),
     "3bet_as_bluff": (
         "Hero is 3-betting with a hand that doesn't beat villain's value "
-        "but has fold equity + good blockers + playability when called. "
-        "Frame around polarization: 3-bet bluffs use ace-blockers, "
-        "suited connectors, or hands one rank below the value 3-bet range."
+        "but has fold equity and playability when called. Frame around "
+        "polarization and fold equity. Cite a specific blocker ONLY if it is "
+        "in the blockers fact (concept_tags flag it) -- do not assume an "
+        "ace-blocker or a particular hand type the data doesn't show."
     ),
     "4bet_for_value": (
         "Hero is 4-betting a 3-bet with a premium hand that dominates "
@@ -404,8 +406,10 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     ),
     "4bet_as_bluff": (
         "Hero is 4-betting with a hand that has fold equity vs villain's "
-        "3-bet range. Frame around blockers (ace-blockers reduce villain's "
-        "AA/AK combos) and game-theory balance with the value 4-bets."
+        "3-bet range. Frame around fold equity and balance with the value "
+        "4-bets. Name a blocker ONLY if it is in the blockers fact (e.g. an "
+        "ace reducing villain's AA/AK combos) -- do not assume one the hand "
+        "doesn't hold."
     ),
     "5bet_for_value": (
         "Hero is 5-betting (or shoving over a 4-bet) with a premium hand. "
@@ -413,10 +417,10 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "all-in, hero wants villain's continuing range to call."
     ),
     "5bet_as_bluff": (
-        "Hero is shoving a 5-bet as a bluff. Frame around blockers + "
-        "polarization: the hand has key blockers (e.g. an ace) and the "
-        "shove either folds out villain's mid-strength 4-bet range or "
-        "runs into AA/KK."
+        "Hero is shoving a 5-bet as a bluff. Frame around fold equity + "
+        "polarization: the shove either folds out villain's mid-strength "
+        "4-bet range or runs into AA/KK. Cite a blocker ONLY if it is in the "
+        "blockers fact -- do not assume an ace the hand may not have."
     ),
     "squeeze_for_value": (
         "Hero is raising over an open + at least one call, with a strong "
@@ -427,8 +431,9 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     "squeeze_as_bluff": (
         "Hero is squeezing with a hand that has fold equity rather than "
         "showdown value. Frame around dead money + polarization: the open + "
-        "call(s) create attractive dead money, hero's hand has blockers + "
-        "playability when called."
+        "call(s) create attractive dead money, and the hand has playability "
+        "when called. Cite a blocker ONLY if it is in the blockers fact -- "
+        "do not assume one."
     ),
 }
 
@@ -749,8 +754,16 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         "dominant_frequency": round(spot.dominant_frequency, 4),
         "archetype": facts.archetype,
         # Hero's in-position / out-of-position standing, computed (not left
-        # to the LLM to infer -- it got the blind-vs-blind SB case wrong).
-        "hero_position": hero_relative_position(facts),
+        # to the LLM to infer -- it got the blind-vs-blind SB case wrong). On
+        # an OPEN (no villain yet) "in/out of position" is premature -- there
+        # is no opponent -- so label it as opening, and the frames + voice
+        # rule 14 then have no position to assert before there is one. (M3.)
+        # The CSV's Relative Position column still uses the seat-derived value.
+        "hero_position": (
+            hero_relative_position(facts)
+            if facts.villain_stats is not None
+            else "Opening (first to act)"
+        ),
         # Prior action with deterministic bet-level labels ("SB opens, BB
         # 3-bets") -- the SAME single source as the framing + Question, so
         # the model never recounts bet levels from raw tokens.
@@ -1094,13 +1107,75 @@ _PROMPT_OVERRIDE_PATH = (
 )
 
 
+# The archetype catalog is delimited in the system prompt by these two
+# markers. They are unambiguous: "STRATEGIC ARCHETYPES." is only the section
+# header, and "BANNED PHRASES (" is the banned-phrases SECTION header (voice
+# rule 7 says "BANNED PHRASES list." with no paren, so it won't false-match).
+_CATALOG_START = "STRATEGIC ARCHETYPES."
+_CATALOG_END = "BANNED PHRASES ("
+
+
+def _current_archetype_section() -> str:
+    """The STRATEGIC ARCHETYPES section of the built-in prompt -- the header
+    (with the live archetype count) plus the full current catalog, up to (not
+    including) the BANNED PHRASES section. Single source of truth =
+    :data:`PREFLOP_ARCHETYPE_GUIDANCE`."""
+    full = build_preflop_system_prompt()
+    start = full.index(_CATALOG_START)
+    end = full.index(_CATALOG_END)
+    return full[start:end]
+
+
+def _resync_archetype_catalog(prompt: str) -> str:
+    """Splice the CURRENT code archetype catalog into a saved prompt.
+
+    Saved prompts (``admin_panel/prompts/*``) bake in a COPY of the archetype
+    catalog, which goes stale the moment :data:`PREFLOP_ARCHETYPE_GUIDANCE`
+    changes (a new archetype like ``fold_no_continue``, or reworded frames).
+    The catalog MUST match :func:`pipeline.preflop.fact_extractor.classify_archetype`
+    -- it is code-owned, not a per-prompt voice choice -- so on load we replace
+    the saved catalog with the live one, preserving everything the user DID
+    customise (voice rules, structure, examples).
+
+    The block is found structurally, NOT by a trailing section marker: saved
+    prompts reorder sections freely (some put the catalog last), so we anchor on
+    the ``STRATEGIC ARCHETYPES.`` header line and consume the contiguous
+    ``  - <archetype>: ...`` entry lines that follow it. A prompt that lacks the
+    header, or has no entry lines after it, is left untouched (the catalog still
+    reaches the LLM per-spot via the framing block, so nothing breaks).
+
+    This is why no manual prompt-merge is needed for archetype edits anymore:
+    the code is the single source of truth and the saved prompt's catalog is
+    refreshed on every load.
+    """
+    lines = prompt.splitlines(keepends=True)
+    start_i = next(
+        (i for i, ln in enumerate(lines) if ln.lstrip().startswith(_CATALOG_START)),
+        None,
+    )
+    if start_i is None:
+        return prompt
+    end_i = start_i + 1
+    while end_i < len(lines) and lines[end_i].lstrip().startswith("- "):
+        end_i += 1
+    if end_i == start_i + 1:  # no "  - <archetype>" entry lines after the header
+        return prompt
+    section = _current_archetype_section().rstrip("\n") + "\n"
+    return "".join(lines[:start_i]) + section + "".join(lines[end_i:])
+
+
 def load_preflop_system_prompt() -> str:
     """The active preflop system prompt -- override file if present, built-in
-    default otherwise.
+    default otherwise -- with the archetype catalog always resynced from code.
 
     The override mechanism lets the admin panel save edited prompts to
     ``admin_panel/prompts/preflop_system.txt``; this function checks for
     that file at every call. Reset to default = delete the override.
+
+    The saved override's archetype catalog is re-spliced from the current code
+    on every load (:func:`_resync_archetype_catalog`), so a stale saved catalog
+    can never reach generation -- the user's voice/structure edits are kept,
+    but the catalog tracks the classifier automatically.
 
     Cached at module level would defeat the prompt-editor workflow (the
     user expects edits to take effect on the next generation), so this
@@ -1110,7 +1185,9 @@ def load_preflop_system_prompt() -> str:
     resulting string since the content is identical across spots).
     """
     if _PROMPT_OVERRIDE_PATH.is_file():
-        return _PROMPT_OVERRIDE_PATH.read_text(encoding="utf-8")
+        return _resync_archetype_catalog(
+            _PROMPT_OVERRIDE_PATH.read_text(encoding="utf-8")
+        )
     return build_preflop_system_prompt()
 
 
