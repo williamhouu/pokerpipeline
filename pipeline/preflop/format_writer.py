@@ -294,9 +294,15 @@ def _format_action_evs(
     Ordered by descending action frequency so it aligns column-for-column
     with ``action_frequencies``. Each EV is in bb to two decimals with an
     explicit sign. ``None`` (pack has no EVs) -> empty string.
+
+    A pure / snapped-to-pure spot (one action shown at 100%) returns "" too:
+    the per-action EV bars would expose the very mix the snap is hiding, so a
+    spot displayed as "always X" shows no per-action EVs.
     """
     if not evs:
         return ""
+    if any(freq >= 0.999 for freq in strategy.values()):  # noqa: PLR2004
+        return ""  # pure display -> no per-action EV bars
     ordered = sorted(evs.keys(), key=lambda label: -strategy.get(label, 0.0))
     return ", ".join(f"{label}: {evs[label]:+.2f}" for label in ordered)
 

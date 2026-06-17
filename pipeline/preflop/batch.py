@@ -752,6 +752,50 @@ def _hero_premise_min_freq(
     return min_freq
 
 
+# Dominant-action frequency at/above which a near-pure spot is DISPLAYED as a
+# clean 100% spot (see the snap step in the per-spot loop). The last few percent
+# of a 96-99% mix is GTO balancing noise, not a teachable alternative, so for a
+# training tool "always X" beats "X 97% / Y 3%". The real frequencies are kept
+# on the meta record for the Review/Compare note. The function default is
+# 1.0 = OFF (tests/scripts see no snapping); the admin panel opts in at 0.96.
+# When snapped, difficulty gets full EV credit so the spot reads easy on the EV
+# axis too (consistent with easy_freq=1.0 from the pure dominant action).
+# TODO(PLO): apply the same snap to the PLO path (pipeline/plo) once NLHE is
+# validated -- PLO worthy spots are mixed by definition, so the threshold/UX
+# there needs its own thought.
+_PURE_DISPLAY_EV_GAP_BB = 3.0  # = difficulty's full-credit EV ceiling
+
+
+def _snap_facts_to_pure(
+    facts: object, spot: PreflopSpot, threshold: float
+) -> tuple[object, dict[str, float] | None]:
+    """Display a near-pure spot as a clean 100% spot.
+
+    When hero's dominant action is at/above ``threshold`` (and not already a
+    pure 100%), return a facts copy with the dominant action snapped to 100%
+    (others 0%) and ``ev_gap_bb`` cleared -- so the options, the SOLVER DATA
+    block, the CSV freqs, and the prose all read "always X" with no mention of
+    the leftover few-percent mix -- plus the REAL frequencies (for the
+    Review/Compare note). Returns ``(facts, None)`` unchanged when the spot
+    isn't near-pure enough. ``facts`` is typed ``object`` to match the batch
+    loop's local (extract_facts is annotated loosely there); the correctly
+    typed ``spot`` drives the decision + rebuild.
+    """
+    if not (1.0 > spot.dominant_frequency >= threshold):
+        return facts, None
+    real_freqs = dict(spot.action_frequencies)
+    pure_freqs = {
+        label: (1.0 if label == spot.dominant_action else 0.0)
+        for label in spot.action_frequencies
+    }
+    snapped = replace(
+        facts,
+        spot=replace(spot, action_frequencies=pure_freqs, dominant_frequency=1.0),
+        ev_gap_bb=None,
+    )
+    return snapped, real_freqs
+
+
 # --- the entry point --------------------------------------------------------
 def generate_preflop_batch(
     *,
@@ -769,6 +813,7 @@ def generate_preflop_batch(
     min_ev_gap_bb: float | None = None,
     min_villain_line_pct: float | None = 0.25,
     min_hero_premise_freq: float | None = 0.05,
+    pure_snap_threshold: float = 1.0,
     answer_style: str = "auto",
     stakes_bb_dollars: float = 0.50,
     live_or_online: str = "Online",
@@ -983,6 +1028,7 @@ def generate_preflop_batch(
         # couldn't score the spot, typical for raise-involved spots).
         # A failure here is rare (equity / extract issues) but must not
         # abort the batch.
+        snapped_real_freqs: dict[str, float] | None = None
         try:
             facts: object = extract_facts(
                 spot, pack, equity_runouts=equity_runouts)
@@ -1004,6 +1050,16 @@ def generate_preflop_batch(
             # Carry the gap on the facts so Layer 6's data block can cite the
             # "cost of the mistake" (None for raise-involved spots -> omitted).
             facts = replace(facts, ev_gap_bb=ev_gap)
+            # --- snap near-pure spots to a clean pure display ----------------
+            # A 96-99% dominant action is shown as 100% so the question reads as
+            # "always X" everywhere the user + the LLM see it (options, the
+            # SOLVER DATA block, the CSV freqs); the real mix is kept for the
+            # Review/Compare note. See _snap_facts_to_pure.
+            facts, snapped_real_freqs = _snap_facts_to_pure(
+                facts, spot, pure_snap_threshold
+            )
+            if snapped_real_freqs is not None:
+                ev_gap = _PURE_DISPLAY_EV_GAP_BB  # easy on the EV axis too
             difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap)
         except Exception as exc:  # noqa: BLE001
             failures.append(
@@ -1109,6 +1165,10 @@ def generate_preflop_batch(
                 record["validator_warnings"] = soft_warnings
             if claim_issues:
                 record["claim_check_issues"] = claim_issues
+            if snapped_real_freqs is not None:
+                # Real solver mix, kept for the Review/Compare "shown as pure"
+                # note (the question itself displays 100%).
+                record["snapped_actual_frequencies"] = snapped_real_freqs
             prompt_records.append(record)
         except Exception as exc:  # noqa: BLE001
             # Catch-all on purpose: one bad spot must not abort the batch.
@@ -1172,6 +1232,7 @@ def generate_preflop_batch(
                 "min_ev_gap_bb": min_ev_gap_bb,
                 "min_villain_line_pct": min_villain_line_pct,
                 "min_hero_premise_freq": min_hero_premise_freq,
+                "pure_snap_threshold": pure_snap_threshold,
                 "equity_runouts": equity_runouts,
                 "run_claim_checker": run_claim_checker,
                 "display_in_bb": display_in_bb,

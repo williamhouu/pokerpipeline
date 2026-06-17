@@ -1614,6 +1614,39 @@ def _render_generate_page_preflop() -> None:
                 "result summary."
             ),
         )
+        # Snap near-pure spots to a clean "always X" display.
+        snap_pure = st.checkbox(
+            "Show near-pure spots as 100% (recommended)",
+            value=True,
+            key="preflop_snap_pure",
+            help=(
+                "When the solver takes one action at least this often, the "
+                "question is shown as a pure 'always X' spot -- the prose, the "
+                "options, and the CSV frequencies all read 100%, and the "
+                "per-action EV bars are hidden. The last few percent of a "
+                "96–99% mix is GTO balancing noise, not a teachable "
+                "alternative, so 'always fold' is a cleaner lesson than "
+                "'fold 97%, call 3%'. The TRUE frequencies show as a note on "
+                "the Review and Compare tabs. Off = show the real mix."
+            ),
+        )
+        snap_pure_pct = st.slider(
+            "└ snap threshold (%)",
+            min_value=95,
+            max_value=100,
+            value=96,
+            step=1,
+            key="preflop_snap_pure_threshold",
+            disabled=not snap_pure,
+            help=(
+                "Dominant-action frequency at or above which a spot is shown "
+                "as pure. 96% sits just above the excluded 90–95% ambiguous "
+                "band. 100% effectively turns snapping off."
+            ),
+        )
+    # Threshold passed to generation: 1.0 = OFF (nothing snaps, since worthy
+    # spots are always < 100%).
+    pure_snap_threshold = (snap_pure_pct / 100.0) if snap_pure else 1.0
 
     # The two always-on guards (unconverged-node + EV-coherence) are documented
     # in the "📖 How question generation works" reference at the top of the
@@ -1995,6 +2028,7 @@ def _render_generate_page_preflop() -> None:
             run_claim_checker=run_claim_checker,
             claim_checker_prompt=claim_checker_prompt,
             equity_runouts=equity_runouts,
+            pure_snap_threshold=pure_snap_threshold,
         )
 
 
@@ -2012,6 +2046,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     min_ev_gap_bb: float | None,
     min_villain_line_pct: float | None,
     min_hero_premise_freq: float | None,
+    pure_snap_threshold: float,
     display_in_bb: bool,
     total_questions: int,
     output_filename: str,
@@ -2091,6 +2126,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             min_ev_gap_bb=min_ev_gap_bb,
             min_villain_line_pct=min_villain_line_pct,
             min_hero_premise_freq=min_hero_premise_freq,
+            pure_snap_threshold=pure_snap_threshold,
             display_in_bb=display_in_bb,
             stakes_bb_dollars=stakes_bb_dollars,
             live_or_online=live_or_online,
@@ -3477,21 +3513,23 @@ def render_review_page() -> None:
                 + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
             )
 
+        # Per-question meta record (join on user_cards + solver_reference);
+        # used for the soft-flag text AND the snap-to-pure note below.
+        _qmeta = (
+            review.meta_question_for(
+                _meta,
+                user_cards=_cell(row, "User Cards"),
+                solver_reference=_cell(row, "solver_reference"),
+            )
+            if _meta
+            else None
+        )
         # Soft-flag visibility: a row that SHIPPED but a soft validator or the
         # claim checker warned on (validation_status "flagged") -- surface the
         # warning here so it's as clear on Review as it was on Generate. The
         # warning text lives in the meta question record.
         _vstatus = _cell(row, "validation_status")
         if _vstatus in ("flagged", "needs_review"):
-            _qmeta = (
-                review.meta_question_for(
-                    _meta,
-                    user_cards=_cell(row, "User Cards"),
-                    solver_reference=_cell(row, "solver_reference"),
-                )
-                if _meta
-                else None
-            )
             _warn_bits: list[str] = []
             if _qmeta:
                 _warn_bits += [str(w) for w in (_qmeta.get("validator_warnings") or [])]
@@ -3508,6 +3546,14 @@ def render_review_page() -> None:
                 )
             else:
                 st.warning(f"**{_badge}.**")
+        # Snap-to-pure note: this question is DISPLAYED as 100% but the solver
+        # actually mixed -- show the reviewer the true frequencies.
+        _snap_mix = _format_snapped_mix(_qmeta)
+        if _snap_mix:
+            st.info(
+                f"🎯 **Shown as pure** — displayed as 100% for teaching, but "
+                f"the solver's real mix here is {_snap_mix}."
+            )
 
         ctx = _cell(row, "Context")
         if ctx:
@@ -4467,6 +4513,25 @@ def _render_claim_check_panel(row: dict[str, str]) -> None:
             st.caption(it.get("problem", ""))
 
 
+def _format_snapped_mix(qmeta: dict[str, object] | None) -> str:
+    """A snapped spot's REAL solver mix as ``"Fold 97%, Call 3%"``, or ``""``
+    when the spot wasn't snapped to pure.
+
+    Reads ``snapped_actual_frequencies`` from the meta question record (set by
+    generate_preflop_batch when a near-pure spot is displayed as 100%). Used by
+    the Review + Compare "shown as pure" note so reviewers see the truth behind
+    the pure display.
+    """
+    freqs = (qmeta or {}).get("snapped_actual_frequencies") if qmeta else None
+    if not isinstance(freqs, dict) or not freqs:
+        return ""
+    return ", ".join(
+        f"{label} {round(float(f) * 100)}%"
+        for label, f in sorted(freqs.items(), key=lambda kv: -kv[1])
+        if float(f) > 0
+    )
+
+
 def _render_action_ev_bars(row: dict[str, str]) -> None:
     """Per-action solver EV as a small zero-centered bar chart.
 
@@ -4969,6 +5034,8 @@ def render_compare_page() -> None:
         "below override individual picks and keep any edits you made."
     )
 
+    # A-side meta for the snap-to-pure note (both sides are the same spot).
+    _cmp_meta_a = review.load_batch_meta(a_csv)
     for key, row_a, row_b in pairs:
         with st.container(border=True):
             if row_a.get("Context"):
@@ -4986,6 +5053,17 @@ def render_compare_page() -> None:
             # shown once, mirroring the Review card.
             if row_a.get("action_frequencies"):
                 st.markdown(f"**Solver frequencies:** {row_a['action_frequencies']}")
+            _cmp_snap_mix = _format_snapped_mix(
+                review.meta_question_for(
+                    _cmp_meta_a,
+                    user_cards=row_a.get("User Cards", ""),
+                    solver_reference=row_a.get("solver_reference", ""),
+                )
+                if _cmp_meta_a
+                else None
+            )
+            if _cmp_snap_mix:
+                st.caption(f"🎯 Shown as pure — real solver mix: {_cmp_snap_mix}")
             fact_bits: list[str] = []
             for col, lbl in (
                 ("archetype", "archetype"),

@@ -1194,22 +1194,28 @@ def test_format_action_evs_orders_by_freq_with_signed_bb() -> None:
     from pipeline.preflop.format_writer import _format_action_evs
 
     evs = {"Fold": -1.0, "Call": 0.146, "All-in": 0.528}
-    strategy = {"All-in": 1.0, "Call": 0.0, "Fold": 0.0}
+    strategy = {"All-in": 0.6, "Call": 0.3, "Fold": 0.1}  # a real mix
     out = _format_action_evs(evs, strategy)
     assert out.startswith("All-in: +0.53")  # highest frequency first
     assert "Call: +0.15" in out and "Fold: -1.00" in out
     # None (pack has no EVs) and an empty dict both render blank.
     assert _format_action_evs(None, strategy) == ""
     assert _format_action_evs({}, strategy) == ""
+    # A pure / snapped-to-pure spot (one action at 100%) hides the EV bars --
+    # showing them would expose the very mix the snap is hiding.
+    assert _format_action_evs(evs, {"All-in": 1.0, "Call": 0.0, "Fold": 0.0}) == ""
 
 
 def test_action_ev_bb_populated_on_real_monker_pack() -> None:
-    """On a real Monker pack (per-action EVs present) the column populates
-    with signed bb values that parse; AA's best action is +EV."""
+    """A real Monker pack ships per-action EVs; action_evs_bb reads them and
+    AA's best action is clearly +EV. (The formatted action_ev_bb COLUMN is
+    intentionally blank for pure / snapped spots -- AA opens ~pure -- so this
+    asserts on the raw reader, which is what proves the pack carries EVs.)"""
     ranges = Path(__file__).resolve().parent.parent / "ranges"
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")
     from pipeline.preflop.fact_extractor import extract_facts
+    from pipeline.preflop.format_writer import action_evs_bb
     from pipeline.preflop.node_enumerator import enumerate_nodes
     from pipeline.preflop.pack import clear_registry, discover_packs
     from pipeline.preflop.spot_sampler import sample_spot
@@ -1222,18 +1228,10 @@ def test_action_ev_bb_populated_on_real_monker_pack() -> None:
     # A first-in open node (always present); AA always reaches it.
     node = next(n for n in enumerate_nodes([monker]) if len(n.history_before) == 0)
     facts = extract_facts(sample_spot(node, "AA"), monker, equity_runouts=20)
-    row = build_preflop_row(
-        facts, _explanation(), pack=monker, difficulty=_difficulty(), number=1,
-    )
-    cell = row["action_ev_bb"]
-    assert cell, "expected populated per-action EVs on a Monker pack"
-    values = []
-    for part in cell.split(", "):
-        label, val = part.rsplit(": ", 1)
-        assert label  # non-empty action label
-        values.append(float(val))  # every value parses as a number
-    assert len(values) >= 2  # at least fold + raise at an open node
-    assert max(values) > 0  # AA's best action is clearly +EV
+    evs = action_evs_bb(facts, monker)
+    assert evs, "expected per-action EVs on a Monker pack"
+    assert len(evs) >= 2  # at least fold + raise at an open node
+    assert max(evs.values()) > 0  # AA's best action is clearly +EV
 
 
 if __name__ == "__main__":
