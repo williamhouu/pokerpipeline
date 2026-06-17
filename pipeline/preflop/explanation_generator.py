@@ -315,12 +315,13 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     "fold_dominated": (
         "Hero is facing a raise with a hand dominated by villain's range. "
         "Frame the explanation around domination: villain's continuing "
-        "range crushes hero's hand class, and the implied odds don't "
-        "compensate."
+        "range is well ahead of hero's hand class, and the implied odds "
+        "don't compensate. Read villain's actual range from villain_stats; "
+        "do not assert a range shape (tight, polarized) the data doesn't show."
     ),
     "fold_pot_odds": (
         "Hero is facing a raise and CAN call, but folds because the hand "
-        "realizes its equity poorly against a polarized range. Frame the "
+        "realizes its equity poorly. Frame the "
         "explanation around REALIZATION in words -- the hand "
         "does not play well enough to continue -- NOT a numeric price "
         "comparison. Realization depends on position: take in/out of position "
@@ -353,8 +354,9 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     "call_for_value": (
         "Hero is calling a raise with a strong-but-not-3bet-worthy hand. "
         "Frame the explanation around playing a strong hand without bloating "
-        "the pot vs a tight raising range. State in/out of position only from "
-        "the hero_position fact."
+        "the pot. State in/out of position only from the hero_position fact, "
+        "and read villain's range width from villain_stats rather than "
+        "assuming it is tight or wide."
     ),
     "call_for_implied_odds": (
         "Hero is calling a raise with a speculative hand whose value comes "
@@ -382,10 +384,12 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "specific hand is one of the bluff shoves."
     ),
     "3bet_for_value": (
-        "Hero is 3-betting a raise with a premium hand that dominates "
+        "Hero is 3-betting a raise with a strong hand that is ahead of "
         "villain's continuing range. Frame the explanation around hand "
         "strength + isolating villain: 3-betting builds the pot with a "
-        "hand that crushes the call-down range."
+        "hand that is ahead of the call-down range. Qualify what the range "
+        "does to your hand by frequency (voice rule 17); don't claim it "
+        "'crushes' unless that is near-total."
     ),
     "3bet_as_bluff": (
         "Hero is 3-betting with a hand that doesn't beat villain's value "
@@ -837,10 +841,12 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
             facts.hero_equity_vs_villain, 4
         )
         out["hand_equity_sample_size"] = facts.hero_equity_runouts_used
-    if facts.hero_range_equity_vs_villain is not None:
-        out["your_range_equity_vs_villain_range"] = round(
-            facts.hero_range_equity_vs_villain, 4
-        )
+    # NOTE: hero's RANGE equity is deliberately NOT in the LLM block (M4, June
+    # 2026 -- the team's call). A single-hand verdict should lean on the HAND's
+    # equity, and having a second "range" % next to it only invited the model
+    # to cite the wrong one. The number is still computed and still feeds the
+    # "stronger/weaker than your average hand" phrasing in the Show-the-math
+    # panel (pipeline.preflop.stat_notes); it's just not handed to the LLM.
     if facts.blockers:
         # Sort by count desc for readability; the LLM tends to cite the
         # top blockers first.
