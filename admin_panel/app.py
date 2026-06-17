@@ -1914,6 +1914,38 @@ def _render_generate_page_preflop() -> None:
         "call per question. It only flags (never rejects); flags show under the "
         "explanation in Review and Compare.",
     )
+    with st.popover("ℹ️  How checking & validation works"):
+        st.markdown(
+            "Two kinds of checks run on every question, and **only one uses "
+            "the AI**.\n\n"
+            "**1. Gates — before any AI call (all deterministic).** A spot is "
+            "dropped if it isn't worth a question: top-action frequency outside "
+            "the 55–95% window, difficulty outside the chosen band, EV gap too "
+            "small, an unconverged solver node, or a near-zero-frequency "
+            "premise (a 'ghost' line). No prose is involved.\n\n"
+            "**2. Hard validators — after the explanation is written "
+            "(deterministic).** If the prose breaks a rule it is rejected and "
+            "the model rewrites it once. Checks: invented options, banned "
+            "phrases (em dash / semicolon), a suit emoji for a card you don't "
+            "hold, a 'blocks X' claim not in the data, wrong preflop "
+            "terminology (a raiser 'cold-calling', a 'squeeze' with no caller). "
+            "If it still fails, the spot is routed to human review.\n\n"
+            "**3. Soft validators — flag only (deterministic).** Currently one: "
+            "it flags when the prose calls hero in/out of position in a way "
+            "that contradicts the computed position. Never rejects.\n\n"
+            "**4. Claim checker — the ONLY AI step (opt-in, flag only).** A "
+            "second LLM pass reads the explanation plus the solver data and "
+            "flags claims that are confusing, misleading, or wrong. One extra "
+            "API call per question. It fails open, so it can never block a "
+            "good explanation.\n\n"
+            "**Order:** gates → write the explanation (hard validators + one "
+            "retry) → soft validators (flag) → claim checker (flag, if on).\n\n"
+            "**Heads-up on the Review tab:** the orange *'Flagged by a soft "
+            "validator'* badge shows BOTH the deterministic soft warnings AND "
+            "the AI claim-checker's notes together, so an eloquent, "
+            "reasoning-style flag there is the claim checker (AI), not a "
+            "deterministic validator."
+        )
     claim_checker_prompt: str | None = None
     if run_claim_checker:
         ck_key = "preflop_claim_checker_prompt"
