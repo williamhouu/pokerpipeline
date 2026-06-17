@@ -4,6 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from pipeline.preflop.claim_checker import (
+    CHECKER_SYSTEM_PROMPT,
     build_checker_user_prompt,
     check_explanation_claims,
     parse_checker_response,
@@ -20,6 +21,18 @@ def test_clean_response_passes():
     r = parse_checker_response('{"issues": []}')
     assert r.passed is True
     assert r.issues == ()
+
+
+def test_checker_prompt_covers_overcertain_conditional_outcomes():
+    """The checker must look for conditional/future outcomes stated as certain
+    (June 2026: it missed 'you would be playing a 3-bet pot multiway' on a fold
+    where HJ was still to act). Pin the rule + the fields it keys on so it
+    can't silently regress."""
+    p = CHECKER_SYSTEM_PROMPT
+    assert "your_call_or_fold_closes_the_action" in p
+    assert "still_to_act_after_you" in p
+    assert "multiway" in p
+    assert "certain" in p.lower()
 
 
 def test_issues_parsed_and_fail():
