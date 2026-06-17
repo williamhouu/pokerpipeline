@@ -72,3 +72,30 @@ def test_end_to_end_with_mock_client():
     )
     assert flagged.passed is False
     assert flagged.issues[0].claim == "AK pays off your set"
+
+
+def test_none_client_lazily_builds_from_env(monkeypatch) -> None:
+    """The admin panel drives the batch with client=None, so the checker must
+    build its own client from ANTHROPIC_API_KEY.
+
+    Regression: it used to call the API with a None client, which threw and
+    was swallowed by the batch's try/except -- so run_claim_checker=True
+    silently produced an empty claim_check column (no verdict in the UI).
+    """
+    import anthropic
+
+    created: dict[str, str] = {}
+
+    def _fake_anthropic(*, api_key: str) -> object:
+        created["api_key"] = api_key
+        return _client('{"issues": []}')
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-123")
+    monkeypatch.setattr(anthropic, "Anthropic", _fake_anthropic)
+
+    result = check_explanation_claims(
+        "This is a clear fold.", {"hand_class": "A9s"}, None
+    )
+    assert result.passed is True
+    # It actually constructed a client from the env (rather than dying on None).
+    assert created["api_key"] == "test-key-123"

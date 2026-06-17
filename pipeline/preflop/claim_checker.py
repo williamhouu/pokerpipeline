@@ -157,6 +157,16 @@ def check_explanation_claims(
     panel can pass an edited version so the checker prompt is tunable like the
     explanation prompts.
     """
+    # The admin panel drives the batch with client=None (generation lazily
+    # creates its own client; the checker must too, or it dies on a None
+    # client and the claim_check column comes back empty -- the checker
+    # silently does nothing). Mirror the generation pattern exactly.
+    if client is None:
+        import os  # noqa: PLC0415
+
+        from anthropic import Anthropic  # noqa: PLC0415
+
+        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     user = build_checker_user_prompt(explanation, solver_data)
     response = call_messages_create(
         client,
