@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.explanation_generator import GeneratedExplanation  # noqa: E402
-from pipeline.format_writer import CSV_COLUMNS  # noqa: E402
+from pipeline.preflop.format_writer import PREFLOP_CSV_COLUMNS  # noqa: E402
 from pipeline.preflop.difficulty import DifficultyResult  # noqa: E402
 from pipeline.preflop.fact_extractor import (  # noqa: E402
     PreflopFacts,
@@ -229,25 +229,14 @@ def _explanation() -> GeneratedExplanation:
 
 # --- column structure (post-reorg) ----------------------------------------
 def test_column_structure() -> None:
-    """Every preflop row covers all 49 CSV_COLUMNS.
+    """Every preflop row covers exactly PREFLOP_CSV_COLUMNS (the trimmed NLHE
+    schema), and none of the June-2026-dropped columns leak back in.
 
-    Column-count history:
-      * 38: baseline schema (~Apr 2026)
-      * 39: + skills (Phase 3 user-facing skill labels)
-      * 40: + archetype (preflop strategic frame for QA)
-      * 45: + easy_freq / easy_ev / easy_concept / easy_hand /
-             difficulty_bumps (May 2026 difficulty algorithm redesign;
-             per-axis breakdown of the rating for reviewer QA).
-      * 43: - tag_1/tag_2/tag_3 (dropped); + Position Matchup (the
-             hero-vs-villain seat matchup, split out of Relative Position
-             when that column was repurposed to IP/OOP). (May 2026.)
-      * 44: + ranges (position-labeled JSON of every active player's
-             range -- multiway-capable). (May 2026.)
-      * 42: - ip_range -oop_range (dropped; superseded by `ranges`).
-             (May 2026.)
-      * 40: - difficulty_bumps (always empty -- BUMP_RULES unpopulated)
-             - hand_class (duplicated User Cards on preflop); Notes
-             moved to right after concept_tags. (June 2026.)
+    June 2026 trim (NLHE preflop only; PLO keeps the full shared schema):
+    dropped the four stat_notes-duplicate decision-math columns (pot_odds,
+    hero_equity, blocker_combos, top_villain_combos), range_equity, ev_gap_bb
+    (superseded by the per-action action_ev_bb column), and the four easy_*
+    difficulty diagnostics -- 10 columns, 49 -> 39.
     """
     row = build_preflop_row(
         _facing_open_facts(),
@@ -256,15 +245,20 @@ def test_column_structure() -> None:
         difficulty=_difficulty(1500),
         number=1,
     )
-    assert set(row.keys()) == set(CSV_COLUMNS)
-    assert len(row) == 49
+    assert set(row.keys()) == set(PREFLOP_CSV_COLUMNS)
+    # The dropped columns must be gone.
+    for dropped in (
+        "pot_odds", "hero_equity", "range_equity", "blocker_combos",
+        "top_villain_combos", "ev_gap_bb",
+        "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+    ):
+        assert dropped not in row, dropped
+    # The kept decision-math + per-action-EV columns are still present.
+    assert "stat_notes" in row
+    assert "action_ev_bb" in row
     # Preflop rows ALWAYS populate archetype (it's a preflop-only
-    # classifier). One of 16 labels or "unclassified".
+    # classifier). One of the preflop archetype labels or "unclassified".
     assert row["archetype"] != ""
-    # Difficulty diagnostic columns are populated (the test fixture
-    # uses easy_*=0.5 across the board).
-    assert row["easy_freq"] == "0.500"
-    assert row["easy_concept"] == "0.500"
 
 
 def test_no_column_auto_increments() -> None:
@@ -725,12 +719,11 @@ def test_phase_b_columns_populated_when_data_available() -> None:
     assert "small_blind" in tag_list
     assert "facing_single_raise" in tag_list
     assert "ace_blocker" in tag_list
-    # ev_gap_bb from Phase B step 4. The fixture is BB facing BTN open
-    # with action_frequencies {Call: 0.60, Raise 308%: 0.40, Fold: 0.0}.
-    # Top-2 canonical actions are Call and 3-bet -- the engine returns
-    # None because raises in the top-2 aren't computable in v1 EV. So
-    # ev_gap_bb is empty for this specific fixture.
-    assert row["ev_gap_bb"] == ""
+    # ev_gap_bb is no longer a CSV column (dropped June 2026); the per-action
+    # action_ev_bb column carries the EV signal now. (The gap is still
+    # computed internally for difficulty + the worthiness gate.)
+    assert "ev_gap_bb" not in row
+    assert "action_ev_bb" in row
 
 
 def test_solver_reference_is_pack_relative_path() -> None:
@@ -1086,16 +1079,16 @@ def test_write_preflop_csv_round_trip() -> None:
             reader = csv.reader(handle)
             header = next(reader)
             data_rows = list(reader)
-        assert header == CSV_COLUMNS
+        assert header == PREFLOP_CSV_COLUMNS
         assert len(data_rows) == 2
 
-        no_index = CSV_COLUMNS.index("No")
+        no_index = PREFLOP_CSV_COLUMNS.index("No")
         assert [r[no_index] for r in data_rows] == ["1", "2"]
 
-        stage_index = CSV_COLUMNS.index("Hand Stage")
+        stage_index = PREFLOP_CSV_COLUMNS.index("Hand Stage")
         assert all(r[stage_index] == "Preflop" for r in data_rows)
 
-        board_index = CSV_COLUMNS.index("Cards on Table")
+        board_index = PREFLOP_CSV_COLUMNS.index("Cards on Table")
         assert all(r[board_index] == "" for r in data_rows)
 
 

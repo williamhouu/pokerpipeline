@@ -182,7 +182,10 @@ def audit_batch(csv_path: Path) -> int:
             elif drift > 0.02:
                 tolerance_notes += 1
                 print(f"  tolerance: equity {orig_eq} vs re-estimate {new_eq:.3f}")
-        csv_gap = row["ev_gap_bb"]
+        # ev_gap_bb was dropped from the NLHE preflop CSV (June 2026); older
+        # batches still carry it, so read it defensively and skip the check
+        # when absent (the gap is still recomputed above for difficulty).
+        csv_gap = row.get("ev_gap_bb", "")
         if csv_gap and ev_gap is not None:
             # The analytic call-EV amplifies Monte-Carlo equity noise by
             # (pot + cost): on a 200bb jam pot, +/-1.5% equity is +/-3bb of

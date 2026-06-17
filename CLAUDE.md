@@ -393,9 +393,13 @@ explanations before the tagger goes to production.
 
 ## Output format
 
-Source of truth is **Google Sheets**. The schema is **40 columns**. The
-pipeline writes the team's template columns via a formatter and adds the
-new pipeline columns below.
+Source of truth is **Google Sheets**. The **shared** `CSV_COLUMNS` schema (in
+`pipeline/format_writer.py`, used by the PLO writer and the old postflop
+writer) is **49 columns**. The **NLHE preflop** writer emits a **39-column
+subset** — `PREFLOP_CSV_COLUMNS` in `pipeline/preflop/format_writer.py`, the
+shared list minus the 10 columns the NLHE path dropped in June 2026 (see the
+trim note after the table). The pipeline writes the team's template columns
+via a formatter and adds the new pipeline columns below.
 
 **May-2026 reorg:** `tag_1`/`tag_2`/`tag_3` (the old empty Phase-3
 placeholder template columns) were **dropped** — `skills` superseded them.
@@ -406,8 +410,11 @@ hero-vs-villain seat matchup to hero's IP/OOP standing (`In Position` /
 reordered: the difficulty/skill/EV diagnostic cluster sits right after
 `Difficulty Rating`, and `hand_class` + `Notes` close out the row.
 
-Column numbers below are 1-indexed positions in the current
-`CSV_COLUMNS` order (defined in `pipeline/format_writer.py`):
+Column numbers below are 1-indexed positions in the **shared/PLO**
+`CSV_COLUMNS` order (defined in `pipeline/format_writer.py`). The **NLHE
+preflop** CSV drops 10 of these (June 2026 — see the trim note below), so its
+positions differ; the column *meanings* below still apply to the ones it
+keeps:
 
 | Col | Name | Purpose |
 |-----|------|---------|
@@ -428,11 +435,26 @@ Column numbers below are 1-indexed positions in the current
 | 39 | `easy_concept` | Per-spot ease on the archetype-and-concept-tag axis. Lookup table in `pipeline/preflop/difficulty.py:ARCHETYPE_BASE_EASE` plus `CONCEPT_TAG_MODIFIERS`. Preflop only. |
 | 40 | `easy_hand` | Per-spot ease on the hand-class axis. U-shaped: premium hands AND clear trash (incl. suited junk like 73s) are easy; marginal hands are hard. Preflop only. |
 
-> **June 2026 schema trim (42 → 40 columns):** dropped `difficulty_bumps`
-> (always empty — `BUMP_RULES` is unpopulated) and `hand_class` (it
-> duplicated `User Cards` on preflop rows; Compare/Review now key their
-> spot joins on `User Cards`). `Notes` moved up to sit right before
-> `ev_gap_bb`.
+> **June 2026 schema trim (earlier, 42 → 40 columns):** dropped
+> `difficulty_bumps` (always empty — `BUMP_RULES` is unpopulated) and
+> `hand_class` (it duplicated `User Cards` on preflop rows; Compare/Review now
+> key their spot joins on `User Cards`).
+>
+> **June 2026 NLHE CSV declutter (NLHE preflop only; PLO keeps the full shared
+> schema):** the NLHE preflop writer now has its own `PREFLOP_CSV_COLUMNS` =
+> the shared `CSV_COLUMNS` minus 10 columns:
+> `pot_odds` / `hero_equity` / `blocker_combos` / `top_villain_combos` (flat
+> duplicates of values already inside the kept `stat_notes` JSON),
+> `range_equity` (a QA-only number no longer in the panel), `ev_gap_bb`
+> (superseded by the per-action `action_ev_bb` column the Review page charts —
+> the gap is still computed INTERNALLY for difficulty + the worthiness gate),
+> and the four `easy_freq`/`easy_ev`/`easy_concept`/`easy_hand` difficulty
+> diagnostics (the `Difficulty Rating` itself stays). Kept the substantive
+> decision-math (`stat_notes`) + per-action EV (`action_ev_bb`). The admin
+> equity bar reads `hero_equity`/`pot_odds` column-first then falls back to
+> `stat_notes`, so PLO (full columns) and NLHE (stat_notes only) both render.
+> `_PREFLOP_DROPPED_COLUMNS` in `pipeline/preflop/format_writer.py` is the
+> authoritative drop list.
 
 **App-format table columns (May 2026).** The 7 "table-state" columns
 `User Seat`, `User Cards`, `Cards on Table`, `Table Size`, `Default

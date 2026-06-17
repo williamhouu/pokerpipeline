@@ -4289,24 +4289,36 @@ def _render_equity_bar(row: dict[str, str]) -> None:
     only -- never a "you have the price" verdict, since implied odds can make
     a sub-threshold call correct (the answer explanation owns the decision).
     """
+    # stat_notes is the source of truth for the panel; the NLHE preflop CSV
+    # dropped the flat hero_equity / pot_odds columns (June 2026) but their
+    # values still live inside stat_notes, so read the column first (PLO still
+    # ships the flat columns) and fall back to stat_notes when it's blank.
+    from pipeline.preflop.stat_notes import parse_stat_notes  # noqa: PLC0415
+
+    parsed_notes = parse_stat_notes(row.get("stat_notes", ""))
+    sn_values = {sn.get("key"): (sn.get("value", "") or "") for sn in parsed_notes}
+
     def _pct(key: str) -> float | None:
         raw = (row.get(key) or "").strip().rstrip("%")
+        if not raw:
+            raw = sn_values.get(key, "").strip().rstrip("%")
         try:
             v = float(raw)
         except ValueError:
             return None
         return v if 0.0 <= v <= 100.0 else None
 
+    # range_equity was dropped entirely from the NLHE CSV and never had a
+    # stat_notes row, so it resolves to None there (the range bar is omitted);
+    # PLO still carries the column.
     hand_eq, range_eq, be = _pct("hero_equity"), _pct("range_equity"), _pct("pot_odds")
 
-    # Multi-way all-in: the hero_equity COLUMN is the HEADS-UP number (vs one
+    # Multi-way all-in: the hero_equity number is the HEADS-UP value (vs one
     # opponent), which overstates a multi-way pot. stat_notes carry the FIELD
     # equity (beat everyone) under a "(multi-way)" label -- prefer it here so
     # the bar isn't misleading, and relabel.
-    from pipeline.preflop.stat_notes import parse_stat_notes  # noqa: PLC0415
-
     multiway_eq: float | None = None
-    for sn in parse_stat_notes(row.get("stat_notes", "")):
+    for sn in parsed_notes:
         if sn.get("key") == "hero_equity" and "multi-way" in sn.get("label", "").lower():
             try:
                 multiway_eq = float((sn.get("value", "") or "").rstrip("%"))

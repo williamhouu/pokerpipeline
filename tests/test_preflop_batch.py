@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.format_writer import CSV_COLUMNS  # noqa: E402
+from pipeline.preflop.format_writer import PREFLOP_CSV_COLUMNS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
     ACTION_CONTEXTS,
     BatchResult,
@@ -455,17 +455,17 @@ def test_dry_run_writes_csv_with_placeholder_explanations(tmp_path: Path) -> Non
         reader = csv.reader(handle)
         header = next(reader)
         rows = list(reader)
-    assert header == CSV_COLUMNS
+    assert header == PREFLOP_CSV_COLUMNS
     assert len(rows) == 2
 
     # Hand Stage is "Preflop", Cards on Table is empty.
-    stage_idx = CSV_COLUMNS.index("Hand Stage")
-    board_idx = CSV_COLUMNS.index("Cards on Table")
+    stage_idx = PREFLOP_CSV_COLUMNS.index("Hand Stage")
+    board_idx = PREFLOP_CSV_COLUMNS.index("Cards on Table")
     assert all(r[stage_idx] == "Preflop" for r in rows)
     assert all(r[board_idx] == "" for r in rows)
 
     # Dry-run marker appears in answer_explanation.
-    ans_idx = CSV_COLUMNS.index("Answer Explanation")
+    ans_idx = PREFLOP_CSV_COLUMNS.index("Answer Explanation")
     assert all("[dry-run placeholder" in r[ans_idx] for r in rows)
 
 
@@ -576,7 +576,7 @@ def test_random_seed_makes_sampling_deterministic(tmp_path: Path) -> None:
         with open(out, newline="", encoding="utf-8-sig") as handle:
             reader = csv.reader(handle)
             next(reader)  # header
-            hand_col_idx = CSV_COLUMNS.index("User Cards")
+            hand_col_idx = PREFLOP_CSV_COLUMNS.index("User Cards")
             return [r[hand_col_idx] for r in reader]
 
     assert _run(7) == _run(7)
@@ -639,7 +639,7 @@ def test_llm_path_writes_csv_with_real_explanation(tmp_path: Path) -> None:
         reader = csv.reader(handle)
         next(reader)
         rows = list(reader)
-    ans_idx = CSV_COLUMNS.index("Answer Explanation")
+    ans_idx = PREFLOP_CSV_COLUMNS.index("Answer Explanation")
     assert all(r[ans_idx] == "Open this hand for value." for r in rows)
 
 

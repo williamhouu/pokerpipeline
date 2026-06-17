@@ -1,9 +1,12 @@
 """Layer 8 (preflop edition): Format Writer for preflop spots.
 
 The preflop sibling of ``pipeline.format_writer``. Same role: produce a CSV
-row in the 44-column team template (``CSV_COLUMNS`` is the canonical schema
-defined in the postflop module and reused verbatim here) from a populated
-``PreflopFacts`` + a ``GeneratedExplanation`` + the source ``PreflopPack``.
+row from a populated ``PreflopFacts`` + a ``GeneratedExplanation`` + the
+source ``PreflopPack``. The schema is ``PREFLOP_CSV_COLUMNS`` -- the shared
+``CSV_COLUMNS`` (defined in the postflop module) minus the columns the NLHE
+preflop path dropped in June 2026 (the stat_notes-duplicate decision-math
+columns, ev_gap_bb, and the easy_* difficulty diagnostics -- see
+``_PREFLOP_DROPPED_COLUMNS``). The PLO writer keeps the full shared schema.
 
 What differs from postflop:
 
@@ -86,9 +89,6 @@ from pipeline.preflop.pack import PreflopPack
 from pipeline.preflop.position import hero_relative_position
 from pipeline.preflop.stat_notes import (
     build_stat_notes,
-    format_blockers,
-    format_pct_or_blank,
-    format_top_villain_combos,
     stat_notes_to_json,
 )
 from pipeline.preflop_ranges import (
@@ -96,6 +96,33 @@ from pipeline.preflop_ranges import (
     parse_monker_rng_file,
     parse_range_file,
 )
+
+# --- the NLHE preflop CSV schema (June 2026 trim) ----------------------------
+# Columns the NLHE preflop writer drops from the SHARED schema
+# (``pipeline.format_writer.CSV_COLUMNS``). The PLO writer keeps the full
+# shared schema, so it imports CSV_COLUMNS directly and is unaffected -- this
+# trim is NLHE-preflop-only (the team's call, June 2026). Reasons:
+#   * pot_odds / hero_equity / blocker_combos / top_villain_combos -- flat
+#     duplicates of values already inside the ``stat_notes`` JSON (the app
+#     reads stat_notes for the "Show the math" panel).
+#   * range_equity -- a QA-only number no longer surfaced in the panel.
+#   * ev_gap_bb -- the single-number gap; the per-action ``action_ev_bb``
+#     column (which the Review page charts) supersedes it. ev_gap_bb is still
+#     computed INTERNALLY for difficulty + the worthiness gate; only the CSV
+#     column is dropped.
+#   * easy_freq / easy_ev / easy_concept / easy_hand -- difficulty-algorithm
+#     diagnostics; the ``Difficulty Rating`` itself stays.
+_PREFLOP_DROPPED_COLUMNS = frozenset({
+    "pot_odds", "hero_equity", "range_equity", "blocker_combos",
+    "top_villain_combos", "ev_gap_bb",
+    "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+})
+# The preflop schema: the shared column order, minus the dropped set. Derived
+# from CSV_COLUMNS so any future shared-schema column is inherited unless it's
+# explicitly dropped here.
+PREFLOP_CSV_COLUMNS: list[str] = [
+    c for c in CSV_COLUMNS if c not in _PREFLOP_DROPPED_COLUMNS
+]
 
 # --- position-prose vocabulary -----------------------------------------------
 # Mirrors ``pipeline.action_history``'s mappings but redefined locally so the
@@ -357,18 +384,6 @@ def _compute_preflop_skills(
         return ", ".join(compute_skills(ctx))
     except Exception:  # noqa: BLE001 - tagging never blocks a batch
         return ""
-
-
-def _render_ev_gap(facts: PreflopFacts, pack: PreflopPack) -> str:
-    """The ev_gap_bb column value. Two decimals when computed; empty
-    string when the v1 EV engine can't compute reliably (raise actions
-    in the top-2, no equity data, etc -- see ev_engine module docstring)."""
-    from pipeline.preflop.ev_engine import compute_ev_gap_bb  # noqa: PLC0415
-
-    gap = compute_ev_gap_bb(facts, pack)
-    if gap is None:
-        return ""
-    return f"{gap:.2f}"
 
 
 # --- raise-count math --------------------------------------------------------
@@ -825,10 +840,12 @@ def build_preflop_row(
         game_format: "cash" or "tournament".
 
     Returns:
-        A dict keyed by ``CSV_COLUMNS``; every column is present.
+        A dict keyed by ``PREFLOP_CSV_COLUMNS`` (the shared schema minus the
+        columns the NLHE preflop path dropped in June 2026); every column is
+        present.
 
     Raises:
-        KeyError: never -- every CSV_COLUMNS entry is filled (some with
+        KeyError: never -- every PREFLOP_CSV_COLUMNS entry is filled (some with
             empty strings where the preflop path doesn't yet compute the
             field).
     """
@@ -903,12 +920,9 @@ def build_preflop_row(
         # board_texture: empty (no board preflop).
         "board_texture": "",
         "solver_reference": _solver_reference(facts, pack),
-        # ev_gap_bb: gap between dominant and 2nd-most-frequent action,
-        # in bb. Computed by pipeline.preflop.ev_engine for call/fold
-        # spots; empty for spots where the top-2 actions involve a
-        # raise (the v1 engine doesn't model raise EVs -- see the
-        # engine module docstring for the scope rationale).
-        "ev_gap_bb": _render_ev_gap(facts, pack),
+        # (ev_gap_bb column dropped June 2026 -- superseded by the per-action
+        # action_ev_bb column. The gap is still computed internally for
+        # difficulty + the worthiness gate; it's just no longer a CSV column.)
         # "auto_approved" unless the caller overrides -- the batch driver
         # passes "flagged" when a soft validator warned on this row (the
         # warnings themselves live in the meta sidecar's question record).
@@ -939,30 +953,14 @@ def build_preflop_row(
         # surfacing it in the CSV makes "show me all 3bet_as_bluff
         # spots" and similar analytics trivial.
         "archetype": facts.archetype,
-        # Diagnostic columns: per-axis breakdown of the difficulty
-        # score (May 2026). Each axis is in [0, 1] where 1 = "easy on
-        # this dimension". The Difficulty Rating column is computed
-        # from a weighted sum of these four. Surfacing them lets the
-        # reviewer see WHY a spot got a particular rating without
-        # re-running the algorithm. ``easy_ev`` is empty when the EV
-        # engine couldn't score the spot (raise-involved spots in v1
-        # -- see pipeline.preflop.ev_engine).
-        "easy_freq": f"{difficulty.easy_freq:.3f}",
-        "easy_ev": (
-            f"{difficulty.easy_ev:.3f}" if difficulty.ev_available else ""
-        ),
-        "easy_concept": f"{difficulty.easy_concept:.3f}",
-        "easy_hand": f"{difficulty.easy_hand:.3f}",
-        # Decision-math columns -- deterministic stats from the Layer-5
-        # facts (pipeline.preflop.stat_notes), surfaced in the app's "Show
-        # the math" panel. Blank on opens (no villain to price/measure
-        # against). stat_notes is the JSON the panel renders; the four
-        # scalar columns are the same numbers as standalone cells.
-        "pot_odds": format_pct_or_blank(facts.break_even_equity),
-        "hero_equity": format_pct_or_blank(facts.hero_equity_vs_villain),
-        "range_equity": format_pct_or_blank(facts.hero_range_equity_vs_villain),
-        "blocker_combos": format_blockers(facts.blockers),
-        "top_villain_combos": format_top_villain_combos(facts.villain_stats),
+        # (easy_freq / easy_ev / easy_concept / easy_hand difficulty-diagnostic
+        # columns dropped June 2026 -- the Difficulty Rating itself stays; the
+        # per-axis breakdown is computed internally but no longer exported.)
+        # Decision math: the deterministic "Show the math" panel rows, as a
+        # compact JSON the app renders (pipeline.preflop.stat_notes). The old
+        # flat duplicate columns (pot_odds / hero_equity / range_equity /
+        # blocker_combos / top_villain_combos) were dropped June 2026 -- their
+        # values already live inside this JSON. Blank on opens (no villain).
         "stat_notes": stat_notes_to_json(build_stat_notes(facts)),
         # Layer-7 claim-checker output (opt-in); "" when the checker didn't run.
         "claim_check": claim_check,
@@ -1024,7 +1022,7 @@ def write_preflop_csv(
     # of falling back to cp1252 and mojibake-ing the suit emoji bytes.
     # Matches pipeline.format_writer.write_csv's encoding choice.
     with open(out_path, "w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=PREFLOP_CSV_COLUMNS)
         writer.writeheader()
         for number, (facts, explanation, difficulty) in enumerate(rows, start=1):
             status = (
@@ -1054,6 +1052,7 @@ def write_preflop_csv(
 
 
 __all__ = [
+    "PREFLOP_CSV_COLUMNS",
     "action_evs_bb",
     "build_preflop_row",
     "format_preflop_question",
