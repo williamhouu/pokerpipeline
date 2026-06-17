@@ -559,7 +559,13 @@ def extract_facts(
             n_samples_per_matchup=50,
             rng=rng,
         )
-        blockers = compute_blockers(spot.hero_card_combo, villain_combos)
+        # Restrict to villain's TOP VALUE (~top 35% by strength) so the
+        # blockers fact -- and the blocks_villain_top_value tag + the prose
+        # citing it -- only count blocking hands that actually matter, not the
+        # bottom of the range (22 clipping A2s).
+        blockers = compute_blockers(
+            spot.hero_card_combo, top_value_combos(villain_combos)
+        )
         archetype = classify_archetype(spot, villain, hero_eq)
         # Multi-way field equity. When 2+ opponents are still in the pot (all-in
         # OR not), hero's heads-up-vs-the-raiser number (hero_eq) overstates the
@@ -676,6 +682,78 @@ def _hero_range_combos_uncached(
 
 
 # --- chunk 2: blockers -----------------------------------------------------
+# Fraction of villain's range (by combo weight, strongest first) that counts
+# as "top value" for the blocks_villain_top_value tag. Blocking a combo in this
+# top tier is meaningful; blocking the bottom of the range (e.g. 22 clipping 2
+# combos of A2s) is not. Strength is the Chen formula -- a standard,
+# deterministic preflop hand-strength score, so no precomputed equity table is
+# needed. 0.35 sits in the requested 30-40% band.
+_TOP_VALUE_RANGE_FRACTION = 0.35
+_CHEN_RANK_VALUE = {
+    "A": 14, "K": 13, "Q": 12, "J": 11, "T": 10,
+    "9": 9, "8": 8, "7": 7, "6": 6, "5": 5, "4": 4, "3": 3, "2": 2,
+}
+_CHEN_HIGH_POINTS = {"A": 10.0, "K": 8.0, "Q": 7.0, "J": 6.0}
+_CHEN_GAP_PENALTY = {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0}
+
+
+def _chen_score(hand_class: str) -> float:
+    """Chen-formula preflop strength for a 169 hand-class label (e.g. 'AKs',
+    '22', 'T7o'). The classic deterministic hand-ranking heuristic: high-card
+    points, pair doubling, suited bonus, gap penalty, straight bonus. Used only
+    to RANK villain's range, so the raw (un-rounded) score is fine.
+    """
+    def _pts(rank: str) -> float:
+        return _CHEN_HIGH_POINTS.get(rank, _CHEN_RANK_VALUE[rank] / 2.0)
+
+    if len(hand_class) == 2:  # pocket pair
+        return max(_pts(hand_class[0]) * 2.0, 5.0)
+    hi, lo, suit = hand_class[0], hand_class[1], hand_class[2]
+    score = _pts(hi)
+    if suit == "s":
+        score += 2.0
+    gap = _CHEN_RANK_VALUE[hi] - _CHEN_RANK_VALUE[lo] - 1
+    score -= _CHEN_GAP_PENALTY.get(gap, 5.0)
+    if gap <= 1 and _CHEN_RANK_VALUE[hi] <= 11:  # connected and below a queen
+        score += 1.0
+    return score
+
+
+def top_value_combos(villain_combos: dict[str, float]) -> dict[str, float]:
+    """The strongest ~35% of villain's range (by combo weight), as a
+    ``{combo: weight}`` dict.
+
+    Ranks villain's hand classes by Chen strength, walks from the top
+    accumulating combo weight until it reaches
+    :data:`_TOP_VALUE_RANGE_FRACTION` of the range, and returns every combo
+    whose class is in that top tier. This is what "top value" means for
+    :func:`compute_blockers` / the ``blocks_villain_top_value`` tag: blocking
+    the bottom of the range (22 clipping A2s) no longer counts as blocking
+    value, but blocking AA/AK (e.g. holding an ace) still does.
+    """
+    by_class: dict[str, float] = {}
+    for combo, weight in villain_combos.items():
+        if weight > 0:
+            hc = combo_str_to_hand_class(combo)
+            by_class[hc] = by_class.get(hc, 0.0) + weight
+    total = sum(by_class.values())
+    if total <= 0:
+        return {}
+    target = total * _TOP_VALUE_RANGE_FRACTION
+    top_classes: set[str] = set()
+    acc = 0.0
+    for hc, weight in sorted(by_class.items(), key=lambda kv: -_chen_score(kv[0])):
+        top_classes.add(hc)
+        acc += weight
+        if acc >= target:
+            break
+    return {
+        combo: weight
+        for combo, weight in villain_combos.items()
+        if weight > 0 and combo_str_to_hand_class(combo) in top_classes
+    }
+
+
 def compute_blockers(
     hero_combo: str,
     villain_combos: dict[str, float],

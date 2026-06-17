@@ -3556,28 +3556,37 @@ def render_review_page() -> None:
             if _meta
             else None
         )
-        # Soft-flag visibility: a row that SHIPPED but a soft validator or the
-        # claim checker warned on (validation_status "flagged") -- surface the
-        # warning here so it's as clear on Review as it was on Generate. The
-        # warning text lives in the meta question record.
+        # Flag visibility: a row that SHIPPED but was flagged. The two sources
+        # are shown SEPARATELY and labeled by what they are -- deterministic
+        # soft validators (rule checks) vs the AI claim checker (a second LLM
+        # pass). Previously both were lumped under one "soft validator" badge,
+        # which made the LLM checker's eloquent notes look like a rule check.
         _vstatus = _cell(row, "validation_status")
         if _vstatus in ("flagged", "needs_review"):
-            _warn_bits: list[str] = []
-            if _qmeta:
-                _warn_bits += [str(w) for w in (_qmeta.get("validator_warnings") or [])]
-                _warn_bits += [str(w) for w in (_qmeta.get("claim_check_issues") or [])]
-            _badge = (
-                "🟠 Flagged by a soft validator"
-                if _vstatus == "flagged"
-                else "⚠️ Marked needs-review"
+            _soft = (
+                [str(w) for w in (_qmeta.get("validator_warnings") or [])]
+                if _qmeta else []
             )
-            if _warn_bits:
+            _claims = (
+                [str(w) for w in (_qmeta.get("claim_check_issues") or [])]
+                if _qmeta else []
+            )
+            if _vstatus == "needs_review":
+                st.warning("⚠️ **Marked needs-review.**")
+            if _soft:
                 st.warning(
-                    f"**{_badge}** — shipped to the CSV but flagged:\n\n"
-                    + "\n".join(f"- {w}" for w in _warn_bits)
+                    "🟠 **Soft validator (deterministic rule check)** — shipped "
+                    "to the CSV but flagged:\n\n"
+                    + "\n".join(f"- {w}" for w in _soft)
                 )
-            else:
-                st.warning(f"**{_badge}.**")
+            if _claims:
+                st.warning(
+                    "🤖 **AI claim checker (a second LLM pass, not a rule "
+                    "check)** — review these:\n\n"
+                    + "\n".join(f"- {w}" for w in _claims)
+                )
+            if _vstatus == "flagged" and not _soft and not _claims:
+                st.warning("🟠 **Flagged.**")
         # Snap-to-pure note: this question is DISPLAYED as 100% but the solver
         # actually mixed -- show the reviewer the true frequencies.
         _snap_mix = _format_snapped_mix(_qmeta)

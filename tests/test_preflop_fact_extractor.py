@@ -10,7 +10,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.fact_extractor import (  # noqa: E402
-    VillainRangeStats,
     classify_archetype,
     compute_blockers,
     compute_villain_range_stats,
@@ -19,17 +18,18 @@ from pipeline.preflop.fact_extractor import (  # noqa: E402
     identify_showdown_opponents,
     identify_villain,
 )
-from pipeline.preflop.spot_sampler import PreflopSpot  # noqa: E402, F811
 from pipeline.preflop.grammars.types import (  # noqa: E402
     ParsedAction,
     PreflopActionType,
 )
 from pipeline.preflop.node_enumerator import (  # noqa: E402
-    PreflopActionOption,
     PreflopDecisionNode,
 )
 from pipeline.preflop.pack import PreflopPack, clear_registry  # noqa: E402
-from pipeline.preflop.spot_sampler import sample_spot  # noqa: E402
+from pipeline.preflop.spot_sampler import (
+    PreflopSpot,  # noqa: E402, F811
+    sample_spot,  # noqa: E402
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -697,3 +697,43 @@ def test_equity_vs_range_reproducible_with_seeded_rng():
         "AsKs", villain, max_runouts=50, rng=random.Random("seed")
     )
     assert eq1 == eq2
+
+
+def test_top_value_combos_restricts_blockers_to_real_value() -> None:
+    """blocks_villain_top_value should count blocking villain's STRONG hands,
+    not the bottom of the range (22 clipping A2s). top_value_combos keeps only
+    the strongest ~35% by Chen strength, so compute_blockers counts only
+    meaningful blocks."""
+    from pipeline.preflop.fact_extractor import (
+        combo_str_to_hand_class,
+        compute_blockers,
+        top_value_combos,
+    )
+
+    suits = "cdhs"
+
+    def all_combos(hc: str) -> list[str]:
+        if len(hc) == 2:  # pair -> 6 combos
+            r = hc[0]
+            return [r + a + r + b for i, a in enumerate(suits) for b in suits[i + 1:]]
+        hi, lo, kind = hc[0], hc[1], hc[2]
+        if kind == "s":  # suited -> 4
+            return [hi + s + lo + s for s in suits]
+        return [hi + a + lo + b for a in suits for b in suits if a != b]  # offsuit 12
+
+    rng: dict[str, float] = {}
+    for hc in ("AA", "KK", "QQ", "AKs", "A2s", "72o"):
+        for combo in all_combos(hc):
+            rng[combo] = 1.0
+
+    top = top_value_combos(rng)
+    top_classes = {combo_str_to_hand_class(c) for c in top}
+    # Premiums are "top value"; the bottom of the range is not.
+    assert "AA" in top_classes
+    assert "A2s" not in top_classes
+    assert "72o" not in top_classes
+    # 22 blocks NONE of the top value (no A/K/Q) -> the tag stays off (the bug).
+    assert compute_blockers("2c2d", top) == {}
+    # An ace+king holder DOES block top value (AA + KK via the ace / king).
+    blk = compute_blockers("AsKs", top)
+    assert blk.get("AA", 0) > 0 and blk.get("KK", 0) > 0

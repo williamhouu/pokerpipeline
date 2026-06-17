@@ -334,25 +334,28 @@ SKILL_CATALOG: dict[str, SkillRule] = {
         c.archetype == "call_for_implied_odds"
         or "implied_odds_call" in c.concept_tags
     ),
-    # Postflop: the dedicated reverse_implied_odds_call tag. Preflop: a
-    # DOMINATED, weak-OFFSUIT hand (an offsuit broadway / weak ace) that makes
-    # second-best top pairs. unconnected_offsuit structurally excludes pairs
-    # (set-miners have GOOD implied odds) and suited hands (nut-flush / nut
-    # draws) -- the opposite of reverse implied odds -- so this can't misfire
-    # on them. Needs equity (dominated), so it only fires when there's a
-    # villain. Gated to FOLD archetypes (same ruling as PLO, June 2026):
-    # tagged where the insight drives the decision. On a correct dominated
-    # call (KJo closing the BB on price) RIO knowledge pushes toward the
-    # WRONG answer -- measured on the pack, 12 of 95 worthy dominant-Call
-    # offsuit spots co-fired RIO with Implied Odds. The gate removes those;
-    # dominated-offsuit FOLDS (the real RIO lesson) fire exactly as before.
-    # Disjoint from Implied Odds by construction now.
+    # Postflop: the dedicated reverse_implied_odds_call tag. Preflop: the
+    # deterministic reverse_implied_odds concept tag (a weak ace / weak K-high
+    # offsuit vs a tight, dominator-heavy range -- this one DOES catch weak
+    # SUITED aces like A4s vs a tight UTG open), with the older
+    # dominated + unconnected_offsuit heuristic kept as a fallback. Both
+    # preflop paths are gated to FOLD archetypes (same ruling as PLO, June
+    # 2026): tagged only where the insight drives the decision. On a correct
+    # dominated call RIO knowledge pushes toward the WRONG answer, so the gate
+    # removes those; dominated FOLDS (the real RIO lesson) fire as before.
+    # Disjoint from Implied Odds by construction: the concept tag itself never
+    # fires on call_for_implied_odds, and the FOLD gate excludes call archetypes.
     "Reverse Implied Odds": lambda c: (
         "reverse_implied_odds_call" in c.concept_tags
         or (
             c.archetype in _ARCHETYPES_FOLD
-            and "dominated" in c.concept_tags
-            and "unconnected_offsuit" in c.concept_tags
+            and (
+                "reverse_implied_odds" in c.concept_tags
+                or (
+                    "dominated" in c.concept_tags
+                    and "unconnected_offsuit" in c.concept_tags
+                )
+            )
         )
     ),
     "Minimum Defense Frequency (MDF)": lambda c: (

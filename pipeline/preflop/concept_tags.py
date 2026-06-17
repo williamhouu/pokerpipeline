@@ -348,6 +348,43 @@ def dominated(facts: PreflopFacts) -> bool:
     return eq is not None and eq < 0.35
 
 
+# A villain range this tight (pct of dealt hands) or tighter is
+# dominator-heavy -- packed with big aces and pairs that outkick a weak ace --
+# which is what turns a weak ace/king into a reverse-implied-odds hand rather
+# than a speculative one. Against wider ranges those same hands have POSITIVE
+# implied odds, so the tag must stay off there.
+_RIO_TIGHT_RANGE_MAX_PCT = 20.0
+
+
+def reverse_implied_odds(facts: PreflopFacts) -> bool:
+    """Dominated-pair-prone hand facing a TIGHT, value-heavy range.
+
+    Fires for a weak ace (A2s-AJs, or a weak A-high offsuit) or a weak K-high
+    offsuit when villain's range is tight: these flop second-best top pairs
+    that pay off bigger hands -- the textbook reverse-implied-odds spot (e.g.
+    A4s vs a tight UTG open). The ace/king makes a top pair that is routinely
+    outkicked, so you win small and lose big.
+
+    Mutually exclusive with positive implied odds BY CONSTRUCTION: pocket
+    pairs (set value) and suited connectors (nut straights/flushes) are
+    neither weak-ace nor weak-K-offsuit hands, so they never fire here; and it
+    never fires on the ``call_for_implied_odds`` archetype. Requires a villain
+    to be dominated by, and requires the range to be tight -- against a WIDE
+    range a weak suited ace is a fine speculative hand with positive implied
+    odds, not reverse.
+    """
+    if facts.archetype == "call_for_implied_odds":
+        return False  # a hand can't be reverse- AND positive-implied-odds
+    stats = facts.villain_stats
+    width = getattr(stats, "pct_of_dealt_hands", None) if stats else None
+    if width is None or width > _RIO_TIGHT_RANGE_MAX_PCT:
+        return False  # no villain, or the range is too wide to dominate
+    high = _hand_class(facts)[0]
+    weak_ace = suited_ace(facts) or (unconnected_offsuit(facts) and high == "A")
+    weak_king = unconnected_offsuit(facts) and high == "K"
+    return weak_ace or weak_king
+
+
 # --- Blockers (3) ------------------------------------------------------------
 def ace_blocker(facts: PreflopFacts) -> bool:
     """Hero holds at least one Ace -- removes AA / AK / etc. from villain's
@@ -432,6 +469,7 @@ _TAG_REGISTRY: tuple[TagFn, ...] = (
     equity_favorite,
     coinflip,
     dominated,
+    reverse_implied_odds,
     # Blockers
     ace_blocker,
     king_blocker,
@@ -505,6 +543,7 @@ __all__ = [
     "equity_favorite",
     "coinflip",
     "dominated",
+    "reverse_implied_odds",
     # Blockers
     "ace_blocker",
     "king_blocker",

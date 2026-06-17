@@ -41,6 +41,7 @@ from pipeline.preflop.concept_tags import (  # noqa: E402
     open_decision,
     premium_pair,
     premium_unpaired,
+    reverse_implied_odds,
     roughly_equal_ranges,
     small_blind,
     small_pair,
@@ -52,7 +53,10 @@ from pipeline.preflop.concept_tags import (  # noqa: E402
     unconnected_offsuit,
     villain_range_advantage,
 )
-from pipeline.preflop.fact_extractor import PreflopFacts, VillainRangeStats  # noqa: E402
+from pipeline.preflop.fact_extractor import (  # noqa: E402
+    PreflopFacts,
+    VillainRangeStats,
+)
 from pipeline.preflop.grammars.types import (  # noqa: E402
     ParsedAction,
     PreflopActionType,
@@ -608,3 +612,53 @@ def test_standard_stack_always_fires_in_v1() -> None:
     """Ryan pack is 100bb; standard_stack always returns True. Short/deep
     are TODO for multi-stack packs."""
     assert standard_stack(_facts()) is True
+
+
+# --- reverse_implied_odds ----------------------------------------------------
+def _villain(pct: float) -> VillainRangeStats:
+    return VillainRangeStats(
+        position="UTG", action_label="raise to 4bb",
+        weighted_combo_count=pct / 100.0 * 1326.0, pct_of_dealt_hands=pct,
+    )
+
+
+def test_reverse_implied_odds_fires_for_weak_suited_ace_vs_tight_range() -> None:
+    # A4s vs a tight UTG-style range: dominated weak ace -> reverse implied odds.
+    f = _facts(hand_class="A4s", combo="As4s", archetype="fold_pot_odds",
+               villain_stats=_villain(8.0))
+    assert reverse_implied_odds(f) is True
+
+
+def test_reverse_implied_odds_fires_for_weak_offsuit_king() -> None:
+    f = _facts(hand_class="KTo", combo="KsTh", archetype="fold_pot_odds",
+               villain_stats=_villain(10.0))
+    assert reverse_implied_odds(f) is True
+
+
+def test_reverse_implied_odds_off_vs_wide_range() -> None:
+    # Same weak suited ace vs a WIDE range is a speculative hand (positive
+    # implied odds), not reverse -- the tag stays off.
+    f = _facts(hand_class="A4s", combo="As4s", archetype="fold_pot_odds",
+               villain_stats=_villain(45.0))
+    assert reverse_implied_odds(f) is False
+
+
+def test_reverse_implied_odds_excludes_implied_odds_hands() -> None:
+    tight = _villain(8.0)
+    # Pocket pair (set value) and suited connector (nut draws) are never RIO.
+    assert reverse_implied_odds(_facts(hand_class="55", combo="5s5h",
+        archetype="fold_pot_odds", villain_stats=tight)) is False
+    assert reverse_implied_odds(_facts(hand_class="76s", combo="7s6s",
+        archetype="fold_pot_odds", villain_stats=tight)) is False
+    # Never on the implied-odds archetype, even with a weak ace.
+    assert reverse_implied_odds(_facts(hand_class="A4s", combo="As4s",
+        archetype="call_for_implied_odds", villain_stats=tight)) is False
+    # Premiums are not RIO.
+    assert reverse_implied_odds(_facts(hand_class="AKo", combo="AhKc",
+        archetype="fold_pot_odds", villain_stats=tight)) is False
+
+
+def test_reverse_implied_odds_needs_a_villain() -> None:
+    # Open spot (no villain range to be dominated by) -> off.
+    assert reverse_implied_odds(_facts(hand_class="A4s", combo="As4s",
+        archetype="open_for_value", villain_stats=None)) is False
