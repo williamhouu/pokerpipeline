@@ -217,6 +217,15 @@ class PreflopFacts:
     # Layer 6 must treat it as "cite only if present". See ev_engine.py.
     ev_gap_bb: float | None = None
 
+    # The set of 169 hand-class labels the PRIMARY villain actually plays at
+    # the node where they last acted -- every class with weight > 0 in their
+    # range, e.g. ``frozenset({"AA", "AKs", "AKo", ...})``. This is the FULL
+    # range (not the top subset in ``villain_stats.most_common_combos``), so a
+    # soft validator can check a "villain has X" prose claim against the real
+    # range and flag a class villain never holds. Empty on open / first-in
+    # spots (no villain) and when range loading failed.
+    villain_played_classes: frozenset[str] = field(default_factory=frozenset)
+
 
 # --- villain identification -------------------------------------------------
 def identify_villain(
@@ -543,6 +552,14 @@ def extract_facts(
             top_n=top_combo_count,
         )
         villain_combos = _cached_load_combo_weights(str(villain_path))
+        # Every hand class villain actually plays here (weight > 0). Used by
+        # the soft "named combo in range" validator to catch prose that says
+        # villain holds a hand class that's at 0% in their range.
+        villain_played_classes = frozenset(
+            combo_str_to_hand_class(combo)
+            for combo, weight in villain_combos.items()
+            if weight > 0
+        )
         rng = _spot_rng(spot)
         hero_eq = compute_hero_equity_vs_range(
             spot.hero_card_combo,
@@ -587,6 +604,7 @@ def extract_facts(
             hero_range_equity_vs_villain=hero_range_eq,
             blockers=blockers,
             archetype=archetype,
+            villain_played_classes=villain_played_classes,
         )
     except (ValueError, OSError) as exc:
         logger.warning(

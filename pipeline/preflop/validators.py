@@ -51,7 +51,19 @@ Soft (warning-only) validators (June 2026): run via
 :func:`run_preflop_soft_validators` after generation succeeds; they
 never fail a row. The batch driver marks warned rows
 ``validation_status='flagged'`` and stores the warnings in the meta
-sidecar. v1 soft check: position words vs the hero_position fact.
+sidecar. They are tuned for PRECISION over recall -- a flag must mean
+"a human should actually look", because false positives are pure review
+noise. Four soft checks:
+
+  1. :func:`soft_validate_position_words` -- hero-bound position words vs
+     the hero_position fact.
+  2. :func:`soft_validate_number_vs_data` -- a cited equity / pot-odds
+     percentage that contradicts the data block (heads-up spots only, so
+     field-vs-per-opponent numbers don't false-fire).
+  3. :func:`soft_validate_verdict_vs_answer` -- the opening verdict's
+     action (fold / passive / aggressive) vs the spot's dominant action.
+  4. :func:`soft_validate_named_combo_in_range` -- a "villain has X" claim
+     naming a hand class absent from villain's actual range.
 """
 
 from __future__ import annotations
@@ -938,6 +950,260 @@ def soft_validate_position_words(
     return []
 
 
+# --- soft #2: number-vs-data ------------------------------------------------
+# A percentage figure in the prose, e.g. "55%" / "41.5 %".
+_PCT_FIGURE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+# How far a cited number may sit from the matching fact before we flag.
+# Generous on purpose: equity is Monte-Carlo'd (~1-2% noise) and prose rounds,
+# so only a CLEAR miss (the LLM inventing a number) trips this.
+_NUMBER_TOLERANCE_PCT = 10.0
+# Context cues, scanned in a small window around each figure. Pot-odds /
+# break-even cues win over equity cues when both are present ("you need 41%
+# equity to call" is a break-even threshold, not hero's actual equity).
+_EQUITY_CUES = ("equity", "favorite", "favourite")
+_POTODDS_CUES = (
+    "to call", "break-even", "break even", "breakeven", "pot odds",
+    "the price", "priced",
+)
+# "your range realizes 53%" is RANGE equity (a different fact); skip those so
+# we never compare a range number to hero's HAND equity.
+_HERO_RANGE_CUES = ("your range", "our range")
+
+
+def soft_validate_number_vs_data(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> list[str]:
+    """Warn when a cited equity / pot-odds % contradicts the data block.
+
+    Guards the core invariant -- the LLM must use the solver's numbers, never
+    invent them. HEADS-UP ONLY (single villain, not a multi-way pot) so a
+    field-vs-per-opponent equity number can't false-fire. For each ``NN%`` in
+    the prose we read a small window of surrounding text:
+
+      * a break-even / pot-odds figure ("need 41% to call") is compared to
+        ``break_even_equity``;
+      * an equity figure ("55% equity / favorite") is compared to
+        ``hero_equity_vs_villain`` (and, defensively, the range-equity fact),
+        unless it reads as a "your range" (range-equity) claim.
+
+    Only a mismatch larger than :data:`_NUMBER_TOLERANCE_PCT` flags, and a
+    figure we can't confidently map to a fact is left alone. SOFT: a real
+    miss is the LLM inventing a number, but odd phrasings exist, so it queues
+    for review rather than failing the row.
+    """
+    # Gate: single villain, heads-up. showdown_opponents has length >= 2 only
+    # on multi-way pots; it's empty heads-up.
+    if facts.villain_stats is None or len(facts.showdown_opponents) >= 2:
+        return []
+
+    text = generated.answer_explanation or ""
+    if not text:
+        return []
+
+    for m in _PCT_FIGURE.finditer(text):
+        value = float(m.group(1))
+        if value <= 0 or value >= 100:
+            continue  # 0% / 100% are not equity or pot-odds claims
+        window = text[max(0, m.start() - 55) : m.end() + 30].lower()
+        is_potodds = any(cue in window for cue in _POTODDS_CUES)
+        is_equity = any(cue in window for cue in _EQUITY_CUES)
+
+        if is_potodds and facts.break_even_equity is not None:
+            target = facts.break_even_equity * 100.0
+            if abs(value - target) > _NUMBER_TOLERANCE_PCT:
+                return [
+                    f"prose cites {value:g}% as the price to call, but the "
+                    f"data block's break-even equity is {target:.0f}%. Review "
+                    "the number (the LLM may have invented it)."
+                ]
+        elif (
+            is_equity
+            and not is_potodds
+            and facts.hero_equity_vs_villain is not None
+            and not any(cue in window for cue in _HERO_RANGE_CUES)
+        ):
+            candidates = [facts.hero_equity_vs_villain * 100.0]
+            if facts.hero_range_equity_vs_villain is not None:
+                candidates.append(facts.hero_range_equity_vs_villain * 100.0)
+            if min(abs(value - c) for c in candidates) > _NUMBER_TOLERANCE_PCT:
+                return [
+                    f"prose cites {value:g}% equity, but the data block has "
+                    f"hero equity {candidates[0]:.0f}% vs the villain. Review "
+                    "the number (the LLM may have invented it)."
+                ]
+    return []
+
+
+# --- soft #3: verdict-vs-answer ---------------------------------------------
+# Coarse action buckets for the opening-verdict check. We compare INTENT
+# (fold / passive / aggressive), not exact sizing -- "raise" vs "shove" or
+# "call" vs "check" are not conflicts worth a human's time, but a verdict that
+# says "fold" when the answer is "raise" is. Order: most specific first so a
+# raise-family token isn't shadowed.
+_VERDICT_BUCKETS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bfold(?:s|ed|ing)?\b", re.I), "fold"),
+    (re.compile(
+        r"\b(?:3-?bet|4-?bet|5-?bet|three-?bet|four-?bet|five-?bet)"
+        r"(?:s|ting|ted)?\b",
+        re.I,
+    ), "aggressive"),
+    (re.compile(r"\braise(?:s|d)?\b|\braising\b", re.I), "aggressive"),
+    (re.compile(
+        r"\b(?:all-?in|shove[sd]?|shoving|jam(?:s|med|ming)?)\b", re.I,
+    ), "aggressive"),
+    (re.compile(r"\bcall(?:s|ed|ing)?\b", re.I), "passive"),
+    (re.compile(r"\bcheck(?:s|ed|ing)?\b", re.I), "passive"),
+)
+
+
+def _dominant_action_bucket(dominant_action: str) -> str | None:
+    """Map a dominant-action label to a coarse fold/passive/aggressive bucket.
+
+    ``"Fold"`` -> fold, ``"Call"`` / ``"Check"`` -> passive, ``"Raise 60%"`` /
+    ``"AllIn"`` -> aggressive. None for anything unrecognised (don't flag).
+    A BB check is filed under "Call" by the pack, so "Call" maps to passive,
+    keeping check/call compatible.
+    """
+    low = dominant_action.lower()
+    if "fold" in low:
+        return "fold"
+    if "raise" in low or "allin" in low or "all-in" in low:
+        return "aggressive"
+    if "call" in low or "check" in low:
+        return "passive"
+    return None
+
+
+def soft_validate_verdict_vs_answer(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> list[str]:
+    """Warn when the opening verdict's action conflicts with the answer.
+
+    The first sentence is the verdict. We collect the action buckets it names
+    (fold / passive / aggressive). If the spot's dominant-action bucket is
+    among them, the verdict references the right action -- pass (this lets
+    "folding looks tempting but calling is correct" through unflagged when the
+    answer is call). Only when the dominant bucket is ENTIRELY ABSENT from the
+    first sentence and a conflicting action is named do we flag -- e.g. a
+    "this is a clear fold" verdict on a spot whose answer is raise. SOFT:
+    almost always a real garble, but occasionally a hedge, so it's a flag.
+    """
+    text = generated.answer_explanation or ""
+    if not text:
+        return []
+
+    dominant_bucket = _dominant_action_bucket(facts.spot.dominant_action or "")
+    if dominant_bucket is None:
+        return []
+
+    first_sentence = _SENTENCE_SPLIT.split(text)[0]
+    present: set[str] = set()
+    earliest_pos = len(first_sentence) + 1
+    earliest_word = ""
+    for pattern, bucket in _VERDICT_BUCKETS:
+        m = pattern.search(first_sentence)
+        if m is None:
+            continue
+        present.add(bucket)
+        if m.start() < earliest_pos:
+            earliest_pos = m.start()
+            earliest_word = m.group(0)
+
+    if not present or dominant_bucket in present:
+        return []
+
+    return [
+        f"the opening verdict reads as '{earliest_word}' but the spot's "
+        f"answer is {facts.spot.dominant_action!r} (a {dominant_bucket} "
+        "action). Review whether the first sentence states the right action."
+    ]
+
+
+# --- soft #4: named-combo-in-range ------------------------------------------
+# A sentence asserts villain HOLDS something. We require a villain referent
+# AND a possession verb in the same sentence, so a bare "AK is strong for us"
+# (hero's hand) isn't policed. Two shapes cover the common prose.
+_VILLAIN_HAS = re.compile(
+    r"\b(?:villains?|opponents?|the\s+raiser|the\s+opener|the\s+\d-?bettor|"
+    r"the\s+caller|they|their\s+range|its\s+range)\b"
+    r"[^.!?]*?\b(?:has|have|holds?|shows?\s+up\s+with|include[sd]?|"
+    r"contain[sd]?|turns?\s+up\s+with|shows?\s+down)\b",
+    re.I,
+)
+_IN_VILLAIN_RANGE = re.compile(
+    r"\bin\s+(?:villain'?s?|their|its|the\s+(?:raiser|opener|caller)'?s?)"
+    r"\s+range\b",
+    re.I,
+)
+# Negation/hedge cues: a sentence saying villain does NOT have a class is a
+# TRUE statement about an absent hand, so it must never be policed. Extends
+# the blocker-validator markers with "rarely"/"unlikely"/"seldom"/"without".
+_RANGE_NEGATION = _NEGATION_MARKERS + (
+    " rarely", " unlikely", " seldom", " without",
+)
+
+
+def _class_in_range(core: str, suffix: str, played: frozenset[str]) -> bool:
+    """Is the prose's hand-class token present in villain's played classes?
+
+    Mirrors :func:`_hand_blocked_in_fact`: pairs match exactly; a bare
+    non-pair like "AK" counts as present if EITHER the suited or offsuit class
+    is played (prose often drops the s/o suffix).
+    """
+    if suffix:
+        return f"{core}{suffix}" in played
+    if core[0] == core[1]:  # pair
+        return core in played
+    return f"{core}s" in played or f"{core}o" in played
+
+
+def soft_validate_named_combo_in_range(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> list[str]:
+    """Warn when prose claims villain HAS a hand class absent from their range.
+
+    Lowest-precision of the soft checks, so it is scoped tightly: HEADS-UP
+    only (so "villain has X" can't mean the wrong villain on a multi-way pot),
+    skips negated/hedged sentences ("villain doesn't have AA"), and fires only
+    on sentences that pair a villain referent with a possession verb -- so a
+    bare "AK is strong for us" (hero's own hand) is never policed. A named
+    class is flagged only when NONE of its representable classes appear in
+    ``villain_played_classes`` (the full weight>0 range). SOFT: a genuine "has
+    a hand they fold" claim is a real defect, but the parse is fuzzy, so it
+    flags for review.
+    """
+    played = facts.villain_played_classes
+    if not played or len(facts.showdown_opponents) >= 2:
+        return []  # no villain range to check, or multi-way (ambiguous referent)
+
+    text = generated.answer_explanation or ""
+    if not text:
+        return []
+
+    for sentence in _SENTENCE_SPLIT.split(text):
+        if not (_VILLAIN_HAS.search(sentence) or _IN_VILLAIN_RANGE.search(sentence)):
+            continue
+        low = sentence.lower()
+        if any(marker in low for marker in _RANGE_NEGATION):
+            continue
+        absent = sorted({
+            f"{core}{suffix or ''}"
+            for core, suffix in _HAND_CLASS_TOKEN.findall(sentence)
+            if not _class_in_range(core, suffix, played)
+        })
+        if absent:
+            return [
+                "prose says villain's range has "
+                + ", ".join(absent)
+                + ", but that hand class is at 0% in villain's actual range. "
+                f"Review the claim. Offending sentence: {sentence.strip()!r}"
+            ]
+    return []
+
+
 def run_preflop_soft_validators(
     generated: GeneratedExplanation,
     facts: PreflopFacts,
@@ -950,7 +1216,12 @@ def run_preflop_soft_validators(
     them for a human.
     """
     warnings: list[str] = []
-    for check in (soft_validate_position_words,):
+    for check in (
+        soft_validate_position_words,
+        soft_validate_number_vs_data,
+        soft_validate_verdict_vs_answer,
+        soft_validate_named_combo_in_range,
+    ):
         warnings.extend(check(generated, facts))
     return warnings
 
@@ -993,7 +1264,10 @@ __all__ = [
     "PreflopValidationResult",
     "run_preflop_audit_validators",
     "run_preflop_soft_validators",
+    "soft_validate_named_combo_in_range",
+    "soft_validate_number_vs_data",
     "soft_validate_position_words",
+    "soft_validate_verdict_vs_answer",
     "validate_banned_phrases",
     "validate_blocker_claims",
     "validate_card_suit_consistency",

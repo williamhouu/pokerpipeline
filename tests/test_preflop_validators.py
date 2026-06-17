@@ -32,7 +32,10 @@ from pipeline.preflop.validators import (  # noqa: E402
     PreflopValidationResult,
     run_preflop_audit_validators,
     run_preflop_soft_validators,
+    soft_validate_named_combo_in_range,
+    soft_validate_number_vs_data,
     soft_validate_position_words,
+    soft_validate_verdict_vs_answer,
     validate_banned_phrases,
     validate_blocker_claims,
     validate_card_suit_consistency,
@@ -79,12 +82,18 @@ def _facts(
     blockers: dict[str, int] | None = None,
     villain_position: str | None = "BTN",
     villain_top: tuple[tuple[str, float], ...] = (),
+    hero_equity_vs_villain: float | None = 0.55,
+    hero_range_equity_vs_villain: float | None = None,
+    break_even_equity: float | None = None,
+    showdown_opponents: tuple[str, ...] = (),
+    villain_played_classes: frozenset[str] | None = None,
 ) -> PreflopFacts:
     """Minimal PreflopFacts. Default: BB facing a BTN open, 66/34 call/fold.
 
     The round-2 validator tests vary the history, hero combo, blockers
     fact, and villain identity; ``villain_position=None`` makes an open
-    spot (no villain, empty blockers).
+    spot (no villain, empty blockers). The June 2026 soft-validator tests
+    vary the equity / break-even / showdown / villain-range fields.
     """
     if action_frequencies is None:
         action_frequencies = {"Call": 0.66, "Fold": 0.34}
@@ -114,9 +123,17 @@ def _facts(
     return PreflopFacts(
         spot=spot,
         villain_stats=villain,
-        hero_equity_vs_villain=0.55,
+        hero_equity_vs_villain=hero_equity_vs_villain,
+        hero_range_equity_vs_villain=hero_range_equity_vs_villain,
+        break_even_equity=break_even_equity,
+        showdown_opponents=showdown_opponents,
         archetype=archetype,
         blockers=blockers or {},
+        villain_played_classes=(
+            villain_played_classes
+            if villain_played_classes is not None
+            else frozenset()
+        ),
     )
 
 
@@ -735,6 +752,228 @@ def test_soft_position_negated_claim_not_flagged() -> None:
     facts = _facts()  # BB vs BTN: hero OOP
     generated = _gen(prose="You are not in position here, so play it safe.")
     assert soft_validate_position_words(generated, facts) == []
+
+
+# --- soft_validate_number_vs_data (June 2026) --------------------------------
+def test_soft_number_flags_wrong_equity() -> None:
+    """Prose says 55% equity, data block has 40% -- a 15-pt miss flags."""
+    facts = _facts(hero_equity_vs_villain=0.40)
+    generated = _gen(prose="You have about 55% equity against the range here.")
+    warnings = soft_validate_number_vs_data(generated, facts)
+    assert len(warnings) == 1
+    assert "55" in warnings[0] and "40%" in warnings[0]
+
+
+def test_soft_number_flags_wrong_break_even() -> None:
+    """'need 41% to call' vs a 25% break-even -- a 16-pt miss flags."""
+    facts = _facts(hero_equity_vs_villain=0.55, break_even_equity=0.25)
+    generated = _gen(prose="You need about 41% to call, so the price is fine.")
+    warnings = soft_validate_number_vs_data(generated, facts)
+    assert len(warnings) == 1
+    assert "break-even" in warnings[0].lower()
+
+
+def test_soft_number_passes_matching_equity() -> None:
+    facts = _facts(hero_equity_vs_villain=0.55)
+    generated = _gen(prose="You hold about 55% equity, so calling is clear.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_number_passes_matching_break_even() -> None:
+    facts = _facts(hero_equity_vs_villain=0.55, break_even_equity=0.30)
+    generated = _gen(prose="You need roughly 30% to call and you beat that.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_number_break_even_cue_wins_over_equity_word() -> None:
+    """'need 41% equity to call' is a BREAK-EVEN threshold, not hero's actual
+    equity -- the 'to call' cue must route it to break_even_equity (40%), not
+    compare 41 against hero's 55% equity."""
+    facts = _facts(hero_equity_vs_villain=0.55, break_even_equity=0.40)
+    generated = _gen(prose="You need about 41% equity to call here.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_number_skips_multiway() -> None:
+    """Multi-way pots carry field-vs-per-opponent numbers; gate them out."""
+    facts = _facts(
+        hero_equity_vs_villain=0.40,
+        showdown_opponents=("BTN", "HJ"),
+    )
+    generated = _gen(prose="You have about 55% equity against the field.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_number_skips_range_equity_phrasing() -> None:
+    """'your range has 53%' is RANGE equity (a different fact) -- never
+    compare it to hero's HAND equity."""
+    facts = _facts(hero_equity_vs_villain=0.40)
+    generated = _gen(prose="Your range has about 53% equity in this spot.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_number_skips_frequency_percent() -> None:
+    """A frequency ('raise 70% of the time') has no equity/pot-odds cue, so
+    it is not mapped to a fact and never flags."""
+    facts = _facts(hero_equity_vs_villain=0.40)
+    generated = _gen(prose="You raise 70% of the time and fold the rest.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_number_matches_range_equity_candidate() -> None:
+    """Defensive backstop: a number that matches the range-equity fact (53%)
+    must not flag even though it differs from hand equity (40%)."""
+    facts = _facts(
+        hero_equity_vs_villain=0.40,
+        hero_range_equity_vs_villain=0.53,
+    )
+    generated = _gen(prose="You have around 53% equity in this spot.")
+    assert soft_validate_number_vs_data(generated, facts) == []
+
+
+# --- soft_validate_verdict_vs_answer (June 2026) -----------------------------
+def test_soft_verdict_flags_call_when_answer_is_fold() -> None:
+    facts = _facts(dominant_action="Fold")
+    generated = _gen(prose="This is a clear call with our equity.")
+    warnings = soft_validate_verdict_vs_answer(generated, facts)
+    assert len(warnings) == 1
+    assert "Fold" in warnings[0]
+
+
+def test_soft_verdict_flags_fold_when_answer_is_raise() -> None:
+    facts = _facts(dominant_action="Raise 60%")
+    generated = _gen(prose="The best play is to fold this hand here.")
+    warnings = soft_validate_verdict_vs_answer(generated, facts)
+    assert len(warnings) == 1
+    assert "Raise 60%" in warnings[0]
+
+
+def test_soft_verdict_flags_fold_when_answer_is_allin() -> None:
+    facts = _facts(dominant_action="AllIn", archetype="all_in_for_value")
+    generated = _gen(prose="Just fold and wait for a better spot.")
+    warnings = soft_validate_verdict_vs_answer(generated, facts)
+    assert len(warnings) == 1
+
+
+def test_soft_verdict_passes_matching_action() -> None:
+    facts = _facts(dominant_action="Call")
+    generated = _gen(prose="This is a clear call given the price.")
+    assert soft_validate_verdict_vs_answer(generated, facts) == []
+
+
+def test_soft_verdict_passes_raise_family_match() -> None:
+    """Dominant is a sized raise; the verdict says '3-bet' -- same aggressive
+    bucket, so no flag (sizing words aren't a conflict)."""
+    facts = _facts(dominant_action="Raise 60%", archetype="3bet_for_value")
+    generated = _gen(prose="You should 3-bet this for value.")
+    assert soft_validate_verdict_vs_answer(generated, facts) == []
+
+
+def test_soft_verdict_passes_hedged_verdict_naming_answer() -> None:
+    """A hedge that NAMES the answer ('folding looks tempting but calling is
+    right') passes -- the answer's action appears in the first sentence."""
+    facts = _facts(dominant_action="Call")
+    generated = _gen(
+        prose="Folding looks tempting, but calling is correct with these odds."
+    )
+    assert soft_validate_verdict_vs_answer(generated, facts) == []
+
+
+def test_soft_verdict_check_compatible_with_call() -> None:
+    """A BB check is filed under 'Call'; a 'check' verdict must not flag."""
+    facts = _facts(actor="BB", dominant_action="Call", archetype="bb_check")
+    generated = _gen(prose="Just check behind and see a free flop.")
+    assert soft_validate_verdict_vs_answer(generated, facts) == []
+
+
+def test_soft_verdict_silent_without_action_word() -> None:
+    facts = _facts(dominant_action="Call")
+    generated = _gen(prose="AKo is a premium holding in this position.")
+    assert soft_validate_verdict_vs_answer(generated, facts) == []
+
+
+# --- soft_validate_named_combo_in_range (June 2026) --------------------------
+_VILLAIN_PLAYED = frozenset({"AA", "KK", "QQ", "AKs", "AKo", "AQs"})
+
+
+def test_soft_named_combo_flags_absent_class() -> None:
+    facts = _facts(villain_played_classes=_VILLAIN_PLAYED)
+    generated = _gen(prose="Villain's range includes 72o and other trash.")
+    warnings = soft_validate_named_combo_in_range(generated, facts)
+    assert len(warnings) == 1
+    assert "72o" in warnings[0]
+
+
+def test_soft_named_combo_flags_absent_among_present() -> None:
+    """A mixed claim ('AK and 32o') flags only the absent class."""
+    facts = _facts(villain_played_classes=_VILLAIN_PLAYED)
+    generated = _gen(prose="They have AK and 32o in their value range.")
+    warnings = soft_validate_named_combo_in_range(generated, facts)
+    assert len(warnings) == 1
+    # Only the absent class is named in the flagged list (the message echoes
+    # the full sentence after "Offending sentence:", which still has "AK").
+    absent_list = warnings[0].split("but that hand class")[0]
+    assert "32o" in absent_list
+    assert "AK" not in absent_list
+
+
+def test_soft_named_combo_passes_present_classes() -> None:
+    facts = _facts(villain_played_classes=_VILLAIN_PLAYED)
+    generated = _gen(prose="Villain's range includes AK and QQ for value.")
+    assert soft_validate_named_combo_in_range(generated, facts) == []
+
+
+def test_soft_named_combo_skips_negated_claim() -> None:
+    """'villain doesn't have 72o' is a TRUE absence claim -- never police it."""
+    facts = _facts(villain_played_classes=_VILLAIN_PLAYED)
+    generated = _gen(prose="Villain doesn't have 72o in this spot.")
+    assert soft_validate_named_combo_in_range(generated, facts) == []
+
+
+def test_soft_named_combo_ignores_hero_hand_mention() -> None:
+    """A hand named without a villain-possession cue (it's hero's hand) is not
+    policed, even if absent from villain's range."""
+    facts = _facts(villain_played_classes=_VILLAIN_PLAYED)
+    generated = _gen(prose="72o would be a strong holding for us here.")
+    assert soft_validate_named_combo_in_range(generated, facts) == []
+
+
+def test_soft_named_combo_skips_multiway() -> None:
+    facts = _facts(
+        villain_played_classes=_VILLAIN_PLAYED,
+        showdown_opponents=("BTN", "HJ"),
+    )
+    generated = _gen(prose="Villain's range includes 72o here.")
+    assert soft_validate_named_combo_in_range(generated, facts) == []
+
+
+def test_soft_named_combo_skips_when_range_unknown() -> None:
+    """No villain range loaded (open spot / load failure) -> can't verify."""
+    facts = _facts(villain_played_classes=frozenset())
+    generated = _gen(prose="Villain's range includes 72o here.")
+    assert soft_validate_named_combo_in_range(generated, facts) == []
+
+
+# --- run_preflop_soft_validators wiring --------------------------------------
+def test_runner_collects_new_soft_validators() -> None:
+    """The runner picks up the verdict-vs-answer check (and friends)."""
+    facts = _facts(dominant_action="Fold")
+    generated = _gen(prose="This is a clear call with our equity.")
+    warnings = run_preflop_soft_validators(generated, facts)
+    assert any("Fold" in w for w in warnings)
+
+
+def test_runner_soft_clean_prose_silent() -> None:
+    facts = _facts(
+        dominant_action="Call",
+        hero_equity_vs_villain=0.55,
+        villain_played_classes=_VILLAIN_PLAYED,
+    )
+    generated = _gen(
+        prose="This is a clear call. You hold around 55% equity against the "
+              "range, so the price is right."
+    )
+    assert run_preflop_soft_validators(generated, facts) == []
 
 
 # --- runner picks up the round-2 validators ----------------------------------
