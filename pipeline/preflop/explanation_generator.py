@@ -293,9 +293,9 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     ),
     "fold_outranged": (
         "Hero is first to act with a hand outside the opening range from "
-        "this position. Frame the explanation around position discipline: "
-        "the hand plays poorly out of position multi-way and isn't a profit "
-        "open."
+        "this seat. Frame the explanation around position discipline: the "
+        "hand plays poorly multi-way and isn't a profitable open from this "
+        "seat. State in/out of position only from the hero_position fact."
     ),
     "bb_check": (
         "Hero is in the big blind with the pot limped to them and no raise "
@@ -308,9 +308,9 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     "sb_complete": (
         "Hero is first in from the small blind, completing the half bet "
         "rather than raising or open-folding. Frame the explanation around "
-        "the discounted price and why this hand prefers seeing a cheap flop "
-        "to raising out of position -- it is a call of half a blind, not a "
-        "fold and not a check."
+        "the discounted price and why this marginal hand prefers seeing a "
+        "cheap flop to building a pot by raising -- it is a call of half a "
+        "blind, not a fold and not a check."
     ),
     "fold_dominated": (
         "Hero is facing a raise with a hand dominated by villain's range. "
@@ -320,10 +320,12 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
     ),
     "fold_pot_odds": (
         "Hero is facing a raise and CAN call, but folds because the hand "
-        "realizes its equity poorly out of position or against a polarized "
-        "range. Frame the explanation around REALIZATION in words -- the hand "
+        "realizes its equity poorly against a polarized range. Frame the "
+        "explanation around REALIZATION in words -- the hand "
         "does not play well enough to continue -- NOT a numeric price "
-        "comparison. Do NOT assert that hero's raw equity is above or below "
+        "comparison. Realization depends on position: take in/out of position "
+        "ONLY from the hero_position fact, never from the seat name. "
+        "Do NOT assert that hero's raw equity is above or below "
         "the price to call: the break-even is provided as a fact, but never "
         "invent an 'equity is under/over the price' verdict (that reverses "
         "the actual relationship and misleads). Mention reverse implied "
@@ -339,17 +341,20 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "price to call, so do NOT frame this around pot odds or 'the equity "
         "you'd need to call' -- that is category-wrong here. Frame it around "
         "why the hand is not strong enough to (re)raise for value and would "
-        "be dominated or realize poorly if it continued: a weak/dominated "
-        "holding (e.g. a weak offsuit ace against a 3-bet built around better "
-        "aces and big pairs), poor playability out of position, and only a "
-        "thin 4-bet-bluff slice that the blocker keeps alive. Never claim "
-        "hero's raw equity is above or below a calling price -- there is no "
-        "call to make."
+        "be dominated if it continued: a weak/dominated holding (e.g. a weak "
+        "offsuit ace against a 3-bet built around better aces and big pairs), "
+        "poor postflop playability, and only a thin 4-bet-bluff slice that "
+        "the blocker keeps alive. Never claim hero's raw equity is above or "
+        "below a calling price -- there is no call to make. Do NOT state "
+        "whether hero is in or out of position from the seat name; take that "
+        "ONLY from the hero_position fact (a button or cutoff hero is IN "
+        "position even when facing a 3-bet)."
     ),
     "call_for_value": (
         "Hero is calling a raise with a strong-but-not-3bet-worthy hand. "
-        "Frame the explanation around playing a strong hand in position "
-        "without bloating the pot vs a tight raising range."
+        "Frame the explanation around playing a strong hand without bloating "
+        "the pot vs a tight raising range. State in/out of position only from "
+        "the hero_position fact."
     ),
     "call_for_implied_odds": (
         "Hero is calling a raise with a speculative hand whose value comes "

@@ -754,6 +754,26 @@ def test_soft_position_negated_claim_not_flagged() -> None:
     assert soft_validate_position_words(generated, facts) == []
 
 
+def test_soft_position_catches_button_out_of_position_misfire() -> None:
+    """June 2026 screenshot: hero on the BUTTON facing a HJ open + CO 3-bet is
+    IN position, but the fold_no_continue archetype frame (which used to bake
+    in 'poor playability out of position') led the LLM to write 'continuing
+    out of position'. The guidance was fixed to defer to the hero_position
+    fact; this asserts the deterministic soft validator still catches the
+    contradiction as the safety net."""
+    facts = _facts(actor="BTN", villain_position="CO", archetype="fold_no_continue")
+    generated = _gen(
+        prose=(
+            "The best play is to mostly fold. You'd be continuing out of "
+            "position in a bloated pot against a 3-bettor, which means you "
+            "realize your equity poorly."
+        )
+    )
+    warnings = soft_validate_position_words(generated, facts)
+    assert len(warnings) == 1
+    assert "In Position" in warnings[0]
+
+
 # --- soft_validate_number_vs_data (June 2026) --------------------------------
 def test_soft_number_flags_wrong_equity() -> None:
     """Prose says 55% equity, data block has 40% -- a 15-pt miss flags."""
