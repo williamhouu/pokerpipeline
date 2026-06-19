@@ -325,7 +325,7 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   BANNED_LITERAL_PHRASES}`). Imports no other pipeline's batch/facts/
   validators/writer; modifies no shared module.
 - **Layers**: `spot_sampler` → `question_extractor` (worthy: dominant freq
-  55–95% AND EV gap ≥ 0.5bb) → `facts` (equity, hand class, board texture,
+  65–99%; EV-gap gate optional, off by default) → `facts` (equity, hand class, board texture,
   SPR, pot odds, EV gap, archetype, `concept_tags`) → `action_history`
   (**multi-street**: a turn question renders preflop + flop + turn ahead of
   it) → `options`/`difficulty` → `explanation_generator` (Layer 6, dry-run
@@ -501,7 +501,7 @@ Mixed full), not the frequency window. `generate_preflop_batch` takes
 `min_difficulty`/`max_difficulty`/`min_ev_gap_bb` and rejects out-of-band
 spots *before* the LLM call (no wasted spend); `BatchResult.
 difficulty_filtered_out` reports the rejection count. The frequency
-worthiness window (55–95%) + an optional min-EV-gap quality gate live in the
+worthiness window (default 65–99%) + an optional min-EV-gap quality gate live in the
 page's "Advanced filters" expander. (Postflop tab still uses legacy freq
 presets — dormant, pending Pio solves.)
 

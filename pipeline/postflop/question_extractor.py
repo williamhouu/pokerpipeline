@@ -5,8 +5,8 @@ neither a coin-flip nor a forced/trivial decision -- the **frequency window**
 is the worthiness gate:
 
     * dominant-action frequency in ``[min_frequency, max_frequency]``
-      (default 55%-95%): below 55% it's a near-coin-flip with no clear answer;
-      above 95% it's a pure/forced spot that teaches nothing.
+      (default 65%-99%): below 65% it's a near-coin-flip with no clear answer;
+      above 99% it's a pure/forced spot that teaches nothing.
 
 The EV gap to the second-best action is an **optional** quality filter, OFF by
 default (``min_ev_gap_bb=None``) -- mirroring the preflop pipeline. The brief
@@ -32,8 +32,8 @@ from dataclasses import dataclass
 
 from pipeline.postflop.spot_sampler import PostflopSpot, spot_ev_gap_bb
 
-MIN_FREQUENCY = 0.55
-MAX_FREQUENCY = 0.95
+MIN_FREQUENCY = 0.65
+MAX_FREQUENCY = 0.99
 # Suggested EV-gap value WHEN the optional filter is enabled (the gate is OFF
 # by default -- see the module docstring). Not a hard worthiness default.
 MIN_EV_GAP_BB = 0.5

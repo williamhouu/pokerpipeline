@@ -35,7 +35,7 @@ no pipeline code changes — only the input.
 | `solve.py` | 1-2 | The IR: `PostflopSolve` / `PostflopNode` / `NodeAction` (+ `validate_solve`). |
 | `fixtures.py` | 1-2 | Synthetic BTN-vs-BB SRP `2c Js 7s` solve (4 nodes). |
 | `spot_sampler.py` | 3 | `PostflopNode` + a hero combo -> `PostflopSpot` (+ per-spot EV gap). |
-| `question_extractor.py` | 4 | Worthiness gate: dominant freq in 55–95% **and** EV gap ≥ 0.5bb. |
+| `question_extractor.py` | 4 | Worthiness gate: dominant freq in 65–99% (EV-gap gate optional, off by default). |
 | `facts.py` | 5 | `PostflopFacts`: equity, hand class, board texture, blockers, SPR, pot odds, EV gap, archetype, concept tags. |
 | `concept_tags.py` | 5 | Postflop concept-tag registry + archetype classifier (pure functions). |
 | `action_history.py` | — | Deterministic **multi-street** Context/Question prose (a turn question shows preflop + flop). |

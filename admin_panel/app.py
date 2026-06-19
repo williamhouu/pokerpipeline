@@ -1553,9 +1553,9 @@ def _render_generate_page_preflop() -> None:
             "Solver frequency worthiness window (%)",
             min_value=50,
             max_value=100,
-            value=(55, 99),
+            value=(65, 99),
             key="preflop_worthiness_slider",
-            help="Below 55% = no clear best answer to teach; 100% = trivial.",
+            help="Below 65% = no clear best answer to teach; 100% = trivial.",
         )
         exclude_ambiguous_band = st.checkbox(
             "Exclude ambiguous 90–95% band (recommended)",
@@ -4909,15 +4909,15 @@ def render_compare_page() -> None:
     # Advanced filters — the same worthiness-window + EV-gap gates the
     # Generate page uses, so the spots a comparison samples match a real
     # batch (both sides still see IDENTICAL spots). Defaults mirror Generate
-    # (55-99 window, 90-95% trap band excluded).
+    # (65-99 window, 90-95% trap band excluded).
     with st.expander("Advanced filters (worthiness window · EV-gap gate)"):
         cmp_freq_low, cmp_freq_high = st.slider(
             "Solver frequency worthiness window (%)",
             min_value=50,
             max_value=100,
-            value=(55, 99),
+            value=(65, 99),
             key="cmp_worthiness_slider",
-            help="Below 55% = no clear best answer; 100% = trivial.",
+            help="Below 65% = no clear best answer; 100% = trivial.",
         )
         cmp_exclude_band = st.checkbox(
             "Exclude ambiguous 90–95% band (recommended)",
@@ -5870,7 +5870,7 @@ def _seed_plo_generate_settings() -> None:
             saved.get("plo_gen_custom_band"), 400, 3200, (400, 3200)
         ),
         "plo_worthiness_slider": _rng(
-            saved.get("plo_worthiness_slider"), 50, 100, (60, 99)
+            saved.get("plo_worthiness_slider"), 50, 100, (65, 99)
         ),
         "plo_exclude_ambiguous": _flag(saved.get("plo_exclude_ambiguous"), True),
         "plo_min_ev_gap": _num(saved.get("plo_min_ev_gap"), 0.0, 3.0, 0.0, float),
@@ -6107,7 +6107,7 @@ def render_plo_generate_page() -> None:
             min_value=50,
             max_value=100,
             key="plo_worthiness_slider",
-            help="Below 55% = no clear best answer; 100% = trivial.",
+            help="Below 65% = no clear best answer; 100% = trivial.",
         )
         exclude_ambiguous = st.checkbox(
             "Exclude ambiguous 90-95% band (recommended)",
