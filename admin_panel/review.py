@@ -412,6 +412,46 @@ def meta_question_for(
     return None
 
 
+def revise_summary_line(meta: dict[str, object] | None) -> str | None:
+    """One-line summary of the 4-call audit & auto-fix pass, or ``None`` when
+    the batch did not use it (``revise_pass`` off).
+
+    Drives the prominent Review-page banner that marks an experimental batch.
+    Reads ``run_settings.revise_pass`` + the ``revise_*`` counters the batch
+    records. Older batches (generated before per-question recording existed)
+    return a generic note rather than misleading zero counts.
+    """
+    rs = (meta or {}).get("run_settings") or {}
+    if not isinstance(rs, dict) or not rs.get("revise_pass"):
+        return None
+    counters = (meta or {}).get("counters") or {}
+    audit = "on" if rs.get("final_audit") else "off"
+    if not isinstance(counters, dict) or "revise_flagged" not in counters:
+        return (
+            "Per-question auto-fix details are recorded on batches generated "
+            f"after this feature update. (Final audit: {audit}.)"
+        )
+    flagged = int(counters.get("revise_flagged", 0) or 0)
+    fixed = int(counters.get("revise_fixed", 0) or 0)
+    discarded = int(counters.get("revise_discarded", 0) or 0)
+    unchanged = int(counters.get("revise_unchanged", 0) or 0)
+    if not flagged:
+        return (
+            "The claim-check gate flagged 0 questions, so no rewrites were "
+            f"needed. (Final audit: {audit}.)"
+        )
+    parts = [f"**{fixed} auto-fixed**"]
+    if discarded:
+        parts.append(f"{discarded} discarded (rewrite broke a rule, original kept)")
+    if unchanged:
+        parts.append(f"{unchanged} unchanged (reviser made no edit)")
+    return (
+        f"The gate flagged **{flagged}** question(s): "
+        + " · ".join(parts)
+        + f". (Final audit: {audit}.)"
+    )
+
+
 def assembled_prompt(meta: dict[str, object], question: dict[str, object]) -> str:
     """Reconstruct the full prompt for one question: system + gold + live.
 

@@ -574,3 +574,46 @@ def test_promote_failure_without_row_returns_false(tmp_path: Path) -> None:
     ok, msg = review.promote_failure(csv_path, _failure(row=None))
     assert not ok
     assert "nothing to promote" in msg.lower()
+
+
+# --- revise_summary_line (the experimental 4-call banner) ------------------
+def test_revise_summary_none_when_revise_pass_off() -> None:
+    assert review.revise_summary_line(None) is None
+    assert review.revise_summary_line({"run_settings": {"revise_pass": False}}) is None
+    assert review.revise_summary_line({"run_settings": {}}) is None
+
+
+def test_revise_summary_reports_counts() -> None:
+    meta = {
+        "run_settings": {"revise_pass": True, "final_audit": True},
+        "counters": {
+            "revise_flagged": 3, "revise_fixed": 1,
+            "revise_discarded": 1, "revise_unchanged": 1,
+        },
+    }
+    line = review.revise_summary_line(meta)
+    assert line is not None
+    assert "flagged **3**" in line
+    assert "1 auto-fixed" in line
+    assert "discarded" in line and "unchanged" in line
+    assert "Final audit: on" in line
+
+
+def test_revise_summary_zero_flagged() -> None:
+    meta = {
+        "run_settings": {"revise_pass": True, "final_audit": False},
+        "counters": {"revise_flagged": 0, "revise_fixed": 0,
+                     "revise_discarded": 0, "revise_unchanged": 0},
+    }
+    line = review.revise_summary_line(meta)
+    assert line is not None and "flagged 0 questions" in line
+    assert "Final audit: off" in line
+
+
+def test_revise_summary_old_batch_without_counters() -> None:
+    # revise_pass on, but counters predate the revise_* keys -> generic note,
+    # not a misleading "0 flagged".
+    meta = {"run_settings": {"revise_pass": True, "final_audit": True},
+            "counters": {"questions_written": 4}}
+    line = review.revise_summary_line(meta)
+    assert line is not None and "after this feature update" in line

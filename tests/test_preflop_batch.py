@@ -1255,10 +1255,63 @@ def test_batch_revise_pass_ships_revision_and_records_both(
     assert captured["original"] == "DRAFT prose."
     # Both versions recorded in the meta for reviewer comparison.
     meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
-    rev = meta["questions"][0]["revision"]
+    rev = meta["questions"][0]["revise"]
+    assert rev["status"] == "fixed"
     assert rev["original_explanation"] == "DRAFT prose."
     assert rev["revised_explanation"] == "REVISED prose."
-    assert rev["issues_fixed"]
+    assert rev["gate_issues"]
+
+
+def test_batch_revise_pass_records_discarded_when_rewrite_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """revise_pass on but the rewrite is DISCARDED (failed re-validation): the
+    ORIGINAL ships, the row is flagged, and the meta records status='discarded'
+    + the reason -- so a silently-failed auto-fix is no longer invisible."""
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.preflop import batch as B
+    from pipeline.preflop.claim_checker import ClaimCheckResult, ClaimIssue
+    from pipeline.preflop.reviser import ReviseResult
+
+    draft = GeneratedExplanation(
+        option_1="Always raise", option_2="", option_3="", option_4="",
+        correct_answer="Always raise", answer_explanation="DRAFT prose.",
+    )
+    monkeypatch.setattr(
+        B, "generate_preflop_answer_explanation",
+        lambda facts, options, correct, **k: draft,
+    )
+    monkeypatch.setattr(
+        B, "check_explanation_claims",
+        lambda *a, **k: ClaimCheckResult(passed=False, issues=(ClaimIssue("vague", "unclear"),)),
+    )
+    # The reviser tried, but its rewrite broke a hard rule -> discarded.
+    monkeypatch.setattr(
+        B, "revise_explanation",
+        lambda explanation, facts, *, issues, **k: ReviseResult(
+            explanation=explanation, changed=False,
+            revised_text="bad rewrite", rejected_reason="invented a blocker",
+        ),
+    )
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    generate_preflop_batch(
+        pack=pack, output_path=out, total_questions=10,
+        client=object(), dry_run=False, random_seed=42,
+        revise_pass=True, final_audit=True,
+    )
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    # The ORIGINAL draft shipped -- the discarded rewrite never reaches the CSV.
+    assert rows and all(r["Answer Explanation"] == "DRAFT prose." for r in rows)
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    rev = meta["questions"][0]["revise"]
+    assert rev["status"] == "discarded"
+    assert rev["rejected_reason"] == "invented a blocker"
+    assert rev["gate_issues"]
+    # Unresolved gate issues flag the shipped row, and the counters tally it.
+    assert meta["counters"]["revise_discarded"] >= 1
+    assert meta["counters"]["revise_flagged"] >= 1
+    assert meta["counters"]["soft_flagged_rows"] >= 1
 
 
 def test_batch_revise_pass_off_by_default_keeps_draft(
@@ -1291,4 +1344,4 @@ def test_batch_revise_pass_off_by_default_keeps_draft(
     rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
     assert rows and all(r["Answer Explanation"] == "DRAFT prose." for r in rows)
     meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
-    assert all("revision" not in q for q in meta["questions"])
+    assert all("revise" not in q for q in meta["questions"])

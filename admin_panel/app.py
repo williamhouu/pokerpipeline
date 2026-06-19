@@ -3500,6 +3500,19 @@ def render_review_page() -> None:
     else:
         st.caption("🧪 Prompt: _no metadata for this batch_")
 
+    # Prominent banner for the experimental 4-LLM-call audit & auto-fix batch,
+    # so a reviewer instantly knows this batch ran the special pipeline (and how
+    # the auto-fix resolved the questions it flagged).
+    _revise_line = review.revise_summary_line(_meta)
+    if _revise_line is not None:
+        st.info(
+            "🔬 **Experimental batch — Audit & Auto-fix pass (up to 4 LLM calls "
+            "per question).** Pipeline: 1) generate → 2) claim-check gate → "
+            "3) rewrite if flagged → 4) final audit. You see only the final "
+            "rewritten version below; any 4th-call flags are marked in blue.\n\n"
+            + _revise_line
+        )
+
     # Download the whole batch -- including any Answer Explanation edits,
     # which are written straight into this CSV on disk when saved below.
     st.download_button(
@@ -3618,7 +3631,11 @@ def render_review_page() -> None:
                     "check)** — review these:\n\n"
                     + "\n".join(f"- {w}" for w in _claims)
                 )
-            if _vstatus == "flagged" and not _soft and not _claims:
+            # Bare fallback only when nothing else explains the flag. A revise
+            # batch's discarded/unchanged rows are explained by the auto-fix
+            # panel below, so don't double up with a generic badge.
+            _has_revise = bool(_qmeta and _qmeta.get("revise"))
+            if _vstatus == "flagged" and not _soft and not _claims and not _has_revise:
                 st.warning("🟠 **Flagged.**")
         # Snap-to-pure note: the question + CSV round this near-pure spot to
         # 100% for teaching; the "Solver frequencies" line below shows the real
@@ -3631,18 +3648,9 @@ def render_review_page() -> None:
                 "below are the solver's real mix."
             )
 
-        # Audit & auto-fix: this explanation was rewritten by the revise pass.
-        # Show what changed so a reviewer can judge whether the fix helped.
-        _revision = _qmeta.get("revision") if _qmeta else None
-        if isinstance(_revision, dict) and _revision.get("revised_explanation"):
-            with st.expander("✍️ Auto-fixed by the audit pass (original vs revised)"):
-                st.caption("Issues the audit flagged on the first draft:")
-                for _iss in _revision.get("issues_fixed") or []:
-                    st.caption(f"- {_iss}")
-                st.markdown("**Original draft**")
-                st.info(_md_lines(str(_revision.get("original_explanation", ""))))
-                st.markdown("**Revised (shipped) — re-validated before shipping**")
-                st.success(_md_lines(str(_revision.get("revised_explanation", ""))))
+        # Audit & auto-fix lifecycle (revise_pass batches): how this question's
+        # final shipped version was produced, plus any distinct 4th-call flags.
+        _render_revise_panel(_qmeta)
 
         ctx = _cell(row, "Context")
         if ctx:
@@ -4644,6 +4652,81 @@ def _panel_solver_frequencies(csv_freqs: str, qmeta: dict[str, object] | None) -
     cell verbatim (unsnapped spots already carry the true mix in the column).
     """
     return _format_snapped_mix(qmeta) or csv_freqs
+
+
+def _render_revise_panel(qmeta: dict[str, object] | None) -> None:
+    """Per-question auto-fix lifecycle on the Review page.
+
+    Drives off the ``revise`` record the batch writes when revise_pass is on
+    (status clean/fixed/discarded/unchanged + the 4th-call final-audit flags);
+    falls back to the legacy ``revision`` key for older batches. The shipped
+    explanation shown in the card is ALWAYS the final version -- this panel only
+    explains how it got there, and surfaces any remaining 4th-call flags in a
+    DISTINCT blue box so they never read as a regular (orange) claim check.
+    """
+    rev = (qmeta or {}).get("revise") if qmeta else None
+    if rev is None and qmeta and isinstance(qmeta.get("revision"), dict):
+        old = qmeta["revision"]  # legacy: a kept fix only
+        rev = {
+            "status": "fixed",
+            "gate_issues": old.get("issues_fixed") or [],
+            "original_explanation": old.get("original_explanation", ""),
+            "revised_explanation": old.get("revised_explanation", ""),
+        }
+    if not isinstance(rev, dict):
+        return
+    status = rev.get("status")
+    if status == "clean":
+        return  # the gate found nothing -- no rewrite, nothing to show
+
+    if status == "fixed":
+        st.success(
+            "✍️ **Auto-fixed by the 4-call audit pass.** The explanation below "
+            "is the **rewritten final version** (re-validated before shipping). "
+            "The first draft is tucked away for comparison."
+        )
+        with st.expander("See the original first draft (not shipped)"):
+            st.caption("The claim-check gate (2nd LLM call) flagged the draft for:")
+            for iss in rev.get("gate_issues") or []:
+                st.caption(f"- {iss}")
+            st.markdown("**Original draft**")
+            st.info(_md_lines(str(rev.get("original_explanation", ""))))
+    elif status == "discarded":
+        st.warning(
+            "🛠️⚠️ **Auto-fix attempted but DISCARDED.** The rewrite broke a hard "
+            "rule, so the **original draft shipped** (flagged for review). Why "
+            "the rewrite was rejected:\n\n"
+            f"> {rev.get('rejected_reason') or 'unknown'}"
+        )
+        _revise_unresolved(rev)
+    elif status == "unchanged":
+        st.warning(
+            "🛠️ **Auto-fix made no change.** The reviser reviewed the flags but "
+            "did not edit the prose, so the **original shipped** (flagged for "
+            "review)."
+        )
+        _revise_unresolved(rev)
+
+    # The 4th LLM call: a claim check on the REWRITTEN version. Shown in a
+    # DISTINCT blue box (the regular claim checker is orange) so a reviewer can
+    # never confuse "the 4th-call audit still flagged this" with a normal run.
+    final_issues = rev.get("final_audit_issues") or []
+    if final_issues:
+        st.info(
+            "4️⃣ **Final audit — the 4th LLM call (claim check on the rewritten "
+            "version)** still flagged these. This is the experimental pass, not "
+            "the regular checker:\n\n"
+            + "\n".join(f"- {i}" for i in final_issues)
+        )
+
+
+def _revise_unresolved(rev: dict[str, object]) -> None:
+    """List the gate issues an auto-fix did NOT resolve (discarded/unchanged)."""
+    issues = rev.get("gate_issues") or []
+    if issues:
+        st.caption("Gate (2nd LLM call) issues that remain unresolved:")
+        for iss in issues:
+            st.caption(f"- {iss}")
 
 
 def _render_action_ev_bars(row: dict[str, str]) -> None:

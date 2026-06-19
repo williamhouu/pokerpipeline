@@ -95,6 +95,40 @@ def test_revise_noop_when_rewrite_is_identical() -> None:
     assert not res.changed
 
 
+def test_revise_reports_usage_with_correct_arg_convention() -> None:
+    """Regression: the reviser must call usage_callback with the generator's
+    5-arg convention (model, input, output, cache_creation, cache_read). It
+    previously called ``usage_callback(response.usage)`` -- one arg -- which
+    raised a TypeError on every REAL response (the test mocks had no ``.usage``
+    so this went unnoticed), and the broad ``except`` swallowed it, silently
+    failing EVERY rewrite. The mock here carries ``.usage`` like the SDK, and
+    the strict 5-arg callback would crash under the old one-arg call."""
+    new = "The best play is to raise. AKo is a premium Button open."
+
+    def create(*, model, max_tokens, system, messages, temperature=None, **_extra):
+        return SimpleNamespace(
+            content=[SimpleNamespace(text=json.dumps({"answer_explanation": new}))],
+            usage=SimpleNamespace(
+                input_tokens=11, output_tokens=22,
+                cache_creation_input_tokens=3, cache_read_input_tokens=4,
+            ),
+        )
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    seen: list[tuple] = []
+
+    def usage_cb(model, input_tokens, output_tokens, cache_creation, cache_read):
+        seen.append((model, input_tokens, output_tokens, cache_creation, cache_read))
+
+    res = revise_explanation(
+        _gen(), _facts(), issues=["wording -- unclear"], client=client,
+        model="claude-x", usage_callback=usage_cb,
+    )
+    assert res.changed  # the rewrite did NOT crash on the usage callback
+    assert res.explanation.answer_explanation == new
+    assert seen == [("claude-x", 11, 22, 3, 4)]
+
+
 def test_revise_ignores_options_the_model_emits() -> None:
     # Even if the model tries to emit different options/correct_answer, we only
     # read answer_explanation and re-attach the originals.

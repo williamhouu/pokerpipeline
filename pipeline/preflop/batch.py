@@ -1010,6 +1010,13 @@ def generate_preflop_batch(
     # BEFORE any equity sim / LLM spend.
     rare_line_filtered_out = 0
     rare_premise_filtered_out = 0
+    # Self-revision (auto-fix) outcome tallies. Only move when revise_pass is on:
+    # how many SHIPPED rows the claim-check gate flagged, and how the auto-fix
+    # resolved them. fixed + discarded + unchanged == flagged.
+    revise_flagged = 0
+    revise_fixed = 0
+    revise_discarded = 0
+    revise_unchanged = 0
     _node_villain_pct: dict[str, float | None] = {}
     node_index: dict[tuple[str, tuple], PreflopDecisionNode] = {
         (n.actor, n.history_before): n for n in nodes
@@ -1144,16 +1151,20 @@ def generate_preflop_batch(
                     usage_callback=_record_usage,
                     system_prompt=system_prompt,
                 )
-            # --- Layer-7 LLM audit / revise passes (all opt-in extra calls) --
-            # The claim checker FLAGS suspect prose. With revise_pass on, a
-            # second call REWRITES a flagged explanation (re-validated by the
-            # hard validators; a rewrite that breaks a rule is discarded and the
-            # original kept), and final_audit re-checks the rewrite. The
-            # (possibly revised) explanation is what ships; both versions go to
-            # meta. The initial check runs whenever EITHER feature is on.
+            # --- Layer-7 LLM audit / revise passes (opt-in extra LLM calls) --
+            # Two flows share one "gate" call (the 2nd LLM pass):
+            #   * run_claim_checker (no revise): the gate just FLAGS prose, flag
+            #     only -> `claim_check_issues` (the regular checker).
+            #   * revise_pass: the gate DECIDES whether to rewrite. If it flags,
+            #     a 3rd call REWRITES the prose, re-validated by the hard
+            #     validators (a rewrite that breaks a rule is DISCARDED and the
+            #     original kept). final_audit is a 4th call that claim-checks the
+            #     KEPT rewrite. The full lifecycle is recorded in `revise` so the
+            #     Review page can show what each call did and flag it distinctly.
             claim_check_json = ""
-            claim_issues: list[str] = []
-            revision_record: dict[str, object] | None = None
+            claim_issues: list[str] = []          # regular checker (2nd call), flag-only
+            final_audit_issues: list[str] = []    # 4th call: claim-check on the rewrite
+            revise_record: dict[str, object] | None = None
             checker_prompt = claim_checker_prompt or CHECKER_SYSTEM_PROMPT
             if not dry_run and (run_claim_checker or revise_pass):
                 cc = _safe_claim_check(
@@ -1161,37 +1172,88 @@ def generate_preflop_batch(
                     model=model, system_prompt=checker_prompt,
                     node_id=spot.node.node_id,
                 )
-                if revise_pass and cc is not None and cc.issues:
-                    issue_strs = [f"{i.claim} -- {i.problem}" for i in cc.issues]
-                    try:
-                        rev = revise_explanation(
-                            explanation, facts, issues=issue_strs,
-                            client=client, model=model, temperature=temperature,
-                            max_tokens=max_tokens, system_prompt=system_prompt,
-                            usage_callback=_record_usage,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "batch: reviser failed for %s: %s",
-                            spot.node.node_id, exc,
-                        )
-                        rev = None
-                    if rev is not None and rev.changed:
-                        revision_record = {
-                            "issues_fixed": issue_strs,
-                            "original_explanation": explanation.answer_explanation,
-                            "revised_explanation": rev.explanation.answer_explanation,
-                        }
-                        explanation = rev.explanation
-                        if final_audit:  # re-check the rewrite (flag only)
-                            cc = _safe_claim_check(
-                                explanation.answer_explanation, facts, client,
-                                model=model, system_prompt=checker_prompt,
-                                node_id=spot.node.node_id,
+                gate_issues = (
+                    [f"{i.claim} -- {i.problem}" for i in cc.issues]
+                    if cc is not None else []
+                )
+                if revise_pass:
+                    if not gate_issues:
+                        revise_record = {"status": "clean", "gate_issues": []}
+                    else:
+                        revise_flagged += 1
+                        original_prose = explanation.answer_explanation
+                        try:
+                            rev = revise_explanation(
+                                explanation, facts, issues=gate_issues,
+                                client=client, model=model, temperature=temperature,
+                                max_tokens=max_tokens, system_prompt=system_prompt,
+                                usage_callback=_record_usage,
                             )
-                if cc is not None:
-                    claim_check_json = claim_check_to_json(cc)
-                    claim_issues = [f"{i.claim} -- {i.problem}" for i in cc.issues]
+                        except Exception as exc:  # noqa: BLE001 - never drop a row
+                            logger.warning(
+                                "batch: reviser failed for %s: %s",
+                                spot.node.node_id, exc,
+                            )
+                            rev = None
+                        if rev is not None and rev.changed:
+                            revise_fixed += 1
+                            explanation = rev.explanation  # ship the rewrite
+                            revise_record = {
+                                "status": "fixed",
+                                "gate_issues": gate_issues,
+                                "original_explanation": original_prose,
+                                "revised_explanation": rev.explanation.answer_explanation,
+                            }
+                            if final_audit:  # 4th call: claim-check the rewrite
+                                cc4 = _safe_claim_check(
+                                    explanation.answer_explanation, facts, client,
+                                    model=model, system_prompt=checker_prompt,
+                                    node_id=spot.node.node_id,
+                                )
+                                if cc4 is not None:
+                                    final_audit_issues = [
+                                        f"{i.claim} -- {i.problem}" for i in cc4.issues
+                                    ]
+                                    claim_check_json = claim_check_to_json(cc4)
+                                revise_record["final_audit_issues"] = final_audit_issues
+                        else:
+                            # The rewrite came back UNCHANGED or was DISCARDED by
+                            # the hard validators. The ORIGINAL ships, so the
+                            # gate's issues are unresolved -- record exactly why.
+                            reason = (
+                                getattr(rev, "rejected_reason", "") if rev
+                                else "the reviser call failed"
+                            )
+                            attempt = getattr(rev, "revised_text", "") if rev else ""
+                            if reason:
+                                revise_discarded += 1
+                                status = "discarded"
+                            else:
+                                revise_unchanged += 1
+                                status = "unchanged"
+                            revise_record = {
+                                "status": status,
+                                "gate_issues": gate_issues,
+                                "rejected_reason": reason,
+                                "attempted_rewrite": attempt,
+                                "original_explanation": original_prose,
+                            }
+                            if cc is not None:  # gate findings describe the shipped original
+                                claim_check_json = claim_check_to_json(cc)
+                elif run_claim_checker:
+                    # Plain claim checker: one 2nd LLM pass, flag only.
+                    if cc is not None:
+                        claim_check_json = claim_check_to_json(cc)
+                    claim_issues = gate_issues
+
+            # Issues that REMAIN on the shipped explanation drive the "flagged"
+            # status: the regular checker's, the 4th-call audit's, or the gate
+            # issues an auto-fix did NOT resolve (discarded / unchanged).
+            remaining_issues = list(claim_issues) + list(final_audit_issues)
+            if revise_record is not None and revise_record["status"] in (
+                "discarded", "unchanged",
+            ):
+                remaining_issues += list(revise_record.get("gate_issues") or [])
 
             # Soft validators run on the FINAL (possibly revised) explanation:
             # never reject, only queue for review. Skipped on dry-runs.
@@ -1204,7 +1266,7 @@ def generate_preflop_batch(
             rows.append((facts, explanation, difficulty))
             claim_checks.append(claim_check_json)
             row_statuses.append(
-                "flagged" if (soft_warnings or claim_issues) else None
+                "flagged" if (soft_warnings or remaining_issues) else None
             )
             snapped_freqs_list.append(snapped_real_freqs)
             # Record the exact (deterministic) inputs that produced this row,
@@ -1219,8 +1281,8 @@ def generate_preflop_batch(
                 record["validator_warnings"] = soft_warnings
             if claim_issues:
                 record["claim_check_issues"] = claim_issues
-            if revision_record is not None:
-                record["revision"] = revision_record
+            if revise_record is not None:
+                record["revise"] = revise_record
             if snapped_real_freqs is not None:
                 # Real solver mix, kept for the Review/Compare "shown as pure"
                 # note (the question itself displays 100%).
@@ -1313,6 +1375,12 @@ def generate_preflop_batch(
                 "questions_attempted": attempted,
                 "questions_written": written,
                 "soft_flagged_rows": sum(1 for s in row_statuses if s),
+                # Self-revision (4-call audit & auto-fix) outcomes. Only nonzero
+                # when revise_pass was on. flagged = fixed + discarded + unchanged.
+                "revise_flagged": revise_flagged,
+                "revise_fixed": revise_fixed,
+                "revise_discarded": revise_discarded,
+                "revise_unchanged": revise_unchanged,
             },
             failures=failures,
         )

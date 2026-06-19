@@ -39,6 +39,7 @@ from pipeline.preflop.explanation_generator import (
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,
     UsageCallback,
+    _extract_usage,
     _parse_explanation_only_response,
     _trim_facts_for_prompt,
     load_preflop_system_prompt,
@@ -152,8 +153,12 @@ def revise_explanation(
             system=system,
             messages=[{"role": "user", "content": user}],
         )
-        if usage_callback is not None and getattr(response, "usage", None) is not None:
-            usage_callback(response.usage)
+        if usage_callback is not None:
+            # Same 5-arg convention the generator uses: (model, input, output,
+            # cache_creation, cache_read). Calling it with the raw usage object
+            # raised a TypeError that the except below swallowed, so EVERY
+            # rewrite silently failed (regression-tested in test_reviser.py).
+            usage_callback(model, *_extract_usage(response))
         revised_text = _parse_explanation_only_response(_extract_text(response))
     except Exception as exc:  # noqa: BLE001 - a reviser hiccup must never drop the row
         logger.warning("reviser: call/parse failed: %s", exc)

@@ -589,6 +589,7 @@ _PRICE_INSUFFICIENT = re.compile(
     r"(?i)(?:"
     r"\bprice\b[^.]{0,40}?\b(?:not|isn'?t|never)\b[^.]{0,20}?\bmet\b"            # price ... not ... met
     r"|\b(?:not|isn'?t|doesn'?t|does not|never)\b[^.]{0,20}?\bmeet(?:ing|s)?\b[^.]{0,15}?\bprice\b"  # doesn't meet the price
+    r"|\bprice\b[^.]{0,30}?\b(?:doesn'?t|does not|don'?t|won'?t|can'?t|cannot|isn'?t|never)\b[^.]{0,22}?\b(?:justif\w+|warrant\w*|support\w*|merit\w*)\b"  # the price doesn't justify/warrant/support continuing
     r"|\b(?:below|under|beneath|short of)\b[^.]{0,25}?\bwhat the price\b"        # below what the price needs
     r"|\b(?:below|under|beneath)\b[^.]{0,12}?\bthe price\b"                      # below/under the price
     r"|\bequity\b[^.]{0,30}?\b(?:below|under|short of)\b[^.]{0,18}?\b(?:price|break[\s-]?even|what you need)\b"  # equity below the price/break-even

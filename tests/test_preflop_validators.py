@@ -1047,6 +1047,16 @@ def test_equity_price_uses_field_equity_when_present() -> None:
     assert not validate_equity_vs_price_direction(gen, facts).is_valid
 
 
+def test_equity_price_fires_on_price_doesnt_justify() -> None:
+    # The Q1 (QQ BTN) phrasing the original regex MISSED: "the price doesn't
+    # justify continuing" while equity (30.6%) clears the 25% break-even.
+    facts = _facts(archetype="fold_dominated", hero_equity_vs_villain=0.306,
+                   break_even_equity=0.25)
+    gen = _gen(correct="Fold",
+               prose="Fold. The price doesn't justify continuing here.")
+    assert not validate_equity_vs_price_direction(gen, facts).is_valid
+
+
 # False-positive guards (must PASS):
 def test_equity_price_passes_genuine_price_fold() -> None:
     # equity BELOW break-even -> "price not met" is CORRECT.
