@@ -23,7 +23,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.preflop.format_writer import PREFLOP_CSV_COLUMNS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
     ACTION_CONTEXTS,
     BatchResult,
@@ -33,6 +32,7 @@ from pipeline.preflop.batch import (  # noqa: E402
     generate_preflop_batch,
     node_action_context,
 )
+from pipeline.preflop.format_writer import PREFLOP_CSV_COLUMNS  # noqa: E402
 from pipeline.preflop.grammars.types import (  # noqa: E402
     ParsedAction,
     PreflopActionType,
@@ -1199,3 +1199,96 @@ def test_snap_facts_to_pure_displays_near_pure_as_100() -> None:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_batch_revise_pass_ships_revision_and_records_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """revise_pass on: a flagged explanation is rewritten, the REVISED version
+    ships to the CSV, and BOTH versions land in the meta for comparison.
+
+    Generation, the claim checker, and the reviser are stubbed so the wiring is
+    tested without any LLM call (the reviser's own re-validation is unit-tested
+    separately in test_reviser.py)."""
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.preflop import batch as B
+    from pipeline.preflop.claim_checker import ClaimCheckResult, ClaimIssue
+    from pipeline.preflop.reviser import ReviseResult
+
+    draft = GeneratedExplanation(
+        option_1="Always raise", option_2="", option_3="", option_4="",
+        correct_answer="Always raise", answer_explanation="DRAFT prose.",
+    )
+    revised = GeneratedExplanation(
+        option_1="Always raise", option_2="", option_3="", option_4="",
+        correct_answer="Always raise", answer_explanation="REVISED prose.",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        B, "generate_preflop_answer_explanation",
+        lambda facts, options, correct, **k: draft,
+    )
+    monkeypatch.setattr(
+        B, "check_explanation_claims",
+        lambda *a, **k: ClaimCheckResult(passed=False, issues=(ClaimIssue("vague", "unclear"),)),
+    )
+
+    def _fake_revise(explanation, facts, *, issues, **k):
+        captured["original"] = explanation.answer_explanation
+        captured["issues"] = list(issues)
+        return ReviseResult(explanation=revised, changed=True, revised_text="REVISED prose.")
+
+    monkeypatch.setattr(B, "revise_explanation", _fake_revise)
+
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    result = generate_preflop_batch(
+        pack=pack, output_path=out, total_questions=10,
+        client=object(), dry_run=False, random_seed=42,
+        revise_pass=True, final_audit=True,
+    )
+    assert result.questions_written >= 1
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    # The REVISED prose shipped to the CSV, not the draft.
+    assert rows and all(r["Answer Explanation"] == "REVISED prose." for r in rows)
+    assert captured["original"] == "DRAFT prose."
+    # Both versions recorded in the meta for reviewer comparison.
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    rev = meta["questions"][0]["revision"]
+    assert rev["original_explanation"] == "DRAFT prose."
+    assert rev["revised_explanation"] == "REVISED prose."
+    assert rev["issues_fixed"]
+
+
+def test_batch_revise_pass_off_by_default_keeps_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without revise_pass, the reviser is never called and no revision is recorded."""
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.preflop import batch as B
+
+    draft = GeneratedExplanation(
+        option_1="Always raise", option_2="", option_3="", option_4="",
+        correct_answer="Always raise", answer_explanation="DRAFT prose.",
+    )
+    monkeypatch.setattr(
+        B, "generate_preflop_answer_explanation",
+        lambda facts, options, correct, **k: draft,
+    )
+
+    def _boom(*a, **k):  # the reviser must NOT be called when the flag is off
+        raise AssertionError("revise_explanation called with revise_pass=False")
+
+    monkeypatch.setattr(B, "revise_explanation", _boom)
+
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    generate_preflop_batch(
+        pack=pack, output_path=out, total_questions=10,
+        client=object(), dry_run=False, random_seed=42,
+    )
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    assert rows and all(r["Answer Explanation"] == "DRAFT prose." for r in rows)
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert all("revision" not in q for q in meta["questions"])

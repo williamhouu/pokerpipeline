@@ -88,13 +88,40 @@ real-LLM path (mock-tested) + 39 tests + this doc. The pipeline produces a
 CSV of worthy questions with full multi-street action history, difficulty,
 concept tags, archetype, and provenance.
 
+**Done (June 2026):** the **third-party `.db` adapter**
+(`adapters/sqlite_db.py`) — the first real-solve integration. It reads a
+vendor SQLite postflop solve into the IR (flop nodes for v1), deriving
+check/call + bet/raise from the node-string betting state (the vendor's
+action *labels* are unreliable), reach-weighting each side's range for
+equity, and converting chips→bb. First real questions generated from
+`BTN_vs_BB_SRP_100bb_QsJd9s_v8.db` (audit: `scripts/audit_postflop_db.py`).
+The CLI loads it via `--solve <path>.db`; `--diversify` rounds-robin across
+decision types (see the calibration note below).
+
+> **Worthiness = the frequency window; the EV-gap filter is OPTIONAL (off by
+> default — mirrors preflop).** Real solves mix heavily, so the
+> genuinely-interesting decisions (c-bet? lead? which size?) have **near-zero
+> EV gaps by construction** — that's genuine indifference, not solver noise.
+> The brief's hard 0.5bb gate therefore collapsed the worthy pool to
+> high-variance "facing-a-big-bet" call/fold spots (on QsJd9s: 144 worthy, ALL
+> one type). So `evaluate_spot` / `generate_postflop_batch` now default
+> `min_ev_gap_bb=None` (frequency-only) → full variety (1014 worthy across
+> c-bets/leads/raises/folds for both players), exactly PLO's reason for
+> dropping its EV axis. Enabling `min_ev_gap_bb` is an opt-in quality filter
+> (the admin "advanced filter"); the EV gap still feeds difficulty's `easy_ev`.
+> `--diversify` round-robins the worthy pool across the four flop decision
+> types so a fill-to-N batch isn't dominated by one archetype.
+
 **Next:**
 
-1. **Real-solve adapters.** Write `adapters/<source>.py` that reads a
-   PioSolver `.cfr` (via `pipeline.piosolver` UPI, on a Windows host) or the
-   third-party `.db` and emits a `PostflopSolve`. `validate_solve` is the
-   contract to target. *This is the only place a vendor format is known.*
-   When real flop/turn/river solves arrive, this is the integration point.
+1. **Turn/river nodes + a `.cfr` adapter.** The `.db` adapter does flop nodes
+   only; turn/river is a clean extension (chance tokens reset the street's
+   invested amounts in the walk). A PioSolver `.cfr` adapter (via
+   `pipeline.piosolver` UPI, on a Windows host) is the other source.
+   `validate_solve` is the contract to target.
+   Also wanted: a **board-emoji hard validator** (the LLM occasionally garbles
+   a board suit emoji, e.g. `9♉` for `9♠️` — the preflop pipeline has the
+   analogous suit-emoji check).
 2. **Admin panel.** Add a "Postflop" section in `admin_panel/app.py`
    (a `_render_generate_page_postflop` mirroring the preflop one) that launches
    `generate_postflop_batch` via the existing `jobs.start_subprocess_job`

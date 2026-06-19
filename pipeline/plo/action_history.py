@@ -206,23 +206,27 @@ def format_plo_action_history(
 def format_plo_context(
     *,
     stakes_bb_dollars: float = 1.0,
-    table_size: int = 6,
     stack_bb: float = 100.0,
     game_format: str = "cash",
     display_in_bb: bool = False,
     live_or_online: str = "Online",
 ) -> str:
-    """The context line: stakes, table size, effective stacks."""
+    """The context line: stakes + effective stacks.
+
+    Table size is intentionally NOT shown -- the dedicated Table Size column
+    already carries it, so repeating it here was redundant (dropped June 2026
+    per the team's feedback).
+    """
     if game_format != "cash":
-        return f"PLO tournament. {table_size}-handed. {_fmt_num(stack_bb)}bb effective stacks."
+        return f"PLO tournament. {_fmt_num(stack_bb)}bb effective stacks."
     venue = live_or_online.capitalize()
     if display_in_bb:
-        return f"{venue} PLO cash. {table_size}-handed. {_fmt_num(stack_bb)}bb effective stacks."
+        return f"{venue} PLO cash. {_fmt_num(stack_bb)}bb effective stacks."
     sb = stakes_bb_dollars * _SB_BB
     eff = stack_bb * stakes_bb_dollars
     return (
         f"${_fmt_num(sb)}/${_fmt_num(stakes_bb_dollars)} {venue} PLO cash. "
-        f"{table_size}-handed. ${_fmt_num(eff)} effective stacks."
+        f"${_fmt_num(eff)} effective stacks."
     )
 
 

@@ -1,21 +1,29 @@
 """Layer 4 (postflop): decide whether a spot is worth a question.
 
-Same worthiness contract the brief specifies for the whole project: keep a
-spot only when the solver's top action sits in a band that is neither a
-coin-flip nor a forced/trivial decision, AND the EV gap to the best wrong
-answer is large enough that there is a genuinely "correct" answer to teach.
+A spot is worth a question when the solver's top action sits in a band that is
+neither a coin-flip nor a forced/trivial decision -- the **frequency window**
+is the worthiness gate:
 
     * dominant-action frequency in ``[min_frequency, max_frequency]``
       (default 55%-95%): below 55% it's a near-coin-flip with no clear answer;
       above 95% it's a pure/forced spot that teaches nothing.
-    * EV gap to the second-best action >= ``min_ev_gap_bb`` (default 0.5bb):
-      ensures the wrong answer actually costs something.
 
-These same signals also feed the difficulty rating (see ``difficulty.py``).
-The EV gap is taken from :func:`pipeline.postflop.spot_sampler.spot_ev_gap_bb`
-(per-combo when the solve exposes per-hand EVs, else range-mean); a spot whose
-EV gap is unknown (``None``) passes the EV check -- we don't drop a spot for
-missing data, we just can't use that axis (mirrors the preflop pipeline).
+The EV gap to the second-best action is an **optional** quality filter, OFF by
+default (``min_ev_gap_bb=None``) -- mirroring the preflop pipeline. The brief
+proposed a hard 0.5bb floor, but postflop GTO mixes heavily: a *worthy*
+(mixed-frequency) spot is, by definition, close to EV-indifferent, so its EV
+gap is ~0 by construction (genuine indifference, not solver noise). A hard
+floor therefore throws out exactly the interesting decisions (c-bet/lead/size)
+and leaves only high-variance facing-a-big-bet call/folds. So worthiness is
+frequency-only by default; enabling ``min_ev_gap_bb`` is an opt-in way to keep
+only the higher-consequence spots (the admin "advanced filter", same as
+preflop). ``MIN_EV_GAP_BB`` below is the suggested value WHEN enabled.
+
+The EV gap still feeds the difficulty rating unconditionally (see
+``difficulty.py``); it is taken from
+:func:`pipeline.postflop.spot_sampler.spot_ev_gap_bb` (per-combo when the solve
+exposes per-hand EVs, else range-mean). A spot whose EV gap is unknown
+(``None``) always passes -- we never drop a spot for missing data.
 """
 
 from __future__ import annotations
@@ -26,6 +34,8 @@ from pipeline.postflop.spot_sampler import PostflopSpot, spot_ev_gap_bb
 
 MIN_FREQUENCY = 0.55
 MAX_FREQUENCY = 0.95
+# Suggested EV-gap value WHEN the optional filter is enabled (the gate is OFF
+# by default -- see the module docstring). Not a hard worthiness default.
 MIN_EV_GAP_BB = 0.5
 
 
@@ -44,13 +54,15 @@ def evaluate_spot(
     *,
     min_frequency: float = MIN_FREQUENCY,
     max_frequency: float = MAX_FREQUENCY,
-    min_ev_gap_bb: float = MIN_EV_GAP_BB,
+    min_ev_gap_bb: float | None = None,
 ) -> PostflopQuestionEvaluation:
     """Apply the worthiness gate to ``spot``.
 
-    Returns a :class:`PostflopQuestionEvaluation`. ``is_worthy`` is True only
-    when the dominant frequency is in the window AND (the EV gap is unknown OR
-    meets the minimum).
+    Returns a :class:`PostflopQuestionEvaluation`. ``is_worthy`` is True when
+    the dominant frequency is in the window AND (the optional ``min_ev_gap_bb``
+    filter is off, OR the EV gap is unknown, OR it meets the minimum). The EV
+    filter is OFF by default (``min_ev_gap_bb=None``) -- mirroring preflop; see
+    the module docstring.
     """
     freq = spot.dominant_frequency
     ev_gap = spot_ev_gap_bb(spot)
@@ -66,12 +78,11 @@ def evaluate_spot(
             ev_gap_bb=ev_gap,
         )
 
-    if ev_gap is not None and ev_gap < min_ev_gap_bb:
+    if min_ev_gap_bb is not None and ev_gap is not None and ev_gap < min_ev_gap_bb:
         return PostflopQuestionEvaluation(
             is_worthy=False,
             reason=(
-                f"EV gap {ev_gap:.2f}bb below minimum {min_ev_gap_bb:.2f}bb "
-                "(no clearly-correct answer)"
+                f"EV gap {ev_gap:.2f}bb below optional filter {min_ev_gap_bb:.2f}bb"
             ),
             dominant_frequency=freq,
             ev_gap_bb=ev_gap,

@@ -23,12 +23,11 @@ registry mechanism does not change.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from pipeline.fact_extractor.spot_data import SpotData
-
 
 # Common cash-game stake levels offered in the admin panel's stake-scaling
 # dropdown. Each value is the BB size in dollars; SB is assumed to be half.
@@ -100,7 +99,7 @@ class ScenarioConfig:
                                                   # (("BTN", "open", 1.25), ("BB", "call"))
 
     # Derived strings, computed in __post_init__.
-    context: str = field(init=False)             # "6-Handed, $0.25/$0.50, Stacks $50.00"
+    context: str = field(init=False)             # "$0.25/$0.50, Stacks $50.00"
 
     def __post_init__(self) -> None:
         if self.game_format not in ("cash", "tournament"):
@@ -118,9 +117,12 @@ class ScenarioConfig:
         # render without trailing ".00" (e.g. "Stacks $50", not "Stacks $50.00")
         # per Ryan-feedback Fix 1, May 2026 -- the .00 reads as fractional-cent
         # precision that's pointless when the value is integer dollars.
+        # Table size is intentionally NOT shown -- the dedicated Table Size
+        # column carries it, so repeating it here was redundant (dropped
+        # June 2026 per the team's feedback).
         object.__setattr__(
             self, "context",
-            f"{self.table_size}-Handed, {self.stakes}, "
+            f"{self.stakes}, "
             f"Stacks {_format_dollars(self.default_stack_dollars)}",
         )
 
@@ -131,8 +133,8 @@ class ScenarioConfig:
 
 
 # --- stake scaling ----------------------------------------------------------
-def scale_scenario(scenario: "ScenarioConfig",
-                   target_bb_dollars: float) -> "ScenarioConfig":
+def scale_scenario(scenario: ScenarioConfig,
+                   target_bb_dollars: float) -> ScenarioConfig:
     """Return a new ScenarioConfig with stakes rescaled to target_bb_dollars/BB.
 
     Use this to render the same strategic spot at any cash-game stake level
@@ -191,7 +193,7 @@ def scale_scenario(scenario: "ScenarioConfig",
 # --- the registry -----------------------------------------------------------
 def _srp_scenario_template(*, cfr_key: str, preflop_action: str,
                            oop_position: str, ip_position: str,
-                           preflop_actions: tuple) -> "ScenarioConfig":
+                           preflop_actions: tuple) -> ScenarioConfig:
     """Helper: build a Cash6max 100bb online SRP ScenarioConfig used as a
     TEMPLATE -- batch_demo_v6 clones it per actual .cfr via dataclasses.replace.
     All Tier-1 SRP scenarios share the same stakes/table/stack metadata;

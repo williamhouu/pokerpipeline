@@ -129,7 +129,7 @@ def test_action_history_bb_display():
 # --- context --------------------------------------------------------------
 def test_context_cash_dollars():
     assert format_plo_context() == (
-        "$0.5/$1 Online PLO cash. 6-handed. $100 effective stacks."
+        "$0.5/$1 Online PLO cash. $100 effective stacks."
     )
 
 

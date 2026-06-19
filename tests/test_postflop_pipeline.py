@@ -112,9 +112,16 @@ def test_worthy_spot_in_window() -> None:
     assert ev.is_worthy
 
 
-def test_unworthy_on_small_ev_gap() -> None:
-    # Ah5h: dominant Call 62% (in window) but EV gap 0.3bb < 0.5 -> dropped.
+def test_ev_gap_filter_is_off_by_default() -> None:
+    # Ah5h: dominant Call 62% (in window) with a small EV gap (0.3bb). The EV
+    # filter is OFF by default (mirrors preflop), so the spot is worthy.
     ev = evaluate_spot(_spot("flop_ip_facing_bet", "Ah5h"))
+    assert ev.is_worthy
+
+
+def test_optional_ev_gap_filter_drops_small_gap_when_enabled() -> None:
+    # Same spot, but with the opt-in filter at 0.5bb: now dropped (gap 0.3bb).
+    ev = evaluate_spot(_spot("flop_ip_facing_bet", "Ah5h"), min_ev_gap_bb=0.5)
     assert not ev.is_worthy
     assert "EV gap" in ev.reason
 
@@ -223,7 +230,7 @@ def test_question_turn_shows_full_line() -> None:
 
 
 def test_context_line() -> None:
-    assert build_context_line(SOLVE) == "Online · 6-max · $0.50/$1"
+    assert build_context_line(SOLVE) == "Online · $0.50/$1"
 
 
 # --- difficulty -------------------------------------------------------------
@@ -379,12 +386,14 @@ def test_batch_dry_run_writes_csv(tmp_path: Path) -> None:
     result = generate_postflop_batch(
         solve=SOLVE, output_path=out, total_questions=20, dry_run=True
     )
-    assert result.questions_written == 6  # the fixture's worthy spots
+    # All 7 fixture combos sit in the 55-95% frequency window; the EV-gap
+    # filter is off by default, so all 7 are worthy.
+    assert result.questions_written == 7
     assert result.failures == []
     assert out.exists() and result.meta_path is not None and result.meta_path.exists()
     with out.open(encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
-    assert len(rows) == 6
+    assert len(rows) == 7
     assert all(r["Correct Answer"] for r in rows)
     # Every row's correct answer is among its options.
     for r in rows:

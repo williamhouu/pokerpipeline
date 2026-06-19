@@ -56,7 +56,7 @@ def test_btn_vs_bb_srp_registered():
     # Derived context string -- matches sample row 1's online-cash format.
     # Whole-dollar stack drops the trailing '.00' per Ryan-feedback Fix 1
     # (May 2026); a non-integer stack would still render as e.g. "Stacks $52.50".
-    assert s.context == "6-Handed, $0.25/$0.50, Stacks $50"
+    assert s.context == "$0.25/$0.50, Stacks $50"
     # $/bb = 50/100 = 0.5
     assert s.dollars_per_bb == 0.5
 
@@ -256,7 +256,7 @@ def test_scale_scenario_basic_5_10():
     assert scaled.default_stack_dollars == 1000.0   # 100bb * $10
     assert scaled.default_stack_bb == 100            # unchanged (stack depth in bb)
     assert scaled.stakes == "$5/$10"
-    assert scaled.context == "6-Handed, $5/$10, Stacks $1,000"
+    assert scaled.context == "$5/$10, Stacks $1,000"
 
 
 def test_scale_scenario_preflop_actions_scaled():

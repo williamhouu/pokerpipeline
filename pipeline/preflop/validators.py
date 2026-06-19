@@ -36,7 +36,11 @@ becomes the retry message):
      X is in the blockers fact; no blocker talk at all when the fact
      is empty (round-2 audit: 4/20 rows claimed impossible blocks).
   7. :func:`validate_terminology` -- cold-call/squeeze/open-fold/N-bet
-     claims the action history disproves (round-2 audit).
+     claims the action history disproves (round-2 audit), incl. a villain
+     raise named above the level that actually occurred.
+  8. :func:`validate_equity_vs_price_direction` -- a fold explanation that
+     calls the price insufficient when the solver shows hero's equity
+     actually clears it (the multi-way equity-vs-price reversal).
 
 (A ``validate_no_postflop_talk`` keyword check was removed -- it
 hard-banned terms like "runout"/"draws" and false-positived on
@@ -565,6 +569,38 @@ _SQUEEZE = re.compile(r"\bsqueez\w*", re.I)
 _OPEN_FOLD = re.compile(r"\bopen[\s-]fold\w*", re.I)
 _N_BET_TOKEN = re.compile(r"\b([3-9])-bet", re.I)
 _CAPPED = re.compile(r"\bcapped\b", re.I)
+# Conditional / future markers. A sentence with one of these is talking about
+# what COULD happen, not describing the recorded action, so the
+# villain-raise-level check (Finding 2) skips it.
+_HYPOTHETICAL = re.compile(
+    r"\b(?:if|could|would|wouldn'?t|might|may|should|were\s+to|can|cannot|"
+    r"can'?t|when|once|imagine|suppose|hypothetical\w*)\b",
+    re.I,
+)
+
+# Finding 1 (Jun 2026): prose asserting the PRICE / pot odds are INSUFFICIENT
+# -- i.e. hero's equity is below what is needed to call. ONLY the explicit
+# equity-vs-price claims; realization talk ("you won't realize it out of
+# position / multi-way") is the CORRECT frame for these folds and is NOT
+# matched. Paired with a numeric gate so it fires only when the solver shows
+# equity actually CLEARS the price -- a genuine price fold (equity < price)
+# uses the same words and must pass.
+_PRICE_INSUFFICIENT = re.compile(
+    r"(?i)(?:"
+    r"\bprice\b[^.]{0,40}?\b(?:not|isn'?t|never)\b[^.]{0,20}?\bmet\b"            # price ... not ... met
+    r"|\b(?:not|isn'?t|doesn'?t|does not|never)\b[^.]{0,20}?\bmeet(?:ing|s)?\b[^.]{0,15}?\bprice\b"  # doesn't meet the price
+    r"|\b(?:below|under|beneath|short of)\b[^.]{0,25}?\bwhat the price\b"        # below what the price needs
+    r"|\b(?:below|under|beneath)\b[^.]{0,12}?\bthe price\b"                      # below/under the price
+    r"|\bequity\b[^.]{0,30}?\b(?:below|under|short of)\b[^.]{0,18}?\b(?:price|break[\s-]?even|what you need)\b"  # equity below the price/break-even
+    r"|\b(?:below|under)\b[^.]{0,18}?\b(?:break[\s-]?even|the (?:required|needed) equity)\b"  # below break-even
+    r")"
+)
+# Folds that weigh a calling price (so the equity-vs-price reversal can occur).
+# fold_no_continue has no call/price, so it is excluded.
+_FOLD_PRICE_ARCHETYPES = frozenset({"fold_pot_odds", "fold_dominated", "fold_outranged"})
+# Margin above break-even before the reversal check fires, to absorb the equity
+# estimate's ~1-2% sampling noise (so a true near-tie never reads as a reversal).
+_PRICE_MET_MARGIN = 0.015
 # Longest-first so "UTG" can't match inside "UTG+1".
 _POSITION_SHORT = re.compile(r"\b(UTG\+[12]|UTG|LJ|HJ|CO|BTN|SB|BB)\b")
 _POSITION_LONG = {
@@ -708,7 +744,7 @@ def validate_terminology(
 ) -> PreflopValidationResult:
     """Preflop terms the action history disproves (round-2 audit, June 2026).
 
-    Four checks, all grounded in ``history_before``:
+    Five checks, all grounded in ``history_before``:
 
       * **cold-call by a raiser** -- a player who already raised can never
         cold-call (3 of 20 rows called the opener's hypothetical call a
@@ -727,6 +763,12 @@ def validate_terminology(
         over it. (Subject-bound miscounts inside that bound, like "CO
         folds to a 5-bet" where only CO could make the 5-bet, are left to
         the prose audit -- parsing who makes which raise is not mechanical.)
+      * **villain raise named too high** -- a COMPLETED villain raise named
+        above the level that actually occurred (a squeeze 3-bet called a
+        "4-bet"). Deliberately narrow to stay mechanical: only when the N-bet
+        is attributed to the villain AS THE RAISER ("SB('s) (cold) 4-bet"), in
+        a clause with no conditional markers and no second person, so hero's
+        hypothetical raises ("SB folds to a 4-bet") never trip it.
     """
     text = generated.answer_explanation or ""
     if not text:
@@ -814,6 +856,39 @@ def validate_terminology(
                     f"Offending sentence: {sentence.strip()!r}"
                 )
 
+        # A COMPLETED villain raise named ABOVE the level that actually occurred
+        # -- e.g. a squeeze (a 3-bet over an open plus callers) called a "4-bet"
+        # (round-2 batch). The ladder check above bounds the CEILING (hero COULD
+        # reach a 4-bet); this bounds what has ALREADY happened. Tightly scoped
+        # to dodge the hypotheticals the authors left to the prose audit: the
+        # N-bet must be attributed to the VILLAIN AS THE RAISER ("SB('s) (cold)
+        # 4-bet"), in a clause with no conditional markers and no second person
+        # -- so "SB folds to a 4-bet" (hero's hypothetical raise) never matches,
+        # and a correctly-named completed raise (level <= what occurred) passes.
+        if (
+            villain_pos is not None
+            and not _HYPOTHETICAL.search(low)
+            and "you" not in low
+        ):
+            highest_completed = n_raises + 1  # the n_raises-th raise = (n+1)-bet
+            villain_nbet = re.compile(
+                rf"\b{re.escape(villain_pos)}(?:'s)?\s+(?:cold[\s-]?)?([3-9])-bet",
+                re.I,
+            )
+            for m in villain_nbet.finditer(sentence):
+                level = int(m.group(1))
+                # Require >=3 so the message never has to call an open a
+                # "2-bet"; the observed error (squeeze 3-bet -> "4-bet") is here.
+                if level > highest_completed and highest_completed >= 3:  # noqa: PLR2004
+                    return PreflopValidationResult.fail(
+                        f"the explanation calls {villain_pos}'s raise a "
+                        f"{level}-bet, but with {n_raises} raise(s) in this line "
+                        f"the latest raise is a {highest_completed}-bet, not a "
+                        f"{level}-bet (a squeeze over an open plus callers is "
+                        f"still a 3-bet). Name it at its real level. Offending "
+                        f"sentence: {sentence.strip()!r}"
+                    )
+
         if (
             _CAPPED.search(sentence)
             and facts.villain_stats is not None
@@ -830,6 +905,58 @@ def validate_terminology(
                 f"or condensed instead. Offending sentence: {sentence.strip()!r}"
             )
 
+    return PreflopValidationResult.ok()
+
+
+def validate_equity_vs_price_direction(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,
+) -> PreflopValidationResult:
+    """Reject a fold explanation that calls the PRICE insufficient when the
+    solver shows hero's equity actually CLEARS it (Finding 1, June 2026).
+
+    On multi-way fold spots the LLM repeatedly reversed the equity-vs-price
+    relationship -- "the price is not being met", "equity collapses below what
+    the price needs" -- when hero's field equity in fact BEATS the break-even.
+    These folds are correct for REALIZATION reasons (you will not realize that
+    equity multi-way / out of position), NOT price, so the sentence as written
+    argues for a call while the verdict is fold. The ``fold_pot_odds`` /
+    ``fold_dominated`` prompt rule already forbids this; this is the mechanical
+    backstop.
+
+    Fires ONLY when ALL hold, so a genuine price fold (equity < price) passes
+    unchanged using the very same words:
+
+      * the archetype is a fold that weighs a calling price;
+      * the solver's decision equity is at least ``_PRICE_MET_MARGIN`` ABOVE the
+        break-even (the margin absorbs the equity estimate's sampling noise, so
+        a true near-tie is never read as a reversal);
+      * the prose makes an explicit "price / equity is insufficient" claim
+        (realization talk -- "you won't realize it" -- is the correct frame and
+        is NOT matched).
+    """
+    if facts.archetype not in _FOLD_PRICE_ARCHETYPES:
+        return PreflopValidationResult.ok()
+    break_even = facts.break_even_equity
+    if break_even is None:
+        return PreflopValidationResult.ok()
+    # Decision equity: vs the whole field multi-way, else vs the single villain.
+    equity = facts.hero_equity_vs_field
+    if equity is None:
+        equity = facts.hero_equity_vs_villain
+    if equity is None:
+        return PreflopValidationResult.ok()
+    if equity < break_even + _PRICE_MET_MARGIN:
+        return PreflopValidationResult.ok()  # price genuinely (near-)unmet
+    if _PRICE_INSUFFICIENT.search(generated.answer_explanation or ""):
+        return PreflopValidationResult.fail(
+            f"the explanation says the price / pot odds are not met, but the "
+            f"solver shows your equity ({equity:.0%}) is ABOVE the break-even to "
+            f"call ({break_even:.0%}) -- so that sentence argues for a call while "
+            f"the answer is fold. This fold is about REALIZATION (you will not "
+            f"realize that equity out of position / multi-way), NOT the price. "
+            f"Reframe around realization; never say your equity is below the price."
+        )
     return PreflopValidationResult.ok()
 
 
@@ -1253,6 +1380,7 @@ def run_preflop_audit_validators(
         validate_card_suit_consistency,
         validate_blocker_claims,
         validate_terminology,
+        validate_equity_vs_price_direction,
     ):
         result = check(generated, facts)
         if not result.is_valid:
@@ -1272,6 +1400,7 @@ __all__ = [
     "validate_blocker_claims",
     "validate_card_suit_consistency",
     "validate_composite_label_frequencies",
+    "validate_equity_vs_price_direction",
     "validate_no_postflop_on_allin",
     "validate_no_standalone_sometimes",
     "validate_option_set",

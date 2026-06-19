@@ -20,6 +20,7 @@ never aborts the run.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,6 @@ from pipeline.postflop.format_writer import build_postflop_row, write_postflop_c
 from pipeline.postflop.options import build_options
 from pipeline.postflop.question_extractor import (
     MAX_FREQUENCY,
-    MIN_EV_GAP_BB,
     MIN_FREQUENCY,
     evaluate_spot,
 )
@@ -72,7 +72,7 @@ def _collect_worthy(
     *,
     min_frequency: float,
     max_frequency: float,
-    min_ev_gap_bb: float,
+    min_ev_gap_bb: float | None,
 ) -> list[Any]:
     """Every worthy spot in the solve, in a deterministic (node, combo) order."""
     worthy = []
@@ -102,11 +102,12 @@ def generate_postflop_batch(
     dry_run: bool = False,
     min_frequency: float = MIN_FREQUENCY,
     max_frequency: float = MAX_FREQUENCY,
-    min_ev_gap_bb: float = MIN_EV_GAP_BB,
+    min_ev_gap_bb: float | None = None,
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
     system_prompt: str | None = None,
     progress_callback: ProgressCallback = None,
     write_meta: bool = True,
+    spot_selector: Callable[[list[Any]], list[Any]] | None = None,
 ) -> PostflopBatchResult:
     """Generate up to ``total_questions`` postflop questions from ``solve``.
 
@@ -114,6 +115,12 @@ def generate_postflop_batch(
     deterministic placeholder and no API key is needed. Returns a
     :class:`PostflopBatchResult`; writes the CSV and (unless ``write_meta`` is
     False) a ``<stem>.meta.json`` sidecar.
+
+    ``spot_selector`` (optional) receives the full worthy-spot list and returns
+    the curated/ordered subset to actually generate -- used to diversify a
+    fill-to-N batch across node types so it is not dominated by one archetype.
+    It must be deterministic to preserve byte-identical output. Default: the
+    worthy list is used as-is (sorted by node, then combo).
 
     Raises:
         ValueError: if ``solve`` fails the structural check in
@@ -130,6 +137,12 @@ def generate_postflop_batch(
         max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
     )
+    worthy_total = len(worthy)
+    # Optional caller-supplied curation/ordering (e.g. diversify across node
+    # types so a fill-to-N batch is not dominated by one archetype). Must be
+    # deterministic to preserve byte-identical output. Default: take as-is.
+    if spot_selector is not None:
+        worthy = spot_selector(worthy)
 
     rows: list[dict[str, str]] = []
     question_records: list[dict[str, Any]] = []
@@ -231,7 +244,8 @@ def generate_postflop_batch(
                 "temperature": temperature,
             },
             "counters": {
-                "worthy_spots_available": len(worthy),
+                "worthy_spots_available": worthy_total,
+                "worthy_spots_selected": len(worthy),
                 "questions_attempted": attempted,
                 "questions_written": len(rows),
                 "soft_flagged_rows": soft_flagged,
@@ -245,7 +259,7 @@ def generate_postflop_batch(
         output_path=output_path,
         questions_written=len(rows),
         questions_attempted=attempted,
-        worthy_spots_available=len(worthy),
+        worthy_spots_available=worthy_total,
         requested_questions=total_questions,
         dry_run=use_placeholder,
         model_used=model if not use_placeholder else "(dry-run placeholder)",

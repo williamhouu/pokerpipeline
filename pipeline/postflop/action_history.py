@@ -229,18 +229,19 @@ def format_question(spot: PostflopSpot, solve: PostflopSolve) -> str:
 
 
 def build_context_line(solve: PostflopSolve) -> str:
-    """The short framing line, e.g. 'Online · 6-max · $0.50/$1'.
+    """The short framing line, e.g. 'Online · $0.50/$1'.
 
-    Table size renders as '6-max' / '9-handed'; cash shows the stakes, a
-    tournament shows the stack depth instead.
+    Cash shows the stakes, a tournament shows the stack depth instead. The
+    table size is intentionally NOT shown -- the dedicated Table Size column
+    already carries it, so repeating it in the Context was redundant (dropped
+    June 2026 per the team's feedback).
     """
     venue = solve.live_or_online
-    size = f"{solve.table_size}-max" if solve.table_size <= 6 else f"{solve.table_size}-handed"
     if solve.game_format == "tournament":
         tail = f"{solve.effective_stack_bb:g}bb"
     else:
         tail = solve.stakes or "cash"
-    return f"{venue} · {size} · {tail}"
+    return f"{venue} · {tail}"
 
 
 __all__ = ["build_context_line", "format_card", "format_question"]

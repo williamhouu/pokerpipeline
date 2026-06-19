@@ -331,15 +331,40 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   it) → `options`/`difficulty` → `explanation_generator` (Layer 6, dry-run
   placeholder OR real Anthropic call + 1 retry) → `validators` (deterministic
   hard + soft) → `format_writer` (35-col team CSV) → `batch.generate_postflop_batch`
-  (+ `meta.json`). CLI: `scripts/generate_postflop.py --dry-run`.
+  (+ `meta.json`). CLI: `scripts/generate_postflop.py --dry-run`
+  (`--solve <path>.db` runs a real vendor solve; `--diversify` for variety).
 - **Deterministic**: seeded per-spot equity + sorted spot order + no
   meta timestamps ⇒ byte-identical CSV (guarded by a test). 39 tests in
   `tests/test_postflop_pipeline.py`.
-- **NOT done (seamed extension points)**: real-solve adapters (`.cfr` via the
-  Pio UPI client / the third-party `.db`), the admin Generate/Review pages
-  (mirror the preflop ones; reuse `jobs.start_subprocess_job` unchanged), LLM
-  prompt tuning against gold examples, and exact Runout app table-state token
-  formatting. See the README's "Done vs. next".
+- **Real `.db` adapter DONE (June 2026)** — `pipeline/postflop/adapters/
+  sqlite_db.py` reads the third-party SQLite postflop solve into the IR (flop
+  nodes for v1). It derives check/call + bet/raise from the node-string
+  **betting state** (vendor action *labels* are unreliable — a check-back is
+  stored as `CALL`), reach-weights each side's range for equity, and converts
+  chips→bb. First real questions came from `BTN_vs_BB_SRP_100bb_QsJd9s_v8.db`
+  ([[project-postflop-v8-solve]]); audit it with
+  `scripts/audit_postflop_db.py <file.db>`. **NOTE: the `.db` is a POSTFLOP
+  solve, NOT a preflop range pack — it does NOT register in
+  `pack.py:KNOWN_PACK_SIGNATURES` and does NOT use the preflop `node_cache`;
+  those are preflop-only.**
+- **Postflop worthiness = frequency window only (EV-gap filter is OPTIONAL,
+  off by default — mirrors preflop, June 2026).** Real solves mix heavily ⇒
+  the interesting decisions (c-bet/lead/size) have ~0 EV gap by construction
+  (genuine indifference, not noise), so the brief's hard 0.5bb gate collapsed
+  variety to facing-big-bet call/folds (QsJd9s: 144 worthy, all one type).
+  Now `evaluate_spot`/`generate_postflop_batch` default `min_ev_gap_bb=None`
+  → frequency-only → full variety (1014 worthy, all archetypes/both players),
+  same as PLO dropping its EV axis. `min_ev_gap_bb` is an opt-in quality filter
+  (suggested value `MIN_EV_GAP_BB=0.5`); the EV gap still feeds difficulty's
+  `easy_ev`. `--diversify` round-robins the worthy pool across the 4 flop
+  decision types so a fill-to-N batch isn't dominated by one archetype.
+- **NOT done (seamed extension points)**: turn/river nodes in the `.db`
+  adapter (flop-only today; chance tokens reset the street in the walk), a
+  `.cfr` adapter (Pio UPI), the admin Generate/Review pages (mirror the
+  preflop ones; reuse `jobs.start_subprocess_job` unchanged), LLM prompt
+  tuning against gold examples, a **board-emoji hard validator** (the LLM
+  occasionally garbles a board suit emoji), and exact Runout app table-state
+  token formatting. See the README's "Done vs. next".
 
 ## Build phases & status
 

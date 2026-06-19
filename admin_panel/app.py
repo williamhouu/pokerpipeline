@@ -1914,6 +1914,28 @@ def _render_generate_page_preflop() -> None:
         "call per question. It only flags (never rejects); flags show under the "
         "explanation in Review and Compare.",
     )
+    # --- Self-revision pass (opt-in experiment) -----------------------------
+    revise_pass = st.checkbox(
+        "Audit & auto-fix pass (experimental)",
+        value=False,
+        key="preflop_revise_pass",
+        help="When the claim checker flags a question, a SECOND LLM pass "
+        "rewrites the explanation to fix the issue, then the deterministic hard "
+        "validators re-check the rewrite (a rewrite that breaks a rule is "
+        "discarded and the original kept). Only the prose changes; the action, "
+        "numbers, and four options stay solver-locked. Both versions are saved "
+        "so you can compare. Adds up to two API calls per flagged question.",
+    )
+    final_audit = st.checkbox(
+        "Final audit after the fix",
+        value=True,
+        key="preflop_final_audit",
+        disabled=not revise_pass,
+        help="Auto-on when the audit & auto-fix pass is on (uncheck to skip). "
+        "Re-runs the claim checker on the rewritten explanation as a last check "
+        "-- it only flags for review, it never triggers another rewrite.",
+    )
+    final_audit = final_audit and revise_pass  # only applies when revise is on
     with st.popover("ℹ️  How checking & validation works"):
         st.markdown(
             "Two kinds of checks run on every question, and **only one uses "
@@ -1952,7 +1974,7 @@ def _render_generate_page_preflop() -> None:
             "deterministic validator."
         )
     claim_checker_prompt: str | None = None
-    if run_claim_checker:
+    if run_claim_checker or revise_pass:  # the revise pass uses the checker as its gate
         ck_key = "preflop_claim_checker_prompt"
         if ck_key not in st.session_state:
             st.session_state[ck_key] = _load_claim_checker_prompt()
@@ -2064,6 +2086,8 @@ def _render_generate_page_preflop() -> None:
             temperature=_temp_val,
             run_claim_checker=run_claim_checker,
             claim_checker_prompt=claim_checker_prompt,
+            revise_pass=revise_pass,
+            final_audit=final_audit,
             equity_runouts=equity_runouts,
             pure_snap_threshold=pure_snap_threshold,
         )
@@ -2098,6 +2122,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     temperature: float = DEFAULT_TEMPERATURE,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
+    revise_pass: bool = False,
+    final_audit: bool = False,
     equity_runouts: int = 400,
 ) -> None:
     """Kick off a preflop batch on a background thread and rerun.
@@ -2176,6 +2202,8 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             random_seed=random_seed,
             run_claim_checker=run_claim_checker,
             claim_checker_prompt=claim_checker_prompt,
+            revise_pass=revise_pass,
+            final_audit=final_audit,
             equity_runouts=equity_runouts,
         )
     except RuntimeError as exc:
@@ -3592,14 +3620,29 @@ def render_review_page() -> None:
                 )
             if _vstatus == "flagged" and not _soft and not _claims:
                 st.warning("🟠 **Flagged.**")
-        # Snap-to-pure note: this question is DISPLAYED as 100% but the solver
-        # actually mixed -- show the reviewer the true frequencies.
+        # Snap-to-pure note: the question + CSV round this near-pure spot to
+        # 100% for teaching; the "Solver frequencies" line below shows the real
+        # mix the solver played.
         _snap_mix = _format_snapped_mix(_qmeta)
         if _snap_mix:
             st.info(
-                f"🎯 **Shown as pure** — displayed as 100% for teaching, but "
-                f"the solver's real mix here is {_snap_mix}."
+                "🎯 **Shown as pure** — the question and the CSV round this "
+                "near-pure spot to 100% for teaching. The Solver frequencies "
+                "below are the solver's real mix."
             )
+
+        # Audit & auto-fix: this explanation was rewritten by the revise pass.
+        # Show what changed so a reviewer can judge whether the fix helped.
+        _revision = _qmeta.get("revision") if _qmeta else None
+        if isinstance(_revision, dict) and _revision.get("revised_explanation"):
+            with st.expander("✍️ Auto-fixed by the audit pass (original vs revised)"):
+                st.caption("Issues the audit flagged on the first draft:")
+                for _iss in _revision.get("issues_fixed") or []:
+                    st.caption(f"- {_iss}")
+                st.markdown("**Original draft**")
+                st.info(_md_lines(str(_revision.get("original_explanation", ""))))
+                st.markdown("**Revised (shipped) — re-validated before shipping**")
+                st.success(_md_lines(str(_revision.get("revised_explanation", ""))))
 
         ctx = _cell(row, "Context")
         if ctx:
@@ -3661,7 +3704,8 @@ def render_review_page() -> None:
             st.info(_md_lines(_cell(row, "Answer Explanation")))
 
         st.markdown(
-            f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}"
+            "**Solver frequencies:**&nbsp;"
+            + _panel_solver_frequencies(_cell(row, "action_frequencies"), _qmeta)
         )
 
         # Compact strategic facts.
@@ -4590,6 +4634,18 @@ def _format_snapped_mix(qmeta: dict[str, object] | None) -> str:
     )
 
 
+def _panel_solver_frequencies(csv_freqs: str, qmeta: dict[str, object] | None) -> str:
+    """What to show after "Solver frequencies:" on the panel.
+
+    For a snapped-to-pure spot, the CSV ``action_frequencies`` column is rounded
+    to 100% to match the "Always X" question (the product deliberately shows the
+    pure line). The PANEL, by contrast, always shows what the solver REALLY did:
+    the true mix from ``snapped_actual_frequencies`` when present, else the CSV
+    cell verbatim (unsnapped spots already carry the true mix in the column).
+    """
+    return _format_snapped_mix(qmeta) or csv_freqs
+
+
 def _render_action_ev_bars(row: dict[str, str]) -> None:
     """Per-action solver EV as a small zero-centered bar chart.
 
@@ -5109,9 +5165,7 @@ def render_compare_page() -> None:
             )
             # Shared strategic facts (identical for both prompts -- same spot),
             # shown once, mirroring the Review card.
-            if row_a.get("action_frequencies"):
-                st.markdown(f"**Solver frequencies:** {row_a['action_frequencies']}")
-            _cmp_snap_mix = _format_snapped_mix(
+            _cmp_qmeta_a = (
                 review.meta_question_for(
                     _cmp_meta_a,
                     user_cards=row_a.get("User Cards", ""),
@@ -5120,8 +5174,18 @@ def render_compare_page() -> None:
                 if _cmp_meta_a
                 else None
             )
-            if _cmp_snap_mix:
-                st.caption(f"🎯 Shown as pure — real solver mix: {_cmp_snap_mix}")
+            if row_a.get("action_frequencies"):
+                st.markdown(
+                    "**Solver frequencies:** "
+                    + _panel_solver_frequencies(
+                        row_a["action_frequencies"], _cmp_qmeta_a
+                    )
+                )
+            if _format_snapped_mix(_cmp_qmeta_a):
+                st.caption(
+                    "🎯 Shown as pure — the question/CSV round to 100% for "
+                    "teaching; the Solver frequencies above are the real mix."
+                )
             fact_bits: list[str] = []
             for col, lbl in (
                 ("archetype", "archetype"),

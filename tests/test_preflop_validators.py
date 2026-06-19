@@ -40,10 +40,21 @@ from pipeline.preflop.validators import (  # noqa: E402
     validate_blocker_claims,
     validate_card_suit_consistency,
     validate_composite_label_frequencies,
+    validate_equity_vs_price_direction,
     validate_no_postflop_on_allin,
     validate_no_standalone_sometimes,
     validate_option_set,
     validate_terminology,
+)
+
+# A squeeze line: UTG opens, two callers, SB squeezes (a 3-bet); hero BB folds.
+# Two raises total -> the latest raise is a 3-bet, so naming it a "4-bet" is the
+# round-2 error the villain-raise-level check targets.
+_HIST_SQUEEZE = (
+    ParsedAction("UTG", PreflopActionType.RAISE, 120.0),
+    ParsedAction("LJ", PreflopActionType.CALL, 120.0),
+    ParsedAction("CO", PreflopActionType.CALL, 120.0),
+    ParsedAction("SB", PreflopActionType.RAISE, 500.0),
 )
 
 # --- fixtures -------------------------------------------------------------
@@ -1003,3 +1014,133 @@ def test_runner_catches_round2_defects() -> None:
     result = run_preflop_audit_validators(generated, facts)
     assert not result.is_valid
     assert "Kh" in result.error_message
+
+
+# --- validate_equity_vs_price_direction (Finding 1) -----------------------
+def test_equity_price_fires_on_price_not_met() -> None:
+    facts = _facts(archetype="fold_pot_odds", hero_equity_vs_villain=0.28,
+                   break_even_equity=0.26)
+    gen = _gen(correct="Fold", prose=(
+        "The best play is to fold. The price to continue is not being met "
+        "given how often you're dominated."))
+    res = validate_equity_vs_price_direction(gen, facts)
+    assert not res.is_valid
+    assert "28%" in res.error_message and "26%" in res.error_message
+
+
+def test_equity_price_fires_on_collapses_below() -> None:
+    facts = _facts(archetype="fold_dominated", hero_equity_vs_villain=0.34,
+                   break_even_equity=0.265)
+    gen = _gen(correct="Fold",
+               prose="Fold. Your equity collapses below what the price needs.")
+    assert not validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+def test_equity_price_uses_field_equity_when_present() -> None:
+    import dataclasses
+    facts = dataclasses.replace(
+        _facts(archetype="fold_pot_odds", hero_equity_vs_villain=None,
+               break_even_equity=0.265),
+        hero_equity_vs_field=0.34,
+    )
+    gen = _gen(correct="Fold", prose="Fold. Your equity sits below the price here.")
+    assert not validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+# False-positive guards (must PASS):
+def test_equity_price_passes_genuine_price_fold() -> None:
+    # equity BELOW break-even -> "price not met" is CORRECT.
+    facts = _facts(archetype="fold_pot_odds", hero_equity_vs_villain=0.20,
+                   break_even_equity=0.26)
+    gen = _gen(correct="Fold",
+               prose="Fold. The price isn't being met with this little equity.")
+    assert validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+def test_equity_price_passes_realization_framing() -> None:
+    # equity ABOVE the price, framed (correctly) around realization, no price claim.
+    facts = _facts(archetype="fold_pot_odds", hero_equity_vs_villain=0.30,
+                   break_even_equity=0.26)
+    gen = _gen(correct="Fold", prose=(
+        "Fold. Your raw equity beats the price, but out of position multiway "
+        "you won't realize it."))
+    assert validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+def test_equity_price_passes_within_noise_margin() -> None:
+    # near-tie (gap < margin) -> don't fire even with a price phrase.
+    facts = _facts(archetype="fold_pot_odds", hero_equity_vs_villain=0.265,
+                   break_even_equity=0.26)
+    gen = _gen(correct="Fold", prose="Fold. The price isn't quite being met here.")
+    assert validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+def test_equity_price_passes_non_fold_archetype() -> None:
+    facts = _facts(archetype="call_for_value", hero_equity_vs_villain=0.55,
+                   break_even_equity=0.26)
+    gen = _gen(correct="Call", prose="Call. The price is easily met here.")
+    assert validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+def test_equity_price_passes_when_no_break_even() -> None:
+    facts = _facts(archetype="fold_pot_odds", hero_equity_vs_villain=0.40,
+                   break_even_equity=None)
+    gen = _gen(correct="Fold", prose="Fold. The price is not met.")
+    assert validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+def test_equity_price_passes_position_idiom() -> None:
+    # "under the gun" must not read as "under ... the price".
+    facts = _facts(archetype="fold_dominated", hero_equity_vs_villain=0.30,
+                   break_even_equity=0.26)
+    gen = _gen(correct="Fold", prose=(
+        "Fold. From under the gun this hand is too dominated to continue."))
+    assert validate_equity_vs_price_direction(gen, facts).is_valid
+
+
+# --- validate_terminology: villain raise named too high (Finding 2) -------
+def test_terminology_fires_on_squeeze_called_4bet() -> None:
+    facts = _facts(actor="BB", archetype="fold_dominated", villain_position="SB",
+                   history=_HIST_SQUEEZE)
+    gen = _gen(correct="Fold", prose=(
+        "The SB cold 4-bet against an open and two callers, so fold."))
+    res = validate_terminology(gen, facts)
+    assert not res.is_valid
+    assert "4-bet" in res.error_message and "SB" in res.error_message
+
+
+def test_terminology_passes_hypothetical_4bet() -> None:
+    facts = _facts(actor="BB", archetype="fold_dominated", villain_position="SB",
+                   history=_HIST_SQUEEZE)
+    gen = _gen(correct="Fold", prose="If you 4-bet, SB might just call. Fold.")
+    assert validate_terminology(gen, facts).is_valid
+
+
+def test_terminology_passes_villain_responding_to_hero_raise() -> None:
+    # "SB folds to a 4-bet" describes hero's hypothetical raise, not SB raising.
+    facts = _facts(actor="BB", archetype="fold_dominated", villain_position="SB",
+                   history=_HIST_SQUEEZE)
+    gen = _gen(correct="Fold", prose="SB folds to a 4-bet a fair amount.")
+    assert validate_terminology(gen, facts).is_valid
+
+
+def test_terminology_passes_correct_completed_4bet() -> None:
+    # A real 4-bet line: open, 3-bet, 4-bet (3 raises) -> "BTN's 4-bet" is right.
+    hist = (
+        ParsedAction("UTG", PreflopActionType.RAISE, 100.0),
+        ParsedAction("CO", PreflopActionType.RAISE, 300.0),
+        ParsedAction("BTN", PreflopActionType.RAISE, 800.0),
+    )
+    facts = _facts(actor="BB", archetype="fold_dominated", villain_position="BTN",
+                   history=hist)
+    gen = _gen(correct="Fold", prose="BTN's 4-bet is enormous, so fold.")
+    assert validate_terminology(gen, facts).is_valid
+
+
+def test_terminology_skips_sentence_with_second_person() -> None:
+    # A "you" sentence is skipped (hero raises create hypothetical re-raises).
+    facts = _facts(actor="BB", archetype="fold_dominated", villain_position="SB",
+                   history=_HIST_SQUEEZE)
+    gen = _gen(correct="Fold",
+               prose="The SB cold 4-bet and you simply have to let it go.")
+    assert validate_terminology(gen, facts).is_valid

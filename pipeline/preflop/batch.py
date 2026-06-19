@@ -109,6 +109,7 @@ from pipeline.preflop.question_extractor import (
     PreflopQuestionEvaluation,
     evaluate_spot,
 )
+from pipeline.preflop.reviser import revise_explanation
 from pipeline.preflop.spot_sampler import (
     PreflopSpot,
     _cached_parse_range_file,
@@ -796,6 +797,24 @@ def _snap_facts_to_pure(
     return snapped, real_freqs
 
 
+def _safe_claim_check(
+    prose: str, facts: object, client: object, *,
+    model: str, system_prompt: str, node_id: str,
+) -> object | None:
+    """Run the claim checker, wrapped so a checker failure never drops a row.
+
+    Returns the ``ClaimCheckResult`` or ``None`` on error. Shared by the
+    flag-only path and the revise pass (initial check + final audit)."""
+    try:
+        return check_explanation_claims(
+            prose, _trim_facts_for_prompt(facts), client,
+            model=model, system_prompt=system_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("batch: claim checker failed for %s: %s", node_id, exc)
+        return None
+
+
 # --- the entry point --------------------------------------------------------
 def generate_preflop_batch(
     *,
@@ -827,6 +846,8 @@ def generate_preflop_batch(
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
+    revise_pass: bool = False,
+    final_audit: bool = False,
     dry_run: bool = False,
     client: object | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -944,6 +965,9 @@ def generate_preflop_batch(
     # Per-row claim-checker output (Layer 7, opt-in), positionally aligned with
     # ``rows``: "" = checker not run, "[]" = run and clean, JSON list = flagged.
     claim_checks: list[str] = []
+    # Per-row real solver mix for snapped-to-pure spots (None otherwise), aligned
+    # with ``rows``: the CSV Notes column records it behind the 100% display.
+    snapped_freqs_list: list[dict[str, float] | None] = []
     # Per-spot prompt inputs (framing / options / correct / solver-data /
     # live block), captured in row order for the meta sidecar + inspector.
     prompt_records: list[dict[str, object]] = []
@@ -1120,41 +1144,71 @@ def generate_preflop_batch(
                     usage_callback=_record_usage,
                     system_prompt=system_prompt,
                 )
-            rows.append((facts, explanation, difficulty))
-            # Soft validators: never reject, only queue for review. Skipped
-            # on dry-runs (placeholder prose has nothing to check).
+            # --- Layer-7 LLM audit / revise passes (all opt-in extra calls) --
+            # The claim checker FLAGS suspect prose. With revise_pass on, a
+            # second call REWRITES a flagged explanation (re-validated by the
+            # hard validators; a rewrite that breaks a rule is discarded and the
+            # original kept), and final_audit re-checks the rewrite. The
+            # (possibly revised) explanation is what ships; both versions go to
+            # meta. The initial check runs whenever EITHER feature is on.
+            claim_check_json = ""
+            claim_issues: list[str] = []
+            revision_record: dict[str, object] | None = None
+            checker_prompt = claim_checker_prompt or CHECKER_SYSTEM_PROMPT
+            if not dry_run and (run_claim_checker or revise_pass):
+                cc = _safe_claim_check(
+                    explanation.answer_explanation, facts, client,
+                    model=model, system_prompt=checker_prompt,
+                    node_id=spot.node.node_id,
+                )
+                if revise_pass and cc is not None and cc.issues:
+                    issue_strs = [f"{i.claim} -- {i.problem}" for i in cc.issues]
+                    try:
+                        rev = revise_explanation(
+                            explanation, facts, issues=issue_strs,
+                            client=client, model=model, temperature=temperature,
+                            max_tokens=max_tokens, system_prompt=system_prompt,
+                            usage_callback=_record_usage,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "batch: reviser failed for %s: %s",
+                            spot.node.node_id, exc,
+                        )
+                        rev = None
+                    if rev is not None and rev.changed:
+                        revision_record = {
+                            "issues_fixed": issue_strs,
+                            "original_explanation": explanation.answer_explanation,
+                            "revised_explanation": rev.explanation.answer_explanation,
+                        }
+                        explanation = rev.explanation
+                        if final_audit:  # re-check the rewrite (flag only)
+                            cc = _safe_claim_check(
+                                explanation.answer_explanation, facts, client,
+                                model=model, system_prompt=checker_prompt,
+                                node_id=spot.node.node_id,
+                            )
+                if cc is not None:
+                    claim_check_json = claim_check_to_json(cc)
+                    claim_issues = [f"{i.claim} -- {i.problem}" for i in cc.issues]
+
+            # Soft validators run on the FINAL (possibly revised) explanation:
+            # never reject, only queue for review. Skipped on dry-runs.
             soft_warnings: list[str] = (
                 [] if dry_run
                 else run_preflop_soft_validators(explanation, facts)
             )
-            # Layer-7 claim checker (opt-in extra LLM call). Audits the prose
-            # against the data block and flags suspect claims; never rejects.
-            # Wrapped so a checker failure never drops an otherwise-good row.
-            claim_check_json = ""
-            claim_issues: list[str] = []
-            if run_claim_checker and not dry_run:
-                try:
-                    cc = check_explanation_claims(
-                        explanation.answer_explanation,
-                        _trim_facts_for_prompt(facts),
-                        client,
-                        model=model,
-                        system_prompt=claim_checker_prompt or CHECKER_SYSTEM_PROMPT,
-                    )
-                    claim_check_json = claim_check_to_json(cc)
-                    claim_issues = [f"{i.claim} -- {i.problem}" for i in cc.issues]
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "batch: claim checker failed for %s: %s",
-                        spot.node.node_id, exc,
-                    )
+
+            # Append the parallel per-row lists together so they stay aligned.
+            rows.append((facts, explanation, difficulty))
             claim_checks.append(claim_check_json)
             row_statuses.append(
                 "flagged" if (soft_warnings or claim_issues) else None
             )
+            snapped_freqs_list.append(snapped_real_freqs)
             # Record the exact (deterministic) inputs that produced this row,
-            # in the same order rows are written to the CSV. Cheap + no API:
-            # gold examples are lru-cached and the parts are pure functions.
+            # in the same order rows are written to the CSV.
             record = _prompt_record(
                 spot,
                 build_explanation_prompt_parts(
@@ -1165,6 +1219,8 @@ def generate_preflop_batch(
                 record["validator_warnings"] = soft_warnings
             if claim_issues:
                 record["claim_check_issues"] = claim_issues
+            if revision_record is not None:
+                record["revision"] = revision_record
             if snapped_real_freqs is not None:
                 # Real solver mix, kept for the Review/Compare "shown as pure"
                 # note (the question itself displays 100%).
@@ -1203,6 +1259,7 @@ def generate_preflop_batch(
             display_in_bb=display_in_bb,
             row_statuses=row_statuses,
             claim_checks=claim_checks,
+            snapped_freqs=snapped_freqs_list,
         )
         final_out = out_path
         # Sidecar metadata: which prompt produced these rows + the exact
@@ -1235,6 +1292,8 @@ def generate_preflop_batch(
                 "pure_snap_threshold": pure_snap_threshold,
                 "equity_runouts": equity_runouts,
                 "run_claim_checker": run_claim_checker,
+                "revise_pass": revise_pass,
+                "final_audit": final_audit,
                 "display_in_bb": display_in_bb,
                 "stakes_bb_dollars": stakes_bb_dollars,
                 "live_or_online": live_or_online,
