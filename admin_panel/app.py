@@ -4635,8 +4635,12 @@ def _format_snapped_mix(qmeta: dict[str, object] | None) -> str:
     freqs = (qmeta or {}).get("snapped_actual_frequencies") if qmeta else None
     if not isinstance(freqs, dict) or not freqs:
         return ""
+    # "<action>: <freq>%" -- the colon matches the CSV action_frequencies format
+    # and, crucially, keeps a raise's SIZE in its label (e.g. "Raise 56%", a
+    # 56%-pot sizing) from running into its FREQUENCY ("Raise 56%: 2%" not the
+    # ambiguous "Raise 56% 2%").
     return ", ".join(
-        f"{label} {round(float(f) * 100)}%"
+        f"{label}: {round(float(f) * 100)}%"
         for label, f in sorted(freqs.items(), key=lambda kv: -kv[1])
         if float(f) > 0
     )
@@ -4675,15 +4679,14 @@ def _render_revise_panel(qmeta: dict[str, object] | None) -> None:
         }
     if not isinstance(rev, dict):
         return
+    # Every state leads with REWRITTEN vs ORIGINAL -- the one thing a reviewer
+    # needs to know about the text below. Only "fixed" means the LLM changed it.
     status = rev.get("status")
-    if status == "clean":
-        return  # the gate found nothing -- no rewrite, nothing to show
-
     if status == "fixed":
         st.success(
-            "✍️ **Auto-fixed by the 4-call audit pass.** The explanation below "
-            "is the **rewritten final version** (re-validated before shipping). "
-            "The first draft is tucked away for comparison."
+            "✍️ **REWRITTEN by the auto-fix.** The text below is the LLM's "
+            "**rewritten final version** (re-validated before shipping); the "
+            "original first draft is in the expander."
         )
         with st.expander("See the original first draft (not shipped)"):
             st.caption("The claim-check gate (2nd LLM call) flagged the draft for:")
@@ -4691,19 +4694,23 @@ def _render_revise_panel(qmeta: dict[str, object] | None) -> None:
                 st.caption(f"- {iss}")
             st.markdown("**Original draft**")
             st.info(_md_lines(str(rev.get("original_explanation", ""))))
+    elif status == "clean":
+        st.caption(
+            "✓ ORIGINAL text (not changed) — the auto-fix gate found no issues, "
+            "so no rewrite was attempted."
+        )
     elif status == "discarded":
         st.warning(
-            "🛠️⚠️ **Auto-fix attempted but DISCARDED.** The rewrite broke a hard "
-            "rule, so the **original draft shipped** (flagged for review). Why "
-            "the rewrite was rejected:\n\n"
-            f"> {rev.get('rejected_reason') or 'unknown'}"
+            "🛠️⚠️ **ORIGINAL text (NOT changed).** The auto-fix tried to rewrite "
+            "this, but the rewrite broke a hard rule and was discarded, so the "
+            "original shipped (flagged for review). Why the rewrite was "
+            f"rejected:\n\n> {rev.get('rejected_reason') or 'unknown'}"
         )
         _revise_unresolved(rev)
     elif status == "unchanged":
         st.warning(
-            "🛠️ **Auto-fix made no change.** The reviser reviewed the flags but "
-            "did not edit the prose, so the **original shipped** (flagged for "
-            "review)."
+            "🛠️ **ORIGINAL text (NOT changed).** The auto-fix reviewed the flags "
+            "but made no edit, so the original shipped (flagged for review)."
         )
         _revise_unresolved(rev)
 
