@@ -298,11 +298,19 @@ def test_gto_fold_dominant_naturally_fold_first() -> None:
     assert correct == "Mostly Fold"
 
 
-def test_gto_uses_always_prefix_at_95_pct() -> None:
-    """At 95% frequency the prefix flips to Always (per the deterministic
-    frequency_to_verb_prefix table shared with postflop). Raise label
-    canonicalised."""
+def test_gto_uses_mostly_prefix_at_95_pct() -> None:
+    """A near-pure 95% spot is still a MIX, so the correct answer is "Mostly
+    Raise" -- "Always" is reserved for a literally-pure 100% action (June 2026).
+    "Always Raise" becomes a neutral-credit near-miss, not the answer."""
     facts = _facts_with_strategy({"Raise 60%": 0.95, "Fold": 0.05})
+    _options, correct = build_options_gto(facts)
+    assert correct == "Mostly Raise"
+
+
+def test_gto_uses_always_prefix_only_at_pure_100() -> None:
+    """A literally-pure (100%) action keeps the "Always" correct answer (the
+    0%-Fold gives the spectrum its secondary)."""
+    facts = _facts_with_strategy({"Raise 60%": 1.0, "Fold": 0.0})
     _options, correct = build_options_gto(facts)
     assert correct == "Always Raise"
 
@@ -378,8 +386,8 @@ def test_gto_near_pure_with_fold_mixin_uses_fold_first() -> None:
         "Mostly Call",
         "Always Call",
     ]
-    # 96% >= 95% -> Always prefix.
-    assert correct == "Always Call"
+    # 96% is still a mix -> "Mostly Call" correct ("Always Call" is neutral).
+    assert correct == "Mostly Call"
     assert correct in options
 
 
@@ -596,13 +604,15 @@ def test_check_spot_basic_answer_is_check() -> None:
     assert "Call" not in options
 
 
-def test_check_spot_gto_always_check_not_call() -> None:
-    # Near-pure check -> "Always Check" (was the buggy "Always Call").
+def test_check_spot_gto_mostly_check_not_call() -> None:
+    # Near-pure check -> "Mostly Check" correct (was "Always Call" bug, then
+    # "Always Check"; now "Mostly" since 97% is a mix). The label is Check, not
+    # Call, which is the point of this test.
     options, correct = build_options(
         _limped_bb({"Call": 0.97, "Raise 60%": 0.03}), style="gto"
     )
-    assert correct == "Always Check"
-    assert "Always Check" in options
+    assert correct == "Mostly Check"
+    assert "Always Check" in options  # the rung still exists (as a neutral)
     assert not any("Call" in opt for opt in options)
 
 

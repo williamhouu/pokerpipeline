@@ -29,8 +29,11 @@ from pipeline.postflop.spot_sampler import PostflopSpot
 _VERB_RANK = {"fold": 0, "check": 1, "call": 2, "bet": 3, "raise": 4}
 
 # Dominant frequency at/above which the correct answer is phrased "Always X"
-# rather than "Mostly X" (binary spots only).
-PURE_THRESHOLD = 0.95
+# rather than "Mostly X" (binary spots only). "Always" is reserved for a
+# literally-pure (100%) action -- a worthy spot tops out at 99% dominant, so its
+# correct answer is "Mostly X" and "Always X" is at most a neutral near-miss
+# (June 2026; mirrors the preflop frequency_to_verb_prefix change).
+PURE_THRESHOLD = 0.9999
 
 
 def _aggression_key(action: NodeAction) -> tuple[int, float]:

@@ -101,15 +101,6 @@ def _action_aggression(label: str) -> int:
     return _ACTION_AGGRESSION.get(first_word, 99)
 
 
-# Threshold above which "Always <action>" is a plausible correct
-# answer rather than a strict-wrong distractor. Below this, the
-# multiple-choice template should not include "Always {dominant}" --
-# it's dead air against the composite "Mostly {dominant}, sometimes X"
-# alternatives that ALSO start with the dominant verb. Tracks
-# frequency_to_verb_prefix's >=95% boundary so a spot whose correct
-# answer starts with "Always" will always include that option.
-_PURE_STRATEGY_THRESHOLD = 0.95
-
 # The canonical answer-style identifiers. The admin panel's radio choices
 # map to these via :data:`ANSWER_STYLE_FROM_RADIO_LABEL`.
 ANSWER_STYLES: tuple[str, ...] = ("basic", "gto", "auto")

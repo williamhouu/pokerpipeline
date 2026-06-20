@@ -1164,39 +1164,6 @@ def test_incoming_villain_line_pct_delegates_to_raiser(
     assert B._incoming_villain_line_pct(node, {}, pack=None) == 7.5
 
 
-def test_snap_facts_to_pure_displays_near_pure_as_100() -> None:
-    """A 96-99% spot is shown as 100% (pure freqs, EV note dropped), with the
-    real mix returned for the Review/Compare note. Below the threshold the
-    spot is untouched."""
-    from pipeline.preflop.batch import _snap_facts_to_pure
-    from pipeline.preflop.fact_extractor import PreflopFacts
-    from pipeline.preflop.spot_sampler import PreflopSpot
-
-    node = PreflopDecisionNode(
-        pack_id="t", actor="BB", history_before=(), actions=()
-    )
-    spot = PreflopSpot(
-        node=node, hero_hand_class="K3s", hero_card_combo="Ks3s",
-        action_frequencies={"Fold": 0.97, "Call": 0.03},
-        dominant_action="Fold", dominant_frequency=0.97, presence=1.0,
-    )
-    facts = PreflopFacts(spot=spot, ev_gap_bb=0.04)
-
-    # At/above threshold -> snapped to pure; real mix returned; EV note dropped.
-    snapped, real = _snap_facts_to_pure(facts, spot, 0.96)
-    assert isinstance(snapped, PreflopFacts)
-    assert real == {"Fold": 0.97, "Call": 0.03}
-    assert snapped.spot.action_frequencies == {"Fold": 1.0, "Call": 0.0}
-    assert snapped.spot.dominant_frequency == 1.0
-    assert snapped.spot.dominant_action == "Fold"
-    assert snapped.ev_gap_bb is None
-
-    # Below threshold -> untouched (same object), no real freqs.
-    same, none_freqs = _snap_facts_to_pure(facts, spot, 0.99)
-    assert none_freqs is None
-    assert same is facts
-
-
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
 

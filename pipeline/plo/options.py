@@ -26,7 +26,10 @@ from pipeline.plo.pack import PloActionType
 
 _MIN_MEANINGFUL_FREQ = 0.05
 _BINARY_ACTION_FREQ_THRESHOLD = 0.80
-_PURE_STRATEGY_PREFIX = 0.95
+# "Always X" is the correct answer only for a literally-pure (100%) action;
+# every mixed spot (even 99/1) is "Mostly X" correct, with "Always X" a neutral
+# near-miss. Worthy spots top out at 99%, so they're always "Mostly". (June 2026.)
+_PURE_STRATEGY_PREFIX = 0.9999
 _MAX_OPTIONS = 4
 _MAX_NON_FOLD = 3
 

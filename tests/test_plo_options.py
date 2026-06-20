@@ -141,13 +141,14 @@ def test_check_spot_basic_answer_is_check():
     assert "Call" not in opts
 
 
-def test_check_spot_gto_always_check_not_call():
-    # Near-pure check -> "Always Check" (was the buggy "Always Call").
+def test_check_spot_gto_mostly_check_not_call():
+    # Near-pure check -> "Mostly Check" correct (97% is a mix; "Always" is only
+    # for a literally-pure action). The label is Check, not Call -- the point.
     opts, correct = build_options(
         _limped_bb({"Call": 0.97, "Raise 100%": 0.03}), style="gto"
     )
-    assert correct == "Always Check"
-    assert "Always Check" in opts
+    assert correct == "Mostly Check"
+    assert "Always Check" in opts  # the rung still exists (as a neutral)
     assert not any("Call" in o for o in opts)
 
 

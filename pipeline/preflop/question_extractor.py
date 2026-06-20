@@ -43,14 +43,13 @@ MIN_TOP_FREQUENCY = 0.55  # below: no clear best answer to teach
 MAX_TOP_FREQUENCY = 0.95  # above: the answer is too obvious
 MIN_PRESENCE = 0.01  # below: hand doesn't actually reach the node
 
-# A dominant action at 90-95% reads as "mostly" but sits just under the
-# 95% "always" label boundary (frequency_to_verb_prefix /
-# options._PURE_STRATEGY_THRESHOLD). A player with the right read can pick
-# the "always" option and still be marked wrong -- a labelling trap, not a
-# strategy test. The Generate page excludes this band by default. The
-# exclusion is a HOLE at [FLOOR, CEILING) within the window, NOT a ceiling
-# cap, so a genuinely-pure 95-100% spot still qualifies when the window
-# reaches it. Tune alongside MAX_TOP_FREQUENCY.
+# A dominant action at 90-95% reads as "mostly". The correct answer for such a
+# spot is "Mostly <dominant>" ("Always X" is reserved for a literally-pure 100%
+# action), and a player who picks "Always <dominant>" now earns NEUTRAL credit
+# via the 20-point rule rather than being marked wrong -- so the old labelling
+# trap is gone. The Generate page still excludes this band by default as a
+# clarity/difficulty choice. The exclusion is a HOLE at [FLOOR, CEILING) within
+# the window, NOT a ceiling cap. Tune alongside MAX_TOP_FREQUENCY.
 AMBIGUOUS_BAND_FLOOR = 0.90
 AMBIGUOUS_BAND_CEILING = 0.95
 

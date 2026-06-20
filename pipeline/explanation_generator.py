@@ -318,8 +318,15 @@ class ExplanationValidationError(RuntimeError):
 
 # --- frequency-to-prefix mapping (deterministic, no LLM) ---------------------
 # Brackets for the Always/Mostly prefix in frequency-style options. Inclusive
-# at the lower bound: freq >= 0.95 -> "Always", freq >= 0.05 -> "Mostly",
+# at the lower bound: freq >= 0.9999 -> "Always", freq >= 0.05 -> "Mostly",
 # below 0.05 -> empty string (the action is essentially not played).
+#
+# "Always" is the CORRECT answer only for a literally-pure (100%) action: a
+# worthy spot tops out at 99% dominant, so its correct answer is always
+# "Mostly X" and "Always X" is at most a neutral-credit near-miss (June 2026,
+# per the team -- "always" overclaims any real mix, even 99/1). The 0.9999 floor
+# is "essentially 100%" with FP slack; nothing in the worthiness window reaches
+# it.
 #
 # Pre-Apr-2026 the mapping had four brackets (Always/Mostly/Sometimes/Rarely).
 # Ryan-feedback item #2: a standalone "Sometimes X" option is ambiguous --
@@ -335,7 +342,7 @@ class ExplanationValidationError(RuntimeError):
 #     receives in the frequency-style option-style instruction;
 #   * validators.validate_correct_answer_verb to check the LLM honoured it.
 _FREQ_PREFIX_BRACKETS = (
-    (0.95, "Always"),
+    (0.9999, "Always"),
     (0.05, "Mostly"),
 )
 
@@ -343,9 +350,9 @@ _FREQ_PREFIX_BRACKETS = (
 def frequency_to_verb_prefix(freq: float) -> str:
     """Map a Pio frequency to its deterministic option-label prefix.
 
-      [0.95, 1.0]  -> "Always"
-      [0.05, 0.95) -> "Mostly"
-      [0,    0.05) -> ""               (action essentially not played)
+      [0.9999, 1.0]   -> "Always"     (literally pure; never a worthy spot)
+      [0.05,   0.9999) -> "Mostly"
+      [0,      0.05)  -> ""            (action essentially not played)
 
     "Sometimes" and "Rarely" used to be separate prefixes; collapsed into
     "Mostly" per Ryan's Apr-2026 V6 review (item #2). The LLM uses "sometimes"

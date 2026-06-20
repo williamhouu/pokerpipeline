@@ -1195,16 +1195,16 @@ def test_format_action_evs_orders_by_freq_with_signed_bb() -> None:
     # None (pack has no EVs) and an empty dict both render blank.
     assert _format_action_evs(None, strategy) == ""
     assert _format_action_evs({}, strategy) == ""
-    # A pure / snapped-to-pure spot (one action at 100%) hides the EV bars --
-    # showing them would expose the very mix the snap is hiding.
-    assert _format_action_evs(evs, {"All-in": 1.0, "Call": 0.0, "Fold": 0.0}) == ""
+    # A near-pure spot still shows the real per-action EVs (no snap-to-pure
+    # blanking anymore -- the EVs are the truth, June 2026).
+    pure = _format_action_evs(evs, {"All-in": 1.0, "Call": 0.0, "Fold": 0.0})
+    assert pure.startswith("All-in: +0.53")
 
 
 def test_action_ev_bb_populated_on_real_monker_pack() -> None:
     """A real Monker pack ships per-action EVs; action_evs_bb reads them and
-    AA's best action is clearly +EV. (The formatted action_ev_bb COLUMN is
-    intentionally blank for pure / snapped spots -- AA opens ~pure -- so this
-    asserts on the raw reader, which is what proves the pack carries EVs.)"""
+    AA's best action is clearly +EV. Asserts on the raw reader, which is what
+    proves the pack carries EVs."""
     ranges = Path(__file__).resolve().parent.parent / "ranges"
     if not ranges.is_dir():
         pytest.skip("ranges/ not present locally")

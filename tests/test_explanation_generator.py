@@ -353,11 +353,15 @@ def test_frequency_to_verb_prefix_brackets():
     four prefixes (Always/Mostly/Sometimes/Rarely); Ryan-feedback Fix 2
     collapsed the lower three into a single Mostly so standalone
     \"Sometimes X\" options never appear."""
-    # Always: 0.95 and above.
+    # Always: only a literally-pure (essentially 100%) action.
     assert frequency_to_verb_prefix(1.0) == "Always"
-    assert frequency_to_verb_prefix(0.95) == "Always"
-    # Mostly: everything in [0.05, 0.95). Was Always/Mostly/Sometimes/Rarely
-    # before; now collapsed.
+    assert frequency_to_verb_prefix(0.9999) == "Always"
+    # Mostly: every real mix, INCLUDING near-pure 95-99% -- a worthy spot tops
+    # out at 99% dominant, so its correct answer is always "Mostly" and
+    # "Always X" is only ever a neutral near-miss (June 2026). Was
+    # Always/Mostly/Sometimes/Rarely before; now collapsed.
+    assert frequency_to_verb_prefix(0.99) == "Mostly"
+    assert frequency_to_verb_prefix(0.95) == "Mostly"
     assert frequency_to_verb_prefix(0.9499) == "Mostly"
     assert frequency_to_verb_prefix(0.66) == "Mostly"
     assert frequency_to_verb_prefix(0.60) == "Mostly"
