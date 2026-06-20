@@ -47,7 +47,13 @@ CSV_COLUMNS = [
     # Question content.
     "Context", "Question", "Question Type", "Hand Stage",
     "option 1", "option 2", "option 3", "option 4",
-    "Correct Answer", "Answer Explanation",
+    "Correct Answer",
+    # Deterministic neutral-credit options ("close enough" answers that earn
+    # partial credit, comma-separated; "" when the spot has one clear answer).
+    # Computed by pipeline.neutral_credit -- never the LLM. Placed right after
+    # Correct Answer so the app reads the two answer-key columns together.
+    "neutral_credit",
+    "Answer Explanation",
     # Classification.
     # "Relative Position" is hero's IP/OOP standing ("In Position" /
     # "Out of Position"); the hero-vs-villain seat matchup lives in
@@ -327,6 +333,9 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         "option 3": _LLM_TBD,
         "option 4": _LLM_TBD,
         "Correct Answer": decision.correct_action or _TBD,   # see module TODO
+        # Deterministic neutral-credit options are wired in the live preflop /
+        # PLO / postflop writers; this legacy scenario-stub path leaves it blank.
+        "neutral_credit": "",
         "Answer Explanation": _LLM_TBD,
         # Classification -- filled from the data block.
         "Cash/Tourney": meta.game_format.capitalize(),

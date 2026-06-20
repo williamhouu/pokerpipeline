@@ -25,6 +25,7 @@ import csv
 from pathlib import Path
 
 from pipeline.format_writer import CSV_COLUMNS
+from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.plo.action_history import (
     display_seat,
     format_plo_action_history,
@@ -173,6 +174,13 @@ def build_plo_row(
         "option 3": opts[2],
         "option 4": opts[3],
         "Correct Answer": correct_answer,
+        # Deterministic neutral-credit options (the 20-point rule), computed
+        # from the same canonical strategy that built the options.
+        "neutral_credit": format_neutral_credit(
+            neutral_credit_options(
+                options, correct_answer, canonicalize_strategy(facts)
+            )
+        ),
         "Answer Explanation": explanation,
         "Cash/Tourney": _GAME_FORMAT_PROSE.get(game_format, game_format.capitalize()),
         "Live or Online": live_or_online,

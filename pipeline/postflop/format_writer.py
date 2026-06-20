@@ -19,6 +19,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from pipeline.explanation_generator import GeneratedExplanation
+from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line, format_question
 from pipeline.postflop.difficulty import PostflopDifficulty
 from pipeline.postflop.facts import PostflopFacts
@@ -45,6 +46,9 @@ POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
     "option 3",
     "option 4",
     "Correct Answer",
+    # Deterministic neutral-credit options (the 20-point rule); "" when the
+    # spot has one clear answer. Right after Correct Answer, like the other paths.
+    "neutral_credit",
     "Answer Explanation",
     "Cash/Tourney",
     "Live or Online",
@@ -117,6 +121,16 @@ def build_postflop_row(
         "option 3": opts[2],
         "option 4": opts[3],
         "Correct Answer": explanation.correct_answer,
+        # Neutral-credit options from the hand's own action mix (the 20-point
+        # rule). spot.action_frequencies is the per-combo conditional strategy
+        # keyed by the same labels the options use.
+        "neutral_credit": format_neutral_credit(
+            neutral_credit_options(
+                explanation.options(),
+                explanation.correct_answer,
+                facts.spot.action_frequencies,
+            )
+        ),
         "Answer Explanation": explanation.answer_explanation,
         "Cash/Tourney": "Tournament" if solve.game_format == "tournament" else "Cash",
         "Live or Online": solve.live_or_online,

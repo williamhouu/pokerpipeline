@@ -61,6 +61,7 @@ from typing import Any
 
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
+from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.preflop.action_history import (
     ResolvedPreflopState,
     raise_to_bb,
@@ -925,6 +926,16 @@ def build_preflop_row(
         "option 3": explanation.option_3,
         "option 4": explanation.option_4,
         "Correct Answer": explanation.correct_answer,
+        # Deterministic neutral-credit options (the 20-point rule). Computed
+        # from the SAME (possibly snapped-to-pure) canonical strategy that built
+        # the options, so a snapped pure spot yields "" automatically.
+        "neutral_credit": format_neutral_credit(
+            neutral_credit_options(
+                explanation.options(),
+                explanation.correct_answer,
+                canonicalize_strategy(facts),
+            )
+        ),
         "Answer Explanation": explanation.answer_explanation,
         # Classification.
         "Cash/Tourney": _GAME_FORMAT_PROSE.get(game_format, game_format.capitalize()),

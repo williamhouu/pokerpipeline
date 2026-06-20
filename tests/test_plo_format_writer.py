@@ -54,13 +54,16 @@ def _facts(
     return PloFacts(spot=spot, hand_class=classify_plo_hand(AAKK), archetype=archetype, villain_stats=vstats)
 
 
-def test_schema_has_49_columns_and_no_ranges():
+def test_schema_has_50_columns_and_no_ranges():
     assert "ranges" not in PLO_CSV_COLUMNS
-    # 49-col shared template minus `ranges` (48) plus the PLO-only `hand_shape`.
-    assert len(PLO_CSV_COLUMNS) == 49  # noqa: PLR2004
+    # 50-col shared template minus `ranges` (49) plus the PLO-only `hand_shape`.
+    assert len(PLO_CSV_COLUMNS) == 50  # noqa: PLR2004
     # hand_shape sits right after archetype.
     i = PLO_CSV_COLUMNS.index("archetype")
     assert PLO_CSV_COLUMNS[i + 1] == "hand_shape"
+    # neutral_credit sits right after Correct Answer (the 20-point rule column).
+    j = PLO_CSV_COLUMNS.index("Correct Answer")
+    assert PLO_CSV_COLUMNS[j + 1] == "neutral_credit"
 
 
 def test_row_covers_full_schema_exactly():

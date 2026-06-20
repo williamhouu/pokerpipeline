@@ -420,11 +420,26 @@ explanations before the tagger goes to production.
 
 Source of truth is **Google Sheets**. The **shared** `CSV_COLUMNS` schema (in
 `pipeline/format_writer.py`, used by the PLO writer and the old postflop
-writer) is **49 columns**. The **NLHE preflop** writer emits a **39-column
+writer) is **50 columns**. The **NLHE preflop** writer emits a **40-column
 subset** — `PREFLOP_CSV_COLUMNS` in `pipeline/preflop/format_writer.py`, the
 shared list minus the 10 columns the NLHE path dropped in June 2026 (see the
 trim note after the table). The pipeline writes the team's template columns
 via a formatter and adds the new pipeline columns below.
+
+**`neutral_credit` (June 2026).** A deterministic partial-credit column
+inserted **right after `Correct Answer`** in all four writers (shared
+schema + the self-contained postflop tuple), so the answer-key columns read
+together. It lists the "close enough" options (comma-separated; `""` for a
+clear spot) that should be held harmless instead of scored wrong. Computed by
+`pipeline/neutral_credit.py` (never the LLM) via the **20-point rule**: an
+option earns credit when the hand's real solver frequency is within 20 points
+of what it claims — `Always X` needs `freq(X) ≥ 80%`, `Mostly X` / bare `X`
+needs `freq(X) ≥ 20%`. The full-credit `Correct Answer` is excluded; the rest
+are mistakes. Frequency-based on purpose: a solver mixes only when EVs are
+~equal, so the EV gap is ~0 across *every* mix (85/15 and 65/35 alike) and
+can't tell a thin sliver from a real toss-up — the frequency split can. NB:
+inserting it after `Correct Answer` shifts every shared-schema column position
+in the table below by +1.
 
 **May-2026 reorg:** `tag_1`/`tag_2`/`tag_3` (the old empty Phase-3
 placeholder template columns) were **dropped** — `skills` superseded them.

@@ -70,8 +70,11 @@ def test_column_structure():
       * 48 = +exploit_notes (deterministic exploit adjustments). (June 2026.)
       * 49 = +action_ev_bb (per-action solver EV for the hero hand, bb).
              (June 2026.)
+      * 50 = +neutral_credit (the "close enough" answers that earn partial
+             credit, inserted right after Correct Answer). (June 2026.)
     """
-    assert len(CSV_COLUMNS) == 49
+    assert len(CSV_COLUMNS) == 50
+    assert CSV_COLUMNS[CSV_COLUMNS.index("Correct Answer") + 1] == "neutral_credit"
     assert CSV_COLUMNS[-1] == "action_ev_bb"
     assert CSV_COLUMNS[-2] == "exploit_notes"
     assert CSV_COLUMNS[-3] == "claim_check"
@@ -109,7 +112,7 @@ def test_column_structure():
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 49
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 50
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""
