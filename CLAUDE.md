@@ -330,7 +330,9 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   (**multi-street**: a turn question renders preflop + flop + turn ahead of
   it) → `options`/`difficulty` → `explanation_generator` (Layer 6, dry-run
   placeholder OR real Anthropic call + 1 retry) → `validators` (deterministic
-  hard + soft) → `format_writer` (35-col team CSV) → `batch.generate_postflop_batch`
+  hard + soft) → `format_writer` (36-col team CSV: +`neutral_credit`; and
+  `ev_gap_bb` column → full per-action `action_ev_bb`, June 2026) →
+  `batch.generate_postflop_batch`
   (+ `meta.json`). CLI: `scripts/generate_postflop.py --dry-run`
   (`--solve <path>.db` runs a real vendor solve; `--diversify` for variety).
 - **Deterministic**: seeded per-spot equity + sorted spot order + no

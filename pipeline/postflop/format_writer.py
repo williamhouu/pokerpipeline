@@ -24,6 +24,7 @@ from pipeline.postflop.action_history import build_context_line, format_question
 from pipeline.postflop.difficulty import PostflopDifficulty
 from pipeline.postflop.facts import PostflopFacts
 from pipeline.postflop.solve import PostflopSolve
+from pipeline.postflop.spot_sampler import spot_action_evs_bb
 
 # The postflop CSV schema. A focused, documented column set: the app table
 # state, the question content, the classification block, and the postflop
@@ -56,7 +57,11 @@ POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
     "Position Matchup",
     "Difficulty Rating",
     "action_frequencies",
-    "ev_gap_bb",
+    # Per-action solver EV (bb) for the hero hand, ordered to match
+    # action_frequencies -- the full per-option breakdown (replaced the
+    # single-number ev_gap_bb column, mirroring the preflop writer; the gap is
+    # still computed internally for the worthiness gate + difficulty).
+    "action_ev_bb",
     "hero_equity",
     "pot_odds",
     "spr",
@@ -85,6 +90,21 @@ def _format_frequencies(action_frequencies: dict[str, float]) -> str:
     return ", ".join(
         f"{label}: {freq * 100:.0f}%" for label, freq in items if freq >= 0.005
     )
+
+
+def _format_action_evs(
+    evs: dict[str, float] | None, action_frequencies: dict[str, float]
+) -> str:
+    """The ``action_ev_bb`` CSV value, e.g. ``"Check: +4.10, Bet 75%: +4.05"``.
+
+    Ordered by descending action frequency so it lines up column-for-column
+    with ``action_frequencies``; each EV is in bb to two decimals with an
+    explicit sign. ``None`` (the solve exposes no per-action EVs) -> "".
+    """
+    if not evs:
+        return ""
+    ordered = sorted(evs, key=lambda label: -action_frequencies.get(label, 0.0))
+    return ", ".join(f"{label}: {evs[label]:+.2f}" for label in ordered)
 
 
 def build_postflop_row(
@@ -138,7 +158,9 @@ def build_postflop_row(
         "Position Matchup": f"{facts.hero_position}_vs_{facts.villain_position}",
         "Difficulty Rating": str(difficulty.score),
         "action_frequencies": _format_frequencies(facts.spot.action_frequencies),
-        "ev_gap_bb": f"{facts.ev_gap_bb:.2f}" if facts.ev_gap_bb is not None else "",
+        "action_ev_bb": _format_action_evs(
+            spot_action_evs_bb(facts.spot), facts.spot.action_frequencies
+        ),
         "hero_equity": f"{facts.hero_equity_vs_villain * 100:.0f}%",
         "pot_odds": pot_odds,
         "spr": f"{facts.spr:.1f}",

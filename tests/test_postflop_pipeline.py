@@ -50,6 +50,7 @@ from pipeline.postflop.solve import validate_solve  # noqa: E402
 from pipeline.postflop.spot_sampler import (  # noqa: E402
     enumerate_spots,
     sample_spot,
+    spot_action_evs_bb,
     spot_ev_gap_bb,
 )
 from pipeline.postflop.validators import (  # noqa: E402
@@ -383,6 +384,34 @@ def test_build_row_has_all_columns() -> None:
     assert set(row) == set(POSTFLOP_CSV_COLUMNS)
     assert row["Cards on Table"] == "2♣️ J♠️ 7♠️"
     assert row["Hand Stage"] == "Flop"
+
+
+def test_per_action_ev_column_replaces_the_gap() -> None:
+    # The CSV now carries the full per-action EV list, not the single gap.
+    assert "action_ev_bb" in POSTFLOP_CSV_COLUMNS
+    assert "ev_gap_bb" not in POSTFLOP_CSV_COLUMNS
+    facts = _facts_for()
+    opts, correct = build_options(facts.spot)
+    g = placeholder_explanation(facts, opts, correct)
+    row = build_postflop_row(facts, g, SOLVE, compute_difficulty(facts), 1)
+    cell = row["action_ev_bb"]
+    # One "Label: +X.XX" entry per action the hand can take, signed, bb to 2dp.
+    assert cell  # the fixture exposes EVs
+    parts = cell.split(", ")
+    assert len(parts) == len(facts.spot.action_frequencies)
+    assert all(": " in p and ("+" in p or "-" in p) for p in parts)
+    # First listed is the most-frequent action (ordered like action_frequencies).
+    assert parts[0].rsplit(": ", 1)[0] == facts.spot.dominant_action
+
+
+def test_spot_action_evs_prefers_per_combo_and_matches_the_gap() -> None:
+    spot = _spot("flop_ip_cbet", "AcJc")
+    evs = spot_action_evs_bb(spot)
+    assert evs is not None
+    assert set(evs) <= {a.label for a in spot.node.actions}
+    # The gap between the best two of these equals spot_ev_gap_bb (same source).
+    top2 = sorted(evs.values(), reverse=True)[:2]
+    assert top2[0] - top2[1] == pytest.approx(spot_ev_gap_bb(spot))
 
 
 # --- end-to-end batch -------------------------------------------------------

@@ -106,4 +106,29 @@ def spot_ev_gap_bb(spot: PostflopSpot) -> float | None:
     return float(evs[0] - evs[1])
 
 
-__all__ = ["PostflopSpot", "enumerate_spots", "sample_spot", "spot_ev_gap_bb"]
+def spot_action_evs_bb(spot: PostflopSpot) -> dict[str, float] | None:
+    """Per-action EV (bb) for THIS hand, keyed by action label.
+
+    The faithful hand-specific values (``combo_evs[hero_combo]``) when the
+    solve exposes per-combo EVs; otherwise the range-mean action EVs
+    (``actions[*].ev_bb``). ``None`` when no action carries an EV (the source
+    solve doesn't expose EVs) -- the ``action_ev_bb`` column is then blank,
+    mirroring the preflop EV-less-pack case. Same source-preference order as
+    :func:`spot_ev_gap_bb`, so the per-action column and the (internal) gap
+    agree on which EVs they read.
+    """
+    node = spot.node
+    combo_evs = node.combo_evs.get(spot.hero_combo)
+    if combo_evs:
+        return dict(combo_evs)
+    range_mean = {a.label: a.ev_bb for a in node.actions if a.ev_bb is not None}
+    return range_mean or None
+
+
+__all__ = [
+    "PostflopSpot",
+    "enumerate_spots",
+    "sample_spot",
+    "spot_action_evs_bb",
+    "spot_ev_gap_bb",
+]
