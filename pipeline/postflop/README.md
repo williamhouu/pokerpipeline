@@ -122,11 +122,14 @@ decision types (see the calibration note below).
    Also wanted: a **board-emoji hard validator** (the LLM occasionally garbles
    a board suit emoji, e.g. `9♉` for `9♠️` — the preflop pipeline has the
    analogous suit-emoji check).
-2. **Admin panel.** Add a "Postflop" section in `admin_panel/app.py`
-   (a `_render_generate_page_postflop` mirroring the preflop one) that launches
-   `generate_postflop_batch` via the existing `jobs.start_subprocess_job`
-   (no changes to `jobs.py` / `job_worker.py` — they're generic). The Review
-   page already renders any batch CSV + `meta.json`.
+2. **Admin Generate page — DONE (June 2026).** `admin_panel/app.py:
+   _render_generate_page_postflop` is a *solve picker*: it scans
+   `solves/postflop/` (`discover_db_solves`), lists each self-describing `.db`
+   by its metadata, and launches `run.generate_postflop_batch_from_db` (which
+   loads the solve + curates spots via `spot_selection`) through the generic
+   `jobs.start_subprocess_job` (the `.db` PATH crosses the process boundary, not
+   the loaded solve). Still TODO: a postflop **Review** page mirroring the
+   preflop one (the generated CSV + `meta.json` are reviewable as raw files).
 3. **LLM prompt tuning.** `POSTFLOP_SYSTEM_PROMPT` +
    `POSTFLOP_ARCHETYPE_GUIDANCE` are a solid first cut; tune against gold
    postflop examples and grow the soft validators from observed failures

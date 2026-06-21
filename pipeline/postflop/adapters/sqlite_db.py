@@ -460,12 +460,180 @@ def con_distinct_nodes(con: sqlite3.Connection):
     return con.execute("SELECT DISTINCT node FROM gto_postflop")
 
 
-def load_postflop_db(db_path: str, **kwargs) -> PostflopSolve:
-    """Convenience: build a flop-only :class:`PostflopSolve` from a vendor ``.db``.
+# --- solve discovery + self-describing metadata -----------------------------
+# Each ``.db`` carries a ``metadata`` table that fully describes its scenario
+# (table size, positions, stack, flop, rake, format). The library below reads
+# it so a solve describes ITSELF -- the admin picker lists solves by their own
+# metadata, and ``load_postflop_db`` derives the scenario from the file instead
+# of relying on caller-passed defaults (which silently mislabel, e.g. a 6-max
+# solve as the hardcoded 9-max). Explicit kwargs still override.
 
-    Keyword args override display/position defaults (see :class:`SqliteDbAdapter`).
+# Longest-first so "UTG+2" matches before "UTG".
+_POSITIONS = ("UTG+2", "UTG+1", "UTG", "LJ", "HJ", "CO", "BTN", "SB", "BB")
+
+
+def read_db_metadata(db_path: str) -> dict[str, str]:
+    """Read just the ``metadata`` table (fast: no node walk). Keys -> values."""
+    con = sqlite3.connect(db_path)
+    try:
+        return {str(k): str(v) for k, v in con.execute("SELECT key, value FROM metadata")}
+    finally:
+        con.close()
+
+
+def _safe_float(v: object) -> float | None:
+    try:
+        return float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_position(text: str) -> str | None:
+    """The leading position token of ``text`` (e.g. a range filename / spot).
+
+    Takes the first ``_``- or space-delimited token -- ``"BTN_open_81pot.txt"``
+    -> ``"BTN"``, ``"BB_call_vs_BTN..."`` -> ``"BB"`` -- and returns it only if
+    it's a known position. (A plain ``\\b`` fails here: ``_`` is a word char, so
+    ``BTN\\b`` doesn't match ``BTN_open``.)"""
+    token = text.strip().split("_", 1)[0].split()[0] if text.strip() else ""
+    return token if token in _POSITIONS else None
+
+
+def derive_scenario(meta: dict[str, str]) -> dict[str, object]:
+    """Adapter kwargs implied by the ``.db`` metadata (table size, positions,
+    format). Best-effort: only keys it can confidently parse are returned, so a
+    caller's explicit overrides win and an unparseable field falls back to the
+    adapter default."""
+    out: dict[str, object] = {}
+    blob = f"{meta.get('game_format', '')} {meta.get('spot', '')}"
+    m = re.search(r"(\d+)\s*max", blob, re.I)
+    if m:
+        out["table_size"] = int(m.group(1))
+    # Positions: the range filenames are the most reliable source
+    # ("BTN_open_..." / "BB_call_vs_BTN_..."); fall back to the spot string.
+    ip = _first_position(meta.get("ip_range", "")) or _first_position(meta.get("spot", ""))
+    oop = _first_position(meta.get("oop_range", ""))
+    if ip:
+        out["ip_position"] = ip
+    if oop:
+        out["oop_position"] = oop
+    ante = (meta.get("ante") or "").strip().lower()
+    fmt = meta.get("game_format", "").lower()
+    is_tourney = ante not in ("", "none", "0", "0%", "-") or any(
+        k in fmt for k in ("mtt", "icm", "tournament", "tourney")
+    )
+    out["game_format"] = "tournament" if is_tourney else "cash"
+    return out
+
+
+@dataclass(frozen=True)
+class DbSolveSummary:
+    """A one-glance description of a ``.db`` solve, read from its metadata.
+
+    Drives the admin solve picker (each solve self-describes); ``ok=False`` with
+    an ``error`` when the file isn't a readable solve (so the picker can show it
+    greyed rather than crash the scan)."""
+
+    path: str
+    ok: bool
+    spot: str = ""
+    flop: str = ""  # raw, e.g. "QsJd9s"
+    flop_cards: tuple[str, ...] = ()
+    table_size: int | None = None
+    stack_bb: float | None = None
+    oop_position: str = "BB"
+    ip_position: str = "BTN"
+    game_format: str = "cash"
+    rake: str = ""
+    customer: str = ""
+    solve_date: str = ""
+    label: str = ""  # compact one-liner for the picker
+    error: str = ""
+
+    @property
+    def flop_pretty(self) -> str:
+        return " ".join(self.flop_cards) if self.flop_cards else self.flop
+
+
+def summarize_db(db_path: str) -> DbSolveSummary:
+    """Read one ``.db``'s metadata into a :class:`DbSolveSummary` (no node walk)."""
+    path = str(db_path)
+    try:
+        meta = read_db_metadata(path)
+    except Exception as exc:  # noqa: BLE001 -- any unreadable file -> greyed entry
+        return DbSolveSummary(path=path, ok=False, error=str(exc))
+    if "flop" not in meta or "spot" not in meta:
+        return DbSolveSummary(
+            path=path, ok=False, error="missing 'flop'/'spot' metadata (not a postflop solve?)"
+        )
+    sc = derive_scenario(meta)
+    flop_raw = meta.get("flop", "")
+    flop_cards = tuple(_split_cards(flop_raw))
+    ts = sc.get("table_size")
+    stack = _safe_float(meta.get("stack_bb"))
+    ip = str(sc.get("ip_position", "BTN"))
+    oop = str(sc.get("oop_position", "BB"))
+    fmt = str(sc.get("game_format", "cash"))
+    rake = meta.get("rake", "") or ""
+    rake_short = rake.split(" cap")[0].strip() if rake and rake.lower() != "none" else ""
+    bits = [f"{ip} vs {oop}"]
+    if ts:
+        bits.append(f"{ts}-max")
+    if stack:
+        bits.append(f"{stack:g}bb")
+    bits.append(" ".join(flop_cards) if flop_cards else flop_raw)
+    if rake_short:
+        bits.append(f"{rake_short} rake")
+    return DbSolveSummary(
+        path=path,
+        ok=True,
+        spot=meta.get("spot", ""),
+        flop=flop_raw,
+        flop_cards=flop_cards,
+        table_size=ts if ts is None else int(ts),
+        stack_bb=stack,
+        oop_position=oop,
+        ip_position=ip,
+        game_format=fmt,
+        rake=rake,
+        customer=meta.get("customer_id", ""),
+        solve_date=meta.get("solve_date", ""),
+        label=" · ".join(bits),
+    )
+
+
+def discover_db_solves(directory: str) -> list[DbSolveSummary]:
+    """Every ``.db`` under ``directory`` (recursive), summarised, sorted by path.
+
+    Returns ``[]`` when the directory is absent. Unreadable files come back as
+    ``ok=False`` summaries rather than being dropped, so the picker can explain
+    why a file isn't usable."""
+    from pathlib import Path  # noqa: PLC0415 -- local: module stays import-light
+
+    d = Path(directory).expanduser()
+    if not d.is_dir():
+        return []
+    return [summarize_db(str(p)) for p in sorted(d.rglob("*.db"))]
+
+
+def load_postflop_db(db_path: str, **overrides: object) -> PostflopSolve:
+    """Build a flop-only :class:`PostflopSolve` from a vendor ``.db``.
+
+    The scenario (table size, positions, cash/tournament) is derived from the
+    file's own metadata via :func:`derive_scenario`; ``**overrides`` win over
+    the derived values (used for display-only fields the metadata doesn't carry,
+    e.g. ``stakes`` / ``live_or_online`` / ``bb_in_dollars``).
     """
-    return SqliteDbAdapter(db_path, **kwargs).build()
+    derived = derive_scenario(read_db_metadata(db_path))
+    return SqliteDbAdapter(db_path, **{**derived, **overrides}).build()  # type: ignore[arg-type]
 
 
-__all__ = ["SqliteDbAdapter", "load_postflop_db"]
+__all__ = [
+    "DbSolveSummary",
+    "SqliteDbAdapter",
+    "derive_scenario",
+    "discover_db_solves",
+    "load_postflop_db",
+    "read_db_metadata",
+    "summarize_db",
+]

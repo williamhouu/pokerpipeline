@@ -51,12 +51,13 @@ read from that data.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from admin_panel.prompt_library import PromptLibrary
@@ -796,17 +797,17 @@ def render_generate_page() -> None:
 
     # --- MODE TOGGLE: Postflop vs Preflop ---
     # Preflop uses pipeline/preflop/* (no Pio solves needed; reads
-    # ranges/ryan_preflop_tree/ instead). Postflop uses the original
-    # pipeline (needs solves/ which are currently unavailable post-William).
+    # ranges/ryan_preflop_tree/ instead). Postflop generates from third-party
+    # .db solves picked in solves/postflop/ (each solve self-describes).
     mode = st.radio(
         "Mode",
         options=["Postflop", "Preflop"],
-        index=1,  # default to Preflop since the backend is ready
+        index=1,  # default to Preflop
         horizontal=True,
         help=(
-            "Postflop uses PioSolver .cfr files (currently blocked -- no "
-            "solves available since William left the project). Preflop "
-            "uses Ryan's preflop pack (loaded and tested)."
+            "Postflop generates from a specific `.db` solve you pick (drop them "
+            "in `solves/postflop/`). Preflop uses the preflop range packs. Both "
+            "run end-to-end."
         ),
         key="generate_mode",
     )
@@ -816,392 +817,324 @@ def render_generate_page() -> None:
         _render_generate_page_preflop()
         return
 
-    # --- POSTFLOP PATH (original; unchanged below) ---
-    st.caption(
-        "Configure a batch run. Filters cascade — pick a format, then "
-        "stack, then scenarios. Only options with available solves are "
-        "selectable."
+    # --- POSTFLOP PATH: pick a specific .db solve and generate from it ---
+    _render_generate_page_postflop()
+
+
+# Folder the postflop solve picker scans by default (gitignored; the user drops
+# their .db solves here, or points the picker elsewhere).
+_POSTFLOP_SOLVES_DIR = Path(__file__).resolve().parent.parent / "solves" / "postflop"
+
+
+def _render_generate_page_postflop() -> None:
+    """Solve-centric postflop Generate.
+
+    Each ``.db`` is ONE scenario on ONE flop, and it describes itself (table
+    size, positions, stack, format) from its own metadata. So the UX is a
+    *picker*, not a filter cascade: choose the solve, set a few per-solve knobs
+    (how many, whose decisions, variety), and run a real subprocess batch. The
+    old board-texture / scenario-cascade UI assumed a large ``.cfr`` library
+    that doesn't exist yet -- with a handful of specific solves, picking one at a
+    time is the right tool. (Cross-solve texture filters become useful later, at
+    library scale.)
+    """
+    from pipeline.postflop.adapters.sqlite_db import discover_db_solves  # noqa: PLC0415
+    from pipeline.postflop.run import (  # noqa: PLC0415
+        POSTFLOP_OUTPUT_DIR,
+        generate_postflop_batch_from_db,
     )
 
-    # Discover what's actually available on disk
-    available_scenarios = [s for s in SCENARIOS if count_cfrs(s.name) > 0]
-    available_formats = sorted({s.format for s in available_scenarios})
-    if not available_formats:
-        available_formats = ["Cash"]  # show the UI even with no solves
+    _render_postflop_job_panel()
 
-    # --- Cascading filters ---
-    st.subheader("1. Game settings")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        fmt = st.selectbox(
-            "Format",
-            options=["Cash", "MTT"],
-            index=0,
-            help="MTT solves aren't loaded yet. Only formats with "
-            "available solves are usable.",
-        )
-    with col2:
-        stack = st.selectbox(
-            "Stack depth",
-            options=["100 bb", "60 bb", "40 bb"],
-            index=0,
-            help="Only 100bb solves exist in Ryan's pack. Others would "
-            "need different range packs.",
-        )
-    with col3:
-        table = st.selectbox(
-            "Table size",
-            options=["6-max", "9-max", "Heads-Up"],
-            index=0,
-        )
+    st.caption(
+        "Generate questions from one postflop solve. Every solve carries its own "
+        "scenario (table size, positions, stack, flop) — pick it and go."
+    )
 
-    # Filter scenarios by the above selections
-    def matches(s: ScenarioMeta) -> bool:
-        if s.format != fmt:
-            return False
-        if s.stack_bb != int(stack.split()[0]):
-            return False
-        if table == "6-max" and s.table_size != 6:
-            return False
-        if table == "9-max" and s.table_size != 9:
-            return False
-        return True
+    # 1. Solves folder + discovery (recursive scan; each solve self-describes).
+    folder = st.text_input(
+        "Solves folder",
+        value=str(_POSTFLOP_SOLVES_DIR),
+        key="postflop_solves_dir",
+        help=(
+            "Folder holding your `.db` postflop solves (scanned recursively). "
+            "Drop solve files here, or point this at wherever you keep them."
+        ),
+    )
+    summaries = discover_db_solves(folder)
+    usable = [s for s in summaries if s.ok]
+    broken = [s for s in summaries if not s.ok]
 
-    scenarios_after_filter = [s for s in SCENARIOS if matches(s)]
-    if not scenarios_after_filter:
-        st.error(
-            f"⚠️ No scenarios match `{fmt}` / `{stack}` / `{table}`. "
-            f"This combination has no registered scenarios yet."
+    if not usable:
+        st.info(
+            f"No readable `.db` solves found in `{folder}`. Drop your solve "
+            "files there (each is one scenario on one flop), or change the "
+            "folder above."
         )
+        if broken:
+            with st.expander(f"⚠️ {len(broken)} file(s) couldn't be read"):
+                for b in broken:
+                    st.caption(f"`{Path(b.path).name}` — {b.error}")
         return
 
-    # --- Scenario picker ---
-    st.subheader("2. Scenarios")
-    st.caption(
-        f"{len(scenarios_after_filter)} registered scenarios match. "
-        "Greyed-out ones are missing solves."
+    # 2. Pick a solve (labelled by its own metadata).
+    st.subheader("1. Pick a solve")
+    by_path = {s.path: s for s in usable}
+    picked = st.selectbox(
+        f"{len(usable)} solve(s) found",
+        options=[s.path for s in usable],
+        format_func=lambda p: f"{Path(p).name}   —   {by_path[p].label}",
+        key="postflop_pick_solve",
     )
-    selected_scenarios = []
-    for s in scenarios_after_filter:
-        n = count_cfrs(s.name)
-        if n == 25:
-            label = f"✅  **{s.name}**  ·  {s.preflop_action}"
-            picked = st.checkbox(label, value=False, key=f"sc_{s.name}")
-            if picked:
-                selected_scenarios.append(s)
-        elif n == 0:
-            st.checkbox(
-                f"❌  ~~{s.name}~~  ·  {s.preflop_action}  ·  *no solves*",
-                value=False,
-                disabled=True,
-                key=f"sc_{s.name}",
-            )
-        else:
-            label = f"⚠️  **{s.name}**  ·  {s.preflop_action}  ·  *only {n}/25 flops*"
-            picked = st.checkbox(label, value=False, key=f"sc_{s.name}")
-            if picked:
-                selected_scenarios.append(s)
+    solve = by_path[picked]
+    if broken:
+        st.caption(f"({len(broken)} other file(s) in the folder couldn't be read.)")
+
+    # 3. Solve details -- the "what am I generating from" confirmation.
+    with st.container(border=True):
+        cols = st.columns(4)
+        cols[0].metric("Table", f"{solve.table_size}-max" if solve.table_size else "—")
+        cols[1].metric("Stack", f"{solve.stack_bb:g}bb" if solve.stack_bb else "—")
+        cols[2].metric("Matchup", f"{solve.ip_position} vs {solve.oop_position}")
+        cols[3].metric("Flop", solve.flop_pretty)
+        meta_bits = [b for b in (solve.spot, solve.game_format) if b]
+        if solve.rake and solve.rake.lower() != "none":
+            meta_bits.append(f"rake {solve.rake}")
+        if solve.solve_date:
+            meta_bits.append(f"solved {solve.solve_date}")
+        if meta_bits:
+            st.caption(" · ".join(meta_bits))
 
     st.divider()
 
-    # --- Content filters (hand class + board texture) ---
-    st.subheader("3. Content filters")
-    st.caption(
-        "Optional. Narrow what kinds of spots show up. Leave empty to "
-        "include everything that survives Layer 4."
-    )
+    # 4. What to ask.
+    st.subheader("2. What to ask")
     col1, col2 = st.columns(2)
     with col1:
-        _hand_classes = st.multiselect(
-            "Hero hand strength buckets",
-            options=list(STRENGTH_BUCKETS),
-            default=[],
-            help=(
-                "Sourced from pipeline/fact_extractor/hand_class.py. "
-                "Each spot's hero hand maps to one bucket. Empty = all."
-            ),
-        )
-    with col2:
-        _board_composites = st.multiselect(
-            "Board texture (composite)",
-            options=list(BOARD_COMPOSITES),
-            default=[],
-            help=("From board_texture.py's composite descriptor. Empty = all."),
-        )
-    col1, col2 = st.columns(2)
-    with col1:
-        _board_suits = st.multiselect(
-            "Board suit distribution",
-            options=list(BOARD_SUIT_DISTRIBUTIONS),
-            default=[],
-        )
-    with col2:
-        _board_pairs = st.multiselect(
-            "Board pair status",
-            options=list(BOARD_PAIR_STATUSES),
-            default=[],
-        )
-
-    st.divider()
-
-    # --- Difficulty ---
-    st.subheader("4. Difficulty")
-    st.caption("How dominant the correct answer is in the solver.")
-    preset = st.radio(
-        "Preset",
-        options=["Easy", "Medium", "Hard", "Mixed", "Custom"],
-        index=4,
-        horizontal=True,
-        key="difficulty_preset",
-    )
-    presets_map = {
-        "Easy": (85, 95),
-        "Medium": (70, 85),
-        "Hard": (55, 70),
-        "Mixed": (55, 95),
-        "Custom": (65, 75),  # default custom value
-    }
-    default_low, default_high = presets_map[preset]
-    freq_low, freq_high = st.slider(
-        "Solver frequency window (%) — correct answer is this dominant",
-        min_value=50,
-        max_value=100,
-        value=(default_low, default_high),
-        disabled=(preset != "Custom"),
-        help="Lower = harder (close decisions). Higher = easier (clear-cut).",
-    )
-
-    st.divider()
-
-    # --- Answer style ---
-    st.subheader("5. Answer option style")
-    col1, col2 = st.columns([2, 3])
-    with col1:
-        answer_style = st.radio(
-            "Style",
-            options=[
-                "Basic (fold/call/raise)",
-                "GTO (always/mostly)",
-                "Sizing (33%/75%/150%) — coming soon",
-                "Auto-pick",
-            ],
-            index=1,
-            help="Basic and GTO work today. Sizing variant needs ~2-3 "
-            "days of pipeline work.",
-        )
-    with col2:
-        st.caption("Style preview:")
-        if answer_style.startswith("Basic"):
-            st.code("option 1: Fold\noption 2: Call\noption 3: Raise")
-        elif answer_style.startswith("GTO"):
-            st.code(
-                "option 1: Always check\n"
-                "option 2: Mostly check, sometimes bet\n"
-                "option 3: Mostly bet, sometimes check\n"
-                "option 4: Always bet"
-            )
-        elif answer_style.startswith("Sizing"):
-            st.code(
-                "option 1: Check\noption 2: Bet $5 (33%)\n"
-                "option 3: Bet $11 (75%)\noption 4: Bet $22 (150%)"
-            )
-        else:
-            st.code("Layer 6 chooses Basic / GTO / Sizing per spot")
-
-    st.divider()
-
-    # --- Sampling targets ---
-    st.subheader("6. How many questions, where")
-    mode = st.radio(
-        "Targeting mode",
-        options=[
-            "Total batch size (auto-distribute)",
-            "Per-street targets (power user)",
-        ],
-        index=0,
-        horizontal=True,
-    )
-    if mode.startswith("Total"):
         total = st.number_input(
-            "Total questions in this batch",
+            "Number of questions",
             min_value=1,
-            max_value=10_000,
+            max_value=5000,
             value=20,
             step=5,
-        )
-        st.caption(
-            "Will spread evenly across selected scenarios + streets, "
-            "with diversity-stratified sampling within each bucket."
-        )
-        # Compute per-bucket distribution preview
-        flop_t = turn_t = river_t = 0
-        if selected_scenarios:
-            per_scenario = total // len(selected_scenarios)
-            flop_t = max(1, per_scenario // 5)
-            turn_t = max(1, (per_scenario * 2) // 5)
-            river_t = per_scenario - flop_t - turn_t
-        st.caption(
-            f"Distribution preview: {len(selected_scenarios)} scenarios × "
-            f"({flop_t} flop + {turn_t} turn + {river_t} river) = "
-            f"{len(selected_scenarios) * (flop_t + turn_t + river_t)} "
-            "questions"
-        )
-    else:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            flop_t = st.number_input("Flop / scenario", 0, 25, 1)
-        with col2:
-            turn_t = st.number_input("Turn / scenario", 0, 25, 2)
-        with col3:
-            river_t = st.number_input("River / scenario", 0, 25, 2)
-        with col4:
-            _per_cfr_cap = st.number_input("Max per .cfr", 1, 25, 5)
-        total = len(selected_scenarios) * (flop_t + turn_t + river_t)
-        st.caption(f"Total questions: **{total}**")
-
-    st.divider()
-
-    # --- Output options ---
-    st.subheader("7. Output")
-    col1, col2 = st.columns(2)
-    with col1:
-        _currency = st.radio(
-            "Display amounts as",
-            options=["Dollars ($1.25)", "Big blinds (2.5 bb)"],
-            index=0,
-            horizontal=True,
+            key="postflop_total",
         )
     with col2:
-        _out_filename = st.text_input(
-            "Output filename",
-            value="batch_2026-05-24.csv",
+        heroes = st.multiselect(
+            "Whose decisions to ask about",
+            options=[solve.ip_position, solve.oop_position],
+            default=[solve.ip_position, solve.oop_position],
+            key="postflop_heroes",
+            help="Generate spots where this player is to act. Both = a mix.",
         )
+    diversify = st.toggle(
+        "Vary the decision types (recommended)",
+        value=True,
+        key="postflop_diversify",
+        help=(
+            "Round-robin across c-bet / facing-c-bet / facing-donk / lead spots "
+            "so a fill-to-N batch isn't dominated by one type."
+        ),
+    )
 
-    # Stake scaling: pick from common levels or specify a custom BB-in-dollars
-    # value. The pipeline's scale_scenario() helper rebuilds each scenario at
-    # the chosen stake. Stack depth (in bb) is preserved -- a 100bb game stays
-    # 100bb at any stake.
-    def _stake_label(bb_dollars: float) -> str:
-        sb = bb_dollars / 2
-        sb_str = f"${sb:.2f}".rstrip("0").rstrip(".") if sb < 1 else f"${int(sb)}"
-        bb_str = (
-            f"${bb_dollars:.2f}".rstrip("0").rstrip(".")
-            if bb_dollars < 1
-            else f"${int(bb_dollars)}"
-        )
-        return f"{sb_str}/{bb_str}"
-
-    stake_options = [_stake_label(bb) for bb in COMMON_STAKE_LEVELS_BB_DOLLARS]
-    default_stake_index = list(COMMON_STAKE_LEVELS_BB_DOLLARS).index(0.50)
-    col_stake1, col_stake2 = st.columns([2, 1])
-    with col_stake1:
-        _stake_choice = st.selectbox(
-            "Stake level (rendered in output CSV)",
-            options=stake_options + ["Custom..."],
-            index=default_stake_index,
+    with st.expander("Worthiness window + filters (advanced)"):
+        freq_lo, freq_hi = st.slider(
+            "Solver frequency window (%) — how dominant the best action is",
+            min_value=50,
+            max_value=100,
+            value=(65, 99),
+            key="postflop_freq",
             help=(
-                "All dollar amounts in the generated questions render at "
-                "this stake. The underlying chip math is identical -- only "
-                "the displayed dollar values change. Stack depth in bb is "
-                "preserved."
+                "Keep spots where the top action sits in this band. Below 65% "
+                "reads as 'no clear answer'; 99%+ is a gimme. Mirrors preflop."
             ),
         )
-    with col_stake2:
-        if _stake_choice == "Custom...":
-            _custom_bb = st.number_input(
-                "Custom BB ($)",
-                min_value=0.01,
-                max_value=10_000.0,
-                value=0.50,
-                step=0.25,
-                format="%.2f",
+        use_ev_gap = st.checkbox(
+            "Also require a minimum EV gap to the 2nd-best action",
+            value=False,
+            key="postflop_use_evgap",
+            help="Off by default (real solves mix at ~0 EV gap). On = a quality gate.",
+        )
+        min_ev_gap = (
+            st.number_input(
+                "Min EV gap (bb)", min_value=0.0, value=0.5, step=0.1, key="postflop_evgap"
             )
-            st.caption(f"= {_stake_label(_custom_bb)}")
-        else:
-            picked_bb = COMMON_STAKE_LEVELS_BB_DOLLARS[
-                stake_options.index(_stake_choice)
-            ]
-            st.caption(f"BB = ${picked_bb:g}")
+            if use_ev_gap
+            else None
+        )
+
+    with st.expander("Presentation — stakes / venue (display only)"):
+        st.caption(
+            "The solve fixes the strategy; these only change how amounts render "
+            "in the question text. The solve doesn't carry stakes."
+        )
+        default_live_idx = 0 if (solve.table_size or 9) >= 9 else 1  # noqa: PLR2004
+        live = st.radio(
+            "Venue", ["Live", "Online"], index=default_live_idx, horizontal=True,
+            key="postflop_live",
+        )
+        stakes = st.text_input("Stakes (display)", value="$1/$2", key="postflop_stakes")
+        bb_dollars = st.number_input(
+            "Big blind in $", min_value=0.01, value=2.0, step=0.5, key="postflop_bbdollars"
+        )
 
     st.divider()
 
-    # --- Model + API settings ---
-    st.subheader("8. Model + API settings")
-    col1, col2, col3 = st.columns(3)
+    # 5. Model + run.
+    st.subheader("3. Generate")
+    col1, col2 = st.columns(2)
     with col1:
-        model = st.radio(
+        model_label = st.radio(
             "Model",
             options=list(_MODEL_LABEL_TO_API),
             index=0,
-            help="Opus 4.7 is the default (the production model); Sonnet 4.6 "
-            "for cheap experimentation.",
+            key="postflop_model",
+            help="Opus for production; Sonnet for cheap iteration.",
         )
-    # (A "Questions per API call" selector used to sit here -- it was never
-    # wired to anything. Generation is one question per API call by design:
-    # per-spot validators + retries need surgical failures, and prompt
-    # caching already amortizes the big system prompt across calls.)
     with col2:
         dry_run = st.toggle(
-            "Dry run (no API calls)",
-            help="Show what would be generated without spending API tokens.",
+            "Dry run (no API spend)",
+            value=False,
+            key="postflop_dryrun",
+            help=(
+                "Generates real options, facts, EVs, and scenario with "
+                "placeholder explanation text. Free — good for a structural check."
+            ),
         )
 
-    # Estimated cost (rough per-question figures by model tier).
-    if model.startswith("Opus"):
-        est_cost_per_q = 0.15
-    else:
-        est_cost_per_q = 0.08
-    est_total_cost = total * est_cost_per_q if total else 0
-    # One API call per question (~30s each with validation retries).
-    est_minutes = total * 0.5 if total else 0
+    if not dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
+        st.warning(
+            "No `ANTHROPIC_API_KEY` set — the run falls back to dry-run "
+            "(placeholder prose)."
+        )
 
-    st.info(
-        f"**Estimated**: {total} questions · "
-        f"~${est_total_cost:.2f} · "
-        f"~{est_minutes:.1f} min · "
-        f"model={model.split()[0]}"
-    )
+    busy = jobs.has_active_job()
+    if not heroes:
+        st.button("GENERATE", disabled=True, type="primary", use_container_width=True)
+        st.caption("Pick at least one player under “Whose decisions to ask about”.")
+    elif st.button("GENERATE", disabled=busy, type="primary", use_container_width=True):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        POSTFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = POSTFLOP_OUTPUT_DIR / f"postflop_{solve.flop}_{stamp}.csv"
+        try:
+            jobs.start_subprocess_job(
+                generate_postflop_batch_from_db,
+                label=f"Postflop: {Path(picked).name} ({int(total)} q)",
+                db_path=picked,
+                output_path=str(out_path),
+                total_questions=int(total),
+                heroes=tuple(heroes),
+                diversify=diversify,
+                stakes=stakes,
+                live_or_online=live,
+                bb_in_dollars=float(bb_dollars),
+                model=_MODEL_LABEL_TO_API[model_label],
+                dry_run=dry_run,
+                min_frequency=freq_lo / 100.0,
+                max_frequency=freq_hi / 100.0,
+                min_ev_gap_bb=min_ev_gap,
+            )
+            st.rerun()
+        except RuntimeError as exc:
+            st.error(str(exc))
 
+
+def _render_postflop_job_panel() -> None:
+    """Top-of-page panel for the current/last POSTFLOP batch (mirrors the
+    preflop one, but renders a ``PostflopBatchResult``). Only shows postflop
+    jobs (filtered by the label prefix), so a preflop job doesn't render here."""
+    from pipeline.postflop.batch import PostflopBatchResult  # noqa: PLC0415
+
+    job = jobs.get_current_job()
+    if job is None or not str(job.label).startswith("Postflop:"):
+        return
+    with st.container(border=True):
+        if job.is_active:
+            _render_active_job_progress()
+        elif job.status is jobs.JobStatus.COMPLETED:
+            st.markdown(f"**✅ Last batch:** {job.label}")
+            if isinstance(job.result, PostflopBatchResult):
+                _render_postflop_result_ui(job.result)
+            else:
+                st.warning("Job finished but returned no PostflopBatchResult.")
+            st.caption(f"Finished in {job.elapsed_seconds:.0f}s.")
+            if st.button("Hide last result", key=f"clear_pf_{job.id}"):
+                jobs.clear_current_job()
+                st.rerun()
+        elif job.status is jobs.JobStatus.CANCELLED:
+            st.warning(f"**⛔ Batch cancelled:** {job.label}")
+            if st.button("Dismiss", key=f"dismiss_pf_cancel_{job.id}"):
+                jobs.clear_current_job()
+                st.rerun()
+        else:  # FAILED
+            st.error(f"**❌ Job failed:** {job.label}")
+            with st.expander("Traceback"):
+                st.code(job.error or "(no traceback captured)")
+            if st.button("Dismiss failure", key=f"dismiss_pf_{job.id}"):
+                jobs.clear_current_job()
+                st.rerun()
     st.divider()
 
-    # --- Generate button ---
-    can_generate = (
-        len(selected_scenarios) > 0
-        and total > 0
-        and (dry_run or True)  # API key check would go here
-    )
-    waiting_on_solves = not any(count_cfrs(s.name) > 0 for s in scenarios_after_filter)
 
-    if waiting_on_solves:
-        st.button(
-            "⏳ GENERATE BATCH  (awaiting solves from William)",
-            disabled=True,
-            type="primary",
-            use_container_width=True,
-        )
+def _render_postflop_result_ui(result: Any) -> None:
+    """Success summary + CSV download + a preview of the first few questions
+    (options marked ✅ correct / 😐 neutral, plus the per-action EVs)."""
+    import csv as _csv  # noqa: PLC0415
+
+    cols = st.columns(4)
+    cols[0].metric("Written", result.questions_written)
+    cols[1].metric("Worthy spots", result.worthy_spots_available)
+    cols[2].metric("Flagged", result.soft_flagged_rows)
+    cols[3].metric("Failed", len(result.failures))
+    if not result.dry_run and (result.total_input_tokens or result.total_output_tokens):
         st.caption(
-            "The postflop Generate button activates once Pio solves land "
-            "in `solves/<scenario_name>/<flop_stem>.cfr`. The preflop "
-            "path is fully wired and does not need solves -- switch the "
-            "Mode toggle above."
+            f"Tokens: {result.total_input_tokens:,} in / "
+            f"{result.total_output_tokens:,} out · model {result.model_used}"
         )
-    elif not can_generate:
-        st.button(
-            "GENERATE BATCH",
-            disabled=True,
-            type="primary",
-            use_container_width=True,
+    out = Path(result.output_path)
+    st.caption(f"CSV: `{out}`")
+    try:
+        st.download_button(
+            "⬇️ Download CSV",
+            data=out.read_bytes(),
+            file_name=out.name,
+            mime="text/csv",
+            key=f"dl_pf_{out.name}",
         )
-        st.caption("Select at least one scenario and set a target above.")
-    else:
-        if st.button("GENERATE BATCH", type="primary", use_container_width=True):
-            st.warning(
-                "Postflop batch orchestrator is not implemented yet. The "
-                "preflop equivalent (`pipeline.preflop.batch`) is the "
-                "template -- a sibling needs to be written for postflop "
-                "once Pio `.cfr` solves are available. Switch the Mode "
-                "toggle to **Preflop** above to generate questions today."
-            )
+        with out.open(encoding="utf-8-sig") as fh:
+            rows = list(_csv.DictReader(fh))
+    except OSError:
+        rows = []
+
+    if rows:
+        with st.expander(
+            f"Preview ({min(3, len(rows))} of {len(rows)} questions)", expanded=True
+        ):
+            for r in rows[:3]:
+                st.markdown(f"**{r.get('User Seat', '')}** · {r.get('Cards on Table', '')}")
+                st.caption(r.get("Question", ""))
+                correct = r.get("Correct Answer", "")
+                neutral = {
+                    x.strip()
+                    for x in (r.get("neutral_credit", "") or "").split(",")
+                    if x.strip()
+                }
+                for i in (1, 2, 3, 4):
+                    opt = r.get(f"option {i}", "")
+                    if not opt:
+                        continue
+                    mark = "✅" if opt == correct else ("😐" if opt in neutral else "▫️")
+                    st.markdown(f"{mark} {opt}")
+                if r.get("action_ev_bb"):
+                    st.caption(f"EVs: {r['action_ev_bb']}")
+                st.divider()
+    if result.failures:
+        with st.expander(f"⚠️ {len(result.failures)} failed spot(s)"):
+            for f in result.failures[:10]:
+                st.caption(
+                    f"{f.get('node_id')} / {f.get('hero_combo')}: "
+                    f"{f.get('error_message', '')}"
+                )
 
 
 # NLHE Generate-page widgets whose selections persist across tab-switches /
@@ -7778,8 +7711,8 @@ def main() -> None:
 
     st.sidebar.divider()
     st.sidebar.caption(
-        "Preflop generation runs end-to-end. Postflop path is wired "
-        "but waits for PioSolver `.cfr` solves in `solves/`."
+        "Preflop and postflop both generate end-to-end. Postflop reads "
+        "third-party `.db` solves from `solves/postflop/`."
     )
 
     if page == "Files":

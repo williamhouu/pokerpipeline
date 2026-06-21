@@ -349,6 +349,23 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   solve, NOT a preflop range pack — it does NOT register in
   `pack.py:KNOWN_PACK_SIGNATURES` and does NOT use the preflop `node_cache`;
   those are preflop-only.**
+- **Solves self-describe + a solve-picker admin page (June 2026).** Each `.db`'s
+  `metadata` table fully describes its scenario, so the adapter no longer
+  hardcodes it: `sqlite_db.py:derive_scenario` reads table size (`9max`→9),
+  positions (from the `ip_range`/`oop_range` filenames), and cash-vs-tournament;
+  `load_postflop_db` applies them (explicit kwargs still win). `summarize_db` /
+  `discover_db_solves` read JUST the metadata (no node walk) to list a solves
+  folder; `DbSolveSummary.label` is the one-liner the picker shows ("BTN vs BB ·
+  9-max · 100bb · Qs Jd 9s · 10% rake"). The admin **Generate → Postflop** page
+  (`admin_panel/app.py:_render_generate_page_postflop`) is a *picker*, not a
+  filter cascade: choose a `.db` from `solves/postflop/` (gitignored; the user
+  drops files there), set count / whose-decisions (BTN/BB) / variety / worthiness
+  / stakes, and run via `jobs.start_subprocess_job(generate_postflop_batch_from_db)`
+  (`pipeline/postflop/run.py` — the picklable wrapper that ships the `.db` PATH
+  to the child, loads + generates there). Spot curation (hero filter + diversify)
+  lives in `pipeline/postflop/spot_selection.py` (shared with the CLI). Board-
+  texture filters were dropped — pointless with a handful of single-flop solves;
+  they'd return only at library scale, derived from each solve's metadata.
 - **Postflop worthiness = frequency window only (EV-gap filter is OPTIONAL,
   off by default — mirrors preflop, June 2026).** Real solves mix heavily ⇒
   the interesting decisions (c-bet/lead/size) have ~0 EV gap by construction
@@ -362,10 +379,10 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   decision types so a fill-to-N batch isn't dominated by one archetype.
 - **NOT done (seamed extension points)**: turn/river nodes in the `.db`
   adapter (flop-only today; chance tokens reset the street in the walk), a
-  `.cfr` adapter (Pio UPI), the admin Generate/Review pages (mirror the
-  preflop ones; reuse `jobs.start_subprocess_job` unchanged), LLM prompt
-  tuning against gold examples, a **board-emoji hard validator** (the LLM
-  occasionally garbles a board suit emoji), and exact Runout app table-state
+  `.cfr` adapter (Pio UPI), the admin **postflop Review** page (Generate is
+  built — a postflop Review mirroring the preflop one is the next admin step),
+  LLM prompt tuning against gold examples, a **board-emoji hard validator** (the
+  LLM occasionally garbles a board suit emoji), and exact Runout app table-state
   token formatting. See the README's "Done vs. next".
 
 ## Build phases & status
