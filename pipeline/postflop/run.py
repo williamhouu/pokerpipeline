@@ -21,6 +21,7 @@ from pipeline.postflop.explanation_generator import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,
+    load_postflop_system_prompt,
 )
 from pipeline.postflop.question_extractor import MAX_FREQUENCY, MIN_FREQUENCY
 from pipeline.postflop.spot_selection import make_spot_selector
@@ -41,6 +42,8 @@ def generate_postflop_batch_from_db(
     stakes: str = "$1/$2",
     live_or_online: str = "Live",
     bb_in_dollars: float = 2.0,
+    answer_style: str = "auto",
+    display_in_bb: bool = True,
     model: str = DEFAULT_MODEL,
     dry_run: bool = False,
     min_frequency: float = MIN_FREQUENCY,
@@ -78,6 +81,10 @@ def generate_postflop_batch_from_db(
     if equity_runouts is not None:
         kwargs["equity_runouts"] = equity_runouts
 
+    # Resolve the system prompt in the child (the admin override takes effect on
+    # the next run without restarting). An explicit system_prompt still wins.
+    prompt = system_prompt if system_prompt is not None else load_postflop_system_prompt()
+
     return generate_postflop_batch(
         solve=solve,
         output_path=output_path,
@@ -87,10 +94,12 @@ def generate_postflop_batch_from_db(
         temperature=DEFAULT_TEMPERATURE,
         max_tokens=DEFAULT_MAX_TOKENS,
         dry_run=dry_run or client is None,
+        answer_style=answer_style,
+        display_in_bb=display_in_bb,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
-        system_prompt=system_prompt,
+        system_prompt=prompt,
         progress_callback=progress_callback,
         spot_selector=selector,
         **kwargs,

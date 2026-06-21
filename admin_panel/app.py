@@ -107,10 +107,7 @@ from admin_panel import (  # noqa: E402
 # Imports from the pipeline (safe at module load -- these touch no I/O and
 # don't require a PioSolver binary or API key to import).
 from pipeline.action_history import preflop_order  # noqa: E402
-from pipeline.explanation_generator import (  # noqa: E402
-    DEFAULT_TEMPERATURE,
-    build_system_prompt,
-)
+from pipeline.explanation_generator import DEFAULT_TEMPERATURE  # noqa: E402
 from pipeline.fact_extractor.hand_class import STRENGTH_BUCKETS  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
     DIFFICULTY_MAX,
@@ -154,6 +151,11 @@ _MODEL_LABEL_TO_API: dict[str, str] = {
 # existing data isn't accidentally shadowed.
 PREFLOP_OUTPUT_DIR = (
     Path(__file__).resolve().parent.parent / "test_output" / "preflop_batches"
+)
+# Where postflop generation writes (mirror of pipeline.postflop.run.
+# POSTFLOP_OUTPUT_DIR; same path, recomputed here like PREFLOP_OUTPUT_DIR).
+POSTFLOP_OUTPUT_DIR = (
+    Path(__file__).resolve().parent.parent / "test_output" / "postflop_batches"
 )
 
 # JSONL log of every completed real-API batch. Sibling of the CSVs
@@ -209,6 +211,11 @@ def _logged_job_ids() -> set[str]:
 # experimental prompts don't leak into commits.
 PREFLOP_PROMPT_OVERRIDE_PATH = (
     Path(__file__).resolve().parent / "prompts" / "preflop_system.txt"
+)
+# Same pattern for the postflop system prompt (mirror of
+# pipeline.postflop.explanation_generator._POSTFLOP_PROMPT_OVERRIDE_PATH).
+POSTFLOP_PROMPT_OVERRIDE_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "postflop_system.txt"
 )
 
 # --- repo paths -------------------------------------------------------------
@@ -839,6 +846,9 @@ def _render_generate_page_postflop() -> None:
     library scale.)
     """
     from pipeline.postflop.adapters.sqlite_db import discover_db_solves  # noqa: PLC0415
+    from pipeline.postflop.options import (  # noqa: PLC0415
+        ANSWER_STYLE_FROM_RADIO_LABEL,
+    )
     from pipeline.postflop.run import (  # noqa: PLC0415
         POSTFLOP_OUTPUT_DIR,
         generate_postflop_batch_from_db,
@@ -936,6 +946,19 @@ def _render_generate_page_postflop() -> None:
             "so a fill-to-N batch isn't dominated by one type."
         ),
     )
+    style_label = st.radio(
+        "Answer option style",
+        options=list(ANSWER_STYLE_FROM_RADIO_LABEL),
+        index=1,  # GTO (always/mostly) — matches the preflop default the team uses
+        horizontal=True,
+        key="postflop_style",
+        help=(
+            "Basic = plain action labels (Check / Bet 33% / Bet 75%). "
+            "GTO = the Always/Mostly spectrum on 2-action spots (plain on 3+ "
+            "sizes). Auto = plain when one action clearly dominates, else GTO."
+        ),
+    )
+    answer_style = ANSWER_STYLE_FROM_RADIO_LABEL[style_label]
 
     with st.expander("Worthiness window + filters (advanced)"):
         freq_lo, freq_hi = st.slider(
@@ -963,11 +986,20 @@ def _render_generate_page_postflop() -> None:
             else None
         )
 
-    with st.expander("Presentation — stakes / venue (display only)"):
+    with st.expander("Presentation — display amounts / stakes / venue"):
         st.caption(
             "The solve fixes the strategy; these only change how amounts render "
             "in the question text. The solve doesn't carry stakes."
         )
+        display_choice = st.radio(
+            "Display amounts as",
+            options=["Big blinds", "Dollars"],
+            index=0,
+            horizontal=True,
+            key="postflop_display",
+            help="How the pot / stack / bets render in the question prose.",
+        )
+        display_in_bb = display_choice == "Big blinds"
         default_live_idx = 0 if (solve.table_size or 9) >= 9 else 1  # noqa: PLR2004
         live = st.radio(
             "Venue", ["Live", "Online"], index=default_live_idx, horizontal=True,
@@ -975,12 +1007,13 @@ def _render_generate_page_postflop() -> None:
         )
         stakes = st.text_input("Stakes (display)", value="$1/$2", key="postflop_stakes")
         bb_dollars = st.number_input(
-            "Big blind in $", min_value=0.01, value=2.0, step=0.5, key="postflop_bbdollars"
+            "Big blind in $ (used when displaying dollars)",
+            min_value=0.01, value=2.0, step=0.5, key="postflop_bbdollars",
         )
 
     st.divider()
 
-    # 5. Model + run.
+    # 5. Model + output + run.
     st.subheader("3. Generate")
     col1, col2 = st.columns(2)
     with col1:
@@ -1001,6 +1034,18 @@ def _render_generate_page_postflop() -> None:
                 "placeholder explanation text. Free — good for a structural check."
             ),
         )
+    out_name = st.text_input(
+        "Output filename",
+        value="",
+        placeholder=f"postflop_{solve.flop}_<timestamp>.csv",
+        key="postflop_filename",
+        help="Leave blank for an auto-timestamped name. Saved under "
+        "test_output/postflop_batches/.",
+    )
+    st.caption(
+        "Explanations use the **postflop** system prompt — edit it on the "
+        "**Prompt** page (Postflop mode). Dry-run uses placeholder prose."
+    )
 
     if not dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
         st.warning(
@@ -1015,7 +1060,10 @@ def _render_generate_page_postflop() -> None:
     elif st.button("GENERATE", disabled=busy, type="primary", use_container_width=True):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         POSTFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        out_path = POSTFLOP_OUTPUT_DIR / f"postflop_{solve.flop}_{stamp}.csv"
+        fname = out_name.strip() or f"postflop_{solve.flop}_{stamp}.csv"
+        if not fname.endswith(".csv"):
+            fname += ".csv"
+        out_path = POSTFLOP_OUTPUT_DIR / fname
         try:
             jobs.start_subprocess_job(
                 generate_postflop_batch_from_db,
@@ -1025,6 +1073,8 @@ def _render_generate_page_postflop() -> None:
                 total_questions=int(total),
                 heroes=tuple(heroes),
                 diversify=diversify,
+                answer_style=answer_style,
+                display_in_bb=display_in_bb,
                 stakes=stakes,
                 live_or_online=live,
                 bb_in_dollars=float(bb_dollars),
@@ -5247,6 +5297,325 @@ def render_compare_page() -> None:
         )
 
 
+def _scan_postflop_outputs() -> pd.DataFrame:
+    """One row per postflop batch CSV (newest first) -- like
+    :func:`_scan_preflop_outputs` but over ``POSTFLOP_OUTPUT_DIR``."""
+    cols = ["filename", "modified", "size_kb", "questions", "_path"]
+    if not POSTFLOP_OUTPUT_DIR.is_dir():
+        return pd.DataFrame(columns=cols)
+    rows: list[dict[str, object]] = []
+    for path in POSTFLOP_OUTPUT_DIR.glob("*.csv"):
+        stat = path.stat()
+        try:
+            with path.open("rb") as fh:
+                n = max(0, sum(1 for _ in fh) - 1)
+        except OSError:
+            n = 0
+        rows.append({
+            "filename": path.name,
+            "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "size_kb": round(stat.st_size / 1024),
+            "questions": n,
+            "_path": str(path),
+        })
+    df = pd.DataFrame(rows, columns=cols)
+    if not df.empty:
+        df = df.sort_values("modified", ascending=False).reset_index(drop=True)
+    return df
+
+
+def render_postflop_review_page() -> None:
+    """Review a postflop batch -- mirrors the preflop Review page.
+
+    Browse the batch question by question; edit the explanation + difficulty
+    inline (auto-saved into the CSV); grade approve / needs-review / reject;
+    remove a bad question; and collect every approved question across batches.
+    Reuses the generic ``admin_panel.review`` sidecar helpers (they key off any
+    batch CSV + ``No``), and shows the postflop-specific facts (per-action EV,
+    SPR, board texture, neutral-credit marking)."""
+    st.title("Review postflop questions")
+    st.caption(
+        "Browse a postflop batch, read each question, edit + grade it. Edits "
+        "auto-save into the CSV (no Save button)."
+    )
+
+    scan = _scan_postflop_outputs()
+    if scan.empty:
+        st.info(
+            "No postflop batches yet. Generate one on the **Generate** page "
+            "(Postflop mode) — it writes to `test_output/postflop_batches/`."
+        )
+        return
+
+    options = scan["_path"].tolist()
+    labels = {
+        r["_path"]: f"{r['filename']}  ({r['questions']} questions · {r['modified']})"
+        for _, r in scan.iterrows()
+    }
+    csv_path = Path(
+        st.selectbox(
+            "Batch",
+            options=options,
+            format_func=lambda p: labels[p],
+            key="postflop_review_batch",
+        )
+    )
+    df = _read_csv_cached(str(csv_path), csv_path.stat().st_mtime, as_str=True)
+    if df.empty:
+        st.warning("This batch CSV is empty.")
+        return
+
+    reviews = review.load_reviews(csv_path)
+    meta = review.load_batch_meta(csv_path)
+    nos = df["No"].tolist()
+    summary = review.summarize(nos, reviews)
+
+    m = st.columns(4)
+    m[0].metric("Reviewed", f"{summary.reviewed}/{summary.total}")
+    m[1].metric("Approved", summary.approved)
+    m[2].metric("Needs review", summary.needs_review)
+    m[3].metric("Rejected", summary.rejected)
+    if meta:
+        rs = meta.get("run_settings", {}) if isinstance(meta, dict) else {}
+        bits = []
+        if meta.get("model"):
+            bits.append(f"model `{meta['model']}`")
+        if rs.get("answer_style"):
+            bits.append(f"style `{rs['answer_style']}`")
+        if "display_in_bb" in rs:
+            bits.append("amounts: bb" if rs["display_in_bb"] else "amounts: dollars")
+        if bits:
+            st.caption(" · ".join(bits))
+
+    st.download_button(
+        "⬇️ Download this batch (CSV)",
+        data=csv_path.read_bytes(),
+        file_name=csv_path.name,
+        mime="text/csv",
+        key="pf_review_dl",
+    )
+
+    # --- navigation ---
+    nav_key = f"postflop_review_idx::{csv_path.name}"
+    idx = max(0, min(int(st.session_state.get(nav_key, 0)), len(df) - 1))
+    c1, c2, c3 = st.columns([1, 2, 1])
+    if c1.button("◀ Prev", disabled=idx == 0, use_container_width=True):
+        st.session_state[nav_key] = idx - 1
+        st.rerun()
+    jump = c2.selectbox(
+        "Jump to",
+        options=list(range(len(df))),
+        index=idx,
+        format_func=lambda i: f"#{nos[i]}  ({i + 1}/{len(df)})",
+        key=f"pf_review_jump::{csv_path.name}",
+        label_visibility="collapsed",
+    )
+    if jump != idx:
+        st.session_state[nav_key] = jump
+        st.rerun()
+    if c3.button("Next ▶", disabled=idx >= len(df) - 1, use_container_width=True):
+        st.session_state[nav_key] = idx + 1
+        st.rerun()
+
+    row = df.iloc[idx]
+    no = _cell(row, "No")
+    existing = reviews.get(no, {})
+
+    # --- question card ---
+    with st.container(border=True):
+        h = st.columns(4)
+        h[0].markdown(f"**#{no}**")
+        h[1].markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
+        h[2].markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
+        h[3].markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
+        if existing.get("status"):
+            st.caption(
+                "Current grade: **"
+                + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
+                + "**"
+            )
+        elif _cell(row, "validation_status"):
+            st.caption(f"Validation: `{_cell(row, 'validation_status')}`")
+
+        if _cell(row, "Context"):
+            st.caption(_cell(row, "Context"))
+        st.markdown("**Question**")
+        st.markdown(_md_lines(_cell(row, "Question")))
+
+        st.markdown("**Options**")
+        correct = _cell(row, "Correct Answer")
+        neutral = {
+            x.strip() for x in (_cell(row, "neutral_credit") or "").split(",") if x.strip()
+        }
+        for i in (1, 2, 3, 4):
+            opt = _cell(row, f"option {i}")
+            if not opt:
+                continue
+            mark = "✅ " if opt == correct else ("😐 " if opt in neutral else "▫️ ")
+            st.markdown(mark + opt)
+        if neutral:
+            st.caption("✅ correct · 😐 neutral credit · ▫️ mistake")
+
+        st.markdown("**Answer Explanation** _(edits auto-save into the CSV)_")
+        ekey = f"postflop_review_expl::{csv_path.name}::{no}"
+        st.text_area(
+            "Answer Explanation",
+            value=_cell(row, "Answer Explanation"),
+            key=ekey,
+            height=240,
+            label_visibility="collapsed",
+            on_change=_autosave_review_cell,
+            args=(csv_path, no, ekey, "explanation"),
+        )
+        with st.expander("Preview (rendered)", expanded=False):
+            st.info(_md_lines(_cell(row, "Answer Explanation")))
+
+        st.markdown(f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}")
+        if _cell(row, "action_ev_bb"):
+            st.markdown(f"**Per-action EV (bb):**&nbsp;{_cell(row, 'action_ev_bb')}")
+        fbits = []
+        for col, lbl in (
+            ("hero_equity", "equity"),
+            ("pot_odds", "pot odds"),
+            ("spr", "SPR"),
+            ("board_texture", "board"),
+            ("archetype", "archetype"),
+            ("Position Matchup", "matchup"),
+        ):
+            val = _cell(row, col)
+            if val:
+                fbits.append(f"{lbl}: `{val}`")
+        if fbits:
+            st.caption(" · ".join(fbits))
+        if _cell(row, "concept_tags"):
+            st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+
+        dkey = f"postflop_review_diff::{csv_path.name}::{no}"
+        try:
+            cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
+        except ValueError:
+            cur_diff = 0
+        st.number_input(
+            "Difficulty Rating (edits auto-save)",
+            min_value=0,
+            max_value=3500,
+            step=10,
+            value=cur_diff,
+            key=dkey,
+            on_change=_autosave_review_cell,
+            args=(csv_path, no, dkey, "difficulty"),
+        )
+
+    # --- grading ---
+    st.markdown("**Grade**")
+    note = st.text_area(
+        "Note (optional)",
+        value=existing.get("note", ""),
+        key=f"postflop_review_note::{csv_path.name}::{no}",
+        height=70,
+    )
+
+    def _grade(status: str) -> None:
+        review.save_review(csv_path, no, status, note)
+        st.session_state[nav_key] = min(idx + 1, len(df) - 1)
+        st.rerun()
+
+    g1, g2, g3 = st.columns(3)
+    if g1.button("✅ Approve", use_container_width=True, type="primary"):
+        _grade("approved")
+    if g2.button("⚠️ Needs review", use_container_width=True):
+        _grade("needs_review")
+    if g3.button("❌ Reject", use_container_width=True):
+        _grade("rejected")
+
+    st.divider()
+    if st.button(
+        f"🗑  Remove #{no} from this batch",
+        key=f"pf_review_rm::{csv_path.name}::{no}",
+        help="Deletes this question from the CSV (regenerate to recover).",
+    ):
+        if review.remove_question(csv_path, no):
+            st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
+            st.rerun()
+        else:
+            st.warning(f"#{no} was not found in the batch.")
+
+    # --- cross-batch approved pool ---
+    st.divider()
+    st.subheader("✅ Approved postflop questions (all batches)")
+    approved_sources = review.collect_approved_sources(POSTFLOP_OUTPUT_DIR)
+    if not approved_sources:
+        st.caption(
+            "No approved questions yet. Grade questions **approved** above and "
+            "they collect here across postflop batches."
+        )
+    else:
+        appr_rows = [r for _c, _n, r in approved_sources]
+        appr_fields = list(appr_rows[0].keys())
+        st.caption(f"**{len(appr_rows)}** approved across all postflop batches.")
+        st.download_button(
+            "⬇️  Download approved (CSV)",
+            data=review.approved_rows_to_csv(appr_fields, appr_rows),
+            file_name="postflop_approved.csv",
+            mime="text/csv",
+            key="pf_approved_dl",
+        )
+
+
+def _render_postflop_prompt_editor() -> None:
+    """Edit the postflop system prompt.
+
+    Deliberately simpler than the preflop prompt LIBRARY: postflop has one
+    system prompt, so this is a single editable override (auto-saved to
+    ``admin_panel/prompts/postflop_system.txt``, gitignored). Generation reads it
+    on the next run via ``load_postflop_system_prompt`` — no restart. Reset =
+    delete the override.
+    """
+    from pipeline.postflop.explanation_generator import (  # noqa: PLC0415
+        POSTFLOP_SYSTEM_PROMPT,
+        load_postflop_system_prompt,
+    )
+
+    override = POSTFLOP_PROMPT_OVERRIDE_PATH
+    active = load_postflop_system_prompt()
+    is_custom = override.is_file()
+    st.caption(
+        ("✏️ Custom override active" if is_custom else "Built-in default (no override)")
+        + f" · {len(active):,} chars · ~{len(active) // 4:,} tokens · edits take "
+        "effect on the next batch (no restart)."
+    )
+
+    def _save_postflop_prompt() -> None:
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(st.session_state["postflop_prompt_edit"], encoding="utf-8")
+
+    st.text_area(
+        "Postflop system prompt (auto-saves)",
+        value=active,
+        height=520,
+        key="postflop_prompt_edit",
+        on_change=_save_postflop_prompt,
+    )
+    cols = st.columns(2)
+    if cols[0].button("💾 Save now", key="pf_prompt_save"):
+        _save_postflop_prompt()
+        st.success("Saved.")
+    if is_custom and cols[1].button(
+        "↩️ Reset to built-in default", key="pf_prompt_reset"
+    ):
+        override.unlink(missing_ok=True)
+        st.session_state.pop("postflop_prompt_edit", None)
+        st.rerun()
+    with st.expander("Built-in default (read-only reference)"):
+        st.text_area(
+            "default",
+            value=POSTFLOP_SYSTEM_PROMPT,
+            height=300,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+
+
 # --- page: Prompt -----------------------------------------------------------
 def render_prompt_page() -> None:
     """The prompt library: create, name, edit, and switch between the
@@ -5270,34 +5639,14 @@ def render_prompt_page() -> None:
 
     mode = st.radio(
         "Pipeline path",
-        options=["Preflop (editable)", "Postflop (read-only -- blocked on solves)"],
+        options=["Preflop (editable)", "Postflop (editable)"],
         index=0,
         horizontal=True,
         key="prompt_mode",
     )
 
     if mode.startswith("Postflop"):
-        try:
-            prompt_text = build_system_prompt()
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not load postflop default prompt: {exc}")
-            return
-        st.info(
-            "Postflop generation is currently blocked (no Pio solves on "
-            "Mac). Its system prompt is shown here for reference -- "
-            "editing it would have no effect until postflop generation "
-            "is unblocked. Use Preflop mode above for live edits."
-        )
-        st.caption(
-            f"Built-in postflop default · {len(prompt_text):,} chars · "
-            f"~{len(prompt_text) // 4:,} tokens"
-        )
-        st.text_area(
-            "Postflop prompt (read-only reference)",
-            value=prompt_text,
-            height=600,
-            disabled=True,
-        )
+        _render_postflop_prompt_editor()
         return
 
     # --- Preflop mode: the prompt LIBRARY ---
@@ -7644,8 +7993,9 @@ def main() -> None:
         st.session_state["nav_page"] = st.session_state.pop("_pending_nav")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "Review", "Ranges", "History", "Browse",
-                 "Prompt", "Compare", "Skills", "Concept Tags",
+        options=["Files", "Generate", "Review", "Postflop Review", "Ranges",
+                 "History", "Browse", "Prompt", "Compare", "Skills",
+                 "Concept Tags",
                  "PLO Generate", "PLO Review", "PLO Prompt", "PLO Compare"],
         index=0,
         key="nav_page",
@@ -7721,6 +8071,8 @@ def main() -> None:
         render_generate_page()
     elif page == "Review":
         render_review_page()
+    elif page == "Postflop Review":
+        render_postflop_review_page()
     elif page == "Ranges":
         render_ranges_page()
     elif page == "History":

@@ -366,6 +366,20 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   lives in `pipeline/postflop/spot_selection.py` (shared with the CLI). Board-
   texture filters were dropped — pointless with a handful of single-flop solves;
   they'd return only at library scale, derived from each solve's metadata.
+- **Postflop Generate/Review parity (June 2026).** The Generate page has the
+  preflop controls: **answer-option style** (`options.build_options(spot,
+  style=)` — basic plain-labels / gto always-mostly-spectrum-on-binary / auto),
+  **display amounts in bb or dollars** (`display_in_bb` threaded through
+  `action_history.make_amount_fmt` + `format_writer`), **output filename**,
+  model, and worthiness — all threaded `batch → run.generate_postflop_batch_from_db`.
+  The **postflop system prompt is admin-editable**: `explanation_generator.
+  load_postflop_system_prompt` reads `admin_panel/prompts/postflop_system.txt`
+  (gitignored override, else the built-in `POSTFLOP_SYSTEM_PROMPT`); the Prompt
+  page's **Postflop mode** edits it (simple single-prompt override, NOT the
+  preflop PromptLibrary). **`render_postflop_review_page`** ("Postflop Review"
+  nav) mirrors the preflop Review — browse a batch, grade approve/needs/reject,
+  edit explanation + difficulty inline (auto-saved) — reusing the GENERIC
+  `admin_panel.review` sidecar helpers (they key off any batch CSV + `No`).
 - **Postflop worthiness = frequency window only (EV-gap filter is OPTIONAL,
   off by default — mirrors preflop, June 2026).** Real solves mix heavily ⇒
   the interesting decisions (c-bet/lead/size) have ~0 EV gap by construction

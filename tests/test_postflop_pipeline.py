@@ -206,17 +206,37 @@ def test_options_multi_action_plain_labels() -> None:
     assert correct == "Bet 75%" and correct in opts
 
 
-def test_options_binary_always_mostly_spectrum() -> None:
-    opts, correct = build_options(_spot("flop_oop_lead", "7h6h"))
+def test_options_binary_gto_is_always_mostly_spectrum() -> None:
+    # GTO style gives the 4-rung spectrum for a 2-action spot.
+    opts, correct = build_options(_spot("flop_oop_lead", "7h6h"), style="gto")
     assert opts == ["Always Check", "Mostly Check", "Mostly Bet 33%", "Always Bet 33%"]
     assert correct == "Mostly Check" and correct in opts
+
+
+def test_options_styles_basic_gto_auto() -> None:
+    spot = _spot("flop_oop_lead", "7h6h")  # a clearly-dominant (>=80%) 2-action spot
+    # basic = plain labels.
+    basic_opts, basic_correct = build_options(spot, style="basic")
+    assert basic_opts == ["Check", "Bet 33%"]
+    assert basic_correct == spot.dominant_action
+    # auto picks basic here (dominant >= 80%), not the spectrum.
+    assert spot.dominant_frequency >= 0.80  # noqa: PLR2004
+    assert build_options(spot, style="auto") == (basic_opts, basic_correct)
+    # gto forces the spectrum.
+    assert build_options(spot, style="gto")[0][0] == "Always Check"
+    # unknown style raises.
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="unknown answer style"):
+        build_options(spot, style="nonsense")
 
 
 def test_options_correct_always_in_options() -> None:
     for node_id, node in SOLVE.nodes.items():
         for spot in enumerate_spots(node):
-            opts, correct = build_options(spot)
-            assert correct in opts, (node_id, spot.hero_combo, correct, opts)
+            for style in ("basic", "gto", "auto"):
+                opts, correct = build_options(spot, style=style)
+                assert correct in opts, (node_id, spot.hero_combo, style, correct, opts)
 
 
 # --- action history (multi-street) ------------------------------------------
@@ -233,6 +253,26 @@ def test_question_turn_shows_full_line() -> None:
     assert "The Button opens to 2.5bb and you call." in q
     assert "You check, the Button bets 1.8bb, and you call." in q
     assert "The turn is 2❤️." in q
+
+
+def test_question_renders_dollars_when_not_in_bb() -> None:
+    import dataclasses
+
+    solve = dataclasses.replace(SOLVE, bb_in_dollars=2.0)
+    spot = sample_spot(solve.nodes["flop_ip_cbet"], "AcJc")
+    q = format_question(spot, solve, display_in_bb=False)
+    assert "You open to $5" in q  # 2.5bb * $2
+    assert "bb" not in q  # no big-blind amounts leak into dollar mode
+
+
+def test_postflop_prompt_override(tmp_path, monkeypatch) -> None:
+    from pipeline.postflop import explanation_generator as eg
+
+    override = tmp_path / "postflop_system.txt"
+    monkeypatch.setattr(eg, "_POSTFLOP_PROMPT_OVERRIDE_PATH", override)
+    assert eg.load_postflop_system_prompt() == eg.POSTFLOP_SYSTEM_PROMPT  # no file
+    override.write_text("CUSTOM POSTFLOP PROMPT")
+    assert eg.load_postflop_system_prompt() == "CUSTOM POSTFLOP PROMPT"
 
 
 def test_context_line() -> None:

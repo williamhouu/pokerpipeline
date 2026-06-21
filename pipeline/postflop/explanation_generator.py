@@ -25,6 +25,7 @@ postflop examples is a documented follow-up (see the package README).
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from pipeline.explanation_generator import (
     ExplanationValidationError,
@@ -97,6 +98,29 @@ never name a specific card you were not given.
 7. Write toward the STRATEGIC FRAME you are given; do not re-decide the spot.
 Return only the explanation text, no preamble, no headings.
 """
+
+
+# Admin-editable override for the postflop system prompt. The Prompt page saves
+# the user's edits here (gitignored, like the preflop one); generation reads the
+# override if present, else the built-in default. Reset = delete the file.
+# Simpler than preflop's: postflop's archetype guidance reaches the LLM per-spot
+# in the SOLVER DATA block (not baked into the system prompt), so there's no
+# catalog to resync -- a plain file read suffices.
+_POSTFLOP_PROMPT_OVERRIDE_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "admin_panel"
+    / "prompts"
+    / "postflop_system.txt"
+)
+
+
+def load_postflop_system_prompt() -> str:
+    """The active postflop system prompt: the admin override file if present,
+    else :data:`POSTFLOP_SYSTEM_PROMPT`. Not cached (edits take effect on the
+    next run); reset to default = delete the override file."""
+    if _POSTFLOP_PROMPT_OVERRIDE_PATH.is_file():
+        return _POSTFLOP_PROMPT_OVERRIDE_PATH.read_text(encoding="utf-8")
+    return POSTFLOP_SYSTEM_PROMPT
 
 
 def _humanize(token: str) -> str:
@@ -262,5 +286,6 @@ __all__ = [
     "POSTFLOP_SYSTEM_PROMPT",
     "build_solver_data_block",
     "generate_postflop_explanation",
+    "load_postflop_system_prompt",
     "placeholder_explanation",
 ]

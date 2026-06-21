@@ -115,9 +115,18 @@ def build_postflop_row(
     number: int,
     *,
     validation_status: str = "draft",
+    display_in_bb: bool = True,
 ) -> dict[str, str]:
-    """Build one CSV row dict from all the layer outputs."""
+    """Build one CSV row dict from all the layer outputs.
+
+    Amounts in the Context / Question / POT / Default Stack render in big blinds
+    (``display_in_bb=True``) or in dollars (``solve.bb_in_dollars``). The
+    ``action_ev_bb`` / SPR / equity columns are unit-fixed and unaffected.
+    """
+    from pipeline.postflop.action_history import make_amount_fmt  # noqa: PLC0415
+
     node = facts.spot.node
+    amt = make_amount_fmt(display_in_bb=display_in_bb, bb_in_dollars=solve.bb_in_dollars)
     opts = (explanation.options() + ["", "", "", ""])[:4]
     pot_odds = (
         f"{facts.break_even_equity * 100:.0f}%"
@@ -127,14 +136,14 @@ def build_postflop_row(
     row = {
         "No": str(number),
         "Hand Stage": facts.street.capitalize(),
-        "Context": build_context_line(solve),
+        "Context": build_context_line(solve, display_in_bb=display_in_bb),
         "User Seat": facts.hero_position,
         "User Cards": _emoji_cards(facts.spot.hero_cards),
         "Cards on Table": _emoji_cards(facts.board),
         "Table Size": str(solve.table_size),
-        "Default Stack": f"{node.effective_stack_bb:g}bb",
-        "POT": f"{facts.pot_bb:g}bb",
-        "Question": format_question(facts.spot, solve),
+        "Default Stack": amt(node.effective_stack_bb),
+        "POT": amt(facts.pot_bb),
+        "Question": format_question(facts.spot, solve, display_in_bb=display_in_bb),
         "Question Type": "Postflop Decision",
         "option 1": opts[0],
         "option 2": opts[1],

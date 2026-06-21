@@ -100,6 +100,8 @@ def generate_postflop_batch(
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     dry_run: bool = False,
+    answer_style: str = "auto",
+    display_in_bb: bool = True,
     min_frequency: float = MIN_FREQUENCY,
     max_frequency: float = MAX_FREQUENCY,
     min_ev_gap_bb: float | None = None,
@@ -169,7 +171,7 @@ def generate_postflop_batch(
             )
 
         facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
-        options, correct = build_options(spot)
+        options, correct = build_options(spot, style=answer_style)
         difficulty = compute_difficulty(facts)
 
         try:
@@ -203,7 +205,7 @@ def generate_postflop_batch(
 
         row = build_postflop_row(
             facts, explanation, solve, difficulty, len(rows) + 1,
-            validation_status=status,
+            validation_status=status, display_in_bb=display_in_bb,
         )
         rows.append(row)
 
@@ -237,6 +239,8 @@ def generate_postflop_batch(
             "dry_run": use_placeholder,
             "run_settings": {
                 "total_questions": total_questions,
+                "answer_style": answer_style,
+                "display_in_bb": display_in_bb,
                 "min_frequency": min_frequency,
                 "max_frequency": max_frequency,
                 "min_ev_gap_bb": min_ev_gap_bb,

@@ -32,6 +32,8 @@ writer renders the dollar/seat table-state columns separately.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from pipeline.action_history import format_card  # pure, game-agnostic leaf
 from pipeline.postflop.solve import (
     POSTFLOP_VERBS,
@@ -76,6 +78,24 @@ def _bb(amount: float) -> str:
     return f"{text}bb"
 
 
+# An amount formatter maps a bb amount -> the display string. Default = bb;
+# dollars mode multiplies by the big-blind dollar size.
+AmountFmt = Callable[[float], str]
+
+
+def make_amount_fmt(*, display_in_bb: bool, bb_in_dollars: float) -> AmountFmt:
+    """The amount renderer for the question prose: bb ('2.5bb') or dollars
+    ('$5', '$4.32'). Dollars show whole values bare and cents to 2 places."""
+    if display_in_bb:
+        return _bb
+
+    def _dollars(amount_bb: float) -> str:
+        d = amount_bb * bb_in_dollars
+        return f"${round(d):g}" if abs(d - round(d)) < 0.005 else f"${d:.2f}"  # noqa: PLR2004
+
+    return _dollars
+
+
 def _cards(combo_or_cards) -> str:
     """Render a 4-char combo or a card iterable as emoji cards (no spaces)."""
     if isinstance(combo_or_cards, str):
@@ -103,7 +123,7 @@ def _subject(position: str, hero: str, *, capitalized: bool) -> str:
     return phrase[0].upper() + phrase[1:] if capitalized else phrase
 
 
-def _preflop_verb_phrase(step: PreflopStep, *, is_hero: bool) -> str:
+def _preflop_verb_phrase(step: PreflopStep, *, is_hero: bool, fmt: AmountFmt = _bb) -> str:
     """Conjugated preflop action: 'open to 2.5bb' / 'opens to 2.5bb', etc."""
     base = {
         "open": "open", "raise": "raise", "3-bet": "3-bet",
@@ -112,20 +132,20 @@ def _preflop_verb_phrase(step: PreflopStep, *, is_hero: bool) -> str:
     }.get(step.verb, step.verb)
     verb = base if is_hero else _third_person(base)
     if step.to_bb is not None and step.verb in ("open", "raise", "3-bet", "4-bet", "5-bet"):
-        return f"{verb} to {_bb(step.to_bb)}"
+        return f"{verb} to {fmt(step.to_bb)}"
     return verb
 
 
-def _postflop_verb_phrase(step: PostflopStep, *, is_hero: bool) -> str:
+def _postflop_verb_phrase(step: PostflopStep, *, is_hero: bool, fmt: AmountFmt = _bb) -> str:
     """Conjugated postflop action: 'check' / 'checks', 'bet 1.8bb' / 'bets 1.8bb',
     'call' / 'calls', 'raise to 6bb' / 'raises to 6bb'."""
     if step.verb not in POSTFLOP_VERBS:
         raise ValueError(f"unknown postflop verb {step.verb!r}")
     verb = step.verb if is_hero else _third_person(step.verb)
     if step.verb == "bet" and step.to_bb is not None:
-        return f"{verb} {_bb(step.to_bb)}"
+        return f"{verb} {fmt(step.to_bb)}"
     if step.verb == "raise" and step.to_bb is not None:
-        return f"{verb} to {_bb(step.to_bb)}"
+        return f"{verb} to {fmt(step.to_bb)}"
     return verb
 
 
@@ -136,14 +156,14 @@ def _third_person(verb: str) -> str:
     return verb + "s"
 
 
-def _preflop_sentence(solve: PostflopSolve, hero: str) -> str:
+def _preflop_sentence(solve: PostflopSolve, hero: str, fmt: AmountFmt = _bb) -> str:
     """The preflop line as one sentence, e.g.
     'You open to 2.5bb and the Big Blind calls.'"""
     clauses: list[str] = []
     for i, step in enumerate(solve.preflop_summary):
         is_hero = step.position == hero
         subject = _subject(step.position, hero, capitalized=(i == 0))
-        clauses.append(f"{subject} {_preflop_verb_phrase(step, is_hero=is_hero)}")
+        clauses.append(f"{subject} {_preflop_verb_phrase(step, is_hero=is_hero, fmt=fmt)}")
     if not clauses:
         return ""
     if len(clauses) == 1:
@@ -166,7 +186,7 @@ def _street_cards(solve_flop, board: tuple[str, ...], street: str) -> list[str]:
     return []
 
 
-def _street_sentences(spot: PostflopSpot, hero: str) -> list[str]:
+def _street_sentences(spot: PostflopSpot, hero: str, fmt: AmountFmt = _bb) -> list[str]:
     """One sentence per street up to (and including) the decision street.
 
     Each sentence reveals that street's board card(s) and then renders the
@@ -193,7 +213,7 @@ def _street_sentences(spot: PostflopSpot, hero: str) -> list[str]:
         if steps:
             clauses = [
                 f"{_subject(s.position, hero, capitalized=(i == 0))} "
-                f"{_postflop_verb_phrase(s, is_hero=(s.position == hero))}"
+                f"{_postflop_verb_phrase(s, is_hero=(s.position == hero), fmt=fmt)}"
                 for i, s in enumerate(steps)
             ]
             if len(clauses) == 1:
@@ -209,36 +229,43 @@ def _street_sentences(spot: PostflopSpot, hero: str) -> list[str]:
     return sentences
 
 
-def format_question(spot: PostflopSpot, solve: PostflopSolve) -> str:
+def format_question(
+    spot: PostflopSpot, solve: PostflopSolve, *, display_in_bb: bool = True
+) -> str:
     """The full multi-street question narrative for ``spot``.
 
     Renders, in order: hero's seat + cards, the preflop line, then each street
     up to the decision (board reveal + the action taken before hero acts).
     Ends right where hero must act (the options carry "what do you do").
+    Amounts render in big blinds (``display_in_bb=True``) or in dollars
+    (using ``solve.bb_in_dollars``).
     """
     hero = spot.node.actor
+    fmt = make_amount_fmt(display_in_bb=display_in_bb, bb_in_dollars=solve.bb_in_dollars)
     intro = (
         f"You're {_SEAT_INTRO.get(hero, hero)} with {_cards(spot.hero_combo)}."
     )
     lines = [intro]
-    preflop = _preflop_sentence(solve, hero)
+    preflop = _preflop_sentence(solve, hero, fmt)
     if preflop:
         lines.append(preflop)
-    lines.extend(_street_sentences(spot, hero))
+    lines.extend(_street_sentences(spot, hero, fmt))
     return "\n".join(lines)
 
 
-def build_context_line(solve: PostflopSolve) -> str:
+def build_context_line(solve: PostflopSolve, *, display_in_bb: bool = True) -> str:
     """The short framing line, e.g. 'Online · $0.50/$1'.
 
-    Cash shows the stakes, a tournament shows the stack depth instead. The
-    table size is intentionally NOT shown -- the dedicated Table Size column
-    already carries it, so repeating it in the Context was redundant (dropped
-    June 2026 per the team's feedback).
+    Cash shows the stakes, a tournament shows the stack depth (bb or the dollar
+    equivalent). The table size is intentionally NOT shown -- the dedicated
+    Table Size column already carries it (dropped June 2026 per the team).
     """
     venue = solve.live_or_online
     if solve.game_format == "tournament":
-        tail = f"{solve.effective_stack_bb:g}bb"
+        fmt = make_amount_fmt(
+            display_in_bb=display_in_bb, bb_in_dollars=solve.bb_in_dollars
+        )
+        tail = fmt(solve.effective_stack_bb)
     else:
         tail = solve.stakes or "cash"
     return f"{venue} · {tail}"

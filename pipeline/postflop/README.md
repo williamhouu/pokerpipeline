@@ -122,20 +122,23 @@ decision types (see the calibration note below).
    Also wanted: a **board-emoji hard validator** (the LLM occasionally garbles
    a board suit emoji, e.g. `9♉` for `9♠️` — the preflop pipeline has the
    analogous suit-emoji check).
-2. **Admin Generate page — DONE (June 2026).** `admin_panel/app.py:
-   _render_generate_page_postflop` is a *solve picker*: it scans
-   `solves/postflop/` (`discover_db_solves`), lists each self-describing `.db`
-   by its metadata, and launches `run.generate_postflop_batch_from_db` (which
-   loads the solve + curates spots via `spot_selection`) through the generic
-   `jobs.start_subprocess_job` (the `.db` PATH crosses the process boundary, not
-   the loaded solve). Still TODO: a postflop **Review** page mirroring the
-   preflop one (the generated CSV + `meta.json` are reviewable as raw files).
-3. **LLM prompt tuning.** `POSTFLOP_SYSTEM_PROMPT` +
-   `POSTFLOP_ARCHETYPE_GUIDANCE` are a solid first cut; tune against gold
-   postflop examples and grow the soft validators from observed failures
-   (same loop as preflop).
-4. **App table-state format.** `format_writer` renders amounts in bb; porting
-   the preflop `app_table_format` engine would emit the exact Runout
+2. **Admin Generate + Review pages — DONE (June 2026).** `admin_panel/app.py:
+   _render_generate_page_postflop` is a *solve picker* (scans `solves/postflop/`
+   via `discover_db_solves`, launches `run.generate_postflop_batch_from_db`
+   through `jobs.start_subprocess_job` with the `.db` PATH). It has preflop
+   parity controls: answer-option style (`build_options(spot, style=)` —
+   basic/gto/auto), display amounts in bb or dollars (`display_in_bb` threaded
+   through `action_history`/`format_writer`), output filename, model, and
+   worthiness. `render_postflop_review_page` mirrors the preflop Review (browse
+   a batch, grade, edit explanation + difficulty inline) reusing the generic
+   `admin_panel.review` sidecar helpers.
+3. **LLM prompt tuning.** `POSTFLOP_SYSTEM_PROMPT` is the default; it's now
+   admin-editable (`load_postflop_system_prompt` reads
+   `admin_panel/prompts/postflop_system.txt`; the Prompt page → Postflop mode
+   edits it). Still wanted: tune against gold postflop examples and grow the
+   soft validators from observed failures (same loop as preflop).
+4. **App table-state format.** `format_writer` renders amounts in bb or dollars;
+   porting the preflop `app_table_format` engine would emit the exact Runout
    chip/seat token strings. A formatting concern only — no layer above changes.
 5. **Richer facts.** Detailed blocker analysis (value/bluff combos blocked) and
    range-vs-range advantage; the reused `equity` module already supports it.

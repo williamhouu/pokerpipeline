@@ -29,3 +29,20 @@ def test_postflop_generate_page_renders() -> None:
     # The picker should have rendered the page heading (a solve found, or the
     # friendly "no solves" info) -- either way, no crash and some markdown.
     assert at.title  # "Generate questions"
+
+
+def test_postflop_review_page_renders() -> None:
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+    at = AppTest.from_file(str(_APP), default_timeout=120)
+    at.session_state["nav_page"] = "Postflop Review"
+    at.run()
+    assert not at.exception, at.exception
+
+
+def test_prompt_page_postflop_mode_renders() -> None:
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+    at = AppTest.from_file(str(_APP), default_timeout=120)
+    at.session_state["nav_page"] = "Prompt"
+    at.session_state["prompt_mode"] = "Postflop (editable)"
+    at.run()
+    assert not at.exception, at.exception
