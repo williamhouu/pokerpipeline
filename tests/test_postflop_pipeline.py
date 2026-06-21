@@ -338,6 +338,20 @@ def test_soft_equity_flags_wrong_number() -> None:
     assert len(warns) == 1
 
 
+def test_soft_equity_accepts_break_even_price() -> None:
+    # "you only need 20% equity to continue and you have 35%" cites the break-even
+    # PRICE and hero equity -- both legitimate, neither invented. (June 2026:
+    # this was the false positive that flagged half the real Call explanations.)
+    facts = _facts_for("flop_ip_facing_bet", "Ah5h")
+    assert facts.break_even_equity is not None
+    be = round(facts.break_even_equity * 100)
+    eq = round(facts.hero_equity_vs_villain * 100)
+    g = _gen(
+        f"You only need {be}% equity to continue and you have around {eq}%, so call."
+    )
+    assert soft_validate_equity_vs_data(g, facts) == []
+
+
 def test_placeholder_passes_hard_validators() -> None:
     facts = _facts_for()
     opts, correct = build_options(facts.spot)

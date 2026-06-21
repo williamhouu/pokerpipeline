@@ -189,14 +189,20 @@ def soft_validate_equity_vs_data(
 ) -> list[str]:
     """Warn when a cited equity % clearly contradicts the data block.
 
-    Postflop v1 is heads-up, so hero_equity_vs_villain is the right reference.
-    Only flags a clear (> ~10pt) mismatch on a number in an equity context;
-    a figure it can't confidently map to a fact is left alone.
+    Postflop v1 is heads-up, so hero_equity_vs_villain is the reference for the
+    hand's equity. But a number "in an equity context" can legitimately be EITHER
+    hero's equity OR the pot-odds **break-even** price -- well-written bluff-catch
+    prose says "you only need 20% equity to continue and you have 35%", citing
+    both. So a figure that matches either reference (within tolerance) is fine;
+    only a number matching NEITHER is flagged as possibly invented.
     """
     text = generated.answer_explanation or ""
     if not text:
         return []
     target = facts.hero_equity_vs_villain * 100.0
+    break_even = (
+        facts.break_even_equity * 100.0 if facts.break_even_equity is not None else None
+    )
     for m in _PCT_FIGURE.finditer(text):
         value = float(m.group(1))
         if value <= 0 or value >= 100:
@@ -206,12 +212,16 @@ def soft_validate_equity_vs_data(
             continue
         if "range" in window and "your range" in window:
             continue  # a range-equity claim, a different figure
-        if abs(value - target) > _NUMBER_TOLERANCE_PCT:
-            return [
-                f"prose cites {value:g}% equity, but the data block has hero "
-                f"equity {target:.0f}% vs the villain's range. Review the "
-                "number (the LLM may have invented it)."
-            ]
+        if abs(value - target) <= _NUMBER_TOLERANCE_PCT:
+            continue  # matches hero's equity
+        if break_even is not None and abs(value - break_even) <= _NUMBER_TOLERANCE_PCT:
+            continue  # matches the pot-odds break-even price ("need X% to call")
+        be_note = f", break-even {break_even:.0f}%" if break_even is not None else ""
+        return [
+            f"prose cites {value:g}% equity, but the data block has hero "
+            f"equity {target:.0f}%{be_note}. Review the number (the LLM may "
+            "have invented it)."
+        ]
     return []
 
 
