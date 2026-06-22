@@ -15,7 +15,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pipeline.postflop.adapters.sqlite_db import load_postflop_db
+from pipeline.postflop.adapters.sqlite_db import (
+    DEFAULT_MAX_NODES_PER_STREET,
+    load_postflop_db,
+)
 from pipeline.postflop.batch import PostflopBatchResult, generate_postflop_batch
 from pipeline.postflop.explanation_generator import (
     DEFAULT_MAX_TOKENS,
@@ -38,6 +41,8 @@ def generate_postflop_batch_from_db(
     output_path: str | Path,
     total_questions: int,
     heroes: tuple[str, ...] = (),
+    streets: tuple[str, ...] = ("flop",),
+    max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
     diversify: bool = False,
     stakes: str = "$1/$2",
     live_or_online: str = "Live",
@@ -59,12 +64,16 @@ def generate_postflop_batch_from_db(
     from the file's own metadata; only the display framing (``stakes`` /
     ``live_or_online`` / ``bb_in_dollars``) is passed in here, since the solve
     doesn't carry stakes. ``heroes`` keeps only those acting positions (empty =
-    both); ``diversify`` round-robins the decision types. A real run needs
+    both); ``streets`` selects which streets to materialise (flop / turn / river)
+    and ``max_nodes_per_street`` caps each street's (large) node set; ``diversify``
+    round-robins the decision types across streets. A real run needs
     ``ANTHROPIC_API_KEY``; without it (or with ``dry_run``) the deterministic
     placeholder prose is used.
     """
     solve = load_postflop_db(
         db_path,
+        streets=tuple(streets) or ("flop",),
+        max_nodes_per_street=max_nodes_per_street,
         stakes=stakes,
         live_or_online=live_or_online,
         bb_in_dollars=bb_in_dollars,

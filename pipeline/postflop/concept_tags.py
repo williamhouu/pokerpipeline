@@ -72,6 +72,11 @@ class PostflopTagInput:
     composite: str  # board-texture composite descriptor
     hero_equity: float
     break_even_equity: float | None
+    # Prior-street action context (from the node history; default False so the
+    # flop case and hand-built inputs need not set them). Drive the street-aware
+    # action-context tags (turn barrel vs delayed c-bet vs probe).
+    hero_bet_prev_street: bool = False  # hero bet/raised the immediately prior street
+    prev_street_checked_through: bool = False  # no bet on the immediately prior street
 
     # convenience predicates (kept off the tag registry; used by rules + archetype)
     @property
@@ -95,7 +100,8 @@ TAG_REGISTRY: dict[str, Callable[[PostflopTagInput], bool]] = {
     "fourbet_pot": lambda s: s.preflop_raise_count >= 3,
     "multiway_pot": lambda s: s.n_players > 2,
     "heads_up_pot": lambda s: s.n_players == 2,
-    # Action context
+    # Action context (street-aware: a flop c-bet, a turn barrel, a delayed
+    # c-bet, an OOP probe, and a river bet are distinct strategic situations).
     "c_bet_spot": lambda s: (
         s.dominant_verb == "bet" and s.hero_is_preflop_aggressor and s.street == "flop"
     ),
@@ -103,7 +109,28 @@ TAG_REGISTRY: dict[str, Callable[[PostflopTagInput], bool]] = {
         s.dominant_verb == "bet"
         and not s.hero_is_preflop_aggressor
         and not s.hero_in_position
+        and s.street == "flop"  # a "donk" is a flop lead; turn/river -> probe/lead
     ),
+    "turn_barrel": lambda s: (
+        s.dominant_verb == "bet"
+        and s.street == "turn"
+        and s.hero_is_preflop_aggressor
+        and s.hero_bet_prev_street  # bet the flop, betting again = second barrel
+    ),
+    "delayed_cbet": lambda s: (
+        s.dominant_verb == "bet"
+        and s.street == "turn"
+        and s.hero_is_preflop_aggressor
+        and s.prev_street_checked_through  # checked the flop, now bets the turn
+    ),
+    "probe_bet": lambda s: (
+        s.dominant_verb == "bet"
+        and s.street in ("turn", "river")
+        and not s.hero_is_preflop_aggressor
+        and not s.hero_in_position
+        and s.prev_street_checked_through  # OOP leads after the aggressor declined
+    ),
+    "river_bet": lambda s: s.dominant_verb == "bet" and s.street == "river",
     "facing_bet_spot": lambda s: s.is_facing_bet,
     "in_position": lambda s: s.hero_in_position,
     "out_of_position": lambda s: not s.hero_in_position,
@@ -126,6 +153,7 @@ TAG_REGISTRY: dict[str, Callable[[PostflopTagInput], bool]] = {
         s.dominant_verb == "bet"
         and s.strength_bucket in ("medium", "vulnerable")
         and s.composite in _WET
+        and s.street != "river"  # nothing to protect once all cards are out
     ),
     "bluff_catch_spot": lambda s: (
         s.dominant_verb == "call"
@@ -178,10 +206,13 @@ def classify_postflop_archetype(tag_input: PostflopTagInput) -> str:
     if verb == "bet":
         if bucket in ("premium", "strong"):
             return "value_bet"
-        if s.has_strong_draw:
+        if s.has_strong_draw:  # no draws on the river, so never fires there
             return "semibluff"
         if bucket in ("medium", "vulnerable"):
-            return "protection_bet" if s.composite in _WET else "value_bet"
+            # Protection needs cards to come; on the river a medium hand betting
+            # is thin value, not protection.
+            protect = s.composite in _WET and s.street != "river"
+            return "protection_bet" if protect else "value_bet"
         return "bluff"  # air / marginal, no real draw
 
     if verb == "raise":

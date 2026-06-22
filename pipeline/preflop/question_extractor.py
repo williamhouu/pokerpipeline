@@ -43,15 +43,23 @@ MIN_TOP_FREQUENCY = 0.55  # below: no clear best answer to teach
 MAX_TOP_FREQUENCY = 0.95  # above: the answer is too obvious
 MIN_PRESENCE = 0.01  # below: hand doesn't actually reach the node
 
-# A dominant action at 90-95% reads as "mostly". The correct answer for such a
-# spot is "Mostly <dominant>" ("Always X" is reserved for a literally-pure 100%
-# action), and a player who picks "Always <dominant>" now earns NEUTRAL credit
-# via the 20-point rule rather than being marked wrong -- so the old labelling
-# trap is gone. The Generate page still excludes this band by default as a
-# clarity/difficulty choice. The exclusion is a HOLE at [FLOOR, CEILING) within
-# the window, NOT a ceiling cap. Tune alongside MAX_TOP_FREQUENCY.
+# Two optional "clarity" holes the Generate page can punch in the worthiness
+# window. "Always X" is now reserved for a LITERALLY pure (100%) action and
+# snap-to-pure rounding is gone, so every worthy spot (<=99%) is "Mostly X", and
+# a player who picks "Always X" earns NEUTRAL credit via the 20-point rule rather
+# than being marked wrong -- neither band is a "trap" any more, they are
+# pedagogical-clarity choices:
+#   * NEAR-PURE 95-99%: nearly pure, so the "Mostly X" answer reads like "Always
+#     X" and the distinction is hair-splitting. Excluded by DEFAULT so "Mostly X"
+#     questions land on genuinely mixed spots. (A literal 100% spot is NOT in
+#     this band, so genuine "Always" spots survive if the window reaches them.)
+#   * AMBIGUOUS 90-95%: clearly "Mostly X" but close to pure -- an OPTIONAL extra
+#     hole, OFF by default (check it to tighten the window to 65-90%).
+# Each is a HOLE at [FLOOR, CEILING) within the window, NOT a ceiling cap.
 AMBIGUOUS_BAND_FLOOR = 0.90
 AMBIGUOUS_BAND_CEILING = 0.95
+NEAR_PURE_BAND_FLOOR = 0.95
+NEAR_PURE_BAND_CEILING = 1.0
 
 # Difficulty-bounds + freq-axis constants. Kept here so the pre-facts
 # freq-only ESTIMATE in :class:`PreflopQuestionEvaluation` doesn't
@@ -105,8 +113,15 @@ def difficulty_score(spot: PreflopSpot) -> int:
 
 
 def in_ambiguous_band(frequency: float) -> bool:
-    """True if a dominant-action frequency sits in the 90-95% trap band."""
+    """True if a dominant-action frequency sits in the 90-95% band."""
     return AMBIGUOUS_BAND_FLOOR <= frequency < AMBIGUOUS_BAND_CEILING
+
+
+def in_near_pure_band(frequency: float) -> bool:
+    """True if a dominant-action frequency sits in the 95-99% near-pure band
+    (95% up to, but NOT including, a literal 100%, which stays a genuine
+    "Always X" spot)."""
+    return NEAR_PURE_BAND_FLOOR <= frequency < NEAR_PURE_BAND_CEILING
 
 
 def is_question_worthy(
@@ -116,17 +131,19 @@ def is_question_worthy(
     max_frequency: float = MAX_TOP_FREQUENCY,
     min_presence: float = MIN_PRESENCE,
     exclude_ambiguous_band: bool = False,
+    exclude_near_pure_band: bool = False,
 ) -> bool:
     """True if the spot passes the presence filter AND the frequency window.
 
-    The frequency window is inclusive at both ends. When
-    ``exclude_ambiguous_band`` is True, the 90-95% band is additionally
-    removed as a HOLE in the window (see :data:`AMBIGUOUS_BAND_FLOOR` /
-    :data:`AMBIGUOUS_BAND_CEILING`): a 90-95% spot reads as "mostly" but
-    sits just under the 0.95 "always" line, a labelling trap. Punching a
-    hole (rather than capping the ceiling at 90%) means a genuinely-pure
-    95-100% spot still qualifies when the window's max reaches it -- e.g. a
-    100% slider yields 55-90% PLUS 95-100%, skipping only the trap.
+    The frequency window is inclusive at both ends. Two optional HOLES can be
+    punched within it (each a [FLOOR, CEILING) band, NOT a ceiling cap, so a
+    genuinely-pure 100% spot still qualifies when the window reaches it):
+
+    * ``exclude_near_pure_band`` -- the 95-99% near-pure band. Excluded by
+      default on the Generate page: these read like "Always X" but are labelled
+      "Mostly X", so the distinction is hair-splitting.
+    * ``exclude_ambiguous_band`` -- the 90-95% band. An optional extra hole
+      (off by default).
 
     Override the thresholds via keyword args -- the admin panel's difficulty
     preset / custom slider passes through to ``min_frequency`` /
@@ -137,7 +154,11 @@ def is_question_worthy(
     frequency = top_action_frequency(spot)
     if not (min_frequency <= frequency <= max_frequency):
         return False
-    return not (exclude_ambiguous_band and in_ambiguous_band(frequency))
+    if exclude_ambiguous_band and in_ambiguous_band(frequency):
+        return False
+    if exclude_near_pure_band and in_near_pure_band(frequency):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -162,6 +183,7 @@ def evaluate_spot(
     max_frequency: float = MAX_TOP_FREQUENCY,
     min_presence: float = MIN_PRESENCE,
     exclude_ambiguous_band: bool = False,
+    exclude_near_pure_band: bool = False,
 ) -> PreflopQuestionEvaluation:
     """Run the filter + the difficulty rating, return the full verdict."""
     return PreflopQuestionEvaluation(
@@ -171,6 +193,7 @@ def evaluate_spot(
             max_frequency=max_frequency,
             min_presence=min_presence,
             exclude_ambiguous_band=exclude_ambiguous_band,
+            exclude_near_pure_band=exclude_near_pure_band,
         ),
         top_action_frequency=top_action_frequency(spot),
         total_presence=total_presence(spot),

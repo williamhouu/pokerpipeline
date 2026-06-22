@@ -1332,6 +1332,39 @@ def soft_validate_named_combo_in_range(
     return []
 
 
+# --- soft #5: equity-favorite fold (solve/pack-artifact catcher) -------------
+# A hand this far ahead of villain's range almost never folds to a single raise.
+# When the solver's dominant answer is FOLD anyway, the node's data is suspect
+# (e.g. the Monker 9-max nodes whose sub-AK continue-EVs collapse to ~0, folding
+# QQ/JJ as 60%-equity favorites). FLAG only -- heavy rake can genuinely tighten
+# these spots, so a human confirms it isn't bad data rather than the pipeline
+# dropping or "correcting" it.
+_FAVORITE_FOLD_EQUITY = 0.53
+
+
+def soft_validate_fold_as_equity_favorite(
+    generated: GeneratedExplanation,  # noqa: ARG001 -- facts-only check
+    facts: PreflopFacts,
+) -> list[str]:
+    """Flag a dominant-FOLD answer where hero is a clear equity favorite vs
+    villain's range (>= 53%). Catches solver/pack artifacts that fold hands which
+    are ahead; a real fold (KJo, small pairs) is an equity underdog and won't
+    fire. A multiway spot can occasionally false-flag (vs-villain equity ignores
+    the field), which is fine for a review flag."""
+    if (facts.spot.dominant_action or "").lower() != "fold":
+        return []
+    eq = facts.hero_equity_vs_villain
+    if eq is None or eq < _FAVORITE_FOLD_EQUITY:
+        return []
+    return [
+        f"the solver's answer is FOLD, but {facts.spot.hero_hand_class} is a "
+        f"{eq * 100:.0f}% equity favorite against villain's range -- folding a "
+        "hand that is ahead may be a solver/pack data artifact (collapsed EVs, "
+        "seen in the Monker 9-max pack). Confirm the data before shipping; heavy "
+        "rake can tighten these spots, so this is a flag, not an auto-reject."
+    ]
+
+
 def run_preflop_soft_validators(
     generated: GeneratedExplanation,
     facts: PreflopFacts,
@@ -1349,6 +1382,7 @@ def run_preflop_soft_validators(
         soft_validate_number_vs_data,
         soft_validate_verdict_vs_answer,
         soft_validate_named_combo_in_range,
+        soft_validate_fold_as_equity_favorite,
     ):
         warnings.extend(check(generated, facts))
     return warnings
@@ -1393,6 +1427,7 @@ __all__ = [
     "PreflopValidationResult",
     "run_preflop_audit_validators",
     "run_preflop_soft_validators",
+    "soft_validate_fold_as_equity_favorite",
     "soft_validate_named_combo_in_range",
     "soft_validate_number_vs_data",
     "soft_validate_position_words",

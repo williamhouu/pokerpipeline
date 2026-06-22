@@ -14,11 +14,13 @@ share one implementation.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
 _RANKS = "23456789TJQKA"
+_CARD_RE = re.compile(r"^[2-9TJQKA][cdhs]$")
 
 
 def combo_class(combo: str) -> str:
@@ -44,38 +46,90 @@ def node_kind(node_id: str) -> str:
     return "deeper"
 
 
-# The four first-line decision types, in the round-robin order a batch fills.
+# The four first-line FLOP decision types, in the round-robin order a batch
+# fills. Turn/river buckets ("turn:bets", "river:faces_bet", ...) are appended
+# after these in first-seen order.
 DECISION_KINDS: tuple[str, ...] = ("btn_cbet", "bb_faces_cbet", "btn_faces_donk", "bb_lead")
+
+
+def _max_street_raises(node_id: str) -> int:
+    """The most bet/raise tokens on any single street of the line.
+
+    Splits the node string at chance cards into per-street segments and counts
+    ``b`` tokens in each. 1 = a lone bet, 2 = bet + raise, >=3 = a re-raise war
+    (poor first question; this is where degenerate, never-reached lines live).
+    Street-aware so a normal "barrel every street" line (one bet per street)
+    isn't mistaken for a deep raise war."""
+    segments: list[list[str]] = [[]]
+    for token in node_id.split(":")[2:]:
+        if _CARD_RE.match(token):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return max((sum(t.startswith("b") for t in seg) for seg in segments), default=0)
+
+
+def _decision_family(spot: Any) -> str:
+    """Coarse decision family for turn/river bucketing: facing a bet, betting
+    out, or checking."""
+    if spot.node.is_facing_bet:
+        return "faces_bet"
+    if spot.dominant_verb in ("bet", "raise"):
+        return "bets"
+    return "checks"
+
+
+def _spot_bucket(spot: Any, *, max_depth: int) -> str | None:
+    """The diversity bucket for a spot, or ``None`` to drop it.
+
+    Flop keeps the original four-kind classification (and its depth cap), so the
+    flop path is unchanged. Turn/river bucket by ``"<street>:<family>"`` and use
+    a street-aware raise-war filter instead of the flop colon-depth cap (which
+    would drop every legitimately-deeper turn/river line)."""
+    nid = spot.node.node_id
+    if "b9697" in nid:  # all-in: a poor first question on any street
+        return None
+    if spot.node.street == "flop":
+        if (nid.count(":") - 1) > max_depth:
+            return None
+        kind = node_kind(nid)
+        return None if kind == "deeper" else kind
+    if _max_street_raises(nid) > 2:  # noqa: PLR2004 -- re-raise war
+        return None
+    return f"{spot.node.street}:{_decision_family(spot)}"
 
 
 def diversify_spots(
     worthy: Sequence[Any], *, per_class: int = 1, max_depth: int = 2
 ) -> list[Any]:
-    """Curate ``worthy`` for a varied fill-to-N batch.
+    """Curate ``worthy`` for a varied fill-to-N batch across streets.
 
-    Drops all-in / deep multi-raise lines (poor first questions), caps each
+    Drops all-in / re-raise-war lines (poor first questions), caps each
     ``(node, 169-class)`` to ``per_class`` combos (kills near-duplicate suits),
-    then round-robins across the four decision types. Pure + sorted.
-    """
+    then round-robins across decision buckets so the batch spreads over streets
+    AND decision types. Flop buckets fill first (in :data:`DECISION_KINDS`
+    order), then turn/river buckets in first-seen order. Pure + sorted, so the
+    output is byte-stable."""
     seen: dict[tuple[Any, ...], int] = defaultdict(int)
     buckets: dict[str, list[Any]] = defaultdict(list)
+    extra_order: list[str] = []  # non-flop buckets, in first-seen order
     for spot in sorted(worthy, key=lambda s: (s.node.node_id, s.hero_combo)):
-        nid = spot.node.node_id
-        if "b9697" in nid or (nid.count(":") - 1) > max_depth:
+        kind = _spot_bucket(spot, max_depth=max_depth)
+        if kind is None:
             continue
-        kind = node_kind(nid)
-        if kind == "deeper":
-            continue
-        key = (kind, nid, combo_class(spot.hero_combo))
+        key = (kind, spot.node.node_id, combo_class(spot.hero_combo))
         if seen[key] >= per_class:
             continue
         seen[key] += 1
+        if kind not in buckets and kind not in DECISION_KINDS:
+            extra_order.append(kind)
         buckets[kind].append(spot)
 
+    ordered_kinds = [k for k in DECISION_KINDS if k in buckets] + extra_order
     out: list[Any] = []
     i = 0
-    while any(i < len(buckets[k]) for k in DECISION_KINDS):
-        for k in DECISION_KINDS:
+    while any(i < len(buckets[k]) for k in ordered_kinds):
+        for k in ordered_kinds:
             if i < len(buckets[k]):
                 out.append(buckets[k][i])
         i += 1

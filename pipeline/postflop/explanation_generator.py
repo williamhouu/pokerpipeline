@@ -73,9 +73,12 @@ POSTFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
                    "against villain's worse continues.",
     "bluff_raise": "Raise as a bluff/semibluff. Frame around fold equity and "
                    "the hands you represent.",
-    "fold_to_pressure": "Fold to a bet you can't profitably continue against. "
-                        "Frame around being beaten by villain's betting range / "
-                        "the wrong price.",
+    "fold_to_pressure": "Fold to pressure you can't profitably continue against. "
+                        "Frame around being beaten by villain's betting/raising "
+                        "range. If hero's equity actually CLEARS the break-even "
+                        "price, do NOT claim the price is unmet -- the fold is "
+                        "because the range is too strong or the spot is close, so "
+                        "say that honestly rather than reversing the price.",
     "unclassified": "Explain the solver's chosen action plainly from the data.",
 }
 
@@ -128,6 +131,19 @@ def _humanize(token: str) -> str:
     return token.replace("_", " ")
 
 
+# Precise, unambiguous names for each draw type the hand classifier emits. The
+# composite hand_label flattens an open-ended draw to "...with straight draw",
+# which the LLM has mislabeled "open-ended" on a gutshot (and vice versa); the
+# DRAWS line in the data block surfaces the exact type so the prose can't guess.
+_DRAW_LABELS = {
+    "straight_draw_open_ended": "open-ended straight draw",
+    "gutshot": "gutshot (one card completes the straight)",
+    "flush_draw_nut": "nut flush draw",
+    "flush_draw_weak": "weak flush draw",
+    "combo_draw": "combo draw (flush draw plus straight draw)",
+}
+
+
 def build_solver_data_block(facts: PostflopFacts) -> str:
     """The structured fact block the LLM reads (the data, not the prose)."""
     f = facts
@@ -139,6 +155,11 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
         f"VILLAIN: {f.villain_position}",
         f"HERO HAND: {f.spot.hero_combo}  ({_humanize(f.hand_label)})",
         f"HAND STRENGTH BUCKET: {f.strength_bucket}",
+        *(
+            [f"DRAWS: {', '.join(_DRAW_LABELS.get(d, _humanize(d)) for d in f.draws)}"]
+            if f.draws
+            else []
+        ),
         f"BOARD TEXTURE: {f.board_texture.get('composite', '')} "
         f"({f.board_texture.get('suit_distribution', '')}, "
         f"{f.board_texture.get('connectedness', '')}, "

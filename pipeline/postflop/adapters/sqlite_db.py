@@ -23,10 +23,14 @@ call as ``CHECK``); we derive check-vs-call and bet-vs-raise from the betting
 **state** implied by the node string, never from the ``action`` column. Bet SIZES
 (the ``b<chips>`` token) are reliable.
 
-v1 builds **flop** decision nodes only (node strings with no chance-card token).
-Turn/river is a clean extension: the same walk generalises once a chance token
-resets the street's invested amounts. Geometry, ranges, the 0-255 scale, and the
-board mask were verified on this exact solve before wiring it in.
+Builds **flop, turn, and river** decision nodes. A chance-card token (``:2c``)
+ends a street: the walk deals the card onto the board, resets the this-street
+invested chips (the pot and the chips-behind carry over), and hands the action
+to OOP (who acts first on every postflop street). Hole-card combos that contain
+a dealt board card are removed from each side's reach. The ``streets`` arg to
+:meth:`SqliteDbAdapter.build` selects which streets to materialise, and
+``max_nodes_per_street`` deterministically down-samples the (very large) turn/
+river node sets to keep build time + memory bounded for a batch.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ import struct
 from dataclasses import dataclass
 
 from pipeline.postflop.solve import (
+    STREETS,
     NodeAction,
     PostflopNode,
     PostflopSolve,
@@ -74,6 +79,27 @@ def _node_tokens(node_id: str) -> list[str]:
 def _is_flop_node(node_id: str) -> bool:
     """True when no chance-card token appears (i.e. still on the flop street)."""
     return not any(_CARD_RE.match(t) for t in _node_tokens(node_id))
+
+
+def _node_street(node_id: str) -> str:
+    """The street a node lives on, from its count of chance-card tokens
+    (0 -> flop, 1 -> turn, 2+ -> river)."""
+    n_cards = sum(1 for t in _node_tokens(node_id) if _CARD_RE.match(t))
+    return STREETS[min(n_cards, 2)]
+
+
+def _stride_sample(items: list[str], k: int) -> list[str]:
+    """``k`` evenly-spaced items from a sorted list (deterministic, order-preserving).
+
+    Used to cap the turn/river node sets (thousands -> tens of thousands) to a
+    representative, byte-stable subset for a batch. Returns all items when
+    ``len(items) <= k``."""
+    if k <= 0:
+        return []
+    if len(items) <= k:
+        return list(items)
+    step = len(items) / k
+    return [items[int(i * step)] for i in range(k)]
 
 
 def _decode_freq(blob: bytes) -> list[int]:
@@ -124,12 +150,15 @@ class _Solve:
 # --- the betting walk -------------------------------------------------------
 @dataclass
 class _BettingState:
-    """The running game state as we walk a node string (flop-only for v1)."""
+    """The running game state as we walk a node string across streets."""
 
     pot_chips: float
-    invested: dict[str, float]  # this-street chips committed, by side
+    invested: dict[str, float]  # THIS-street chips committed, resets each street
+    behind: dict[str, float]  # chips remaining behind, carries across streets
     to_act: str  # side to act NEXT
     other: str
+    street_idx: int  # 0=flop, 1=turn, 2=river
+    board: list[str]  # community cards revealed so far (grows on chance tokens)
 
     def to_call(self) -> float:
         return max(self.invested.values()) - self.invested[self.to_act]
@@ -193,20 +222,32 @@ class SqliteDbAdapter:
             bb = 100.0
         return round(bb)
 
-    def build(self, *, streets: tuple[str, ...] = ("flop",)) -> PostflopSolve:
+    def build(
+        self,
+        *,
+        streets: tuple[str, ...] = ("flop",),
+        max_nodes_per_street: int | None = None,
+    ) -> PostflopSolve:
         con = sqlite3.connect(self.db_path)
         try:
             s = _Solve(con)
-            return self._build(s, streets=streets)
+            return self._build(
+                s, streets=streets, max_nodes_per_street=max_nodes_per_street
+            )
         finally:
             con.close()
 
-    def _build(self, s: _Solve, *, streets: tuple[str, ...]) -> PostflopSolve:
-        if streets != ("flop",):
-            raise NotImplementedError(
-                "v1 of the .db adapter builds flop nodes only; turn/river is the "
-                "documented next step (chance-token street reset)."
-            )
+    def _build(
+        self,
+        s: _Solve,
+        *,
+        streets: tuple[str, ...],
+        max_nodes_per_street: int | None,
+    ) -> PostflopSolve:
+        requested = tuple(streets)
+        bad = [st for st in requested if st not in STREETS]
+        if bad:
+            raise ValueError(f"unknown street(s) {bad}; expected a subset of {STREETS}")
         bb = self._bb_chips(s)
         flop = tuple(_split_cards(s.meta["flop"]))
         board_set = set(flop)
@@ -230,13 +271,25 @@ class SqliteDbAdapter:
             for side in (self.oop, self.ip)
         }
 
-        # All flop decision nodes (drop terminal/fold-leaf strings: a node we
-        # build must have >=1 action row).
+        # Decision nodes for the requested streets. The turn/river node sets are
+        # huge (thousands -> tens of thousands), so each street is deterministically
+        # down-sampled to ``max_nodes_per_street`` -- enough variety for a batch
+        # without building every node. (A node we build must have >=1 action row.)
         all_nodes = [r[0] for r in con_distinct_nodes(s.con)]
-        flop_nodes = sorted(n for n in all_nodes if _is_flop_node(n))
+        by_street: dict[str, list[str]] = {st: [] for st in STREETS}
+        for n in all_nodes:
+            st = _node_street(n)
+            if st in requested:
+                by_street[st].append(n)
+        selected: list[str] = []
+        for st in STREETS:  # deterministic street order
+            ranked = sorted(by_street[st])
+            if max_nodes_per_street is not None:
+                ranked = _stride_sample(ranked, max_nodes_per_street)
+            selected.extend(ranked)
 
         nodes: dict[str, PostflopNode] = {}
-        for node_id in flop_nodes:
+        for node_id in selected:
             node = self._build_node(
                 s, node_id, bb=bb, start_pot=start_pot, eff_flop=eff_flop,
                 base_reach=base_reach, flop=flop,
@@ -274,13 +327,14 @@ class SqliteDbAdapter:
 
         # 1. Walk the node string: betting state + reach products to this node.
         state, reach, history = self._walk(
-            s, node_id, bb=bb, start_pot=start_pot, base_reach=base_reach
+            s, node_id, bb=bb, start_pot=start_pot, eff_flop=eff_flop,
+            base_reach=base_reach, flop=flop,
         )
         actor, villain = state.to_act, state.other
         to_call_chips = state.to_call()
         pot_chips = state.pot_chips
         pot_before = pot_chips - to_call_chips  # pot before the bet hero faces
-        eff_remaining = eff_flop - max(state.invested.values())
+        eff_remaining = min(state.behind.values())  # shorter stack, across streets
 
         # 2. Build the display actions (labels/verbs derived from betting state).
         node_actions, token_map = self._node_actions(
@@ -341,12 +395,17 @@ class SqliteDbAdapter:
             s.idx_to_hand[i]: reach[villain][i]
             for i in range(s.n) if reach[villain][i] > _REACH_EPS
         }
+        # A node where the villain's range never arrives (deep, ~never-played
+        # reraise lines whose reach products underflow) has no opponent to
+        # measure equity against -- skip it rather than emit a 0%-equity spot.
+        if not villain_range:
+            return None
 
-        # decision street's board (flop-only for v1).
+        # decision street + the board revealed at it (3/4/5 cards).
         return PostflopNode(
             node_id=node_id,
-            street="flop",
-            board=flop,
+            street=STREETS[state.street_idx],
+            board=tuple(state.board),
             actor=actor,
             villain=villain,
             pot_bb=pot_chips / bb,
@@ -361,18 +420,37 @@ class SqliteDbAdapter:
         )
 
     # -- the walk: betting state + reach + history -----------------------
-    def _walk(self, s, node_id, *, bb, start_pot, base_reach):
+    def _walk(self, s, node_id, *, bb, start_pot, eff_flop, base_reach, flop):
         state = _BettingState(
             pot_chips=start_pot,
             invested={self.oop: 0.0, self.ip: 0.0},
+            behind={self.oop: eff_flop, self.ip: eff_flop},
             to_act=self.oop,
             other=self.ip,
+            street_idx=0,
+            board=list(flop),
         )
         reach = {self.oop: list(base_reach[self.oop]), self.ip: list(base_reach[self.ip])}
         history: list[PostflopStep] = []
 
         cur = "r:0"
         for token in _node_tokens(node_id):
+            # A chance-card token ends the street: deal the card, reset the
+            # this-street betting, hand action to OOP, and drop combos that
+            # contain the dealt card. The pot and chips-behind carry over.
+            if _CARD_RE.match(token):
+                state.board.append(token)
+                state.invested = {self.oop: 0.0, self.ip: 0.0}
+                state.to_act, state.other = self.oop, self.ip
+                state.street_idx += 1
+                for side in (self.oop, self.ip):
+                    side_reach = reach[side]
+                    for i in range(s.n):
+                        if side_reach[i] and token in _split_cards(s.idx_to_hand[i]):
+                            side_reach[i] = 0.0
+                cur = cur + ":" + token
+                continue
+
             parent_actions = s.actions(cur)
             acting = state.to_act
             db_name = _token_to_db_name(token, parent_actions)
@@ -386,30 +464,29 @@ class SqliteDbAdapter:
                 p = (pa.freq[i] / total) if total > 0 else 0.0
                 reach[acting][i] *= p
 
-            # history step + betting-state update.
+            # history step + betting-state update (street-labelled).
+            street_name = STREETS[state.street_idx]
             to_call_now = state.to_call()
             if token.startswith("b"):
                 size = float(token[1:])
-                if to_call_now > 0:  # raise TO size
-                    history.append(
-                        PostflopStep("flop", acting, "raise", to_bb=round(size / bb, 2))
-                    )
-                else:  # bet OF size
-                    history.append(
-                        PostflopStep("flop", acting, "bet", to_bb=round(size / bb, 2))
-                    )
+                verb = "raise" if to_call_now > 0 else "bet"  # raise TO / bet OF size
+                history.append(
+                    PostflopStep(street_name, acting, verb, to_bb=round(size / bb, 2))
+                )
                 added = size - state.invested[acting]
                 state.pot_chips += added
                 state.invested[acting] = size
+                state.behind[acting] -= added
             elif token == "c":
                 if to_call_now > 0:  # call
-                    history.append(PostflopStep("flop", acting, "call"))
+                    history.append(PostflopStep(street_name, acting, "call"))
                     state.pot_chips += to_call_now
                     state.invested[acting] += to_call_now
+                    state.behind[acting] -= to_call_now
                 else:  # check
-                    history.append(PostflopStep("flop", acting, "check"))
+                    history.append(PostflopStep(street_name, acting, "check"))
             elif token == "f":
-                history.append(PostflopStep("flop", acting, "fold"))
+                history.append(PostflopStep(street_name, acting, "fold"))
 
             state.to_act, state.other = state.other, state.to_act
             cur = cur + ":" + token
@@ -616,16 +693,36 @@ def discover_db_solves(directory: str) -> list[DbSolveSummary]:
     return [summarize_db(str(p)) for p in sorted(d.rglob("*.db"))]
 
 
-def load_postflop_db(db_path: str, **overrides: object) -> PostflopSolve:
-    """Build a flop-only :class:`PostflopSolve` from a vendor ``.db``.
+# Default per-street node cap for a batch load. Flop is tiny (~25 nodes, so the
+# cap is a no-op there); turn (~2k) and river (~130k) are down-sampled to this
+# many representative nodes. Plenty of variety for a batch; keeps build bounded.
+DEFAULT_MAX_NODES_PER_STREET = 600
+
+
+def load_postflop_db(
+    db_path: str,
+    *,
+    streets: tuple[str, ...] = ("flop",),
+    max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
+    **overrides: object,
+) -> PostflopSolve:
+    """Build a :class:`PostflopSolve` from a vendor ``.db``.
 
     The scenario (table size, positions, cash/tournament) is derived from the
     file's own metadata via :func:`derive_scenario`; ``**overrides`` win over
     the derived values (used for display-only fields the metadata doesn't carry,
     e.g. ``stakes`` / ``live_or_online`` / ``bb_in_dollars``).
+
+    ``streets`` selects which streets to materialise (default flop-only, for
+    backward compatibility). ``max_nodes_per_street`` caps each street's node
+    count -- the turn/river sets are huge, so they're deterministically
+    down-sampled; pass ``None`` to build every node (use only for flop/small
+    solves, or you may exhaust memory on a river-heavy solve).
     """
     derived = derive_scenario(read_db_metadata(db_path))
-    return SqliteDbAdapter(db_path, **{**derived, **overrides}).build()  # type: ignore[arg-type]
+    return SqliteDbAdapter(db_path, **{**derived, **overrides}).build(  # type: ignore[arg-type]
+        streets=streets, max_nodes_per_street=max_nodes_per_street
+    )
 
 
 __all__ = [

@@ -30,18 +30,21 @@ from pipeline.postflop.fixtures import btn_vs_bb_srp_2cJs7s  # noqa: E402
 from pipeline.postflop.spot_selection import diversify_spots  # noqa: E402
 
 
-def _load_solve(name: str):
+def _load_solve(name: str, *, streets: tuple[str, ...], max_nodes_per_street: int | None):
     """Resolve a solve by name or a vendor-file path.
 
-    ``fixture`` -> the synthetic in-memory solve. A path ending in ``.db`` ->
-    the third-party SQLite adapter (flop nodes, v1). A ``.cfr`` path is the
-    documented next step (the PioSolver UPI client)."""
+    ``fixture`` -> the synthetic in-memory solve (``streets`` is ignored; it is a
+    fixed flop solve). A path ending in ``.db`` -> the third-party SQLite adapter
+    (``streets`` selects flop/turn/river; ``max_nodes_per_street`` caps each). A
+    ``.cfr`` path is the documented next step (the PioSolver UPI client)."""
     if name in ("fixture", "btn_vs_bb_srp_2cJs7s"):
         return btn_vs_bb_srp_2cJs7s()
     if name.endswith(".db"):
         from pipeline.postflop.adapters.sqlite_db import load_postflop_db
 
-        return load_postflop_db(name)
+        return load_postflop_db(
+            name, streets=streets, max_nodes_per_street=max_nodes_per_street
+        )
     raise SystemExit(
         f"unknown solve {name!r}. Pass 'fixture' or a vendor '.db' path; a "
         "'.cfr' adapter (PioSolver UPI) is the documented next step."
@@ -56,9 +59,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="no API call; deterministic placeholder prose")
     parser.add_argument("--model", default=None, help="override the LLM model")
     parser.add_argument(
+        "--streets", nargs="+", choices=["flop", "turn", "river"], default=["flop"],
+        help="which streets to generate questions from (default: flop). '.db' "
+             "solves only; the fixture is flop-only.",
+    )
+    parser.add_argument(
+        "--max-nodes-per-street", type=int, default=600,
+        help="cap on nodes built per street (turn/river sets are huge; "
+             "deterministically down-sampled). 0 = no cap.",
+    )
+    parser.add_argument(
         "--diversify", action="store_true",
-        help="round-robin the worthy spots across the four flop decision types "
-             "so a fill-to-N batch is not dominated by one archetype "
+        help="round-robin the worthy spots across streets and decision types so "
+             "a fill-to-N batch is not dominated by one archetype/street "
              "(recommended for real solves)",
     )
     parser.add_argument(
@@ -68,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    solve = _load_solve(args.solve)
+    cap = args.max_nodes_per_street if args.max_nodes_per_street > 0 else None
+    solve = _load_solve(args.solve, streets=tuple(args.streets), max_nodes_per_street=cap)
     client = None
     if not args.dry_run:
         if not os.environ.get("ANTHROPIC_API_KEY"):

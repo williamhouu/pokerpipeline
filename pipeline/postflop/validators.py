@@ -31,6 +31,20 @@ _CARD_EMOJI = re.compile(r"([AKQJT2-9])([♠♥♦♣❤])")
 _SUIT_LETTER = {"♠": "s", "♥": "h", "❤": "h", "♦": "d", "♣": "c"}
 _BANNED_PUNCT = tuple(re.compile(p) for p in (r"—", r";", r"–"))
 
+# The four valid suit glyphs (with/without the heavy-heart variant). A rank
+# followed by ANY OTHER symbol/emoji glyph is a garble (e.g. "9" + Taurus
+# instead of "9" + spade) -- the bug validate_card_suit_consistency misses,
+# because its regex only matches a *valid* suit. We scan the symbol ranges that
+# cover the likely garbles (Misc Symbols / Dingbats and the emoji planes); all
+# four real suits live in that first range and are whitelisted, so they pass.
+_VALID_SUIT_GLYPHS = frozenset("♠♥♦♣❤")
+_RANK_CHARS = frozenset("AKQJT98765432")
+
+
+def _is_symbol_glyph(ch: str) -> bool:
+    o = ord(ch)
+    return 0x2600 <= o <= 0x27BF or 0x1F000 <= o <= 0x1FAFF
+
 
 @dataclass(frozen=True)
 class PostflopValidationResult:
@@ -123,6 +137,38 @@ def validate_card_suit_consistency(
     return PostflopValidationResult.ok()
 
 
+def validate_no_garbled_card_glyphs(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,  # noqa: ARG001
+) -> PostflopValidationResult:
+    """Reject a rank glyph followed by a NON-suit symbol/emoji ("9" + Taurus).
+
+    The LLM occasionally garbles a card's suit emoji into an unrelated symbol;
+    :func:`validate_card_suit_consistency` can't catch it (its card regex only
+    matches the four valid suits, so a garbled glyph is invisible to it). This
+    is the dedicated backstop -- more cards are named on the turn/river, so the
+    garble surface grows. A rank directly followed by ♠/♥/♦/♣ (a real card) is
+    fine; a rank directly followed by any other symbol glyph is the garble."""
+    text = generated.answer_explanation or ""
+    bad: list[str] = []
+    for i in range(len(text) - 1):
+        nxt = text[i + 1]
+        if (
+            text[i] in _RANK_CHARS
+            and nxt not in _VALID_SUIT_GLYPHS
+            and _is_symbol_glyph(nxt)
+        ):
+            bad.append(text[i] + nxt)
+    if bad:
+        return PostflopValidationResult.fail(
+            "the explanation has garbled card glyph(s) (a rank followed by a "
+            "non-suit symbol): " + ", ".join(sorted(set(bad)))
+            + ". A card's suit must be one of ♠️ ♥️ ♦️ ♣️ right after the rank "
+            "(e.g. 9♠️), never another emoji or symbol."
+        )
+    return PostflopValidationResult.ok()
+
+
 def run_postflop_audit_validators(
     generated: GeneratedExplanation,
     facts: PostflopFacts,
@@ -132,6 +178,7 @@ def run_postflop_audit_validators(
         validate_correct_answer,
         validate_banned_phrases,
         validate_card_suit_consistency,
+        validate_no_garbled_card_glyphs,
     ):
         result = check(generated, facts)
         if not result.is_valid:
@@ -154,6 +201,46 @@ _BUCKET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 _PCT_FIGURE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 _EQUITY_CUES = ("equity", "favorite", "favourite")
 _NUMBER_TOLERANCE_PCT = 10.0
+# A percentage immediately followed by one of these is a BET SIZE ("a 33% bet",
+# "67% pot", "a small 33% size"), not an equity claim. Postflop prose constantly
+# puts bet sizes next to the word "equity", so without this the equity check
+# flags the size itself (observed on the factor-list prompt).
+_SIZE_WORD_AFTER = re.compile(
+    r"^[\s-]*(?:size|sizing|sized|pot|bet|stab|c-?bet|donk|barrel|overbet)\b", re.I
+)
+# Sizing context just BEFORE a percentage also marks it a bet size, e.g.
+# "sizing up to 50% or 67%" (the figure follows "siz..." or another "NN% or").
+_SIZE_CONTEXT_BEFORE = re.compile(r"siz|over-?bet|\d\s*%\s*(?:or|and|/|,)", re.I)
+# A percentage that is a DERIVED GAP, not an equity claim: "the missing 2%",
+# "2% short", "2% shy of the price". These are correct (equity-minus-break-even)
+# and must not be read as an invented equity figure.
+_GAP_WORDS = ("missing", "short", "shy")
+# A percentage that is an ACTION FREQUENCY, not equity: "folds 66% of the time",
+# "mix at 66% check", "66% of the time", "66% check". Postflop prose cites the
+# solver's frequencies constantly, often a sentence away from the word "equity".
+_FREQ_AFTER = re.compile(r"^[\s,.-]*(?:of the time|check|bet|call|fold|rais|mix)", re.I)
+_FREQ_BEFORE = re.compile(
+    r"(?:of the time|mix\w*|fold\w*|call\w*|check\w*|rais\w*|bet\w*)\s*$", re.I
+)
+_SENTENCE_BOUNDS = (".", "!", "?", "\n")
+
+
+def _sentence_bounded(text: str, start: int, end: int) -> str:
+    """The text around ``text[start:end]``, clipped so it does not cross a
+    sentence boundary on either side. Keeps a bet size in one sentence from
+    borrowing an "equity" cue out of the neighbouring sentence."""
+    pre = text[max(0, start - 60):start]
+    for sep in _SENTENCE_BOUNDS:
+        idx = pre.rfind(sep)
+        if idx != -1:
+            pre = pre[idx + 1:]
+    post = text[end:end + 40]
+    cut = len(post)
+    for sep in _SENTENCE_BOUNDS:
+        idx = post.find(sep)
+        if idx != -1:
+            cut = min(cut, idx)
+    return pre + text[start:end] + post[:cut]
 
 
 def soft_validate_verdict_vs_answer(
@@ -207,7 +294,18 @@ def soft_validate_equity_vs_data(
         value = float(m.group(1))
         if value <= 0 or value >= 100:
             continue
-        window = text[max(0, m.start() - 55): m.end() + 30].lower()
+        if _SIZE_WORD_AFTER.match(text[m.end():m.end() + 16]):
+            continue  # a bet size ("33% bet" / "67% pot"), not an equity claim
+        if _SIZE_CONTEXT_BEFORE.search(text[max(0, m.start() - 30):m.start()]):
+            continue  # a bet size ("sizing up to 50% or 67%"), not equity
+        gap_ctx = text[max(0, m.start() - 14):m.end() + 10].lower()
+        if any(w in gap_ctx for w in _GAP_WORDS):
+            continue  # a derived gap ("the missing 2%", "2% short"), not equity
+        if _FREQ_AFTER.match(text[m.end():m.end() + 14]) or _FREQ_BEFORE.search(
+            text[max(0, m.start() - 14):m.start()]
+        ):
+            continue  # an action frequency ("66% of the time", "mix at 66%"), not equity
+        window = _sentence_bounded(text, m.start(), m.end()).lower()
         if not any(cue in window for cue in _EQUITY_CUES):
             continue
         if "range" in window and "your range" in window:
@@ -245,4 +343,5 @@ __all__ = [
     "validate_banned_phrases",
     "validate_card_suit_consistency",
     "validate_correct_answer",
+    "validate_no_garbled_card_glyphs",
 ]

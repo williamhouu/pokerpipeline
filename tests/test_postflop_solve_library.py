@@ -119,12 +119,15 @@ def test_discover_db_solves_scans_recursively(tmp_path: Path) -> None:
 class _Node:
     node_id: str
     actor: str
+    street: str = "flop"
+    is_facing_bet: bool = False
 
 
 @dataclass
 class _Spot:
     node: _Node
     hero_combo: str
+    dominant_verb: str = "check"
 
 
 def test_node_kind_and_combo_class() -> None:
@@ -160,3 +163,28 @@ def test_diversify_round_robins_decision_types() -> None:
     assert len(out) == 3
     # First out is the highest-priority kind present (btn_cbet).
     assert out[0].node.node_id == "r:0:c"
+
+
+def test_diversify_keeps_turn_river_and_drops_raise_wars() -> None:
+    spots = [
+        # a flop c-bet (kept), a turn bet, a turn facing-bet, a river bet.
+        _Spot(_Node("r:0:c", "BTN", street="flop"), "AsKs", dominant_verb="bet"),
+        _Spot(_Node("r:0:c:c:2c", "BB", street="turn"), "7h7d", dominant_verb="bet"),
+        _Spot(_Node("r:0:c:c:2c:b216", "BTN", street="turn", is_facing_bet=True),
+              "QsJs", dominant_verb="call"),
+        _Spot(_Node("r:0:c:c:2c:c:c:7h", "BB", street="river"), "8h8d",
+              dominant_verb="bet"),
+        # a re-raise war on the turn -> dropped (3 bets on one street).
+        _Spot(_Node("r:0:c:c:2c:b216:b440:b900", "BB", street="turn",
+                    is_facing_bet=True), "AcAd", dominant_verb="call"),
+        # an all-in line -> dropped.
+        _Spot(_Node("r:0:c:b9697", "BB", street="flop", is_facing_bet=True),
+              "KsKd", dominant_verb="call"),
+    ]
+    out = diversify_spots(spots)
+    ids = {s.node.node_id for s in out}
+    assert "r:0:c:c:2c:b216:b440:b900" not in ids  # raise war dropped
+    assert "r:0:c:b9697" not in ids  # all-in dropped
+    # the flop + the three turn/river spots survive, spread across streets.
+    assert {s.node.street for s in out} == {"flop", "turn", "river"}
+    assert len(out) == 4

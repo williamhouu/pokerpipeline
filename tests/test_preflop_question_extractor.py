@@ -16,10 +16,13 @@ from pipeline.preflop.question_extractor import (  # noqa: E402
     MAX_TOP_FREQUENCY,
     MIN_PRESENCE,
     MIN_TOP_FREQUENCY,
+    NEAR_PURE_BAND_CEILING,
+    NEAR_PURE_BAND_FLOOR,
     PreflopQuestionEvaluation,
     difficulty_score,
     evaluate_spot,
     in_ambiguous_band,
+    in_near_pure_band,
     is_question_worthy,
     top_action_frequency,
     total_presence,
@@ -248,6 +251,31 @@ def test_band_exclusion_is_a_hole_keeps_pure_spots():
     band = _spot({"Raise": 0.92, "Fold": 0.08})
     assert is_question_worthy(pure, max_frequency=1.0, exclude_ambiguous_band=True) is True
     assert is_question_worthy(band, max_frequency=1.0, exclude_ambiguous_band=True) is False
+
+
+def test_in_near_pure_band_boundaries():
+    assert not in_near_pure_band(NEAR_PURE_BAND_FLOOR - 0.001)  # 94.9% is not near-pure
+    assert in_near_pure_band(NEAR_PURE_BAND_FLOOR)  # 95%
+    assert in_near_pure_band(0.99)
+    assert not in_near_pure_band(NEAR_PURE_BAND_CEILING)  # a literal 100% is genuine "Always"
+
+
+def test_excluding_near_pure_band_drops_97pct_keeps_92pct_and_pure():
+    """The near-pure exclusion drops 95-99% but keeps a 92% spot and a literal
+    100% spot (the genuine 'Always X')."""
+    near_pure = _spot({"Raise": 0.97, "Fold": 0.03})
+    mixed = _spot({"Raise": 0.92, "Fold": 0.08})
+    pure = _spot({"Raise": 1.0, "Fold": 0.0})
+    assert is_question_worthy(near_pure, max_frequency=1.0) is True  # off by default
+    assert is_question_worthy(
+        near_pure, max_frequency=1.0, exclude_near_pure_band=True
+    ) is False
+    assert is_question_worthy(
+        mixed, max_frequency=1.0, exclude_near_pure_band=True
+    ) is True
+    assert is_question_worthy(
+        pure, max_frequency=1.0, exclude_near_pure_band=True
+    ) is True  # genuine 100% survives
 
 
 # --- constants sanity ------------------------------------------------------

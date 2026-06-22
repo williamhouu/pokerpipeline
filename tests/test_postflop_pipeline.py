@@ -55,6 +55,7 @@ from pipeline.postflop.spot_sampler import (  # noqa: E402
 )
 from pipeline.postflop.validators import (  # noqa: E402
     run_postflop_audit_validators,
+    validate_no_garbled_card_glyphs,
     run_postflop_soft_validators,
     soft_validate_equity_vs_data,
     soft_validate_verdict_vs_answer,
@@ -199,6 +200,70 @@ def test_tags_fire_for_value_bet() -> None:
     assert "value_bet_spot" in tags and "c_bet_spot" in tags and "single_raised_pot" in tags
 
 
+def test_adapter_node_street_and_sampling() -> None:
+    from pipeline.postflop.adapters.sqlite_db import _node_street, _stride_sample
+
+    assert _node_street("r:0:c") == "flop"  # no chance card
+    assert _node_street("r:0:c:c:2c:c") == "turn"  # one chance card
+    assert _node_street("r:0:c:c:2c:c:c:7h:c") == "river"  # two chance cards
+    # stride sample: deterministic, evenly spaced, all when k >= len.
+    items = [f"{i:03d}" for i in range(100)]
+    s = _stride_sample(items, 10)
+    assert len(s) == 10 and s[0] == "000" and s == sorted(s)
+    assert _stride_sample(items, 500) == items
+    assert _stride_sample(items, 0) == []
+
+
+def test_prior_street_context() -> None:
+    from pipeline.postflop.facts import _prior_street_context
+    from pipeline.postflop.solve import PostflopStep
+
+    # flop has no prior street.
+    assert _prior_street_context((), "BTN", "flop") == (False, False)
+    # turn after hero bet the flop -> (hero_bet_prev=True, checked_through=False).
+    hist = (PostflopStep("flop", "BTN", "bet", to_bb=2.0),
+            PostflopStep("flop", "BB", "call"))
+    assert _prior_street_context(hist, "BTN", "turn") == (True, False)
+    # turn after the flop checked through -> (False, True).
+    checked = (PostflopStep("flop", "BB", "check"), PostflopStep("flop", "BTN", "check"))
+    assert _prior_street_context(checked, "BTN", "turn") == (False, True)
+
+
+def test_archetype_no_protection_on_river() -> None:
+    # A medium hand betting a wet flop is protection; the SAME bet on the river
+    # (no cards to come) is thin value, never protection.
+    flop = _tag_input(strength_bucket="medium", composite="wet", street="flop")
+    river = _tag_input(strength_bucket="medium", composite="wet", street="river")
+    assert classify_postflop_archetype(flop) == "protection_bet"
+    assert classify_postflop_archetype(river) == "value_bet"
+    assert "protection_bet_spot" in compute_postflop_tags(flop)
+    assert "protection_bet_spot" not in compute_postflop_tags(river)
+
+
+def test_street_action_context_tags() -> None:
+    # turn barrel: aggressor bet the flop, bets the turn again.
+    barrel = _tag_input(street="turn", hero_is_preflop_aggressor=True,
+                        hero_bet_prev_street=True)
+    assert "turn_barrel" in compute_postflop_tags(barrel)
+    assert "delayed_cbet" not in compute_postflop_tags(barrel)
+    # delayed c-bet: aggressor checked the flop (checked through), bets the turn.
+    delayed = _tag_input(street="turn", hero_is_preflop_aggressor=True,
+                         hero_bet_prev_street=False, prev_street_checked_through=True)
+    assert "delayed_cbet" in compute_postflop_tags(delayed)
+    assert "turn_barrel" not in compute_postflop_tags(delayed)
+    # probe: OOP non-aggressor leads after the aggressor declined the prior street.
+    probe = _tag_input(street="turn", hero_is_preflop_aggressor=False,
+                       hero_in_position=False, prev_street_checked_through=True)
+    assert "probe_bet" in compute_postflop_tags(probe)
+    # river bet tag + no flop-only c-bet/donk on later streets.
+    river = _tag_input(street="river", hero_is_preflop_aggressor=True)
+    assert "river_bet" in compute_postflop_tags(river)
+    assert "c_bet_spot" not in compute_postflop_tags(river)
+    assert "donk_bet_spot" not in compute_postflop_tags(
+        _tag_input(street="turn", hero_is_preflop_aggressor=False, hero_in_position=False)
+    )
+
+
 # --- options ----------------------------------------------------------------
 def test_options_multi_action_plain_labels() -> None:
     opts, correct = build_options(_spot("flop_ip_cbet", "AcJc"))
@@ -319,6 +384,19 @@ def test_card_suit_rejects_invented_card() -> None:
     assert not res.is_valid and "Kh" in res.error_message
 
 
+def test_garbled_card_glyph_rejected() -> None:
+    # A rank followed by a non-suit symbol (Taurus instead of a spade) is a
+    # garble the suit-consistency check can't see (its regex needs a valid suit).
+    facts = _facts_for()
+    assert not validate_no_garbled_card_glyphs(_gen("The 9♉ is scary."), facts).is_valid
+    assert not validate_no_garbled_card_glyphs(_gen("You hold T\U0001f535 here."), facts).is_valid
+    # Real suit glyphs (with and without the variation selector) pass.
+    assert validate_no_garbled_card_glyphs(_gen("The 9♠️ and K❤️."), facts).is_valid
+    assert validate_no_garbled_card_glyphs(_gen("Bet 33% with top pair."), facts).is_valid
+    # It is wired into the hard validator stack.
+    assert not run_postflop_audit_validators(_gen("A 9♉ board."), facts).is_valid
+
+
 def test_soft_verdict_flags_wrong_action() -> None:
     # Answer is "Bet 75%" (aggressive) but the verdict opens with "check".
     g = _gen("You should just check and give up.")
@@ -350,6 +428,46 @@ def test_soft_equity_accepts_break_even_price() -> None:
         f"You only need {be}% equity to continue and you have around {eq}%, so call."
     )
     assert soft_validate_equity_vs_data(g, facts) == []
+
+
+def test_soft_equity_ignores_bet_size_percentages() -> None:
+    # A bet-size % ("a 33% bet") sitting next to the word "equity" must NOT be
+    # read as an invented equity number (June 2026: this FP fired on the
+    # factor-list postflop prompt, where prose routinely puts bet sizes beside
+    # "equity"). Only a real equity figure that matches nothing should flag.
+    facts = _facts_for("flop_ip_cbet", "AcJc")  # high equity, no break-even
+    eq = round(facts.hero_equity_vs_villain * 100)
+    g = _gen(
+        f"A small 33% bet protects your equity here. You hold about {eq}% "
+        "against the range, so betting denies the overcards a free card."
+    )
+    assert soft_validate_equity_vs_data(g, facts) == []
+
+
+def test_soft_equity_ignores_sizing_list_percentages() -> None:
+    # "Sizing up to 50% or 67%" near the word "equity" is a list of bet sizes,
+    # not an equity claim (the size context sits BEFORE the figure).
+    facts = _facts_for("flop_ip_cbet", "AcJc")
+    g = _gen("Sizing up to 50% or 67% just gets raised off your equity here.")
+    assert soft_validate_equity_vs_data(g, facts) == []
+
+
+def test_soft_equity_ignores_derived_gap() -> None:
+    # "the missing 2%" is the gap between equity and the break-even price (a
+    # correct derived number), not an invented equity figure.
+    facts = _facts_for("flop_ip_facing_bet", "Ah5h")
+    g = _gen("Position helps, but it does not manufacture the missing 2% of equity.")
+    assert soft_validate_equity_vs_data(g, facts) == []
+
+
+def test_soft_equity_ignores_action_frequencies() -> None:
+    # Solver frequencies ("folding 66% of the time", "mix at 66% check") near the
+    # word "equity" are not equity figures.
+    facts = _facts_for("flop_ip_cbet", "AcJc")
+    g1 = _gen("The draw has real equity, but folding 66% of the time is the baseline.")
+    g2 = _gen("Your hand has equity; the solver does mix at 66% check here.")
+    assert soft_validate_equity_vs_data(g1, facts) == []
+    assert soft_validate_equity_vs_data(g2, facts) == []
 
 
 def test_placeholder_passes_hard_validators() -> None:

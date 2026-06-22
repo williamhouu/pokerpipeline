@@ -47,6 +47,29 @@ DEFAULT_EQUITY_RUNOUTS = 200
 # "who is the preflop aggressor").
 _RAISE_VERBS = frozenset({"open", "raise", "3-bet", "4-bet", "5-bet"})
 
+# The street immediately before each decision street (flop has none).
+_PREV_STREET = {"turn": "flop", "river": "turn"}
+
+
+def _prior_street_context(
+    history: tuple, hero: str, street: str
+) -> tuple[bool, bool]:
+    """(hero_bet_prev_street, prev_street_checked_through) from the node history.
+
+    Drives the street-aware action-context tags: whether hero put in a bet/raise
+    on the immediately preceding street (a turn barrel continues flop aggression)
+    and whether that street had NO bet at all (a delayed c-bet / probe follows a
+    checked-through street). Flop decisions have no prior street -> (False, False).
+    """
+    prev = _PREV_STREET.get(street)
+    if prev is None:
+        return False, False
+    prev_bets = [
+        s for s in history if s.street == prev and s.verb in ("bet", "raise")
+    ]
+    hero_bet_prev = any(s.position == hero for s in prev_bets)
+    return hero_bet_prev, not prev_bets
+
 
 @dataclass(frozen=True)
 class PostflopFacts:
@@ -175,6 +198,9 @@ def extract_facts(
     n_raises = preflop_raise_count(solve)
 
     # --- archetype + concept tags ---
+    hero_bet_prev, prev_checked_through = _prior_street_context(
+        node.history, node.actor, node.street
+    )
     tag_input = PostflopTagInput(
         street=node.street,
         preflop_raise_count=n_raises,
@@ -192,6 +218,8 @@ def extract_facts(
         composite=texture["composite"],
         hero_equity=hero_equity,
         break_even_equity=break_even,
+        hero_bet_prev_street=hero_bet_prev,
+        prev_street_checked_through=prev_checked_through,
     )
     archetype = classify_postflop_archetype(tag_input)
     concept_tags = compute_postflop_tags(tag_input)

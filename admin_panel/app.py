@@ -937,13 +937,25 @@ def _render_generate_page_postflop() -> None:
             key="postflop_heroes",
             help="Generate spots where this player is to act. Both = a mix.",
         )
+    streets = st.multiselect(
+        "Streets to ask about",
+        options=["flop", "turn", "river"],
+        default=["flop", "turn", "river"],
+        key="postflop_streets",
+        help=(
+            "Which streets to generate questions from. The solve covers the whole "
+            "tree off its one flop, so turn/river questions branch from that flop. "
+            "Turn/river have huge node counts — they're down-sampled (see advanced)."
+        ),
+    )
     diversify = st.toggle(
         "Vary the decision types (recommended)",
         value=True,
         key="postflop_diversify",
         help=(
-            "Round-robin across c-bet / facing-c-bet / facing-donk / lead spots "
-            "so a fill-to-N batch isn't dominated by one type."
+            "Round-robin across streets and decision types (c-bet / barrel / "
+            "probe / facing-bet / check / river bet) so a fill-to-N batch isn't "
+            "dominated by one street or type."
         ),
     )
     style_label = st.radio(
@@ -984,6 +996,19 @@ def _render_generate_page_postflop() -> None:
             )
             if use_ev_gap
             else None
+        )
+        max_nodes = st.number_input(
+            "Max nodes per street (turn/river down-sampling)",
+            min_value=50,
+            max_value=20000,
+            value=600,
+            step=50,
+            key="postflop_maxnodes",
+            help=(
+                "Turn (~2k) and river (~130k) have far too many nodes to build "
+                "all of. Each street is down-sampled to this many representative "
+                "nodes — plenty for a batch. Flop (~25) is always built in full."
+            ),
         )
 
     with st.expander("Presentation — display amounts / stakes / venue"):
@@ -1054,9 +1079,10 @@ def _render_generate_page_postflop() -> None:
         )
 
     busy = jobs.has_active_job()
-    if not heroes:
+    if not heroes or not streets:
         st.button("GENERATE", disabled=True, type="primary", use_container_width=True)
-        st.caption("Pick at least one player under “Whose decisions to ask about”.")
+        missing = "player" if not heroes else "street"
+        st.caption(f"Pick at least one {missing} above.")
     elif st.button("GENERATE", disabled=busy, type="primary", use_container_width=True):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         POSTFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1072,6 +1098,8 @@ def _render_generate_page_postflop() -> None:
                 output_path=str(out_path),
                 total_questions=int(total),
                 heroes=tuple(heroes),
+                streets=tuple(streets),
+                max_nodes_per_street=int(max_nodes),
                 diversify=diversify,
                 answer_style=answer_style,
                 display_in_bb=display_in_bb,
@@ -1541,18 +1569,32 @@ def _render_generate_page_preflop() -> None:
             help="Below 65% = no clear best answer to teach; 100% = trivial.",
         )
         exclude_ambiguous_band = st.checkbox(
-            "Exclude ambiguous 90–95% band (recommended)",
-            value=True,
+            "Exclude ambiguous 90–95% band",
+            value=False,
             key="preflop_exclude_ambiguous_band",
             help=(
-                "Spots where the solver takes one action 90–95% of the time "
-                "read as \"mostly\" but sit just under the 95% \"always\" "
-                "line, so a player with the right read can still pick "
-                "\"always\" and be marked wrong. On by default: punches a "
-                "hole at 90–95% in the worthiness window. It does NOT cap the "
-                "ceiling, so genuinely pure spots at 95% and up still qualify "
-                "-- with the window at 99% you get 55–90% plus 95–99%. "
-                "Uncheck to let the 90–95% spots in too."
+                "An OPTIONAL extra hole below the near-pure band: also drop the "
+                "90–95% spots. These are clearly \"Mostly X\" but getting close to "
+                "pure. Off by default -- neutral credit covers an \"Always X\" pick "
+                "and 90–95% spots still teach a real \"mostly\" lesson. Check to "
+                "tighten the window to 65–90%."
+            ),
+        )
+        exclude_near_pure_band = st.checkbox(
+            "Exclude ambiguous 95–99% band (recommended)",
+            value=True,
+            key="preflop_exclude_near_pure_band",
+            help=(
+                "Spots where the solver takes one action 95–99% of the time are "
+                "nearly pure. The correct answer is \"Mostly X\" (\"Always X\" is "
+                "reserved for a literal 100%, since we no longer round), but at "
+                "this frequency it reads like \"Always X\", so the Mostly-vs-Always "
+                "distinction is hair-splitting. On by default: punches a hole at "
+                "95–99% so \"Mostly X\" questions land on genuinely mixed spots. A "
+                "literal 100% spot is NOT in the band, so a genuine \"Always X\" "
+                "spot still qualifies. (Neutral credit already gives an \"Always "
+                "X\" pick partial credit, so these aren't unfair -- just fuzzy.) "
+                "Uncheck to let near-pure spots in."
             ),
         )
         min_ev_gap = st.slider(
@@ -1568,34 +1610,53 @@ def _render_generate_page_preflop() -> None:
             ),
         )
         # Premise-realism gates (June 2026 audit). Both default ON.
+        st.markdown("**Realism gates** — drop questions whose SETUP almost never happens")
+        st.caption(
+            "Each value is a **minimum frequency, in % of hands** — a spot is "
+            "skipped when its setup falls below it. **Higher = stricter** (only "
+            "common, natural spots get through); **lower = looser**; **0 = off** "
+            "(allow even near-impossible setups). They run before any LLM spend; "
+            "skipped spots are counted as “premise-realism gate” in the result "
+            "summary. Defaults (0.25 / 30) are tuned — leave them unless you "
+            "specifically want more (lower) or fewer (higher) edge-case spots."
+        )
         min_villain_pct = st.number_input(
-            "Min villain line frequency (% of dealt hands) — 0 = off",
+            "Min villain line frequency  (the opponent's action you're facing)",
             min_value=0.0, max_value=10.0, value=0.25, step=0.05,
             key="preflop_min_villain_pct",
             help=(
-                "Skips spots where the opponent's whole line is something "
-                "the solver almost never does (e.g. a jam range that is "
-                "0.01% of hands). The question would be built on a ghost."
+                "How often the OPPONENT actually takes the action you're facing, "
+                "as a % of all dealt hands. At 0.25 it drops, say, a 'you face a "
+                "3-bet' question when the solver 3-bets under 0.25% of hands -- "
+                "you'd be quizzed on a line that basically never occurs (a "
+                "'ghost'). Raise it to demand commoner opponent actions; 0 lets "
+                "any line through. Open spots (no villain action yet) always pass."
             ),
         )
+        st.caption(
+            "↳ Is the **opponent's move you're facing** (a 3-bet, a jam, a limp) "
+            "common enough to be worth a question? Default **0.25%** of hands."
+        )
         min_premise_pct = st.number_input(
-            "Min hero premise frequency (%) — 0 = off",
+            "Min hero premise frequency  (a play YOU supposedly made earlier)",
             min_value=0.0, max_value=50.0, value=30.0, step=1.0,
             key="preflop_min_premise_pct",
             help=(
-                "Every question has a STORY -- the line that led to your "
-                "decision, including YOUR own earlier actions in the hand. This "
-                "gate looks at each of your prior actions and skips the spot if "
-                "the LOWEST-frequency one is something the solver does with this "
-                "hand less often than this. Example: a question that starts "
-                "'you call from UTG+2 with AKs' is a weak premise if the solver "
-                "3-bets AKs there 95% of the time and flat-calls only 5% -- at "
-                "30% that spot is skipped before any LLM spend. Higher = "
-                "stricter (only natural, common lines -- a hand the solver "
-                "flats <30% of the time, like QQ at ~16%, gets filtered); 0 = "
-                "off. Skipped spots show as 'premise-realism gate' in the "
-                "result summary."
+                "Looks at YOUR OWN earlier actions in the hand and skips the spot "
+                "if the rarest one is below this %. Example: 'you flat-call AKs "
+                "from UTG+2' is a weak premise if the solver 3-bets AKs there 95% "
+                "and flats only 5% -- at 30% that spot is skipped, because it "
+                "asks you to own a play a strong player almost never makes. "
+                "Higher = only natural lines (note: a hand the solver takes that "
+                "prior action <30% of the time gets filtered); 0 = off. Only "
+                "applies when you ACTED before this decision -- a clean first "
+                "decision (just deciding to open or call) always passes."
             ),
+        )
+        st.caption(
+            "↳ Is the **earlier action that put you here** one the solver actually "
+            "makes with this hand, so the backstory is believable? Default **30%**. "
+            "Only affects spots where you acted before the decision."
         )
     # The two always-on guards (unconverged-node + EV-coherence) are documented
     # in the "📖 How question generation works" reference at the top of the
@@ -1607,10 +1668,13 @@ def _render_generate_page_preflop() -> None:
     # a preset (the preset moves the difficulty band; worthiness + EV-gap are
     # separate gates, shown here so all three are always visible).
     _ev_txt = "off" if min_ev_gap == 0.0 else f"≥ {min_ev_gap:.2f} bb"
+    _excluded_bands = []
+    if exclude_near_pure_band and freq_high > 95:  # noqa: PLR2004
+        _excluded_bands.append("95–99%")
+    if exclude_ambiguous_band and freq_high > 90:  # noqa: PLR2004
+        _excluded_bands.append("90–95%")
     _band_note = (
-        "  ·  90–95% band excluded"
-        if exclude_ambiguous_band and freq_high > 90
-        else ""
+        "  ·  " + " + ".join(_excluded_bands) + " excluded" if _excluded_bands else ""
     )
     st.info(
         f"**Numbers in effect for this batch** — difficulty rating "
@@ -2012,6 +2076,7 @@ def _render_generate_page_preflop() -> None:
             freq_min=freq_low / 100.0,
             freq_max=freq_high / 100.0,
             exclude_ambiguous_band=exclude_ambiguous_band,
+            exclude_near_pure_band=exclude_near_pure_band,
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
@@ -2050,6 +2115,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     freq_min: float,
     freq_max: float,
     exclude_ambiguous_band: bool,
+    exclude_near_pure_band: bool,
     min_difficulty: int,
     max_difficulty: int,
     min_ev_gap_bb: float | None,
@@ -2131,6 +2197,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             min_frequency=freq_min,
             max_frequency=freq_max,
             exclude_ambiguous_band=exclude_ambiguous_band,
+            exclude_near_pure_band=exclude_near_pure_band,
             min_difficulty=min_difficulty,
             max_difficulty=max_difficulty,
             min_ev_gap_bb=min_ev_gap_bb,
@@ -4910,11 +4977,18 @@ def render_compare_page() -> None:
             help="Below 65% = no clear best answer; 100% = trivial.",
         )
         cmp_exclude_band = st.checkbox(
-            "Exclude ambiguous 90–95% band (recommended)",
-            value=True,
+            "Exclude ambiguous 90–95% band",
+            value=False,
             key="cmp_exclude_ambiguous_band",
-            help="Punches a hole at 90–95% (the 'mostly that reads as always' "
-            "trap). Does NOT cap the ceiling — pure 95%+ spots still qualify.",
+            help="Optional extra hole at 90–95% (off by default). With the "
+            "near-pure exclusion below, checking this tightens the window to 65–90%.",
+        )
+        cmp_exclude_near_pure_band = st.checkbox(
+            "Exclude ambiguous 95–99% band (recommended)",
+            value=True,
+            key="cmp_exclude_near_pure_band",
+            help="Punches a hole at 95–99% (nearly pure: the 'Mostly X' answer "
+            "reads as 'Always X'). On by default. A literal 100% spot still qualifies.",
         )
         cmp_min_ev_gap = st.slider(
             "Minimum EV gap (bb) — 0 = off",
@@ -5004,6 +5078,7 @@ def render_compare_page() -> None:
                 min_frequency=cmp_freq_low / 100.0,
                 max_frequency=cmp_freq_high / 100.0,
                 exclude_ambiguous_band=cmp_exclude_band,
+                exclude_near_pure_band=cmp_exclude_near_pure_band,
                 min_ev_gap_bb=(
                     None if cmp_min_ev_gap == 0.0 else float(cmp_min_ev_gap)
                 ),
@@ -5032,6 +5107,7 @@ def render_compare_page() -> None:
                 min_frequency=cmp_freq_low / 100.0,
                 max_frequency=cmp_freq_high / 100.0,
                 exclude_ambiguous_band=cmp_exclude_band,
+                exclude_near_pure_band=cmp_exclude_near_pure_band,
                 min_ev_gap_bb=(
                     None if cmp_min_ev_gap == 0.0 else float(cmp_min_ev_gap)
                 ),

@@ -33,6 +33,7 @@ from pipeline.preflop.validators import (  # noqa: E402
     run_preflop_audit_validators,
     run_preflop_soft_validators,
     soft_validate_named_combo_in_range,
+    soft_validate_fold_as_equity_favorite,
     soft_validate_number_vs_data,
     soft_validate_position_words,
     soft_validate_verdict_vs_answer,
@@ -814,6 +815,28 @@ def test_soft_number_passes_matching_break_even() -> None:
     facts = _facts(hero_equity_vs_villain=0.55, break_even_equity=0.30)
     generated = _gen(prose="You need roughly 30% to call and you beat that.")
     assert soft_validate_number_vs_data(generated, facts) == []
+
+
+def test_soft_flags_fold_when_equity_favorite() -> None:
+    """Dominant FOLD with hero a 60% favorite -> flag (the Monker QQ artifact)."""
+    facts = _facts(dominant_action="Fold", hero_equity_vs_villain=0.60)
+    warnings = soft_validate_fold_as_equity_favorite(_gen(prose="Fold."), facts)
+    assert len(warnings) == 1 and "FOLD" in warnings[0] and "60%" in warnings[0]
+
+
+def test_soft_fold_favorite_silent_on_legit_underdog_fold() -> None:
+    """A real fold (equity underdog, e.g. KJo at 40%) does NOT flag."""
+    facts = _facts(dominant_action="Fold", hero_equity_vs_villain=0.40)
+    assert soft_validate_fold_as_equity_favorite(_gen(prose="Fold."), facts) == []
+    # Nor a coinflip-ish small-pair fold just under the favorite threshold.
+    facts2 = _facts(dominant_action="Fold", hero_equity_vs_villain=0.48)
+    assert soft_validate_fold_as_equity_favorite(_gen(prose="Fold."), facts2) == []
+
+
+def test_soft_fold_favorite_silent_when_not_folding() -> None:
+    """A high-equity hand whose answer is Call/Raise is not flagged."""
+    facts = _facts(dominant_action="Call", hero_equity_vs_villain=0.70)
+    assert soft_validate_fold_as_equity_favorite(_gen(prose="Call."), facts) == []
 
 
 def test_soft_number_break_even_cue_wins_over_equity_word() -> None:
