@@ -276,6 +276,30 @@ _HARD_FLOOR: int = 400       # clamp; allows ~100 of "easier than easy" room
 _HARD_CEILING: int = 3200    # clamp; allows ~200 of "harder than hard" room
 
 
+# === trap-aware difficulty (opt-in) ==========================================
+# A "trap" spot is one where the solver's dominant action CONTRADICTS the
+# simple pot-odds (equity-vs-price) baseline a naive player reasons from:
+# folding a hand whose equity clears the price, or calling/raising a hand whose
+# equity is clearly below it. These are HARD FOR A HUMAN even when the solver
+# is pure (one clear-cut action, a big EV gap) -- so the frequency + EV axes,
+# which both score a pure spot "easy", measure exactly the wrong thing here.
+# When trap-aware difficulty is ON, such a spot's "easy" score is CAPPED so it
+# lands at least at TRAP_DIFFICULTY_FLOOR (solidly in the Hard band), regardless
+# of how pure / +EV the line is -- this is what lets a 100%-frequency
+# ("Always X") spot be rated Hard. Opt-in (a batch flag), so the DEFAULT rating
+# behaviour is unchanged. Only defined for spots facing a price to call; opening
+# spots (no price) are never traps.
+TRAP_DIFFICULTY_FLOOR: int = 2400
+# easy_blend cap that maps to TRAP_DIFFICULTY_FLOOR via the linear score map, so
+# the floored score still derives cleanly from easy_blend (no separate clamp).
+_TRAP_EASY_CAP: float = (_LINEAR_CEILING - TRAP_DIFFICULTY_FLOOR) / _LINEAR_SPAN
+# Noise guard: equity is Monte-Carlo sampled (~1-2% at 400 runouts), so only
+# call a spot a trap when equity is CLEARLY on the wrong side of the price by
+# this margin. A spot whose equity sits within the margin of the price is a
+# genuine close-call at the price, not a counterintuitive trap.
+_TRAP_EQUITY_MARGIN: float = 0.04
+
+
 # === result dataclass ========================================================
 @dataclass(frozen=True)
 class DifficultyResult:
@@ -300,6 +324,10 @@ class DifficultyResult:
         bumps_applied: Names of any BUMP_RULES that fired for this
             spot. Empty for now (BUMP_RULES is empty).
         ev_available: True iff ``ev_gap_bb`` was provided.
+        trap_bump_applied: True iff trap-aware difficulty was ON AND this
+            spot is a counterintuitive "trap" (so its score was floored to
+            at least :data:`TRAP_DIFFICULTY_FLOOR`). Always False when the
+            trap bump is off.
     """
 
     score: int
@@ -310,6 +338,7 @@ class DifficultyResult:
     easy_blend: float
     bumps_applied: tuple[str, ...] = field(default_factory=tuple)
     ev_available: bool = True
+    trap_bump_applied: bool = False
 
 
 # === main entry point ========================================================
@@ -317,6 +346,7 @@ def compute_difficulty(
     facts: PreflopFacts,
     *,
     ev_gap_bb: float | None = None,
+    apply_trap_bump: bool = False,
 ) -> DifficultyResult:
     """Compute the per-spot difficulty rating with full breakdown.
 
@@ -326,6 +356,12 @@ def compute_difficulty(
             when the EV engine couldn't compute it (raise-involved
             spots). The weight is redistributed across the other axes
             in that case rather than treating EV as neutral 0.5.
+        apply_trap_bump: Opt-in trap-aware difficulty. When True, a
+            counterintuitive "trap" spot (the solver's dominant action
+            contradicts the equity-vs-price baseline) is floored to at
+            least :data:`TRAP_DIFFICULTY_FLOOR`, so a pure / clear-cut
+            but deceptive spot rates Hard. Default False = unchanged
+            behaviour. See :func:`_is_counterintuitive_spot`.
 
     Returns:
         DifficultyResult: score in roughly [400, 3200] (most in
@@ -409,6 +445,16 @@ def compute_difficulty(
             easy_blend += rule.easy_delta
             bumps_applied.append(rule.name)
 
+    # --- trap-aware floor (opt-in) -------------------------------------------
+    # A counterintuitive spot is hard for a human even when the solver is pure,
+    # so cap its "easy" score (-> floor its difficulty). The freq/EV axes rated
+    # it easy precisely because the line is clear-cut -- the wrong signal for a
+    # trap. Spots already harder than the floor keep their (lower) easy_blend.
+    trap_bump_applied = False
+    if apply_trap_bump and _is_counterintuitive_spot(facts):
+        trap_bump_applied = True
+        easy_blend = min(easy_blend, _TRAP_EASY_CAP)
+
     # --- map to integer difficulty with soft bounds --------------------------
     raw_difficulty = _LINEAR_CEILING - easy_blend * _LINEAR_SPAN
     score = round(_clip(raw_difficulty, _HARD_FLOOR, _HARD_CEILING))
@@ -422,6 +468,7 @@ def compute_difficulty(
         easy_blend=easy_blend,
         bumps_applied=tuple(bumps_applied),
         ev_available=ev_available,
+        trap_bump_applied=trap_bump_applied,
     )
 
 
@@ -436,6 +483,53 @@ def _clip(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+def _is_counterintuitive_spot(facts: PreflopFacts) -> bool:
+    """True when the solver's dominant action contradicts the pot-odds
+    (equity-vs-price) baseline a naive player reasons from -- a "trap".
+
+    Defined ONLY for spots facing a price to call (``break_even_equity`` is
+    set); opening spots (no price) return False. Uses the field equity in a
+    multiway all-in (the equity hero must actually beat) and the heads-up
+    equity otherwise. Fires only when equity is on the wrong side of the price
+    by a clear margin (``_TRAP_EQUITY_MARGIN``), so a genuine close-call at the
+    price -- or a sampling wobble -- is NOT mistaken for a trap:
+
+      * equity clears the price but the solver FOLDS (looks like a call, isn't
+        -- domination / reverse implied odds / poor realisation), or
+      * equity is below the price but the solver CONTINUES (calls or raises --
+        an implied-odds call or a low-equity 3-bet bluff that looks like a fold).
+
+    Deliberately the SAME signal as
+    :func:`pipeline.preflop.validators.soft_validate_fold_as_equity_favorite`,
+    so any trap-FOLD this rates Hard is ALSO soft-flagged for human review -- a
+    guard against amplifying a broken solve (e.g. the Monker 9-max QQ-fold
+    artifact) into a "hard" question.
+
+    HEADS-UP ONLY. The equity-vs-price baseline is only well defined against ONE
+    opponent at ONE price. In a multiway pot ``hero_equity_vs_field`` (beat the
+    WHOLE field) compared to a single call price is mis-specified -- and for a
+    jam it is a category error (a raiser is not paying that price). Empirically
+    those multiway "traps" are dominated by degenerate deep-all-in nodes
+    (calling / jamming at ~13-26% field equity), not teachable spots, so we skip
+    them. (A measured 88% of raw trap hits were multiway and ~all degenerate;
+    every clean trap was heads-up.)
+    """
+    if facts.hero_equity_vs_field is not None:
+        return False  # multiway -> field-equity-vs-price is mis-specified; skip
+    price = facts.break_even_equity
+    if price is None:
+        return False
+    eq = facts.hero_equity_vs_villain
+    if eq is None:
+        return False
+    solver_continues = not facts.spot.dominant_action.startswith("Fold")
+    if solver_continues and eq <= price - _TRAP_EQUITY_MARGIN:
+        return True  # equity clearly below the price, yet the solver continues
+    if (not solver_continues) and eq >= price + _TRAP_EQUITY_MARGIN:
+        return True  # equity clearly clears the price, yet the solver folds
+    return False
+
+
 __all__ = [
     "ARCHETYPE_BASE_EASE",
     "BUMP_RULES",
@@ -443,6 +537,7 @@ __all__ = [
     "CONCEPT_TAG_MODIFIERS",
     "DifficultyResult",
     "HAND_CLASS_EASE",
+    "TRAP_DIFFICULTY_FLOOR",
     "W_CONCEPT",
     "W_EV",
     "W_FREQ",

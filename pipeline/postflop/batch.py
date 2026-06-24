@@ -90,6 +90,86 @@ def _collect_worthy(
     return worthy
 
 
+def _node_range_snapshots(node: Any) -> dict[str, dict[str, float]]:
+    """169-class range snapshot for BOTH players at ``node``, keyed by position.
+
+    Reuses the pure preflop-pack aggregator (combo-range + board -> mean weight
+    per UNBLOCKED class) so the Review page's postflop range grids read exactly
+    like the preflop range charts. Returns ``{position: {hand_class: weight}}``
+    with weights in [0, 1]. Deterministic from solver output (goes in meta.json,
+    never the CSV, so byte-identical-CSV determinism is unaffected).
+    """
+    # Pure leaf util (combo -> 169-class), reused like cards / fact_extractor;
+    # lazy-imported to keep the postflop core decoupled at module load.
+    from pipeline.preflop_ranges import (  # noqa: PLC0415
+        aggregate_combo_range_to_classes,
+    )
+
+    board = list(node.board)
+    return {
+        node.actor: aggregate_combo_range_to_classes(dict(node.hero_range), board),
+        node.villain: aggregate_combo_range_to_classes(dict(node.villain_range), board),
+    }
+
+
+def _node_actor_strategy(node: Any) -> dict[str, dict[str, float]]:
+    """The ACTOR's per-action 169-class strategy at ``node`` -- the data for an
+    ACTION-COLOURED grid (check / bet / call / raise per hand), like the preflop
+    range charts, instead of flat presence.
+
+    Returns ``{action_label: {hand_class: weight}}`` where each weight is the
+    reach-weighted ``P(action)`` for that class, so a class's per-action
+    segments sum to its presence (a hand that is 50% of the range and bets it
+    all shows one half-height bet band). Reuses the board-aware aggregator.
+    """
+    from pipeline.preflop_ranges import (  # noqa: PLC0415
+        aggregate_combo_range_to_classes,
+    )
+
+    board = list(node.board)
+    out: dict[str, dict[str, float]] = {}
+    for action in {a.label for a in node.actions}:
+        # weight of (combo plays action) = reach(combo) * P(action | combo).
+        per_combo = {
+            c: node.hero_range.get(c, 0.0) * node.strategy.get(c, {}).get(action, 0.0)
+            for c in node.hero_range
+        }
+        out[action] = aggregate_combo_range_to_classes(per_combo, board)
+    return out
+
+
+def _villain_decision_node(node: Any, solve: Any) -> Any:
+    """The most recent node where ``node.villain`` acted -- so we can show the
+    VILLAIN's own strategy (e.g. BB's check/donk) rather than flat presence.
+
+    The villain's decision is the longest node-id PREFIX of the current node
+    whose actor is the villain. Returns None when the villain has not acted on
+    this line yet (they are first to act on the current street), or when that
+    node was down-sampled out of the solve.
+    """
+    villain = node.villain
+    nid = node.node_id
+    best = None
+    for cid, cand in solve.nodes.items():
+        if cand.actor == villain and nid.startswith(cid + ":"):
+            if best is None or len(cid) > len(best.node_id):
+                best = cand
+    return best
+
+
+def _street_strategies(node: Any, solve: Any) -> dict[str, dict]:
+    """Both players' action strategies for the current street, keyed by
+    position: the ACTOR at this node, and the VILLAIN at the node where THEY
+    last acted (so BB's flop check/donk shows on BB's grid even when BTN is the
+    hero). Villain omitted when they have not acted on this street yet.
+    """
+    out: dict[str, dict] = {node.actor: _node_actor_strategy(node)}
+    vnode = _villain_decision_node(node, solve)
+    if vnode is not None:  # vnode.actor == node.villain
+        out[vnode.actor] = _node_actor_strategy(vnode)
+    return out
+
+
 def generate_postflop_batch(
     *,
     solve: PostflopSolve,
@@ -152,6 +232,27 @@ def generate_postflop_batch(
     attempted = 0
     soft_flagged = 0
     in_tokens = out_tokens = 0
+
+    # Visual range data for the Review page (preflop-parity). The FLOP ROOT --
+    # OOP to act, no postflop action yet -- holds each player's flop-ENTRY
+    # ("preflop") range; it's the same for the whole batch. Each question then
+    # carries its own CURRENT-street snapshot. Both are 169-class, keyed by
+    # position, so the Review page renders standard range grids per player.
+    _flop_root = next(
+        (n for n in solve.nodes.values() if n.street == "flop" and not n.history),
+        None,
+    )
+    preflop_ranges = (
+        _node_range_snapshots(_flop_root) if _flop_root is not None else {}
+    )
+    # How each player REACHED this flop, so the Review page can colour the
+    # preflop grid by entry action (makes "BB shows no raises" self-evident: it
+    # CALLED). Single-raised pot => the IP player opened (raise), OOP called.
+    # (A future 3-bet-pot solve would set these from its own line.)
+    preflop_entry_actions = {
+        solve.ip_position: "raise",
+        solve.oop_position: "call",
+    }
 
     def _record_usage(usage: object) -> None:
         nonlocal in_tokens, out_tokens
@@ -221,6 +322,15 @@ def generate_postflop_batch(
             "ev_gap_bb": facts.ev_gap_bb,
             "concept_tags": facts.concept_tags,
             "solver_data": build_solver_data_block(facts),
+            # Each player's range at THIS (current-street) node, 169-class,
+            # keyed by position -- paired with the batch-level preflop_ranges
+            # for the Review page's visual range grids.
+            "street_ranges": _node_range_snapshots(spot.node),
+            # BOTH players' per-action strategy for the current street (the actor
+            # at this node + the villain at the node where THEY acted), keyed by
+            # position -- the action-coloured grids. + who the hero/actor is.
+            "street_strategy": _street_strategies(spot.node, solve),
+            "street_actor": spot.node.actor,
         }
         if soft_warnings:
             record["validator_warnings"] = soft_warnings
@@ -235,6 +345,11 @@ def generate_postflop_batch(
         meta = {
             "solve_id": solve.solve_id,
             "source_reference": solve.source_reference,
+            # Flop-entry ("preflop") range per player (169-class), shared by
+            # every question -- the Review page pairs it with each question's
+            # street_ranges to show preflop + current-street grids per player.
+            "preflop_ranges": preflop_ranges,
+            "preflop_entry_actions": preflop_entry_actions,
             "model": model if not use_placeholder else "(dry-run placeholder)",
             "dry_run": use_placeholder,
             "run_settings": {

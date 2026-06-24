@@ -1229,6 +1229,73 @@ def test_batch_revise_pass_ships_revision_and_records_both(
     assert rev["gate_issues"]
 
 
+def test_batch_resolves_a_client_for_the_reviser_when_called_with_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The admin panel drives batches with client=None (each LLM layer reads
+    ANTHROPIC_API_KEY itself). Generation and the claim checker self-create a
+    client, but the reviser no-ops on a None client -- so for the feature's
+    whole life the revise pass silently shipped the ORIGINAL on every real
+    (client=None) batch: gate flags, reviser returns unchanged, revise_fixed=0.
+
+    Regression: a non-dry batch must resolve ONE client up front and hand a
+    NON-None client to the reviser. (The prior revise tests all passed
+    client=object(), so they never exercised this path.)"""
+    import anthropic
+
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.preflop import batch as B
+    from pipeline.preflop.claim_checker import ClaimCheckResult, ClaimIssue
+    from pipeline.preflop.reviser import ReviseResult
+
+    # The batch builds `Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])`
+    # inside its guard; stub the constructor + key so no real client is made.
+    sentinel_client = object()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
+    monkeypatch.setattr(anthropic, "Anthropic", lambda *a, **k: sentinel_client)
+
+    draft = GeneratedExplanation(
+        option_1="Always raise", option_2="", option_3="", option_4="",
+        correct_answer="Always raise", answer_explanation="DRAFT prose.",
+    )
+    revised = GeneratedExplanation(
+        option_1="Always raise", option_2="", option_3="", option_4="",
+        correct_answer="Always raise", answer_explanation="REVISED prose.",
+    )
+    monkeypatch.setattr(
+        B, "generate_preflop_answer_explanation",
+        lambda facts, options, correct, **k: draft,
+    )
+    monkeypatch.setattr(
+        B, "check_explanation_claims",
+        lambda *a, **k: ClaimCheckResult(passed=False, issues=(ClaimIssue("vague", "unclear"),)),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_revise(explanation, facts, *, issues, client, **k):
+        captured["client"] = client  # the bug shipped None here
+        return ReviseResult(explanation=revised, changed=True, revised_text="REVISED prose.")
+
+    monkeypatch.setattr(B, "revise_explanation", _fake_revise)
+
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "out.csv"
+    result = generate_preflop_batch(
+        pack=pack, output_path=out, total_questions=10,
+        client=None, dry_run=False, random_seed=42,
+        revise_pass=True, final_audit=False,
+    )
+    # The reviser was reached AND handed the resolved (non-None) client.
+    assert "client" in captured, "reviser was never called -- gate did not flag"
+    assert captured["client"] is sentinel_client
+    assert captured["client"] is not None
+    # And the auto-fix actually ran (the symptom the user reported gone).
+    assert result.questions_written >= 1
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    assert rows and all(r["Answer Explanation"] == "REVISED prose." for r in rows)
+
+
 def test_batch_revise_pass_records_discarded_when_rewrite_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

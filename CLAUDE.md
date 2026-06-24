@@ -215,8 +215,19 @@ via the admin Generate/Compare/Ranges pack selector (choice persists to
 - **`monker_nlhe_9max_100bb`** — MonkerViewer export (`monker_nlhe`
   grammar, flat `.rng` files under `nlhe9_ranges/`, gitignored), 93,235
   files = 44,058 nodes, 4x opens, **rake 10%/3bb cap → visibly tighter
-  ranges** (UTG RFI 8%; UTG+1 folds QQ 99% vs the UTG open — verified
-  real, not a bug). Format + EV-unit calibration (milli-bb from hand
+  ranges** (UTG RFI 8%). **CORRECTION (June 2026):** a subset (~7) of
+  facing-a-single-open nodes show a BROKEN heavy QQ/JJ/TT fold (e.g.
+  UTG+1 folds QQ ~99% vs the UTG open). This is a Monker convergence/
+  export artifact that collapses the sub-AK continue-EVs to ~0 — AA/KK/
+  AKs still 3-bet the SAME node, and QQ continues *less* than JJ/TT,
+  which is impossible in a real solve — NOT "verified real" as an earlier
+  version of this note claimed. (Folding QQ a lot early-vs-early IS
+  directionally real under heavy rake; the broken part is the ~99%
+  magnitude + the strength inversion.) Flagged, not dropped, by
+  `soft_validate_fold_as_equity_favorite`, and incidentally excluded by
+  the default 95–99% near-pure worthiness gate; see
+  `scripts/audit_nlhe9_pack.py` and the monker-9max-qq-fold-bug memory.
+  Format + EV-unit calibration (milli-bb from hand
   start; **not** PLO's milli-sb) in `docs/nlhe9_pack_notes.md`;
   re-runnable audit in `scripts/audit_nlhe9_pack.py`. Monker raise
   tokens are pot-relative; bb sizes come from the shared
@@ -560,6 +571,28 @@ easy * 2500, 400, 3200))`. EV-weight redistributes across the other
 three when unavailable. Full details in `pipeline/preflop/difficulty.py`
 and the Generate page's "How is Difficulty calculated?" popover (which
 reads the constants live).
+
+**Trap-aware difficulty (opt-in, June 2026).** The weighted sum is ~70%
+frequency+EV, which BOTH say "easy" exactly when the solver is
+near-indifferent — so by default "hard" === close-mix spots, and a PURE
+(100%) spot can never exceed difficulty ~2000 (caps below the Hard floor
+2100). To make genuinely counterintuitive PURE spots rate Hard, the
+`trap_difficulty` batch flag (admin Generate checkbox "🪤 Trap-aware
+difficulty" + its own info popover; `compute_difficulty(...,
+apply_trap_bump=)`) floors a **trap** spot to `TRAP_DIFFICULTY_FLOOR`
+(2400). A trap = the solver's dominant action CONTRADICTS the
+equity-vs-price pot-odds baseline by a clear margin (`_TRAP_EQUITY_MARGIN`
+0.04): folds despite equity ≥ price, or calls/3-bets despite equity <
+price (`difficulty._is_counterintuitive_spot`). HEADS-UP facing-a-bet
+spots only (opening spots have no price → never traps; multiway is
+skipped — field-equity-vs-price is mis-specified and ~all such hits were
+degenerate deep-all-in nodes, measured 88% of raw trap hits). It changes the SCORE only,
+never the answer/options/prose/worthiness; OFF by default = unchanged
+behaviour; `meta.counters.trap_floored` reports how many were re-rated.
+Deliberately the same signal as `soft_validate_fold_as_equity_favorite`,
+so trap-FOLDs are also soft-flagged for review (guards against rating a
+broken solve like the Monker QQ-fold as "hard"). Recommended ON for Hard
+batches, off for Easy/Medium.
 
 **PLO drops the EV axis (June 2026).** `pipeline/plo/difficulty.py` is
 3-axis — `easy = 0.57 * easy_freq + 0.29 * easy_concept + 0.14 *

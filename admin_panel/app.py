@@ -549,6 +549,23 @@ def _cached_ranges_index(
     return node_by_id, ids_by_actor, labels
 
 
+@st.cache_resource
+def _cached_ranges_by_hist(
+    pack_id: str,
+) -> dict[tuple, PreflopDecisionNode]:
+    """``history_before`` → decision node, for the Range viewer's tree walk.
+
+    A full action history uniquely identifies whose turn it is, so this maps
+    every history to its node. The action-tree navigator finds the child of
+    any (node, action) in O(1): append the chosen action to the node's history
+    and look it up. The empty tuple ``()`` keys the opening node (first to
+    act). Built once per pack (cache_resource), like
+    :func:`_cached_ranges_index`.
+    """
+    node_by_id, _ids, _labels = _cached_ranges_index(pack_id)
+    return {n.history_before: n for n in node_by_id.values()}
+
+
 def _pack_display_framing(pack: PreflopPack) -> tuple[str, float]:
     """Pack-aware ``(venue, stakes_bb_dollars)`` display default.
 
@@ -1549,6 +1566,25 @@ def _render_generate_page_preflop() -> None:
         ),
     )
 
+    # Trap-aware difficulty (opt-in NEW method). Lets pure/clear-cut but
+    # counterintuitive spots ("Always fold" a hand that looks like a call)
+    # rate Hard, so the Hard band isn't only close mixes. Full explanation
+    # in the popover; off by default = original behaviour.
+    trap_difficulty = st.checkbox(
+        "🪤 Trap-aware difficulty — rate counterintuitive spots as Hard (NEW)",
+        value=False,
+        key="preflop_trap_difficulty",
+        help=(
+            "OFF = the original 4-axis rating (Hard = close-mix spots only). "
+            "ON = ALSO rate \"trap\" spots Hard even when the answer is "
+            "pure/clear-cut (a hand the solver folds 100% despite enough "
+            "equity to call). This is what makes a \"Hard + 100% frequency\" "
+            "batch return questions. Read the ℹ️ below before using."
+        ),
+    )
+    with st.popover("ℹ️  What is Trap-aware difficulty? (read before using)"):
+        _render_trap_difficulty_explainer()
+
     # Advanced: question-worthiness window + EV-gap quality gate. These
     # are SEPARATE from difficulty -- worthiness decides whether a spot is
     # teachable at all; the EV gate drops near-coinflip call/fold spots.
@@ -2079,6 +2115,7 @@ def _render_generate_page_preflop() -> None:
             exclude_near_pure_band=exclude_near_pure_band,
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
+            trap_difficulty=bool(trap_difficulty),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
             min_villain_line_pct=(
                 None if min_villain_pct == 0.0 else float(min_villain_pct)
@@ -2118,6 +2155,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     exclude_near_pure_band: bool,
     min_difficulty: int,
     max_difficulty: int,
+    trap_difficulty: bool,
     min_ev_gap_bb: float | None,
     min_villain_line_pct: float | None,
     min_hero_premise_freq: float | None,
@@ -2200,6 +2238,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             exclude_near_pure_band=exclude_near_pure_band,
             min_difficulty=min_difficulty,
             max_difficulty=max_difficulty,
+            trap_difficulty=trap_difficulty,
             min_ev_gap_bb=min_ev_gap_bb,
             min_villain_line_pct=min_villain_line_pct,
             min_hero_premise_freq=min_hero_premise_freq,
@@ -2228,6 +2267,61 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
 
     # Re-run immediately so the job panel takes over the next render.
     st.rerun()
+
+
+def _render_trap_difficulty_explainer() -> None:
+    """Popover content for the "Trap-aware difficulty" toggle.
+
+    Reads ``TRAP_DIFFICULTY_FLOOR`` live from the difficulty module so the
+    number shown is always the one the algorithm uses.
+    """
+    from pipeline.preflop.difficulty import TRAP_DIFFICULTY_FLOOR  # noqa: PLC0415
+
+    st.markdown(
+        f"""
+### 🪤 Trap-aware difficulty
+
+**The problem it fixes.** Normally a question is rated **Hard** when the
+solver's top action is a *close mix* (e.g. 60/40) — i.e. when it barely
+matters what you pick. Two side effects fall out of that: every Hard question
+ends up a near-coinflip with **~no EV difference**, and a **pure** spot
+("Always fold", 100%) can *never* be rated Hard (a pure action looks "easy" by
+that measure). So a "Hard **and** 100% frequency" batch returns **nothing**.
+
+**What this adds.** A *second kind* of Hard question — a **trap**: a spot where
+the solver's clear answer is the **opposite** of what the hand looks like it
+should do. Example: you hold enough equity to call the price, but the solver
+folds 100% (domination / reverse implied odds). The answer is clear-cut and the
+EV difference is **large** — but a human reads it wrong. Hard for a *person*,
+not for the solver.
+
+**How it works (deterministic — no LLM, never touches the answer).** For each
+spot facing a bet, it compares the solver's main action to a simple **pot-odds
+baseline** ("would a player call, based on equity vs. the price?"). When they
+**disagree by a clear margin** — fold despite enough equity, or call/3-bet
+despite too little — the spot is a trap and its difficulty is **floored to
+{TRAP_DIFFICULTY_FLOOR}** (solidly Hard), no matter how pure the action is.
+Opening spots (no price to call) are never traps. Non-trap spots score exactly
+as before.
+
+**Impact on the questions you get**
+- ON + the **Hard** band → counterintuitive questions with a **single clear
+  correct answer and a real EV gap**, *including* pure "Always X" spots. This is
+  what makes "Hard at 100%" actually produce questions.
+- It changes **difficulty scores only** — never the answer, options, prose, or
+  which spots are "worthy".
+- **Safety net:** a trap that's a *fold-with-equity* is also auto-flagged for
+  human review (the same check that catches broken-solve folds like the Monker
+  QQ artifact), so a bad solve can't silently ship as a "hard" question.
+
+**Old vs. new — which to use**
+- **Old (off):** good general default. Hard = genuinely close decisions.
+- **New (on):** use when you specifically want *hard, counterintuitive* questions
+  (the "trap" study category) — or when a Hard batch keeps coming back as
+  all-mixes. **Recommended ON for Hard batches; leave OFF for Easy/Medium**
+  (those bands exclude the floored traps anyway, so it has little effect there).
+"""
+    )
 
 
 def _render_difficulty_explainer() -> None:
@@ -3910,6 +4004,145 @@ def render_review_page() -> None:
                     st.rerun()
 
 
+def _render_action_tree_nav(
+    pack: PreflopPack,
+    node_by_id: dict[str, PreflopDecisionNode],
+    node_by_hist: dict[tuple, PreflopDecisionNode],
+) -> str | None:
+    """Action-tree navigator for the Range viewer (browse mode).
+
+    Starts at the opening node (first seat, empty history) and lets you click
+    the acting player's action -- each labelled with its big-blind size -- to
+    walk DOWN the tree the way the hand actually unfolds (UTG opens → UTG+1
+    faces it → ...), instead of hunting a node-id in a dropdown of tens of
+    thousands. Returns the current node's id; the page renders its charts.
+
+    The child of (node, action) is found in O(1): append the chosen action to
+    the node's history and look it up in ``node_by_hist``. No child = the
+    action ends preflop (folded out to a winner, or a call to the flop).
+    """
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        resolve_preflop_history,
+    )
+    from pipeline.preflop.grammars.types import (  # noqa: PLC0415
+        ParsedAction,
+        PreflopActionType,
+    )
+
+    root = node_by_hist.get(())
+    cur_id = st.session_state.get("ranges_nav_id")
+    if cur_id not in node_by_id:
+        cur_id = root.node_id if root is not None else None
+    if cur_id is None:
+        st.warning("No opening node found in this pack.")
+        return None
+    node = node_by_id[cur_id]
+
+    def _verb(at: PreflopActionType, size_bb: float | None) -> str:
+        if at is PreflopActionType.RAISE and size_bb is not None:
+            return f"raises to {size_bb:g}bb"
+        if at is PreflopActionType.ALL_IN:
+            return f"all-in {size_bb:g}bb" if size_bb else "all-in"
+        return {
+            PreflopActionType.FOLD: "folds",
+            PreflopActionType.CALL: "calls",
+        }.get(at, at.value.lower())
+
+    state = resolve_preflop_history(node.history_before, pack)
+
+    # --- controls: restart / back ---
+    root_actor = root.actor if root is not None else "UTG"
+    c_restart, c_back, _sp = st.columns([1.3, 1, 4])
+    with c_restart:
+        if st.button(
+            f"↩︎ Restart at {root_actor}", disabled=not node.history_before,
+            key="ranges_tree_restart", use_container_width=True,
+        ):
+            st.session_state["ranges_nav_id"] = root.node_id
+            st.rerun()
+    with c_back:
+        if st.button(
+            "↑ Back", disabled=not node.history_before,
+            key="ranges_tree_back", use_container_width=True,
+        ):
+            parent = node_by_hist.get(node.history_before[:-1])
+            if parent is not None:
+                st.session_state["ranges_nav_id"] = parent.node_id
+                st.rerun()
+
+    # --- breadcrumb: the action that led here ---
+    if node.history_before:
+        path = "  →  ".join(
+            f"{a.position} {_verb(a.action_type, s)}"
+            for a, s in zip(node.history_before, state.sizes_bb, strict=True)
+        )
+        st.markdown(f"**Action so far:**  {path}")
+    else:
+        st.markdown("**Action so far:**  _start of the hand — first to act_")
+    st.markdown(
+        f"### ▶︎ {node.actor} to act &nbsp;·&nbsp; {node_action_context(node)}"
+    )
+    st.caption(f"Click what **{node.actor}** does to walk to the next spot:")
+
+    # --- action buttons: one per option, each descends (or ends preflop) ---
+    order = {
+        PreflopActionType.FOLD: 0,
+        PreflopActionType.CALL: 1,
+        PreflopActionType.RAISE: 2,
+        PreflopActionType.ALL_IN: 3,
+    }
+    opts = sorted(node.actions, key=lambda o: order.get(o.action_type, 9))
+    cols = st.columns(len(opts) or 1)
+    for col, opt in zip(cols, opts, strict=False):
+        pa = ParsedAction(node.actor, opt.action_type, opt.raise_size_pct)
+        child_hist = node.history_before + (pa,)
+        child = node_by_hist.get(child_hist)
+        try:
+            size_bb = resolve_preflop_history(child_hist, pack).sizes_bb[-1]
+        except Exception:  # noqa: BLE001 - size is cosmetic; never break the walk
+            size_bb = None
+        label = _verb(opt.action_type, size_bb)
+        with col:
+            if child is not None:
+                if st.button(
+                    label, key=f"ranges_tree_{cur_id}_{opt.label}",
+                    use_container_width=True,
+                ):
+                    st.session_state["ranges_nav_id"] = child.node_id
+                    st.rerun()
+                st.caption(f"→ {child.actor} acts")
+            else:
+                st.button(
+                    label, key=f"ranges_tree_{cur_id}_{opt.label}",
+                    disabled=True, use_container_width=True,
+                )
+                st.caption("_ends preflop_")
+
+    # --- advanced: jump straight to any node (the old dropdowns) ---
+    with st.expander("🔎 Jump to a specific node (advanced)"):
+        _seats = preflop_order(pack.table_size)
+        _by_id, ids_by_actor, node_labels = _cached_ranges_index(pack.pack_id)
+        actors = [s for s in _seats if s in ids_by_actor] + sorted(
+            a for a in ids_by_actor if a not in _seats
+        )
+        ja, jb = st.columns([1, 4])
+        with ja:
+            jactor = st.selectbox("Position", options=actors, key="ranges_jump_actor")
+        jids = ids_by_actor.get(jactor, ())
+        with jb:
+            jid = st.selectbox(
+                f"Node — {len(jids)} where {jactor} acts",
+                options=jids, format_func=node_labels.__getitem__,
+                key="ranges_jump_node",
+            )
+        if st.button("Go to this node", key="ranges_jump_go") and jid:
+            st.session_state["ranges_nav_id"] = jid
+            st.rerun()
+
+    st.divider()
+    return cur_id
+
+
 # --- page: Ranges -----------------------------------------------------------
 def render_ranges_page() -> None:
     """Visual 13x13 range grids for any decision node.
@@ -3992,27 +4225,20 @@ def render_ranges_page() -> None:
     from_q = st.session_state.get("ranges_from_q")
     target_id = st.session_state.get("ranges_node_id")
     if target_id in node_by_id and from_q is not None:
+        browsing = False
         st.success(f"Showing ranges for review question #{from_q}.")
-        if st.button("← Browse all ranges instead", key="ranges_clear"):
+        if st.button("← Browse the action tree instead", key="ranges_clear"):
+            st.session_state["ranges_nav_id"] = target_id  # start the walk here
             st.session_state.pop("ranges_node_id", None)
             st.session_state.pop("ranges_from_q", None)
             st.rerun()
     else:
-        _seats = preflop_order(pack.table_size)
-        actors = [s for s in _seats if s in ids_by_actor] + sorted(
-            a for a in ids_by_actor if a not in _seats
-        )
-        col_a, col_b = st.columns([1, 4])
-        with col_a:
-            actor = st.selectbox("Position", options=actors, key="ranges_actor")
-        actor_ids = ids_by_actor.get(actor, ())
-        with col_b:
-            target_id = st.selectbox(
-                f"Node — {len(actor_ids)} where {actor} acts",
-                options=actor_ids,
-                format_func=node_labels.__getitem__,
-                key="ranges_node",
-            )
+        # Action-tree walk: start at the opening node, click each player's
+        # action (with its bb size) to descend. Replaces the old position +
+        # node-id dropdowns (kept under "Jump to a specific node").
+        browsing = True
+        node_by_hist = _cached_ranges_by_hist(pack.pack_id)
+        target_id = _render_action_tree_nav(pack, node_by_id, node_by_hist)
 
     node = node_by_id.get(target_id) if target_id else None
     if node is None:
@@ -4041,17 +4267,20 @@ def render_ranges_page() -> None:
 
     _state = resolve_preflop_history(node.history_before, pack)
 
-    st.subheader(f"{node.actor} · {node_action_context(node)}")
-    if node.history_before:
-        st.caption(
-            "Action so far → "
-            + " · ".join(
-                f"{a.position} {_verb(a, size)}"
-                for a, size in zip(
-                    node.history_before, _state.sizes_bb, strict=True
+    # In browse mode the action-tree navigator already prints the breadcrumb +
+    # "<actor> to act" header, so only show this for the from-a-review path.
+    if not browsing:
+        st.subheader(f"{node.actor} · {node_action_context(node)}")
+        if node.history_before:
+            st.caption(
+                "Action so far → "
+                + " · ".join(
+                    f"{a.position} {_verb(a, size)}"
+                    for a, size in zip(
+                        node.history_before, _state.sizes_bb, strict=True
+                    )
                 )
             )
-        )
 
     _action_color = {
         PreflopActionType.FOLD: range_view.COLOR_FOLD,
@@ -5565,6 +5794,102 @@ def render_postflop_review_page() -> None:
             st.caption(" · ".join(fbits))
         if _cell(row, "concept_tags"):
             st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+
+        # --- visual ranges: every player, preflop + current street ---
+        # Ranges are per-NODE (same for every hero hand at the node), so match
+        # the row to its meta record by node id -- robust to row deletions /
+        # reordering. preflop_ranges (flop-entry) is batch-level; street_ranges
+        # is the node's current-street range. Both 169-class, keyed by seat.
+        # The postflop solver_reference is "db/<spot>/<flop>/<node_id>/<combo>"
+        # -- the COMBO is the last segment, so match whichever segment is a real
+        # meta node id (node_id_from_solver_reference grabbed the combo before).
+        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
+        _meta_nodes = {q.get("node_id") for q in _qrecs}
+        _parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+        _ref_node = next((p for p in reversed(_parts) if p in _meta_nodes), "")
+        _street_ranges = next(
+            (q.get("street_ranges") for q in _qrecs if q.get("node_id") == _ref_node),
+            None,
+        )
+        _preflop_ranges = meta.get("preflop_ranges") if isinstance(meta, dict) else None
+        # street_strategy is {position: {action_label: {class: weight}}} (NEW
+        # batches: both players, each at the node where THEY acted). Old batches
+        # stored it action-keyed -> .get(pos) misses -> falls back to presence.
+        _street_strategy = next(
+            (q.get("street_strategy") for q in _qrecs if q.get("node_id") == _ref_node),
+            None,
+        )
+        if not isinstance(_street_strategy, dict):
+            _street_strategy = {}
+        _preflop_entry = meta.get("preflop_entry_actions", {}) if isinstance(meta, dict) else {}
+        if _street_ranges or _preflop_ranges:
+            with st.expander("📊 Player ranges — preflop + this-street strategy", expanded=True):
+                _hero_seat = _cell(row, "User Seat").split("-", 1)[0]
+                _seats = sorted(set(_street_ranges or {}) | set(_preflop_ranges or {}))
+                _seats.sort(key=lambda p: p != _hero_seat)  # hero first
+
+                _act_rank = {"fold": 0, "check": 1, "call": 2, "bet": 3, "raise": 4, "all-in": 5}
+                _act_color = {
+                    "fold": "#6b7280", "check": range_view.COLOR_FOLD,
+                    "call": range_view.COLOR_CALL, "bet": range_view.COLOR_RAISE,
+                    "raise": range_view.COLOR_ALLIN, "all-in": "#3d0c0c",
+                }
+
+                def _segs(snap: dict | None, color: str) -> dict:  # single-colour
+                    return {h: [(w, color)] for h, w in (snap or {}).items() if w > 0.004}
+
+                def _strat_segs(strat: dict) -> dict:  # action-coloured strategy
+                    segs: dict = {}
+                    for action in sorted(
+                        strat, key=lambda a: _act_rank.get(a.split()[0].lower(), 9)
+                    ):
+                        col = _act_color.get(action.split()[0].lower(), range_view.COLOR_INRANGE)
+                        for h, w in strat[action].items():
+                            if w > 0.004:
+                                segs.setdefault(h, []).append((w, col))
+                    return segs
+
+                st.caption(
+                    "Hands are coloured by action: 🟦 check · 🟩 call · 🟥 bet/raise. "
+                    "**Preflop** = how each player reached this flop (BTN raised → red, "
+                    "BB called → green; BB's 3-bets are a separate solve, so none show "
+                    "here). **This street** = their strategy at the node where they acted "
+                    "— a heavy donk shows as red."
+                )
+                for _pos in _seats:
+                    _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
+                    st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
+                    _gp, _gc = st.columns(2)
+                    _pre = (_preflop_ranges or {}).get(_pos)
+                    _cur = (_street_ranges or {}).get(_pos)
+                    _strat = _street_strategy.get(_pos)
+                    _entry = _preflop_entry.get(_pos, "call")
+                    _entry_word = "raised" if _entry == "raise" else "called"
+                    with _gp:
+                        if _pre:
+                            st.caption(
+                                f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
+                            )
+                            st.html(range_view.grid_html(
+                                _segs(_pre, _act_color.get(_entry, range_view.COLOR_CALL))
+                            ))
+                        else:
+                            st.caption("Preflop — n/a")
+                    with _gc:
+                        if _strat:
+                            st.caption(
+                                f"This street — strategy "
+                                f"(~{range_view.range_pct(_cur):.0f}% of hands in range)"
+                            )
+                            st.html(range_view.grid_html(_strat_segs(_strat)))
+                        elif _cur:
+                            st.caption(
+                                f"This street — ~{range_view.range_pct(_cur):.0f}% of hands "
+                                "(not this player's turn on this street)"
+                            )
+                            st.html(range_view.grid_html(_segs(_cur, range_view.COLOR_INRANGE)))
+                        else:
+                            st.caption("This street — n/a")
 
         dkey = f"postflop_review_diff::{csv_path.name}::{no}"
         try:

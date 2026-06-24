@@ -802,6 +802,7 @@ def generate_preflop_batch(
     exclude_near_pure_band: bool = False,
     min_difficulty: int = DIFFICULTY_MIN,
     max_difficulty: int = DIFFICULTY_MAX,
+    trap_difficulty: bool = False,
     min_ev_gap_bb: float | None = None,
     min_villain_line_pct: float | None = 0.25,
     min_hero_premise_freq: float | None = 0.05,
@@ -968,6 +969,10 @@ def generate_preflop_batch(
     # we committed an LLM call to (post-filter).
     attempted = 0
     difficulty_filtered_out = 0
+    # Counterintuitive "trap" spots whose difficulty was floored to Hard by the
+    # opt-in trap_difficulty mode (0 when the mode is off). Lets the user see
+    # how many of the evaluated spots the new method re-rated.
+    trap_floored = 0
     # Spots skipped by the convergence guard (unconverged solver nodes --
     # AA folding preflop / premium-pair inversions). Cached per node so each
     # node is only checked once even though many hands share it.
@@ -991,6 +996,24 @@ def generate_preflop_batch(
     node_index: dict[tuple[str, tuple], PreflopDecisionNode] = {
         (n.actor, n.history_before): n for n in nodes
     }
+    # Resolve ONE Anthropic client for the whole batch. The admin Generate /
+    # Compare pages drive batches with client=None and rely on each LLM layer
+    # reading ANTHROPIC_API_KEY itself. Generation and the claim checker
+    # self-create a client when handed None, but the reviser treats None as
+    # "skip" (it is a pure library with a no-op-without-client contract). So on
+    # every real admin batch the revise pass silently no-opped: the gate flagged
+    # rows, then revise_explanation returned the ORIGINAL unchanged because its
+    # client was None -- which is why no batch ever showed revise_fixed > 0.
+    # Resolving the client up front (non-dry runs only) lets all three LLM
+    # passes -- generate / claim-check / revise -- share it, so the auto-fix
+    # actually runs. dry-runs and callers that pass a (mock) client are
+    # unaffected.
+    if not dry_run and client is None:
+        import os  # noqa: PLC0415
+
+        from anthropic import Anthropic  # noqa: PLC0415
+
+        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     # ``_evaluation`` carried the pre-facts freq-only difficulty; we
     # discard it and recompute the canonical 4-axis rating below.
     for spot, _evaluation in worthy:
@@ -1058,7 +1081,11 @@ def generate_preflop_batch(
             ev_gap_for_difficulty = ev_gap
             if spot.dominant_frequency >= _NEAR_PURE_DOMINANT_FREQ:
                 ev_gap_for_difficulty = _NEAR_PURE_EV_CREDIT_BB
-            difficulty = compute_difficulty(facts, ev_gap_bb=ev_gap_for_difficulty)
+            difficulty = compute_difficulty(
+                facts,
+                ev_gap_bb=ev_gap_for_difficulty,
+                apply_trap_bump=trap_difficulty,
+            )
         except Exception as exc:  # noqa: BLE001
             failures.append(
                 _build_failure(
@@ -1072,6 +1099,8 @@ def generate_preflop_batch(
                 spot.node.node_id, spot.hero_hand_class, exc,
             )
             continue
+        if difficulty.trap_bump_applied:
+            trap_floored += 1
         # --- difficulty-band + min-EV-gap filter -------------------------
         if not (min_difficulty <= difficulty.score <= max_difficulty):
             difficulty_filtered_out += 1
@@ -1311,6 +1340,7 @@ def generate_preflop_batch(
                 "exclude_near_pure_band": exclude_near_pure_band,
                 "min_difficulty": min_difficulty,
                 "max_difficulty": max_difficulty,
+                "trap_difficulty": trap_difficulty,
                 "min_ev_gap_bb": min_ev_gap_bb,
                 "min_villain_line_pct": min_villain_line_pct,
                 "min_hero_premise_freq": min_hero_premise_freq,
@@ -1330,6 +1360,7 @@ def generate_preflop_batch(
                 "worthy_spots_available": len(worthy),
                 "nodes_after_filter": len(filtered_nodes),
                 "difficulty_filtered_out": difficulty_filtered_out,
+                "trap_floored": trap_floored,
                 "noise_filtered_out": noise_filtered_out,
                 "incoherent_mix_filtered_out": incoherent_mix_filtered_out,
                 "rare_line_filtered_out": rare_line_filtered_out,

@@ -23,6 +23,7 @@ from pipeline.neutral_credit import format_neutral_credit, neutral_credit_option
 from pipeline.postflop.action_history import build_context_line, format_question
 from pipeline.postflop.difficulty import PostflopDifficulty
 from pipeline.postflop.facts import PostflopFacts
+from pipeline.postflop.options import frequencies_for_options
 from pipeline.postflop.solve import PostflopSolve
 from pipeline.postflop.spot_sampler import spot_action_evs_bb
 
@@ -151,13 +152,16 @@ def build_postflop_row(
         "option 4": opts[3],
         "Correct Answer": explanation.correct_answer,
         # Neutral-credit options from the hand's own action mix (the 20-point
-        # rule). spot.action_frequencies is the per-combo conditional strategy
-        # keyed by the same labels the options use.
+        # rule). frequencies_for_options sums collapsed verb families (a "Bet"
+        # option = "Bet 33%" + "Bet 50%" + ...) so neutral credit matches the
+        # options even when gto collapsed a multi-size spot to Check-vs-Bet.
         "neutral_credit": format_neutral_credit(
             neutral_credit_options(
                 explanation.options(),
                 explanation.correct_answer,
-                facts.spot.action_frequencies,
+                frequencies_for_options(
+                    facts.spot.action_frequencies, explanation.options()
+                ),
             )
         ),
         "Answer Explanation": explanation.answer_explanation,

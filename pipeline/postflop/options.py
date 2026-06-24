@@ -93,6 +93,69 @@ def _spectrum_options(
     return options, correct
 
 
+def _collapsed_spectrum_options(spot: PostflopSpot) -> tuple[list[str], str]:
+    """Collapse a 2-verb MULTI-size spot (e.g. Check + Bet 33%/50%/67%) into a
+    binary Check-vs-Bet spectrum.
+
+    The bet size is dropped from the OPTION (the LLM still receives the real
+    size in its data block, and ~99% of hands commit to a single size, so the
+    option loses essentially nothing). The correct answer is the dominant verb
+    FAMILY's claim -- "Always Bet" when the family is ~pure, else "Mostly Bet".
+    """
+    actions = sorted(spot.node.actions, key=_aggression_key)
+    by_verb: dict[str, list[NodeAction]] = {}
+    for a in actions:
+        by_verb.setdefault(a.verb, []).append(a)
+    passive_v, aggr_v = sorted(by_verb, key=lambda v: _VERB_RANK.get(v, 9))[:2]
+
+    def _family(verb: str) -> str:
+        # A single action keeps its own label; a multi-size verb collapses to
+        # the capitalised verb ("Bet" / "Raise").
+        acts = by_verb[verb]
+        return acts[0].label if len(acts) == 1 else verb.capitalize()
+
+    passive, aggr = _family(passive_v), _family(aggr_v)
+    options = [f"Always {passive}", f"Mostly {passive}", f"Mostly {aggr}", f"Always {aggr}"]
+    aggr_freq = sum(spot.action_frequencies.get(a.label, 0.0) for a in by_verb[aggr_v])
+    pass_freq = sum(spot.action_frequencies.get(a.label, 0.0) for a in by_verb[passive_v])
+    dom, dom_freq = (aggr, aggr_freq) if aggr_freq >= pass_freq else (passive, pass_freq)
+    prefix = "Always" if dom_freq >= PURE_THRESHOLD else "Mostly"
+    return options, f"{prefix} {dom}"
+
+
+def frequencies_for_options(
+    action_frequencies: dict[str, float], options: list[str]
+) -> dict[str, float]:
+    """Solver frequency for each option's action, summing collapsed families.
+
+    ``neutral_credit_options`` looks up each option (stripped of its
+    ``Always``/``Mostly`` prefix) in a frequency map. For plain / single-size
+    options that is just ``action_frequencies``; for a COLLAPSED family option
+    (``"Bet"`` / ``"Raise"`` with the size dropped) the matching key is absent,
+    so we sum every size of that verb (``"Bet"`` -> ``"Bet 33%" + "Bet 50%"``).
+    Returns ``{action_label: frequency}`` keyed the way neutral-credit expects.
+    """
+    out: dict[str, float] = {}
+    for opt in options:
+        if not opt:
+            continue
+        action = opt
+        for prefix in ("Always ", "Mostly "):
+            if action.startswith(prefix):
+                action = action[len(prefix):]
+                break
+        if action in out:
+            continue
+        if action in action_frequencies:
+            out[action] = action_frequencies[action]
+        else:  # collapsed verb family -> sum every size of that verb
+            out[action] = sum(
+                f for lbl, f in action_frequencies.items()
+                if lbl == action or lbl.startswith(action + " ")
+            )
+    return out
+
+
 def build_options(
     spot: PostflopSpot, *, style: str = "auto"
 ) -> tuple[list[str], str]:
@@ -119,11 +182,20 @@ def build_options(
     if resolved not in ("basic", "gto"):
         raise ValueError(f"unknown answer style {style!r}; expected one of {ANSWER_STYLES}")
 
-    # The Always/Mostly spectrum applies only to a 2-action spot; a multi-size
-    # spot (Check / Bet 33% / Bet 75% / ...) can't be spectrum'd, so gto falls
-    # back to plain labels there.
-    if resolved == "gto" and len(actions) == 2:  # noqa: PLR2004
-        return _spectrum_options(spot, labels, dominant)
+    # The Always/Mostly spectrum: a 2-ACTION spot uses the two action labels; a
+    # multi-SIZE spot with only two action TYPES (Check + Bet 33%/50%/67%)
+    # COLLAPSES to its two verbs (Check vs Bet) and spectrums those -- a hand
+    # commits to one size ~99% of the time, so the dropped size costs nothing
+    # (the LLM still gets the real size in its data block). A 3+-VERB spot
+    # (Fold/Call/Raise) can't be a 2-rung spectrum, so gto keeps plain labels.
+    if resolved == "gto":
+        if len(actions) == 2:  # noqa: PLR2004
+            return _spectrum_options(spot, labels, dominant)
+        # Multi-size collapse (Check vs Bet) is EXPLICIT-gto only; "auto" keeps
+        # plain size labels on multi-size spots (its long-standing behaviour),
+        # so turning on gto is a deliberate "I want the spectrum everywhere".
+        if style == "gto" and len({a.verb for a in actions}) == 2:  # noqa: PLR2004
+            return _collapsed_spectrum_options(spot)
     return _plain_options(actions, labels, dominant)
 
 
@@ -132,4 +204,5 @@ __all__ = [
     "ANSWER_STYLE_FROM_RADIO_LABEL",
     "PURE_THRESHOLD",
     "build_options",
+    "frequencies_for_options",
 ]

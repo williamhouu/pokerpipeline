@@ -15,16 +15,20 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from dataclasses import replace  # noqa: E402
+
 from pipeline.preflop.difficulty import (  # noqa: E402
     ARCHETYPE_BASE_EASE,
     BUMP_RULES,
     HAND_CLASS_EASE,
+    TRAP_DIFFICULTY_FLOOR,
     W_CONCEPT,
     W_EV,
     W_FREQ,
     W_HAND,
     BumpRule,
     DifficultyResult,
+    _is_counterintuitive_spot,
     compute_difficulty,
 )
 from pipeline.preflop.fact_extractor import (  # noqa: E402
@@ -596,3 +600,86 @@ def test_every_guidance_archetype_has_a_base_ease_entry() -> None:
 
     missing = set(PREFLOP_ARCHETYPE_GUIDANCE) - set(ARCHETYPE_BASE_EASE)
     assert not missing, f"archetypes missing a base ease: {sorted(missing)}"
+
+
+# --- trap-aware difficulty (opt-in) --------------------------------------
+def _trap_facts(
+    *,
+    dominant_action: str,
+    hero_equity: float | None,
+    break_even: float | None,
+    dominant_freq: float = 1.0,
+) -> PreflopFacts:
+    """A facing-a-bet spot with explicit action / equity / price for trap
+    tests. Defaults to a PURE (100%) action -- the headline case the trap
+    floor is meant to rescue into the Hard band."""
+    base = _facts(dominant_freq=dominant_freq, hero_equity=hero_equity)
+    spot = replace(
+        base.spot, dominant_action=dominant_action, dominant_frequency=dominant_freq
+    )
+    return replace(base, spot=spot, break_even_equity=break_even)
+
+
+def test_trap_fold_with_equity_floored_to_hard_when_on() -> None:
+    """A PURE fold of a hand whose equity clears the price is a trap: with
+    trap-aware difficulty ON it is floored to the Hard band even though the
+    freq + EV axes both rate it easy. OFF leaves it easy (unchanged)."""
+    facts = _trap_facts(dominant_action="Fold", hero_equity=0.50, break_even=0.35)
+    on = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=True)
+    off = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=False)
+    assert on.trap_bump_applied and on.score >= TRAP_DIFFICULTY_FLOOR
+    assert not off.trap_bump_applied and off.score < TRAP_DIFFICULTY_FLOOR
+    assert on.score > off.score
+
+
+def test_trap_low_equity_continue_floored_when_on() -> None:
+    """The other direction: a 3-bet/call of a hand whose equity is clearly
+    below the price is also a trap."""
+    facts = _trap_facts(
+        dominant_action="Raise 3-bet", hero_equity=0.25, break_even=0.40
+    )
+    on = compute_difficulty(facts, ev_gap_bb=1.0, apply_trap_bump=True)
+    assert on.trap_bump_applied and on.score >= TRAP_DIFFICULTY_FLOOR
+
+
+def test_non_trap_agreement_not_floored() -> None:
+    """Solver folds AND equity is below the price -> pot-odds AGREES with the
+    fold -> not a trap -> score identical with the toggle on or off."""
+    facts = _trap_facts(dominant_action="Fold", hero_equity=0.25, break_even=0.40)
+    on = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=True)
+    off = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=False)
+    assert not on.trap_bump_applied and on.score == off.score
+
+
+def test_trap_equity_within_margin_is_not_a_trap() -> None:
+    """Equity within the noise margin of the price is a genuine close-call,
+    not a counterintuitive trap, so it is NOT floored."""
+    facts = _trap_facts(dominant_action="Fold", hero_equity=0.37, break_even=0.35)
+    on = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=True)
+    assert not on.trap_bump_applied
+
+
+def test_opening_spot_no_price_is_never_a_trap() -> None:
+    """No break-even price (opening / no bet to call) -> never a trap."""
+    facts = _trap_facts(dominant_action="Fold", hero_equity=0.50, break_even=None)
+    on = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=True)
+    assert not on.trap_bump_applied
+
+
+def test_is_counterintuitive_spot_helper() -> None:
+    trap = _trap_facts(dominant_action="Fold", hero_equity=0.50, break_even=0.35)
+    agree = _trap_facts(dominant_action="Fold", hero_equity=0.25, break_even=0.40)
+    assert _is_counterintuitive_spot(trap)
+    assert not _is_counterintuitive_spot(agree)
+
+
+def test_multiway_spot_is_never_a_trap() -> None:
+    """HEADS-UP ONLY: in a multiway pot (hero_equity_vs_field set), the
+    field-equity-vs-price comparison is mis-specified and dominated by
+    degenerate deep-all-in nodes, so the trap signal is skipped even when it
+    would otherwise fire (here a low-field-equity continue)."""
+    facts = _trap_facts(dominant_action="Call", hero_equity=0.50, break_even=0.40)
+    facts = replace(facts, hero_equity_vs_field=0.15)  # multiway: low field equity
+    assert not _is_counterintuitive_spot(facts)
+    on = compute_difficulty(facts, ev_gap_bb=1.0, apply_trap_bump=True)
+    assert not on.trap_bump_applied

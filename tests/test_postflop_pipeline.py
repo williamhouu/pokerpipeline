@@ -55,13 +55,13 @@ from pipeline.postflop.spot_sampler import (  # noqa: E402
 )
 from pipeline.postflop.validators import (  # noqa: E402
     run_postflop_audit_validators,
-    validate_no_garbled_card_glyphs,
     run_postflop_soft_validators,
     soft_validate_equity_vs_data,
     soft_validate_verdict_vs_answer,
     validate_banned_phrases,
     validate_card_suit_consistency,
     validate_correct_answer,
+    validate_no_garbled_card_glyphs,
 )
 
 SOLVE = btn_vs_bb_srp_2cJs7s()
@@ -294,6 +294,30 @@ def test_options_styles_basic_gto_auto() -> None:
 
     with _pytest.raises(ValueError, match="unknown answer style"):
         build_options(spot, style="nonsense")
+
+
+def test_options_gto_collapses_multisize_to_check_vs_bet() -> None:
+    # A multi-SIZE check+bet spot (3 actions, 2 verbs) collapses under gto to a
+    # Check-vs-Bet spectrum -- the bet size is dropped from the option.
+    from pipeline.postflop.options import frequencies_for_options
+    spot = _spot("flop_ip_cbet", "AcJc")  # Check / Bet 33% / Bet 75%
+    opts, correct = build_options(spot, style="gto")
+    assert opts == ["Always Check", "Mostly Check", "Mostly Bet", "Always Bet"]
+    assert correct in opts and correct.split()[-1] == "Bet"
+    # neutral credit sums the bet sizes back into the "Bet" family.
+    fo = frequencies_for_options(spot.action_frequencies, opts)
+    assert fo["Bet"] == pytest.approx(
+        sum(f for lbl, f in spot.action_frequencies.items() if lbl.startswith("Bet"))
+    )
+    assert fo["Check"] == pytest.approx(spot.action_frequencies.get("Check", 0.0))
+
+
+def test_options_gto_keeps_plain_for_three_verb_spot() -> None:
+    # Fold/Call/Raise = three action TYPES -> can't be a 2-rung spectrum -> plain.
+    spot = _spot("flop_ip_facing_bet", "KsJd")
+    opts, correct = build_options(spot, style="gto")
+    assert opts == ["Fold", "Call", "Raise"]
+    assert correct in opts
 
 
 def test_options_correct_always_in_options() -> None:
@@ -606,6 +630,44 @@ def test_batch_dry_run_writes_csv(tmp_path: Path) -> None:
     for r in rows:
         opts = [r[f"option {i}"] for i in (1, 2, 3, 4) if r[f"option {i}"]]
         assert r["Correct Answer"] in opts
+
+
+def test_batch_meta_carries_range_snapshots(tmp_path: Path) -> None:
+    """The meta carries flop-entry ('preflop') ranges per player + each
+    question's current-street ranges, both 169-class keyed by position -- the
+    data the Review page renders as visual range grids for all players."""
+    import json
+
+    out = tmp_path / "postflop.csv"
+    result = generate_postflop_batch(
+        solve=SOLVE, output_path=out, total_questions=20, dry_run=True
+    )
+    assert result.meta_path is not None
+    meta = json.loads(result.meta_path.read_text())
+    positions = set(SOLVE.positions)  # {BB, BTN}
+
+    pre = meta["preflop_ranges"]
+    assert set(pre) == positions
+    for snap in pre.values():
+        assert len(snap) == 169
+        assert all(0.0 <= w <= 1.0 for w in snap.values())
+
+    assert meta["questions"]
+    for q in meta["questions"]:
+        sr = q["street_ranges"]
+        assert set(sr) == positions
+        assert all(len(snap) == 169 for snap in sr.values())
+        # Plus per-player action strategy grids (action-coloured chart data):
+        # {position: {action_label: {hand_class: weight}}}, the actor + (when it
+        # has acted) the villain.
+        assert q["street_actor"] in positions
+        strat = q["street_strategy"]
+        assert set(strat) <= positions and strat  # one or both players
+        for pos_strat in strat.values():
+            assert pos_strat  # at least one action
+            for snap in pos_strat.values():
+                assert len(snap) == 169
+                assert all(w >= 0.0 for w in snap.values())
 
 
 def test_batch_is_deterministic(tmp_path: Path) -> None:
