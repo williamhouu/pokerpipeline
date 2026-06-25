@@ -455,6 +455,21 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   nav) mirrors the preflop Review — browse a batch, grade approve/needs/reject,
   edit explanation + difficulty inline (auto-saved) — reusing the GENERIC
   `admin_panel.review` sidecar helpers (they key off any batch CSV + `No`).
+- **Postflop Compare page DONE (June 2026).** `render_postflop_compare_page`
+  ("Postflop Compare" nav) is the postflop analog of `render_compare_page`:
+  pick a `.db` solve, edit **two free-text prompt boxes** (Prompt A / Prompt B,
+  prefilled with the active postflop prompt) and/or pick **two models**, set
+  count / heroes / streets / worthiness / claim-checker, and run BOTH sides in
+  ONE `jobs.start_subprocess_job(run.compare_postflop_batches_from_db)` — which
+  loads the solve once and drives both batches with the SAME deterministic spot
+  selector (postflop spots need no shared RNG seed, so both sides see identical
+  hands). Side-by-side with A/B/tie verdicts + per-spot finalize, reusing the
+  generic `admin_panel.compare` + `review` + `_render_claim_check_panel` helpers.
+  Postflop uses two free-text boxes, NOT a PromptLibrary (a full postflop prompt
+  library is the remaining optional piece). **Join key fix:** postflop
+  `solver_reference` is `…/<node_id>/<combo>`, so the generic join's default key
+  (last segment = combo) collides across nodes; `compare.join_by_spot` gained an
+  optional `key_fn` and the postflop page passes the full ref (node+combo-unique).
 - **Postflop worthiness = frequency window only (EV-gap filter is OPTIONAL,
   off by default — mirrors preflop, June 2026).** Real solves mix heavily ⇒
   the interesting decisions (c-bet/lead/size) have ~0 EV gap by construction
@@ -497,16 +512,43 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   (`POSTFLOP_SKILL_EXPLAINERS`) surfaced in the admin **📋 How each postflop
   skill is tagged** dropdown (Generate + Review pages); deliberately-untagged
   skills + why in `POSTFLOP_SKILLS_NOT_TAGGED`. Strict tagging (~2-5/question).
-- **NOT done (seamed extension points)**: a `.cfr` adapter (Pio UPI); LLM
-  prompt tuning against gold postflop examples; exact Runout app table-state
-  token formatting (port preflop's `app_table_format` — postflop is where
-  `Cards on Table` is finally non-empty); a postflop Compare page + prompt
-  library; the harder-to-detect skills (`Facing a Check-Raise`, MDF, Reverse
-  Implied Odds — see `POSTFLOP_SKILLS_NOT_TAGGED`). (DONE since earlier notes:
-  turn/river nodes, board-emoji validator, the postflop Review page, the Layer-7
-  claim-checker/reviser, range-vs-range advantage, the batch re-verifier,
-  3-axis+trap difficulty, the `skills` column, blocker value/bluff
-  decomposition, the curation filters, the solve-quality/node-reach gate.)
+- **App table-state tokens DONE (June 2026).** `pipeline/postflop/
+  app_table_format.py:build_postflop_app_table_columns` emits the Runout app's
+  exact chip/seat/board render tokens — `User Seat` (`BTN-$97.5`), `Seats`
+  (`BB-$95.7-$1.8-bet`, a NEW column between `Default Stack` and `POT`),
+  `Cards on Table` (`2-clubs, J-spades, 7-spades` — the board, now non-empty),
+  `User Cards`, `Default Stack`, `POT` — all from the same bb-denominated
+  amounts the question prose uses (so they never disagree). Built natively (NOT
+  by importing the preflop engine — postflop stays self-contained). Differs from
+  preflop per the team's `docs/output_format_examples.xlsx` postflop rows:
+  **remaining stacks keep cents** (preflop rounds), **both players always render**
+  (a postflop decision has both still in), and **per-player remaining is
+  reconstructed by a betting walk** over the preflop line + every postflop street.
+  `POSTFLOP_CSV_COLUMNS` is +1 (`Seats`); the audit's `EXACT_COLS` includes it.
+- **`.cfr` adapter DONE (June 2026, NOT verified on this Mac).** `pipeline/
+  postflop/adapters/cfr_pio.py:CfrPioAdapter` maps a PioSolver Edge `.cfr` into
+  the IR by driving the solver over UPI (`show_node`/`show_children`/
+  `show_strategy`/`show_range`/`calc_ev`/`show_hand_order`). Pio's node-string
+  grammar == the `.db` adapter's, so the betting-state walk mirrors it
+  (check/call + bet/raise derived from STATE, never a label); `show_range` gives
+  each node's range directly (no manual reach-walk); `calc_ev(actor, child)`
+  gives per-action EVs. Written against a `UpiClient` `Protocol` + unit-tested
+  with a mocked client (`tests/test_postflop_cfr_adapter.py`). **This Mac can't
+  run Pio (Windows-only), so it is NOT verified end-to-end** — full integration
+  needs a Windows host with Pio Edge + a `.cfr` (e.g. `test_solves/
+  btn_vs_bb_srp_2cJs7s.cfr`), driven via `load_postflop_cfr`. v1 = flop nodes
+  (turn/river is a BFS-through-chance-nodes extension; the walk already handles
+  chance tokens). `validate_solve` is the contract both adapters target.
+- **NOT done (seamed extension points)**: a postflop **prompt library** (the
+  Compare page uses two free-text boxes today); LLM prompt tuning against gold
+  postflop examples; the harder-to-detect skills (`Facing a Check-Raise`, MDF,
+  Reverse Implied Odds — see `POSTFLOP_SKILLS_NOT_TAGGED`); real-host `.cfr`
+  verification + turn/river in the `.cfr` adapter. (DONE since earlier notes:
+  turn/river `.db` nodes, board-emoji validator, the postflop Review **and
+  Compare** pages, the Layer-7 claim-checker/reviser, range-vs-range advantage,
+  the batch re-verifier, 3-axis+trap difficulty, the `skills` column, blocker
+  value/bluff decomposition, the curation filters, the solve-quality/node-reach
+  gate, the **app table-state tokens**, and the **`.cfr` adapter**.)
 
 ## Build phases & status
 

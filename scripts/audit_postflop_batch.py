@@ -52,7 +52,7 @@ from pipeline.postflop.spot_sampler import sample_spot  # noqa: E402
 # Pure-deterministic columns: must match exactly given (node, combo, solve).
 EXACT_COLS = (
     "Hand Stage", "Context", "User Seat", "User Cards", "Cards on Table",
-    "Table Size", "Default Stack", "POT", "Question", "Question Type",
+    "Table Size", "Default Stack", "Seats", "POT", "Question", "Question Type",
     "Relative Position", "Position Matchup", "Cash/Tourney", "Live or Online",
     "action_frequencies", "action_ev_bb", "solver_reference", "archetype",
     "board_texture", "pot_odds", "spr", "neutral_credit", "Notes",

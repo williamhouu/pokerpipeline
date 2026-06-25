@@ -151,4 +151,151 @@ def generate_postflop_batch_from_db(
     )
 
 
-__all__ = ["POSTFLOP_OUTPUT_DIR", "generate_postflop_batch_from_db"]
+def compare_postflop_batches_from_db(
+    *,
+    db_path: str,
+    output_path_a: str | Path,
+    output_path_b: str | Path,
+    total_questions: int,
+    system_prompt_a: str,
+    system_prompt_b: str,
+    model_a: str = DEFAULT_MODEL,
+    model_b: str = DEFAULT_MODEL,
+    name_a: str = "Prompt A",
+    name_b: str = "Prompt B",
+    heroes: tuple[str, ...] = (),
+    streets: tuple[str, ...] = ("flop",),
+    max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
+    diversify: bool = False,
+    strength_buckets: tuple[str, ...] = (),
+    decision_types: tuple[str, ...] = (),
+    stakes: str = "$1/$2",
+    live_or_online: str = "Live",
+    bb_in_dollars: float = 2.0,
+    answer_style: str = "auto",
+    display_in_bb: bool = True,
+    min_frequency: float = MIN_FREQUENCY,
+    max_frequency: float = MAX_FREQUENCY,
+    min_ev_gap_bb: float | None = None,
+    quality_gate: bool = True,
+    equity_runouts: int | None = None,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
+    dry_run: bool = False,
+    progress_callback: Any = None,
+) -> dict[str, Any]:
+    """Generate TWO postflop batches on the SAME spots, A vs B, for the Compare page.
+
+    The whole point of an A/B is that the only thing that differs is the prompt
+    (or the model): so the solve is loaded ONCE and the SAME deterministic spot
+    selector drives both batches. Postflop spot selection is fully deterministic
+    (sorted nodes + combos, deterministic diversify), so both sides see identical
+    spots with no shared RNG seed needed. Returns a picklable summary dict the
+    admin stashes + renders side-by-side; each side also writes its own CSV +
+    meta.json (so each is reviewable as a normal batch).
+
+    A single subprocess job runs both sides sequentially (the job runner allows
+    one active job), so the heavy equity sims never contend with the Streamlit UI.
+    """
+    solve = load_postflop_db(
+        db_path,
+        streets=tuple(streets) or ("flop",),
+        max_nodes_per_street=max_nodes_per_street,
+        stakes=stakes,
+        live_or_online=live_or_online,
+        bb_in_dollars=bb_in_dollars,
+    )
+    from pipeline.postflop.facts import preflop_aggressor  # noqa: PLC0415
+
+    selector = make_spot_selector(
+        heroes=tuple(heroes) or None,
+        diversify=diversify,
+        strength_buckets=tuple(strength_buckets) or None,
+        decision_types=tuple(decision_types) or None,
+        aggressor=preflop_aggressor(solve),
+        ip_position=solve.ip_position,
+    )
+
+    client = None
+    if not dry_run and os.environ.get("ANTHROPIC_API_KEY"):
+        from anthropic import Anthropic  # noqa: PLC0415
+
+        client = Anthropic()
+
+    kwargs: dict[str, Any] = {}
+    if equity_runouts is not None:
+        kwargs["equity_runouts"] = equity_runouts
+
+    provenance = {
+        "db_path": str(db_path),
+        "streets": list(streets) or ["flop"],
+        "max_nodes_per_street": max_nodes_per_street,
+        "stakes": stakes,
+        "live_or_online": live_or_online,
+        "bb_in_dollars": bb_in_dollars,
+    }
+
+    # One combined progress bar across both sides (A fills [0, N), B fills [N, 2N)).
+    total2 = max(1, total_questions * 2)
+
+    def _side_cb(side: str, offset: int) -> Any:
+        if progress_callback is None:
+            return None
+
+        def _cb(message: str, done: int, _total: int) -> None:
+            progress_callback(f"{side} — {message}", offset + done, total2)
+
+        return _cb
+
+    def _run(out_path: str | Path, prompt: str, model: str, side: str, offset: int):
+        return generate_postflop_batch(
+            solve=solve,
+            output_path=out_path,
+            total_questions=total_questions,
+            client=client,
+            model=model,
+            temperature=DEFAULT_TEMPERATURE,
+            max_tokens=DEFAULT_MAX_TOKENS,
+            dry_run=dry_run or client is None,
+            answer_style=answer_style,
+            display_in_bb=display_in_bb,
+            min_frequency=min_frequency,
+            max_frequency=max_frequency,
+            min_ev_gap_bb=min_ev_gap_bb,
+            quality_gate=quality_gate,
+            system_prompt=prompt,
+            run_claim_checker=run_claim_checker,
+            claim_checker_prompt=claim_checker_prompt,
+            progress_callback=_side_cb(side, offset),
+            spot_selector=selector,
+            provenance=provenance,
+            **kwargs,
+        )
+
+    res_a = _run(output_path_a, system_prompt_a, model_a, name_a, 0)
+    res_b = _run(output_path_b, system_prompt_b, model_b, name_b, total_questions)
+
+    return {
+        "a_csv": str(output_path_a),
+        "b_csv": str(output_path_b),
+        "a_name": name_a,
+        "b_name": name_b,
+        "a_written": res_a.questions_written,
+        "b_written": res_b.questions_written,
+        "a_attempted": res_a.questions_attempted,
+        "b_attempted": res_b.questions_attempted,
+        "a_failures": len(res_a.failures),
+        "b_failures": len(res_b.failures),
+        "dry_run": res_a.dry_run,
+        "model_a": res_a.model_used,
+        "model_b": res_b.model_used,
+        "in_tokens": res_a.total_input_tokens + res_b.total_input_tokens,
+        "out_tokens": res_a.total_output_tokens + res_b.total_output_tokens,
+    }
+
+
+__all__ = [
+    "POSTFLOP_OUTPUT_DIR",
+    "compare_postflop_batches_from_db",
+    "generate_postflop_batch_from_db",
+]

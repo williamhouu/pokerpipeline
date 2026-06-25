@@ -5,11 +5,11 @@ output format (the table-state columns the app renders, the question/options/
 explanation, the classification block, and the postflop diagnostics), then
 writes the CSV. Deterministic; no LLM.
 
-Amounts render in big blinds for v1 (the IR is bb-denominated). A follow-up
-can port the preflop ``app_table_format`` engine to emit the exact Runout
-chip/seat token strings (e.g. ``User Seat = "BTN-$97-..."``) for the
-dollar-denominated table renderer; that is a formatting concern, not a
-pipeline one, so it does not touch any layer above this.
+The table-state columns (User Seat / User Cards / Cards on Table / Table Size /
+Default Stack / Seats / POT) are the Runout app's exact chip/seat/board render
+tokens, built by :mod:`pipeline.postflop.app_table_format` from the same
+bb-denominated amounts the question prose uses. They render in big blinds
+(``display_in_bb=True``) or in dollars (``solve.bb_in_dollars``).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from pipeline.chat_context import StrategyEntry, build_chat_context
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line, format_question
+from pipeline.postflop.app_table_format import build_postflop_app_table_columns
 from pipeline.postflop.difficulty import PostflopDifficulty
 from pipeline.postflop.facts import PostflopFacts
 from pipeline.postflop.options import frequencies_for_options
@@ -42,6 +43,11 @@ POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
     "Cards on Table",
     "Table Size",
     "Default Stack",
+    # Villain seat tokens in the app's poker-table format (e.g.
+    # "BB-$95.7-$1.8-bet"); same grammar as User Seat. Built by
+    # pipeline/postflop/app_table_format.py. Sits between Default Stack and POT,
+    # matching the app's table-state column order.
+    "Seats",
     "POT",
     "Question",
     "Question Type",
@@ -210,10 +216,11 @@ def build_postflop_row(
     (``display_in_bb=True``) or in dollars (``solve.bb_in_dollars``). The
     ``action_ev_bb`` / SPR / equity columns are unit-fixed and unaffected.
     """
-    from pipeline.postflop.action_history import make_amount_fmt  # noqa: PLC0415
-
     node = facts.spot.node
-    amt = make_amount_fmt(display_in_bb=display_in_bb, bb_in_dollars=solve.bb_in_dollars)
+    # The app's poker-table render tokens (seats + chips + board), so the CSV
+    # feeds the chip/seat/board renderer directly. Built from the same resolved
+    # amounts as the Question prose, so the two never disagree.
+    table = build_postflop_app_table_columns(facts, solve, display_in_bb=display_in_bb)
     opts = (explanation.options() + ["", "", "", ""])[:4]
     pot_odds = (
         f"{facts.break_even_equity * 100:.0f}%"
@@ -231,12 +238,15 @@ def build_postflop_row(
         "No": str(number),
         "Hand Stage": facts.street.capitalize(),
         "Context": build_context_line(solve, display_in_bb=display_in_bb),
-        "User Seat": facts.hero_position,
-        "User Cards": _emoji_cards(facts.spot.hero_cards),
-        "Cards on Table": _emoji_cards(facts.board),
-        "Table Size": str(solve.table_size),
-        "Default Stack": amt(node.effective_stack_bb),
-        "POT": amt(facts.pot_bb),
+        # App table-state tokens (User Seat / User Cards / Cards on Table /
+        # Table Size / Default Stack / Seats / POT) -- see app_table_format.py.
+        "User Seat": table["user_seat"],
+        "User Cards": table["user_cards"],
+        "Cards on Table": table["cards_on_table"],
+        "Table Size": table["table_size"],
+        "Default Stack": table["default_stack"],
+        "Seats": table["seats"],
+        "POT": table["pot"],
         "Question": format_question(facts.spot, solve, display_in_bb=display_in_bb),
         "Question Type": "Postflop Decision",
         "option 1": opts[0],

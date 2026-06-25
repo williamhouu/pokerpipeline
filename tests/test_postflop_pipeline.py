@@ -27,6 +27,10 @@ from pipeline.postflop.action_history import (  # noqa: E402
     build_context_line,
     format_question,
 )
+from pipeline.postflop.app_table_format import (  # noqa: E402
+    _seat_states,
+    build_postflop_app_table_columns,
+)
 from pipeline.postflop.batch import generate_postflop_batch  # noqa: E402
 from pipeline.postflop.claim_checker import (  # noqa: E402
     check_postflop_claims,
@@ -589,8 +593,73 @@ def test_build_row_has_all_columns() -> None:
     g = placeholder_explanation(facts, opts, correct)
     row = build_postflop_row(facts, g, SOLVE, compute_difficulty(facts), 1)
     assert set(row) == set(POSTFLOP_CSV_COLUMNS)
-    assert row["Cards on Table"] == "2♣️ J♠️ 7♠️"
+    # Cards on Table is now the app's rank-suitword board token (was emoji),
+    # so the CSV feeds the app's board renderer directly.
+    assert row["Cards on Table"] == "2-clubs, J-spades, 7-spades"
     assert row["Hand Stage"] == "Flop"
+
+
+# --- app table-state tokens (the Runout chip/seat/board renderer) -----------
+def test_app_table_cbet_spot_tokens_bb() -> None:
+    # BTN to act after BB checks (c-bet decision). Hero has not acted this
+    # street -> bare User Seat; the villain's check renders "-0BB-check".
+    facts = extract_facts(_spot("flop_ip_cbet", "AcJc"), SOLVE)
+    t = build_postflop_app_table_columns(facts, SOLVE, display_in_bb=True)
+    assert t["user_seat"] == "BTN-97.5BB"
+    assert t["user_cards"] == "A-clubs, J-clubs"
+    assert t["cards_on_table"] == "2-clubs, J-spades, 7-spades"
+    assert t["seats"] == "BB-97.5BB-0BB-check"
+    assert t["pot"] == "5.5BB"
+    assert t["default_stack"] == "100BB"
+    assert t["table_size"] == "6"
+
+
+def test_app_table_facing_bet_tokens_dollars() -> None:
+    # BTN faces BB's 1.8bb bet. Dollars (bb_in_dollars=1.0): remaining keeps
+    # cents (95.7 -> $95.7), the villain shows the bet it made this street.
+    facts = extract_facts(_spot("flop_ip_facing_bet", "KsJd"), SOLVE)
+    t = build_postflop_app_table_columns(facts, SOLVE, display_in_bb=False)
+    assert t["user_seat"] == "BTN-$97.5"
+    assert t["seats"] == "BB-$95.7-$1.8-bet"
+    assert t["pot"] == "$7.3"  # 5.5 + the unmatched 1.8 bet
+
+
+def test_app_table_turn_multistreet_and_stack_invariant() -> None:
+    # Turn, BB to act after flop check/bet 1.8/call. Both players invested 2.5
+    # (preflop) + 1.8 (flop) = 4.3, so each has 95.7bb behind -- which must
+    # equal the IR's aggregate min-stack-behind for the node (the cross-check
+    # that the per-player betting walk is correct). BTN has not acted on the
+    # turn yet -> a bare villain seat.
+    facts = extract_facts(_spot("turn_oop", "Jh9c"), SOLVE)
+    t = build_postflop_app_table_columns(facts, SOLVE, display_in_bb=True)
+    assert t["user_seat"] == "BB-95.7BB"
+    assert t["seats"] == "BTN-95.7BB"
+    assert t["cards_on_table"] == "2-clubs, J-spades, 7-spades, 2-hearts"
+    assert t["pot"] == "9.1BB"
+    states = _seat_states(facts, SOLVE)
+    behind = min(s["remaining"] for s in states.values())
+    assert abs(behind - facts.spot.node.effective_stack_bb) < 1e-6
+
+
+def test_app_table_lead_spot_both_seats_bare() -> None:
+    # BB first to act on the flop, BTN yet to act this street: neither seat has
+    # chips in front, so both render bare POS-$remaining.
+    facts = extract_facts(_spot("flop_oop_lead", "7h6h"), SOLVE)
+    t = build_postflop_app_table_columns(facts, SOLVE, display_in_bb=True)
+    assert t["user_seat"] == "BB-97.5BB"
+    assert t["seats"] == "BTN-97.5BB"
+
+
+def test_app_table_dollar_conversion_uses_bb_in_dollars() -> None:
+    # A $2/bb solve scales every amount by bb_in_dollars (97.5bb -> $195).
+    from dataclasses import replace  # noqa: PLC0415
+
+    solve2 = replace(SOLVE, bb_in_dollars=2.0)
+    facts = extract_facts(_spot("flop_ip_facing_bet", "KsJd"), solve2)
+    t = build_postflop_app_table_columns(facts, solve2, display_in_bb=False)
+    assert t["user_seat"] == "BTN-$195"
+    assert t["seats"] == "BB-$191.4-$3.6-bet"
+    assert t["pot"] == "$14.6"
 
 
 def test_per_action_ev_column_replaces_the_gap() -> None:
@@ -700,6 +769,37 @@ def test_batch_real_path_with_mock_client(tmp_path: Path) -> None:
     assert result.questions_written == 3
     assert not result.dry_run
     assert result.total_output_tokens > 0
+
+
+def test_compare_mechanism_two_batches_share_identical_spots(tmp_path: Path) -> None:
+    # The postflop Compare page's core invariant: two batches on the SAME solve +
+    # the SAME deterministic selector see byte-identical spots (no shared RNG seed
+    # needed), so an A/B isolates the prompt. Mirrors what
+    # run.compare_postflop_batches_from_db does, minus the .db load + the LLM.
+    import csv as _csv  # noqa: PLC0415
+
+    from admin_panel import compare as _cmp  # noqa: PLC0415 -- pure logic, no streamlit
+    from pipeline.postflop.facts import preflop_aggressor  # noqa: PLC0415
+    from pipeline.postflop.spot_selection import make_spot_selector  # noqa: PLC0415
+
+    selector = make_spot_selector(
+        diversify=True, aggressor=preflop_aggressor(SOLVE), ip_position=SOLVE.ip_position
+    )
+    a, b = tmp_path / "cmp_A.csv", tmp_path / "cmp_B.csv"
+    for out in (a, b):
+        generate_postflop_batch(
+            solve=SOLVE, output_path=out, total_questions=4, dry_run=True,
+            write_meta=False, spot_selector=selector,
+        )
+    rows_a = [{str(k): str(v) for k, v in r.items()}
+              for r in _csv.DictReader(a.open(encoding="utf-8-sig"))]
+    rows_b = [{str(k): str(v) for k, v in r.items()}
+              for r in _csv.DictReader(b.open(encoding="utf-8-sig"))]
+    # Identical spot set, in the same order.
+    assert [r["solver_reference"] for r in rows_a] == [r["solver_reference"] for r in rows_b]
+    # The node-aware join (full solver_reference) pairs every spot.
+    pairs = _cmp.join_by_spot(rows_a, rows_b, key_fn=lambda r: r["solver_reference"])
+    assert len(pairs) == len(rows_a) > 0
 
 
 def test_batch_rejects_malformed_solve(tmp_path: Path) -> None:

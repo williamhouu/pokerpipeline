@@ -133,11 +133,27 @@ decision types (see the calibration note below).
 - **Batch re-verifier:** `scripts/audit_postflop_batch.py` rebuilds every CSV row
   from the source `.db` (via `meta.provenance`) and diffs (0/0 on real output).
 
+**Done (June 2026, the `.cfr` adapter):** `adapters/cfr_pio.py` maps a PioSolver
+Edge `.cfr` solve into the IR by driving the solver over its **UPI protocol**
+(`show_node` / `show_children` / `show_strategy` / `show_range` / `calc_ev` /
+`show_hand_order` — the same commands the Phase-0 client uses). Pio's node-string
+grammar is identical to the `.db` adapter's, so the betting-state walk mirrors it
+(check/call + bet/raise derived from the betting STATE, never a label); `show_range`
+gives each node's range directly (no manual reach-walk), and `calc_ev(actor, child)`
+gives per-action EVs. Written against a small `UpiClient` `Protocol` and
+**unit-tested with a mocked client** (`tests/test_postflop_cfr_adapter.py`) — this
+Mac can't run Pio, so it is **NOT verified end-to-end here**. Full integration
+needs a Windows host with Pio Edge + a `.cfr` (e.g. `test_solves/
+btn_vs_bb_srp_2cJs7s.cfr`), driven via `load_postflop_cfr`. v1 builds flop nodes
+(turn/river is a BFS-through-chance-nodes extension; the walk already handles
+chance tokens). `validate_solve` is the contract both adapters target.
+
 **Next:**
 
-1. **A `.cfr` adapter.** Turn/river `.db` nodes are done; a PioSolver `.cfr`
-   adapter (via `pipeline.piosolver` UPI, on a Windows host) is the other source.
-   `validate_solve` is the contract to target.
+1. **Real-host `.cfr` verification.** Run `load_postflop_cfr` on a Windows host
+   with Pio Edge against `test_solves/btn_vs_bb_srp_2cJs7s.cfr` and confirm the
+   built IR matches the synthetic fixture's shape; then extend the BFS through
+   chance nodes for turn/river.
 2. **Admin Generate + Review pages — DONE (June 2026).** `admin_panel/app.py:
    _render_generate_page_postflop` is a *solve picker* (scans `solves/postflop/`
    via `discover_db_solves`, launches `run.generate_postflop_batch_from_db`
@@ -153,9 +169,15 @@ decision types (see the calibration note below).
    `admin_panel/prompts/postflop_system.txt`; the Prompt page → Postflop mode
    edits it). Still wanted: tune against gold postflop examples and grow the
    soft validators from observed failures (same loop as preflop).
-4. **App table-state format.** `format_writer` renders amounts in bb or dollars;
-   porting the preflop `app_table_format` engine would emit the exact Runout
-   chip/seat token strings. A formatting concern only — no layer above changes.
+4. **App table-state format — DONE.** `pipeline/postflop/app_table_format.py`
+   emits the exact Runout chip/seat/board tokens (`User Seat = "BTN-$97.5"`,
+   `Seats = "BB-$95.7-$1.8-bet"`, `Cards on Table = "2-clubs, J-spades,
+   7-spades"`), built from the same bb-denominated amounts as the question
+   prose. Postflop is where `Cards on Table` is finally non-empty. Remaining
+   stacks keep cents and both players always render (unlike the preflop engine);
+   per-player remaining is reconstructed by a betting walk over the preflop line
+   + every postflop street. A new `Seats` column sits between `Default Stack`
+   and `POT`. Verified against `docs/output_format_examples.xlsx` postflop rows.
 5. **Parity + tuning.** A postflop Compare page + prompt library; the
    harder-to-detect skills (`Facing a Check-Raise`, MDF, Reverse Implied Odds —
    see `skills.py:POSTFLOP_SKILLS_NOT_TAGGED`); LLM prompt tuning against gold

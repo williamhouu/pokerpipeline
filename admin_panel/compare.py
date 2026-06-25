@@ -12,6 +12,7 @@ than row order, so a generation failure on one side can't misalign the join.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 # Verdict vocabulary: which prompt's output was better for a spot.
@@ -34,25 +35,35 @@ def spot_key(solver_reference: str, user_cards: str) -> str:
     return f"{_node_id(solver_reference)}|{user_cards}"
 
 
+def _default_key(row: dict[str, str]) -> str:
+    return spot_key(row.get("solver_reference", ""), row.get("User Cards", ""))
+
+
 def join_by_spot(
     rows_a: list[dict[str, str]],
     rows_b: list[dict[str, str]],
+    *,
+    key_fn: Callable[[dict[str, str]], str] | None = None,
 ) -> list[tuple[str, dict[str, str], dict[str, str]]]:
     """Pair batch-A and batch-B rows by spot, in A's order.
 
     Returns ``(spot_key, row_a, row_b)`` for every spot present in BOTH
     batches. Spots only one side produced (e.g. an LLM failure under one
     prompt) are skipped so the comparison only shows true head-to-heads.
+
+    ``key_fn`` overrides the join key. The default keys on
+    ``(node_id, User Cards)`` where ``node_id`` is the LAST segment of
+    ``solver_reference`` -- correct for preflop, but for POSTFLOP the last
+    segment is the hero combo (the ref is ``.../<node_id>/<combo>``), so two
+    spots that are the same combo at different nodes would collide. The postflop
+    Compare page passes ``key_fn=lambda r: r["solver_reference"]`` -- the full
+    ref is node+combo-unique -- to key correctly.
     """
-    b_by_key: dict[str, dict[str, str]] = {
-        spot_key(r.get("solver_reference", ""), r.get("User Cards", "")): r
-        for r in rows_b
-    }
+    kf = key_fn or _default_key
+    b_by_key: dict[str, dict[str, str]] = {kf(r): r for r in rows_b}
     out: list[tuple[str, dict[str, str], dict[str, str]]] = []
     for row_a in rows_a:
-        key = spot_key(
-            row_a.get("solver_reference", ""), row_a.get("User Cards", "")
-        )
+        key = kf(row_a)
         row_b = b_by_key.get(key)
         if row_b is not None:
             out.append((key, row_a, row_b))

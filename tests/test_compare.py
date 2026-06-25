@@ -61,6 +61,30 @@ def test_join_by_spot_skips_spots_missing_on_one_side() -> None:
     assert paired[0][0] == "N1|AKs"
 
 
+def test_join_by_spot_custom_key_fn_avoids_postflop_collision() -> None:
+    # Postflop solver_reference is ".../<node_id>/<combo>", so its LAST segment
+    # is the combo -- the default (last-segment, cards) key collides for the same
+    # combo decided at two different nodes. The postflop Compare page passes a
+    # full-ref key_fn so the two nodes stay distinct.
+    def pf(ref: str, expl: str) -> dict[str, str]:
+        return {"solver_reference": ref, "User Cards": "Q-spades, J-diamonds",
+                "Answer Explanation": expl}
+
+    rows_a = [pf("db/spot/QsJd9s/r:0:c/QsJd", "A1"),
+              pf("db/spot/QsJd9s/r:0:b22/QsJd", "A2")]
+    rows_b = [pf("db/spot/QsJd9s/r:0:c/QsJd", "B1"),
+              pf("db/spot/QsJd9s/r:0:b22/QsJd", "B2")]
+    # Default key collapses both nodes to one key -> both A rows wrongly pair to
+    # the SAME (last) B row.
+    default_paired = compare.join_by_spot(rows_a, rows_b)
+    assert {k for k, _, _ in default_paired} == {"QsJd|Q-spades, J-diamonds"}
+    assert all(rb["Answer Explanation"] == "B2" for _k, _ra, rb in default_paired)
+    # Node-aware key pairs each node correctly.
+    paired = compare.join_by_spot(rows_a, rows_b, key_fn=lambda r: r["solver_reference"])
+    assert [ra["Answer Explanation"] for _k, ra, _rb in paired] == ["A1", "A2"]
+    assert [rb["Answer Explanation"] for _k, _ra, rb in paired] == ["B1", "B2"]
+
+
 def test_verdict_round_trip_and_path(tmp_path: Path) -> None:
     csv = tmp_path / "compare_A.csv"
     assert compare.verdicts_path(csv) == tmp_path / "compare_A.verdicts.json"

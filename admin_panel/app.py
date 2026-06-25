@@ -6214,6 +6214,358 @@ def render_postflop_review_page() -> None:
         )
 
 
+def render_postflop_compare_page() -> None:
+    """Run two postflop prompts (or models) on the SAME spots, judged side by side.
+
+    The postflop analog of :func:`render_compare_page`. Postflop uses a single
+    admin-editable system prompt (no PromptLibrary), so the A/B is two free-text
+    prompt boxes (and/or two models). Both sides run in ONE subprocess job on
+    identical, fully-deterministic spots from one ``.db`` solve (postflop spot
+    selection needs no shared RNG seed), so any difference is the prompt/model,
+    not luck. Reuses the generic compare/review/claim-check helpers.
+    """
+    import os  # noqa: PLC0415
+
+    from pipeline.postflop.adapters.sqlite_db import discover_db_solves  # noqa: PLC0415
+    from pipeline.postflop.explanation_generator import (  # noqa: PLC0415
+        load_postflop_system_prompt,
+    )
+    from pipeline.postflop.options import (  # noqa: PLC0415
+        ANSWER_STYLE_FROM_RADIO_LABEL,
+    )
+    from pipeline.postflop.run import (  # noqa: PLC0415
+        POSTFLOP_OUTPUT_DIR as _PF_OUT,
+    )
+    from pipeline.postflop.run import (  # noqa: PLC0415
+        compare_postflop_batches_from_db,
+    )
+
+    st.title("Compare postflop prompts (A/B)")
+    st.caption(
+        "Run two prompts (or two models) on the SAME spots from one solve and "
+        "judge them side by side — so any difference is the prompt, not luck. "
+        "Postflop spots are fully deterministic, so both sides see identical hands."
+    )
+
+    # --- job lifecycle: while running show progress; on finish stash + clear ---
+    _STATE = "pf_cmp_result"
+    job = jobs.get_current_job()
+    if job is not None and str(job.label).startswith("PostflopCompare:"):
+        with st.container(border=True):
+            if job.is_active:
+                _render_active_job_progress()
+                st.caption("Both sides run in one job; this page updates when it finishes.")
+                return
+            if job.status is jobs.JobStatus.COMPLETED:
+                res = job.result if isinstance(job.result, dict) else None
+                if res and res.get("a_written") and res.get("b_written"):
+                    st.session_state[_STATE] = {
+                        k: res[k] for k in ("a_csv", "b_csv", "a_name", "b_name")
+                    }
+                    msg = (
+                        f"✅ Comparison ready — {res['a_name']} "
+                        f"({res['a_written']}) vs {res['b_name']} ({res['b_written']})."
+                    )
+                    if not res.get("dry_run") and (res.get("in_tokens") or res.get("out_tokens")):
+                        msg += (
+                            f" Tokens: {res['in_tokens']:,} in / {res['out_tokens']:,} out."
+                        )
+                    st.success(msg)
+                else:
+                    a_w = (res or {}).get("a_written", 0)
+                    b_w = (res or {}).get("b_written", 0)
+                    st.warning(
+                        f"A side wrote {a_w} rows, B wrote {b_w} — both need rows to "
+                        "compare. Adjust the prompts/filters and run again."
+                    )
+                jobs.clear_current_job()
+            elif job.status is jobs.JobStatus.CANCELLED:
+                st.warning("⛔ Comparison cancelled.")
+                jobs.clear_current_job()
+            else:  # FAILED
+                st.error("❌ Comparison job failed.")
+                with st.expander("Traceback"):
+                    st.code(job.error or "(no traceback captured)")
+                jobs.clear_current_job()
+
+    # --- 1. pick a solve (reuse the Generate-page discovery) ------------------
+    folder = st.text_input(
+        "Solves folder", value=str(_POSTFLOP_SOLVES_DIR), key="pfcmp_solves_dir",
+        help="Folder holding your `.db` postflop solves (scanned recursively).",
+    )
+    usable = [s for s in discover_db_solves(folder) if s.ok]
+    if not usable:
+        st.info(f"No readable `.db` solves found in `{folder}`.")
+        return
+    by_path = {s.path: s for s in usable}
+    picked = st.selectbox(
+        f"{len(usable)} solve(s) found",
+        options=[s.path for s in usable],
+        format_func=lambda p: f"{Path(p).name}   —   {by_path[p].label}",
+        key="pfcmp_pick_solve",
+    )
+    solve_sum = by_path[picked]
+    st.caption(f"`{solve_sum.label}`")
+
+    # --- 2. the two prompts (prefilled with the active postflop prompt) -------
+    active_prompt = load_postflop_system_prompt()
+    for k in ("pfcmp_prompt_a", "pfcmp_prompt_b"):
+        if k not in st.session_state:
+            st.session_state[k] = active_prompt
+    st.markdown("**Prompts** — edit one (or both) to compare. Both start from the active postflop prompt.")
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        prompt_a = st.text_area("Prompt A", key="pfcmp_prompt_a", height=260)
+        if st.button("↺ Reset A to active", key="pfcmp_reset_a"):
+            st.session_state["pfcmp_prompt_a"] = active_prompt
+            st.rerun()
+    with pc2:
+        prompt_b = st.text_area("Prompt B", key="pfcmp_prompt_b", height=260)
+        if st.button("↺ Reset B to active", key="pfcmp_reset_b"):
+            st.session_state["pfcmp_prompt_b"] = active_prompt
+            st.rerun()
+
+    # --- 3. per-side models + spot count + filters ----------------------------
+    _short = lambda lbl: lbl.split(" (")[0]  # noqa: E731
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        model_a_label = st.selectbox(
+            "Model A", list(_MODEL_LABEL_TO_API), index=0,
+            format_func=_short, key="pfcmp_model_a",
+        )
+    with mc2:
+        model_b_label = st.selectbox(
+            "Model B", list(_MODEL_LABEL_TO_API), index=0,
+            format_func=_short, key="pfcmp_model_b",
+        )
+    with mc3:
+        n_spots = int(st.number_input("Spots", min_value=1, max_value=50, value=6, key="pfcmp_n"))
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        heroes = st.multiselect(
+            "Whose decisions", options=[solve_sum.ip_position, solve_sum.oop_position],
+            default=[solve_sum.ip_position, solve_sum.oop_position], key="pfcmp_heroes",
+        )
+    with fc2:
+        streets = st.multiselect(
+            "Streets", options=["flop", "turn", "river"], default=["flop"],
+            key="pfcmp_streets", help="Flop only is fastest; both sides see the same spots either way.",
+        )
+    diversify = st.toggle("Vary the decision types", value=True, key="pfcmp_diversify")
+
+    oc1, oc2 = st.columns(2)
+    with oc1:
+        display_in_bb = st.radio(
+            "Amounts", ["Big blinds", "Dollars"], index=0, horizontal=True,
+            key="pfcmp_amounts",
+        ) == "Big blinds"
+    with oc2:
+        answer_style = ANSWER_STYLE_FROM_RADIO_LABEL[
+            st.radio(
+                "Answer option style", list(ANSWER_STYLE_FROM_RADIO_LABEL), index=1,
+                horizontal=True, key="pfcmp_style",
+            )
+        ]
+
+    with st.expander("Worthiness window (advanced)"):
+        freq_lo, freq_hi = st.slider(
+            "Solver frequency window (%)", 50, 100, (65, 99), key="pfcmp_freq",
+        )
+
+    cmp_run_claim_checker = st.checkbox(
+        "Run claim checker (Layer 7) on both sides", value=False, key="pfcmp_claim",
+        help="A second LLM pass audits each explanation; its verdict shows under "
+        "each spot. One extra API call per question per side.",
+    )
+    dry = st.toggle("Dry run", key="pfcmp_dry", help="No API calls — placeholder prose, flow check.")
+
+    # --- 4. guards + run ------------------------------------------------------
+    same_prompt = prompt_a.strip() == prompt_b.strip()
+    same_model = model_a_label == model_b_label
+    if same_prompt and same_model:
+        st.info("Edit one prompt (or pick a different model) — identical sides generate the same thing twice.")
+    elif not same_prompt and not same_model:
+        st.warning("Both the prompt AND the model differ, so a verdict won't isolate the cause. Vary one at a time.")
+
+    blocked = (same_prompt and same_model) or jobs.has_active_job() or not heroes or not streets
+    if st.button("Run comparison", type="primary", disabled=blocked, key="pfcmp_run"):
+        if not dry and not os.environ.get("ANTHROPIC_API_KEY"):
+            st.error("ANTHROPIC_API_KEY is not set. Add it to `.env`, or enable Dry run.")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _PF_OUT.mkdir(parents=True, exist_ok=True)
+        out_a = _PF_OUT / f"compare_{ts}_A.csv"
+        out_b = _PF_OUT / f"compare_{ts}_B.csv"
+        name_a = f"A · {_short(model_a_label)}" if not same_model else "Prompt A"
+        name_b = f"B · {_short(model_b_label)}" if not same_model else "Prompt B"
+        live = "Live" if (solve_sum.table_size or 9) >= 9 else "Online"  # noqa: PLR2004
+        try:
+            jobs.start_subprocess_job(
+                compare_postflop_batches_from_db,
+                label=f"PostflopCompare: {Path(picked).name} ({n_spots} q ×2)",
+                db_path=picked,
+                output_path_a=str(out_a),
+                output_path_b=str(out_b),
+                total_questions=n_spots,
+                system_prompt_a=prompt_a,
+                system_prompt_b=prompt_b,
+                model_a=_MODEL_LABEL_TO_API[model_a_label],
+                model_b=_MODEL_LABEL_TO_API[model_b_label],
+                name_a=name_a,
+                name_b=name_b,
+                heroes=tuple(heroes),
+                streets=tuple(streets),
+                diversify=diversify,
+                answer_style=answer_style,
+                display_in_bb=display_in_bb,
+                live_or_online=live,
+                min_frequency=freq_lo / 100.0,
+                max_frequency=freq_hi / 100.0,
+                run_claim_checker=cmp_run_claim_checker,
+                claim_checker_prompt=(
+                    _load_postflop_claim_checker_prompt() if cmp_run_claim_checker else None
+                ),
+                dry_run=dry,
+            )
+            st.rerun()
+        except RuntimeError as exc:
+            st.error(str(exc))
+
+    # --- 5. results: join the two CSVs + judge side by side -------------------
+    result = _render_past_comparisons(_PF_OUT, _STATE)
+    if not result:
+        st.caption("Run a comparison above to see the side-by-side view.")
+        return
+    a_csv = Path(str(result["a_csv"]))
+    b_csv = Path(str(result["b_csv"]))
+    if not (a_csv.is_file() and b_csv.is_file()):
+        st.info("Run a comparison above to see results.")
+        return
+
+    df_a = _read_csv_cached(str(a_csv), a_csv.stat().st_mtime, as_str=True)
+    df_b = _read_csv_cached(str(b_csv), b_csv.stat().st_mtime, as_str=True)
+    rows_a = [{str(k): str(v) for k, v in r.items()} for r in df_a.to_dict("records")]
+    rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
+    # Postflop solver_reference is ".../<node_id>/<combo>" — its LAST segment is
+    # the combo, so the default (node_id, cards) key would collide across nodes.
+    # Key on the FULL ref instead (node+combo unique).
+    pf_key = lambda r: r.get("solver_reference", "")  # noqa: E731
+    pairs = compare.join_by_spot(rows_a, rows_b, key_fn=pf_key)
+    verdicts = compare.load_verdicts(a_csv)
+    counts = compare.tally(verdicts)
+
+    st.divider()
+    st.markdown(
+        f"### Tally — **{result['a_name']}** {counts['A']}  ·  "
+        f"**{result['b_name']}** {counts['B']}  ·  tie {counts['tie']}   "
+        f"({len(verdicts)}/{len(pairs)} judged)"
+    )
+    if not pairs:
+        st.warning("No shared spots to compare (did both runs produce rows?).")
+        return
+
+    opts = [f"{result['a_name']} better", "Tie", f"{result['b_name']} better"]
+    to_verdict = {opts[0]: "A", opts[1]: "tie", opts[2]: "B"}
+    from_verdict = {"A": opts[0], "tie": opts[1], "B": opts[2]}
+    reviews_a = review.load_reviews(a_csv)
+    reviews_b = review.load_reviews(b_csv)
+
+    for key, row_a, row_b in pairs:
+        with st.container(border=True):
+            if row_a.get("Context"):
+                st.caption(row_a["Context"])
+            st.markdown(_md_lines(row_a.get("Question", "")))
+            picks = ", ".join(
+                row_a.get(f"option {i}", "") for i in (1, 2, 3, 4) if row_a.get(f"option {i}", "")
+            )
+            st.caption(f"Options: {picks}  ·  Correct: **{row_a.get('Correct Answer', '')}**")
+            if row_a.get("action_frequencies"):
+                st.markdown("**Solver frequencies:** " + row_a["action_frequencies"])
+            fact_bits: list[str] = []
+            for col, lbl in (
+                ("archetype", "archetype"), ("Difficulty Rating", "difficulty"),
+                ("spr", "SPR"), ("hero_equity", "equity"), ("range_equity", "range eq"),
+                ("Position Matchup", "matchup"),
+            ):
+                if row_a.get(col):
+                    fact_bits.append(f"{lbl}: `{row_a[col]}`")
+            if fact_bits:
+                st.caption(" · ".join(fact_bits))
+            if row_a.get("concept_tags"):
+                st.caption(f"concept tags: {row_a['concept_tags']}")
+            if row_a.get("skills"):
+                st.caption(f"skills: {row_a['skills']}")
+
+            orig_a = row_a.get("Answer Explanation", "")
+            orig_b = row_b.get("Answer Explanation", "")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**{result['a_name']}**")
+                edited_a = st.text_area(
+                    "Explanation A", value=orig_a, height=320,
+                    key=f"pfcmp_exp_a_{a_csv.stem}_{key}", label_visibility="collapsed",
+                )
+                if edited_a.strip() != orig_a.strip():
+                    st.caption("✏️ Edited — finalizing A saves this text.")
+                _render_claim_check_panel(row_a)
+            with col_b:
+                st.markdown(f"**{result['b_name']}**")
+                edited_b = st.text_area(
+                    "Explanation B", value=orig_b, height=320,
+                    key=f"pfcmp_exp_b_{b_csv.stem}_{key}", label_visibility="collapsed",
+                )
+                if edited_b.strip() != orig_b.strip():
+                    st.caption("✏️ Edited — finalizing B saves this text.")
+                _render_claim_check_panel(row_b)
+
+            cur = verdicts.get(key)
+            idx = opts.index(from_verdict[cur]) if cur in from_verdict else None
+            choice = st.radio(
+                "Which is better?", opts, index=idx, horizontal=True, key=f"pfcmp_v_{key}",
+            )
+            if choice is not None and to_verdict[choice] != cur:
+                compare.save_verdict(a_csv, key, to_verdict[choice])
+                st.rerun()
+
+            no_a, no_b = str(row_a.get("No", "")), str(row_b.get("No", ""))
+            fin_a = reviews_a.get(no_a, {}).get("status") == "approved"
+            fin_b = reviews_b.get(no_b, {}).get("status") == "approved"
+            fcol_a, fcol_b = st.columns(2)
+            if fcol_a.button("Save A to finalized", key=f"pfcmp_fin_a_{key}", disabled=fin_a, use_container_width=True):
+                review.save_review(
+                    a_csv, no_a, "approved", "finalized from postflop compare",
+                    explanation=(edited_a if edited_a.strip() != orig_a.strip() else None),
+                )
+                review.remove_review(b_csv, no_b)
+                st.rerun()
+            if fcol_b.button("Save B to finalized", key=f"pfcmp_fin_b_{key}", disabled=fin_b, use_container_width=True):
+                review.save_review(
+                    b_csv, no_b, "approved", "finalized from postflop compare",
+                    explanation=(edited_b if edited_b.strip() != orig_b.strip() else None),
+                )
+                review.remove_review(a_csv, no_a)
+                st.rerun()
+            if fin_a or fin_b:
+                which = result["a_name"] if fin_a else result["b_name"]
+                st.caption(f"✅ Saved to finalized using **{which}**.")
+                if st.button("Remove from finalized", key=f"pfcmp_unfin_{key}"):
+                    review.remove_review(a_csv, no_a)
+                    review.remove_review(b_csv, no_b)
+                    st.rerun()
+
+    # --- download the shared finalized pool (same set as the Postflop Review) -
+    st.divider()
+    fin_fields, fin_rows = review.collect_approved_rows(_PF_OUT)
+    if fin_rows:
+        st.download_button(
+            f"⬇️  Download finalized postflop questions (CSV) — {len(fin_rows)} total",
+            review.approved_rows_to_csv(fin_fields, fin_rows),
+            file_name="postflop_approved_all_batches.csv",
+            mime="text/csv", type="primary", key="pfcmp_download_finalized",
+        )
+
+
 def _render_postflop_prompt_editor() -> None:
     """Edit the postflop system prompt.
 
@@ -8645,7 +8997,8 @@ def main() -> None:
         st.session_state["nav_page"] = st.session_state.pop("_pending_nav")
     page = st.sidebar.radio(
         "Page",
-        options=["Files", "Generate", "Review", "Postflop Review", "Ranges",
+        options=["Files", "Generate", "Review", "Postflop Review",
+                 "Postflop Compare", "Ranges",
                  "History", "Browse", "Prompt", "Compare", "Skills",
                  "Concept Tags",
                  "PLO Generate", "PLO Review", "PLO Prompt", "PLO Compare"],
@@ -8725,6 +9078,8 @@ def main() -> None:
         render_review_page()
     elif page == "Postflop Review":
         render_postflop_review_page()
+    elif page == "Postflop Compare":
+        render_postflop_compare_page()
     elif page == "Ranges":
         render_ranges_page()
     elif page == "History":
