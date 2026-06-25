@@ -149,6 +149,13 @@ CSV_COLUMNS = [
     # rows. Distinct from ev_gap_bb (one number, the analytic call/fold
     # gap). (June 2026.)
     "action_ev_bb",
+    # Per-question chatbot context (June 2026): one JSON blob of ALL the
+    # deterministic facts for the app's "chat about this question" AI -- the
+    # full action strategy + EVs, equity, the villain's likely hands, the
+    # answer + neutral-credit alternatives, the explanation shown, and a
+    # guardrails line. One schema across preflop / postflop / PLO. See
+    # pipeline/chat_context.py.
+    "chat_context",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -389,6 +396,7 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         "claim_check": "",  # postflop rows: claim checker is preflop-only for now
         "exploit_notes": "",  # postflop rows: exploit tags are preflop-only for now
         "action_ev_bb": "",  # postflop rows: per-action EVs await postflop solves
+        "chat_context": "",  # legacy shared-writer postflop path: not populated here
     }
 
 

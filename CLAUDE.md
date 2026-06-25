@@ -562,11 +562,28 @@ explanations before the tagger goes to production.
 
 Source of truth is **Google Sheets**. The **shared** `CSV_COLUMNS` schema (in
 `pipeline/format_writer.py`, used by the PLO writer and the old postflop
-writer) is **50 columns**. The **NLHE preflop** writer emits a **40-column
+writer) is **51 columns**. The **NLHE preflop** writer emits a **41-column
 subset** — `PREFLOP_CSV_COLUMNS` in `pipeline/preflop/format_writer.py`, the
 shared list minus the 10 columns the NLHE path dropped in June 2026 (see the
 trim note after the table). The pipeline writes the team's template columns
 via a formatter and adds the new pipeline columns below.
+
+**`chat_context` (June 2026) — the AI-chatbot column.** The app's per-question
+chatbot (a user chats about a spot after answering) is fed this ONE
+self-contained JSON blob of all deterministic truth, so it never invents poker
+facts. Built by the shared `pipeline/chat_context.py:build_chat_context`
+(a pure formatter, like `neutral_credit`) — ONE schema across all four writers
+(preflop, postflop, PLO, + the self-contained postflop tuple). It carries MORE
+than the generation SOLVER DATA block, because a chatbot user asks comparative
++ hypothetical questions: the **full action strategy with per-action EVs** (not
+just the recommended action), the **villain's likely hands**, the
+**neutral-credit alternatives**, the **explanation already shown**, all the
+facts (equity incl. multiway field + range-vs-range, pot odds, SPR, range/nut
+advantage, blockers value/bluff, board texture, archetype, concept tags,
+skills, difficulty), and a **`guardrails`** line baked in ("answer only from
+this data; never invent numbers; for a hypothetical hand, say it's outside this
+spot's data"). The app's chatbot system prompt should ALSO enforce that rule.
+Last column in every writer.
 
 **`neutral_credit` (June 2026).** A deterministic partial-credit column
 inserted **right after `Correct Answer`** in all four writers (shared

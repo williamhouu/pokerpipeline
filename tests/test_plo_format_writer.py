@@ -56,8 +56,8 @@ def _facts(
 
 def test_schema_has_50_columns_and_no_ranges():
     assert "ranges" not in PLO_CSV_COLUMNS
-    # 50-col shared template minus `ranges` (49) plus the PLO-only `hand_shape`.
-    assert len(PLO_CSV_COLUMNS) == 50  # noqa: PLR2004
+    # 51-col shared template minus `ranges` (50) plus the PLO-only `hand_shape`.
+    assert len(PLO_CSV_COLUMNS) == 51  # noqa: PLR2004
     # hand_shape sits right after archetype.
     i = PLO_CSV_COLUMNS.index("archetype")
     assert PLO_CSV_COLUMNS[i + 1] == "hand_shape"
@@ -132,3 +132,19 @@ def test_write_csv_roundtrips(tmp_path):
     assert len(rows) == 1
     assert rows[0]["Correct Answer"] == "Call"
     assert "ranges" not in rows[0]
+
+
+def test_chat_context_column_plo():
+    import json
+    facts = _facts()
+    row = build_plo_row(
+        facts, difficulty=compute_plo_difficulty(facts),
+        options=["Fold", "Call", "3-bet"], correct_answer="Call",
+        explanation="Premium aces, call to keep the pot manageable.", number=1,
+    )
+    ctx = json.loads(row["chat_context"])
+    assert ctx["pipeline"] == "plo"
+    assert ctx["recommended_action"] == "Call"
+    assert ctx["full_strategy"]  # the action mix
+    assert ctx["coaching_answer"].startswith("Premium aces")
+    assert ctx["guardrails"]

@@ -1219,3 +1219,20 @@ def test_batch_quality_gate_counter(tmp_path: Path) -> None:
     meta = json.loads(res.meta_path.read_text())
     assert meta["run_settings"]["quality_gate"] is True
     assert "low_quality_nodes_skipped" in meta["counters"]
+
+
+def test_chat_context_column_postflop() -> None:
+    facts = _facts_for("flop_ip_facing_bet", "KsJd")
+    opts, correct = build_options(facts.spot)
+    row = build_postflop_row(
+        facts, placeholder_explanation(facts, opts, correct), SOLVE,
+        compute_difficulty(facts), 1,
+    )
+    assert "chat_context" in POSTFLOP_CSV_COLUMNS
+    ctx = json.loads(row["chat_context"])
+    assert ctx["pipeline"] == "postflop"
+    # The chatbot-specific additions are present + grounded.
+    assert ctx["full_strategy"] and "frequency_pct" in ctx["full_strategy"][0]
+    assert ctx["recommended_action"] == correct
+    assert ctx["villain"]["seat"] == facts.villain_position
+    assert ctx["guardrails"]

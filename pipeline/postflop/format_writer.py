@@ -18,6 +18,7 @@ import csv
 from collections.abc import Iterable
 from pathlib import Path
 
+from pipeline.chat_context import StrategyEntry, build_chat_context
 from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line, format_question
@@ -86,6 +87,11 @@ POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
     "Notes",
     "solver_reference",
     "validation_status",
+    # Per-question chatbot context: one JSON blob of ALL deterministic facts for
+    # the app's "chat about this question" AI (full strategy + EVs, equity,
+    # range/nut advantage, blockers, villain summary, the answer + alternatives,
+    # the explanation shown, and a guardrails line). See pipeline/chat_context.py.
+    "chat_context",
     # Layer-7 claim-checker output (opt-in): "" = not run, "[]" = run + clean,
     # a JSON list of {claim, problem} = flagged. Same shape as the preflop
     # column, so the admin Review panel reads it with the same parser.
@@ -124,6 +130,70 @@ def _format_action_evs(
     return ", ".join(f"{label}: {evs[label]:+.2f}" for label in ordered)
 
 
+def _postflop_chat_context(
+    facts: PostflopFacts,
+    explanation: GeneratedExplanation,
+    solve: PostflopSolve,
+    difficulty: PostflopDifficulty,
+    *,
+    display_in_bb: bool,
+    neutral: list[str],
+) -> str:
+    """The per-question chatbot JSON blob (all deterministic facts). See
+    :mod:`pipeline.chat_context`."""
+    from pipeline.postflop.explanation_generator import (  # noqa: PLC0415
+        POSTFLOP_ARCHETYPE_GUIDANCE,
+    )
+    from pipeline.postflop.skills import compute_postflop_skills  # noqa: PLC0415
+
+    evs = spot_action_evs_bb(facts.spot) or {}
+    strategy = [
+        StrategyEntry(action=label, frequency_pct=freq * 100.0, ev_bb=evs.get(label))
+        for label, freq in facts.spot.action_frequencies.items()
+    ]
+    key_facts: dict[str, object] = {
+        "hero_equity_vs_villain_pct": round(facts.hero_equity_vs_villain * 100),
+        "your_range_equity_pct": round(facts.hero_range_equity * 100),
+        "range_advantage": facts.range_advantage,
+        "nut_advantage": facts.nut_advantage,
+        "spr": round(facts.spr, 1),
+        "pot_bb": round(facts.pot_bb, 1),
+        "board_texture": facts.board_texture.get("composite", ""),
+    }
+    if facts.break_even_equity is not None:
+        key_facts["break_even_equity_pct"] = round(facts.break_even_equity * 100)
+        key_facts["to_call_bb"] = round(facts.to_call_bb, 1)
+    if facts.blocker_effect != "neutral":
+        key_facts["blockers"] = (
+            f"you remove ~{facts.blocked_value_pct * 100:.0f}% of villain's value "
+            f"and ~{facts.blocked_bluff_pct * 100:.0f}% of their bluffs "
+            f"(mainly block their {facts.blocker_effect})"
+        )
+    villain = {
+        "seat": facts.villain_position,
+        "strong_hands_pct": round(facts.villain_nut_share * 100),
+        "has_range_edge": facts.range_advantage == "villain",
+    }
+    return build_chat_context(
+        pipeline="postflop",
+        situation=format_question(facts.spot, solve, display_in_bb=display_in_bb),
+        hero_hand=_emoji_cards(facts.spot.hero_cards),
+        hand_summary=f"{facts.made_hand.replace('_', ' ')} ({facts.strength_bucket})"
+        + (f"; draws: {', '.join(facts.draws)}" if facts.has_strong_draw else ""),
+        recommended_action=explanation.correct_answer,
+        also_acceptable=neutral,
+        full_strategy=strategy,
+        key_facts=key_facts,
+        villain=villain,
+        strategic_frame=f"{facts.archetype}: "
+        f"{POSTFLOP_ARCHETYPE_GUIDANCE.get(facts.archetype, '')}",
+        concept_tags=facts.concept_tags,
+        skills_tested=compute_postflop_skills(facts, game_format=solve.game_format),
+        difficulty=difficulty.score,
+        coaching_answer=explanation.answer_explanation,
+    )
+
+
 def build_postflop_row(
     facts: PostflopFacts,
     explanation: GeneratedExplanation,
@@ -150,6 +220,13 @@ def build_postflop_row(
         if facts.break_even_equity is not None
         else ""
     )
+    # Neutral-credit options from the hand's own action mix (the 20-point rule);
+    # computed once, reused by the neutral_credit column + the chatbot context.
+    neutral_list = neutral_credit_options(
+        explanation.options(),
+        explanation.correct_answer,
+        frequencies_for_options(facts.spot.action_frequencies, explanation.options()),
+    )
     row = {
         "No": str(number),
         "Hand Stage": facts.street.capitalize(),
@@ -167,19 +244,10 @@ def build_postflop_row(
         "option 3": opts[2],
         "option 4": opts[3],
         "Correct Answer": explanation.correct_answer,
-        # Neutral-credit options from the hand's own action mix (the 20-point
-        # rule). frequencies_for_options sums collapsed verb families (a "Bet"
-        # option = "Bet 33%" + "Bet 50%" + ...) so neutral credit matches the
-        # options even when gto collapsed a multi-size spot to Check-vs-Bet.
-        "neutral_credit": format_neutral_credit(
-            neutral_credit_options(
-                explanation.options(),
-                explanation.correct_answer,
-                frequencies_for_options(
-                    facts.spot.action_frequencies, explanation.options()
-                ),
-            )
-        ),
+        # frequencies_for_options sums collapsed verb families (a "Bet" option =
+        # "Bet 33%" + "Bet 50%" + ...) so neutral credit matches the options even
+        # when gto collapsed a multi-size spot to Check-vs-Bet.
+        "neutral_credit": format_neutral_credit(neutral_list),
         "Answer Explanation": explanation.answer_explanation,
         "Cash/Tourney": "Tournament" if solve.game_format == "tournament" else "Cash",
         "Live or Online": solve.live_or_online,
@@ -207,6 +275,10 @@ def build_postflop_row(
         "Notes": _NOTES,
         "solver_reference": f"{solve.source_reference}/{node.node_id}/{facts.spot.hero_combo}",
         "validation_status": validation_status,
+        "chat_context": _postflop_chat_context(
+            facts, explanation, solve, difficulty,
+            display_in_bb=display_in_bb, neutral=neutral_list,
+        ),
         # "" = the Layer-7 claim checker did not run for this row. The batch
         # overwrites this with the checker's JSON when the opt-in pass runs.
         "claim_check": "",

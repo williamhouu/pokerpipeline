@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from pipeline.chat_context import StrategyEntry, build_chat_context
 from pipeline.format_writer import CSV_COLUMNS
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.plo.action_history import (
@@ -112,6 +113,54 @@ def _solver_reference(facts: PloFacts, pack_label: str) -> str:
     return f"{pack_label}/{facts.spot.node.actor}/{facts.spot.node.node_id}"
 
 
+def _plo_chat_context(
+    facts: PloFacts,
+    *,
+    options: list[str],
+    correct_answer: str,
+    explanation: str,
+    difficulty: PloDifficultyResult,
+    question_text: str,
+    user_cards: str,
+    neutral_list: list[str],
+) -> str:
+    """The per-question chatbot JSON blob (all deterministic facts). Reuses PLO's
+    rich generation block (:func:`build_solver_data`) for the PLO-specific facts
+    (flush potential, nut ranking, card redundancy). See :mod:`pipeline.chat_context`."""
+    from pipeline.plo.explanation_generator import build_solver_data  # noqa: PLC0415
+
+    sd = build_solver_data(facts, options, correct_answer, include_skills=False)
+    # Keys mapped to dedicated top-level fields -- everything else in the rich
+    # generation block becomes key_facts (flush potential, redundancy, ev note,
+    # equity, leaning examples, ...).
+    _top = {
+        "situation", "your_hand", "your_hand_shape", "your_position", "options",
+        "correct_action", "action_strategy", "strategic_frame", "concept_tags",
+        "villain",
+    }
+    key_facts = {k: v for k, v in sd.items() if k not in _top}
+    strategy = [
+        StrategyEntry(action=lbl, frequency_pct=fr * 100.0)
+        for lbl, fr in canonicalize_strategy(facts).items()
+    ]
+    return build_chat_context(
+        pipeline="plo",
+        situation=question_text,
+        hero_hand=user_cards,
+        hand_summary=sd.get("your_hand_shape", facts.hand_class.descriptor),
+        recommended_action=correct_answer,
+        also_acceptable=neutral_list,
+        full_strategy=strategy,
+        key_facts=key_facts,
+        villain=sd.get("villain"),
+        strategic_frame=sd.get("strategic_frame", facts.archetype),
+        concept_tags=compute_plo_concept_tags(facts),
+        skills_tested=compute_plo_skills(facts),
+        difficulty=difficulty.score,
+        coaching_answer=explanation,
+    )
+
+
 def build_plo_row(
     facts: PloFacts,
     *,
@@ -143,6 +192,17 @@ def build_plo_row(
     )
     opts = [*options[:_MAX_OPTIONS], *([""] * (_MAX_OPTIONS - len(options)))]
     ev_gap = facts.ev_gap_bb
+    # Computed once, reused by their CSV column AND the chatbot context blob.
+    question_text = format_plo_action_history(
+        facts,
+        stakes_bb_dollars=stakes_bb_dollars,
+        game_format=game_format,
+        display_in_bb=display_in_bb,
+        stack_bb=stack_bb,
+    )
+    neutral_list = neutral_credit_options(
+        options, correct_answer, canonicalize_strategy(facts)
+    )
 
     row = {
         "No": str(number),
@@ -160,13 +220,7 @@ def build_plo_row(
             display_in_bb=display_in_bb,
             live_or_online=live_or_online,
         ),
-        "Question": format_plo_action_history(
-            facts,
-            stakes_bb_dollars=stakes_bb_dollars,
-            game_format=game_format,
-            display_in_bb=display_in_bb,
-            stack_bb=stack_bb,
-        ),
+        "Question": question_text,
         "Question Type": "Hand Scenario Question.",
         "Hand Stage": "Preflop",
         "option 1": opts[0],
@@ -176,11 +230,7 @@ def build_plo_row(
         "Correct Answer": correct_answer,
         # Deterministic neutral-credit options (the 20-point rule), computed
         # from the same canonical strategy that built the options.
-        "neutral_credit": format_neutral_credit(
-            neutral_credit_options(
-                options, correct_answer, canonicalize_strategy(facts)
-            )
-        ),
+        "neutral_credit": format_neutral_credit(neutral_list),
         "Answer Explanation": explanation,
         "Cash/Tourney": _GAME_FORMAT_PROSE.get(game_format, game_format.capitalize()),
         "Live or Online": live_or_online,
@@ -218,6 +268,18 @@ def build_plo_row(
         "claim_check": "",  # NLHE claim checker not wired for PLO yet
         "exploit_notes": "",  # NLHE exploit tagger not wired for PLO yet
         "action_ev_bb": "",  # per-action EV column not wired for PLO yet
+        # Per-question chatbot context (all deterministic facts as one JSON blob),
+        # reusing PLO's rich generation block for the PLO-specific facts.
+        "chat_context": _plo_chat_context(
+            facts,
+            options=options,
+            correct_answer=correct_answer,
+            explanation=explanation,
+            difficulty=difficulty,
+            question_text=question_text,
+            user_cards=table["user_cards"],
+            neutral_list=neutral_list,
+        ),
     }
     # Defensive: guarantee exact schema coverage (every column, no extras).
     missing = set(PLO_CSV_COLUMNS) - set(row)

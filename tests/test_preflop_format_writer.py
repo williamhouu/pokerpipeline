@@ -19,13 +19,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.explanation_generator import GeneratedExplanation  # noqa: E402
-from pipeline.preflop.format_writer import PREFLOP_CSV_COLUMNS  # noqa: E402
 from pipeline.preflop.difficulty import DifficultyResult  # noqa: E402
 from pipeline.preflop.fact_extractor import (  # noqa: E402
     PreflopFacts,
     VillainRangeStats,
 )
 from pipeline.preflop.format_writer import (  # noqa: E402
+    PREFLOP_CSV_COLUMNS,  # noqa: E402
     _active_villain_actions,
     _position_matchup,
     _pot_participant_for_facts,
@@ -1230,3 +1230,19 @@ def test_action_ev_bb_populated_on_real_monker_pack() -> None:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_chat_context_column_preflop() -> None:
+    import json
+    row = build_preflop_row(
+        _facing_open_facts(),
+        _explanation(),
+        pack=_pack(),
+        difficulty=_difficulty(1500),
+        number=1,
+    )
+    ctx = json.loads(row["chat_context"])
+    assert ctx["pipeline"] == "preflop"
+    assert ctx["full_strategy"]  # the action mix with frequencies
+    assert ctx["recommended_action"] == row["Correct Answer"]
+    assert ctx["guardrails"]
