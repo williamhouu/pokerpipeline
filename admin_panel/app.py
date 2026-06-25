@@ -975,6 +975,33 @@ def _render_generate_page_postflop() -> None:
             "dominated by one street or type."
         ),
     )
+    # Curation filters -- the postflop analog of preflop's hand-strength +
+    # action-faced filters. Applied BEFORE the equity sim (no wasted spend).
+    from pipeline.postflop.spot_selection import (  # noqa: PLC0415
+        DECISION_TYPES,
+        STRENGTH_BUCKETS,
+    )
+
+    fcol1, fcol2 = st.columns(2)
+    with fcol1:
+        strength_filter = st.multiselect(
+            "Hero hand strength (filter)",
+            options=list(STRENGTH_BUCKETS),
+            default=[],
+            key="postflop_strength_filter",
+            help="Keep only spots where hero's made-hand bucket is one of these. "
+            "Empty = all. The postflop analog of the preflop hand-strength filter.",
+        )
+    with fcol2:
+        decision_filter = st.multiselect(
+            "Decision type (filter)",
+            options=list(DECISION_TYPES),
+            default=[],
+            key="postflop_decision_filter",
+            help="Keep only these decision situations (analog of preflop's "
+            "'action faced'). Empty = all. Situation-based, so it never leaks the "
+            "answer.",
+        )
     style_label = st.radio(
         "Answer option style",
         options=list(ANSWER_STYLE_FROM_RADIO_LABEL),
@@ -988,6 +1015,44 @@ def _render_generate_page_postflop() -> None:
         ),
     )
     answer_style = ANSWER_STYLE_FROM_RADIO_LABEL[style_label]
+
+    trap_difficulty = st.checkbox(
+        "🪤 Trap-aware difficulty",
+        value=False,
+        key="postflop_trap_difficulty",
+        help="Floor counterintuitive PURE spots to Hard (2400+). A 'trap' is "
+        "where the solver's action contradicts the equity-vs-price baseline "
+        "(folds a hand whose equity clears the price, or continues one clearly "
+        "below it). Score only -- never changes the answer/options/prose. Off by "
+        "default; recommended for Hard batches. Heads-up facing-a-bet spots only.",
+    )
+    with st.popover("ℹ️ How is postflop difficulty calculated?"):
+        from pipeline.postflop.difficulty import (  # noqa: PLC0415
+            TRAP_DIFFICULTY_FLOOR,
+            W_CONCEPT,
+            W_FREQ,
+            W_HAND,
+        )
+
+        st.markdown(
+            f"A **3-axis** weighted ease score (like preflop/PLO), mapped to "
+            f"`3000 - ease*2500` clipped to [400, 3200]:\n\n"
+            f"- **Frequency** (weight {W_FREQ:.0%}) — how dominant the top action "
+            "is. A near-coin-flip (55%) is hard, a pure (100%) action is easy.\n"
+            f"- **Concept** (weight {W_CONCEPT:.0%}) — how hard the strategic "
+            "frame is. A value bet is easy, a thin bluff-catch / trap-check is "
+            "hard.\n"
+            f"- **Hand class** (weight {W_HAND:.0%}) — U-shaped: premium made "
+            "hands and clear air are easy, the medium/marginal middle is hard.\n\n"
+            "The **EV gap is NOT scored** — a worthy postflop spot mixes at ~0 EV "
+            "gap by construction, so it adds no signal (it's kept only as the "
+            "`easy_ev` diagnostic column).\n\n"
+            f"**🪤 Trap-aware (opt-in):** floors a counterintuitive pure spot to "
+            f"{TRAP_DIFFICULTY_FLOOR} so a deceptive but clear-cut spot rates "
+            "Hard. Otherwise a pure spot can't exceed ~Medium."
+        )
+
+    _render_postflop_skills_explainer()
 
     with st.expander("Worthiness window + filters (advanced)"):
         freq_lo, freq_hi = st.slider(
@@ -1027,6 +1092,16 @@ def _render_generate_page_postflop() -> None:
                 "nodes — plenty for a batch. Flop (~25) is always built in full."
             ),
         )
+        quality_gate = st.checkbox(
+            "Skip low-quality / barely-reached nodes (recommended)",
+            value=True,
+            key="postflop_quality_gate",
+            help="The convergence guard: skip whole nodes that are barely "
+            "reached (only a handful of combos get there) or look untrained "
+            "(nearly every hand plays one identical mixed strategy). Matters most "
+            "for third-party solves and down-sampled turn/river nodes. Count of "
+            "skipped nodes is in the batch meta.",
+        )
 
     with st.expander("Presentation — display amounts / stakes / venue"):
         st.caption(
@@ -1052,6 +1127,60 @@ def _render_generate_page_postflop() -> None:
             "Big blind in $ (used when displaying dollars)",
             min_value=0.01, value=2.0, step=0.5, key="postflop_bbdollars",
         )
+
+    # Layer-7 LLM audit (claim checker + optional auto-fix), mirroring preflop.
+    pf_run_claim_checker = False
+    pf_revise_pass = False
+    pf_final_audit = False
+    pf_claim_checker_prompt: str | None = None
+    with st.expander("Layer 7 — claim checker & auto-fix (advanced)"):
+        st.caption(
+            "A second LLM pass that AUDITS each finished explanation against the "
+            "solver data and flags confusing or wrong poker claims (range "
+            "advantage to the wrong player, a mislabeled draw, a backwards "
+            "equity-vs-price line). Real runs only; adds API calls."
+        )
+        pf_run_claim_checker = st.checkbox(
+            "Run claim checker (Layer 7)",
+            value=False,
+            key="postflop_run_claim_checker",
+            help="One extra LLM call per question. It only FLAGS (never rejects); "
+            "flags show under the explanation on the Postflop Review page.",
+        )
+        pf_revise_pass = st.checkbox(
+            "Audit & auto-fix pass (experimental)",
+            value=False,
+            key="postflop_revise_pass",
+            help="When the claim checker flags a question, a THIRD LLM pass "
+            "rewrites the explanation to fix it, then the deterministic hard "
+            "validators re-check the rewrite (a rewrite that breaks a rule is "
+            "discarded and the original kept). Only the prose changes; the "
+            "action, numbers, and four options stay solver-locked. Both versions "
+            "are saved so you can compare.",
+        )
+        pf_final_audit = st.checkbox(
+            "Final audit after the fix",
+            value=True,
+            key="postflop_final_audit",
+            disabled=not pf_revise_pass,
+            help="Re-runs the claim checker on the rewritten explanation as a "
+            "last check (flag only; never triggers another rewrite).",
+        )
+        pf_final_audit = pf_final_audit and pf_revise_pass
+        if pf_run_claim_checker or pf_revise_pass:
+            ck_key = "postflop_claim_checker_prompt"
+            if ck_key not in st.session_state:
+                st.session_state[ck_key] = _load_postflop_claim_checker_prompt()
+            with st.expander("Claim-checker prompt (editable)"):
+                edited = st.text_area(
+                    "System prompt the postflop claim checker runs with",
+                    height=320,
+                    key=ck_key,
+                )
+                if edited.strip() and edited != _load_postflop_claim_checker_prompt():
+                    _save_postflop_claim_checker_prompt(edited)
+                    st.caption("Saved.")
+            pf_claim_checker_prompt = st.session_state[ck_key]
 
     st.divider()
 
@@ -1118,6 +1247,9 @@ def _render_generate_page_postflop() -> None:
                 streets=tuple(streets),
                 max_nodes_per_street=int(max_nodes),
                 diversify=diversify,
+                strength_buckets=tuple(strength_filter),
+                decision_types=tuple(decision_filter),
+                quality_gate=quality_gate,
                 answer_style=answer_style,
                 display_in_bb=display_in_bb,
                 stakes=stakes,
@@ -1128,10 +1260,45 @@ def _render_generate_page_postflop() -> None:
                 min_frequency=freq_lo / 100.0,
                 max_frequency=freq_hi / 100.0,
                 min_ev_gap_bb=min_ev_gap,
+                trap_difficulty=trap_difficulty,
+                run_claim_checker=pf_run_claim_checker,
+                claim_checker_prompt=pf_claim_checker_prompt,
+                revise_pass=pf_revise_pass,
+                final_audit=pf_final_audit,
             )
             st.rerun()
         except RuntimeError as exc:
             st.error(str(exc))
+
+
+def _render_postflop_skills_explainer() -> None:
+    """A plain-English dropdown of EXACTLY how each postflop skill is tagged.
+
+    Reads the rules' own explainers (pipeline/postflop/skills.py) so this can
+    never drift from the code that actually tags. Grouped by the app's catalog
+    sections; also lists the skills deliberately left untagged and why."""
+    from pipeline.postflop.skills import (  # noqa: PLC0415
+        POSTFLOP_SKILL_EXPLAINERS,
+        POSTFLOP_SKILL_RULES,
+        POSTFLOP_SKILLS_NOT_TAGGED,
+    )
+
+    with st.expander("📋 How each postflop skill is tagged (plain English)"):
+        st.caption(
+            "Every skill in the `skills` CSV column is set by a deterministic "
+            "Python rule (never the LLM). Here is exactly what triggers each one."
+        )
+        st.markdown(f"**Tagged today ({len(POSTFLOP_SKILL_RULES)} skills):**")
+        for name in POSTFLOP_SKILL_RULES:
+            why = POSTFLOP_SKILL_EXPLAINERS.get(name, "")
+            st.markdown(f"- **{name}** — {why}")
+        st.markdown("**Not tagged on postflop (no clean signal yet):**")
+        for name, why in POSTFLOP_SKILLS_NOT_TAGGED.items():
+            st.caption(f"- {name} — {why}")
+        st.caption(
+            "Preflop-only skills (3-Betting, Squeezing, Blind Defense, …) never "
+            "apply to a postflop decision and are not listed."
+        )
 
 
 def _render_postflop_job_panel() -> None:
@@ -4826,6 +4993,33 @@ def _save_claim_checker_prompt(text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _postflop_claim_checker_prompt_path() -> Path:
+    """File backing the editable POSTFLOP claim-checker system prompt (its own
+    file -- the postflop checker targets postflop errors, distinct from the
+    preflop one). Gitignored like the other prompts."""
+    return (
+        Path(__file__).resolve().parent / "prompts" / "postflop_claim_checker_system.txt"
+    )
+
+
+def _load_postflop_claim_checker_prompt() -> str:
+    """The saved editable postflop claim-checker prompt, or the built-in default."""
+    from pipeline.postflop.claim_checker import (  # noqa: PLC0415
+        POSTFLOP_CHECKER_SYSTEM_PROMPT,
+    )
+
+    path = _postflop_claim_checker_prompt_path()
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return POSTFLOP_CHECKER_SYSTEM_PROMPT
+
+
+def _save_postflop_claim_checker_prompt(text: str) -> None:
+    path = _postflop_claim_checker_prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _render_claim_check_panel(row: dict[str, str]) -> None:
     """Layer-7 claim-checker output under the explanation. The ``claim_check``
     cell is "" when the checker did not run (no panel), "[]" when it ran and
@@ -5691,6 +5885,23 @@ def render_postflop_review_page() -> None:
             bits.append("amounts: bb" if rs["display_in_bb"] else "amounts: dollars")
         if bits:
             st.caption(" · ".join(bits))
+        # Layer-7 lifecycle banner: only when the opt-in claim/auto-fix ran.
+        ctr = meta.get("counters", {}) if isinstance(meta, dict) else {}
+        if rs.get("revise_pass"):
+            st.info(
+                f"🛠️ **Audit & auto-fix pass ran.** "
+                f"{ctr.get('revise_flagged', 0)} flagged · "
+                f"{ctr.get('revise_fixed', 0)} auto-fixed · "
+                f"{ctr.get('revise_discarded', 0)} discarded (original kept) · "
+                f"{ctr.get('revise_unchanged', 0)} unchanged. Each card shows "
+                "REWRITTEN vs ORIGINAL below its explanation."
+            )
+        elif rs.get("run_claim_checker"):
+            st.info(
+                f"🔎 **Claim checker ran (flag only).** "
+                f"{ctr.get('claim_flagged_rows', 0)} of {summary.total} rows "
+                "flagged. Flags show under each explanation."
+            )
 
     st.download_button(
         "⬇️ Download this batch (CSV)",
@@ -5699,6 +5910,7 @@ def render_postflop_review_page() -> None:
         mime="text/csv",
         key="pf_review_dl",
     )
+    _render_postflop_skills_explainer()
 
     # --- navigation ---
     nav_key = f"postflop_review_idx::{csv_path.name}"
@@ -5775,6 +5987,43 @@ def render_postflop_review_page() -> None:
         with st.expander("Preview (rendered)", expanded=False):
             st.info(_md_lines(_cell(row, "Answer Explanation")))
 
+        # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
+        # Match this row to its meta record by node id AND combo (a node can host
+        # several combos, so node-id alone would grab the wrong revise record).
+        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
+        _meta_node_ids = {q.get("node_id") for q in _qrecs}
+        _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+        _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
+        _ref_combo = _ref_parts[-1] if _ref_parts else ""
+        _qrec = next(
+            (
+                q for q in _qrecs
+                if q.get("node_id") == _ref_node and q.get("hero_combo") == _ref_combo
+            ),
+            None,
+        )
+        row_strs = {c: _cell(row, c) for c in df.columns}
+        _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
+        _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
+        with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
+            if _qrec and _qrec.get("solver_data"):
+                st.markdown("**SOLVER DATA block** (the facts the model wrote from)")
+                st.code(str(_qrec["solver_data"]))
+            else:
+                st.caption(
+                    "No solver-data snapshot for this row (older batch, or the "
+                    "row was reordered)."
+                )
+            st.markdown("**Question shown**")
+            st.code(_cell(row, "Question"))
+            _opts = [_cell(row, f"option {i}") for i in (1, 2, 3, 4)]
+            st.markdown(f"**Options:** {[o for o in _opts if o]}")
+            st.markdown(f"**Correct answer:** {_cell(row, 'Correct Answer')}")
+            st.caption(
+                "The model writes only the prose, from the SOLVER DATA above, "
+                "using the active postflop system prompt (Prompt page → Postflop)."
+            )
+
         st.markdown(f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}")
         if _cell(row, "action_ev_bb"):
             st.markdown(f"**Per-action EV (bb):**&nbsp;{_cell(row, 'action_ev_bb')}")
@@ -5792,6 +6041,8 @@ def render_postflop_review_page() -> None:
                 fbits.append(f"{lbl}: `{val}`")
         if fbits:
             st.caption(" · ".join(fbits))
+        if _cell(row, "skills"):
+            st.caption(f"🎯 skills: {_cell(row, 'skills')}")
         if _cell(row, "concept_tags"):
             st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
 

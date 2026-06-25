@@ -44,6 +44,8 @@ def generate_postflop_batch_from_db(
     streets: tuple[str, ...] = ("flop",),
     max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
     diversify: bool = False,
+    strength_buckets: tuple[str, ...] = (),
+    decision_types: tuple[str, ...] = (),
     stakes: str = "$1/$2",
     live_or_online: str = "Live",
     bb_in_dollars: float = 2.0,
@@ -54,8 +56,14 @@ def generate_postflop_batch_from_db(
     min_frequency: float = MIN_FREQUENCY,
     max_frequency: float = MAX_FREQUENCY,
     min_ev_gap_bb: float | None = None,
+    quality_gate: bool = True,
     equity_runouts: int | None = None,
     system_prompt: str | None = None,
+    trap_difficulty: bool = False,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
+    revise_pass: bool = False,
+    final_audit: bool = False,
     progress_callback: Any = None,
 ) -> PostflopBatchResult:
     """Load the ``.db`` solve, curate spots, and generate a batch.
@@ -78,7 +86,19 @@ def generate_postflop_batch_from_db(
         live_or_online=live_or_online,
         bb_in_dollars=bb_in_dollars,
     )
-    selector = make_spot_selector(heroes=tuple(heroes) or None, diversify=diversify)
+    # Curation filters need to know the preflop aggressor + IP seat to classify
+    # the decision SITUATION (c-bet vs lead vs facing a bet) without leaking the
+    # answer. Both come from the solve.
+    from pipeline.postflop.facts import preflop_aggressor  # noqa: PLC0415
+
+    selector = make_spot_selector(
+        heroes=tuple(heroes) or None,
+        diversify=diversify,
+        strength_buckets=tuple(strength_buckets) or None,
+        decision_types=tuple(decision_types) or None,
+        aggressor=preflop_aggressor(solve),
+        ip_position=solve.ip_position,
+    )
 
     client = None
     if not dry_run and os.environ.get("ANTHROPIC_API_KEY"):
@@ -108,9 +128,25 @@ def generate_postflop_batch_from_db(
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
+        quality_gate=quality_gate,
         system_prompt=prompt,
+        trap_difficulty=trap_difficulty,
+        run_claim_checker=run_claim_checker,
+        claim_checker_prompt=claim_checker_prompt,
+        revise_pass=revise_pass,
+        final_audit=final_audit,
         progress_callback=progress_callback,
         spot_selector=selector,
+        # Provenance for the batch re-verifier (scripts/audit_postflop_batch.py):
+        # how to reload THIS exact solve (same streets + down-sampling cap).
+        provenance={
+            "db_path": str(db_path),
+            "streets": list(streets) or ["flop"],
+            "max_nodes_per_street": max_nodes_per_street,
+            "stakes": stakes,
+            "live_or_online": live_or_online,
+            "bb_in_dollars": bb_in_dollars,
+        },
         **kwargs,
     )
 

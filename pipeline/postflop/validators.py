@@ -323,13 +323,58 @@ def soft_validate_equity_vs_data(
     return []
 
 
+_BLOCK_RE = re.compile(r"block", re.I)
+
+
+def soft_validate_blocker_direction(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,
+) -> list[str]:
+    """Flag a REVERSED blocker-direction claim vs the BLOCKERS fact.
+
+    The data resolves whether hero mainly blocks villain's VALUE or their
+    BLUFFS. If the prose claims the opposite, the bluff-catch logic is backwards
+    (the brief's reversed-blocker failure mode). High precision: only flags when
+    a "block ... value/bluff" claim clearly contradicts a non-neutral verdict.
+    """
+    text = generated.answer_explanation or ""
+    if not text or facts.blocker_effect == "neutral":
+        return []
+    low = text.lower()
+    claims_value = claims_bluffs = False
+    for m in _BLOCK_RE.finditer(low):
+        window = low[m.start():m.end() + 40]
+        has_value, has_bluff = "value" in window, "bluff" in window
+        if has_value and not has_bluff:
+            claims_value = True
+        elif has_bluff and not has_value:
+            claims_bluffs = True
+    if facts.blocker_effect == "value" and claims_bluffs and not claims_value:
+        return [
+            "prose says you block villain's BLUFFS, but the data says you mainly "
+            "block their VALUE. Review the blocker direction (this reverses the "
+            "bluff-catch logic)."
+        ]
+    if facts.blocker_effect == "bluffs" and claims_value and not claims_bluffs:
+        return [
+            "prose says you block villain's VALUE, but the data says you mainly "
+            "block their BLUFFS. Review the blocker direction (this reverses the "
+            "bluff-catch logic)."
+        ]
+    return []
+
+
 def run_postflop_soft_validators(
     generated: GeneratedExplanation,
     facts: PostflopFacts,
 ) -> list[str]:
     """Run every soft validator; return all warnings (empty == clean)."""
     warnings: list[str] = []
-    for check in (soft_validate_verdict_vs_answer, soft_validate_equity_vs_data):
+    for check in (
+        soft_validate_verdict_vs_answer,
+        soft_validate_equity_vs_data,
+        soft_validate_blocker_direction,
+    ):
         warnings.extend(check(generated, facts))
     return warnings
 
@@ -338,6 +383,7 @@ __all__ = [
     "PostflopValidationResult",
     "run_postflop_audit_validators",
     "run_postflop_soft_validators",
+    "soft_validate_blocker_direction",
     "soft_validate_equity_vs_data",
     "soft_validate_verdict_vs_answer",
     "validate_banned_phrases",

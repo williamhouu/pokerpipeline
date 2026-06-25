@@ -78,6 +78,17 @@ class PostflopTagInput:
     hero_bet_prev_street: bool = False  # hero bet/raised the immediately prior street
     prev_street_checked_through: bool = False  # no bet on the immediately prior street
 
+    # Node-level range-vs-range verdicts (resolved in Python by the fact
+    # extractor; "hero" / "villain" / "even"). Drive the range/nut-advantage
+    # tags so the "who is ahead on this board" signal is a first-class concept
+    # atom, not an LLM inference.
+    range_advantage: str = "even"
+    nut_advantage: str = "even"
+
+    # Blocker value/bluff verdict (resolved in Python): "value" = hero removes
+    # villain's value combos, "bluffs" = removes villain's bluffs, "neutral".
+    blocker_effect: str = "neutral"
+
     # convenience predicates (kept off the tag registry; used by rules + archetype)
     @property
     def has_flush_draw(self) -> bool:
@@ -184,6 +195,17 @@ TAG_REGISTRY: dict[str, Callable[[PostflopTagInput], bool]] = {
         and s.break_even_equity is not None
         and s.hero_equity >= s.break_even_equity
     ),
+    # Range vs range (node-level; "who is ahead on this board"). The brief's #1
+    # LLM failure mode is range advantage assigned to the wrong player, so these
+    # are computed atoms the prose must mirror -- never the LLM's call.
+    "range_advantage": lambda s: s.range_advantage == "hero",
+    "range_disadvantage": lambda s: s.range_advantage == "villain",
+    "nut_advantage": lambda s: s.nut_advantage == "hero",
+    "nut_disadvantage": lambda s: s.nut_advantage == "villain",
+    # Blockers (postflop now HAS a value/bluff decomposition). The brief's #2
+    # LLM failure mode is reversed blocker logic, so this is a computed atom.
+    "blocks_value": lambda s: s.blocker_effect == "value",
+    "blocks_bluffs": lambda s: s.blocker_effect == "bluffs",
 }
 
 

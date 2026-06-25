@@ -99,6 +99,14 @@ frequencies, or cards. If you cite a number, use the one given.
 never name a specific card you were not given.
 6. NO em dashes, NO semicolons, no corporate/template phrasing.
 7. Write toward the STRATEGIC FRAME you are given; do not re-decide the spot.
+8. Range vs range: if you say who is ahead as a RANGE on this board, or who \
+holds the nutted hands, state it exactly as the RANGE ADVANTAGE and NUT \
+ADVANTAGE facts say. Never compute or reverse who has the edge, and do not \
+claim a range advantage the data does not give you.
+9. Blockers: discuss blockers ONLY when a BLOCKERS line is present, and only as \
+it states (whether you mainly block villain's value or their bluffs). If there \
+is no BLOCKERS line, do not mention blockers at all. Never invent which specific \
+combos you remove or reverse value vs bluffs.
 Return only the explanation text, no preamble, no headings.
 """
 
@@ -129,6 +137,19 @@ def load_postflop_system_prompt() -> str:
 def _humanize(token: str) -> str:
     """'top_pair_top_kicker' -> 'top pair, top kicker' (readable, for prose)."""
     return token.replace("_", " ")
+
+
+# Render the resolved range/nut-advantage verdict for the data block. "hero" /
+# "villain" become "you" / "villain" so the LLM can quote it verbatim.
+_ADVANTAGE_PHRASE = {
+    "hero": "you (hero)",
+    "villain": "villain",
+    "even": "roughly even (neither player)",
+}
+
+
+def _advantage_phrase(label: str) -> str:
+    return _ADVANTAGE_PHRASE.get(label, "roughly even (neither player)")
 
 
 # Precise, unambiguous names for each draw type the hand classifier emits. The
@@ -165,6 +186,27 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
         f"{f.board_texture.get('connectedness', '')}, "
         f"{f.board_texture.get('pair_status', '')})",
         f"HERO EQUITY vs villain range: {f.hero_equity_vs_villain * 100:.0f}%",
+        # Node-level "who is ahead on this board" verdicts, resolved in Python
+        # (the LLM mirrors them; it must never compute or reverse them). The
+        # number is the supporting evidence for the stated verdict.
+        f"RANGE ADVANTAGE: {_advantage_phrase(f.range_advantage)} "
+        f"(your range ~{f.hero_range_equity * 100:.0f}% equity vs villain's "
+        f"range on this board)",
+        f"NUT ADVANTAGE: {_advantage_phrase(f.nut_advantage)} "
+        f"(strong made hands, two pair or better: you {f.hero_nut_share * 100:.0f}%, "
+        f"{f.villain_position} {f.villain_nut_share * 100:.0f}%)",
+        # Blocker value/bluff decomposition -- only when there's a real effect
+        # (resolved in Python). The LLM must mirror this, never invent blockers.
+        *(
+            [
+                f"BLOCKERS: you remove ~{f.blocked_value_pct * 100:.0f}% of "
+                f"{f.villain_position}'s value combos and ~{f.blocked_bluff_pct * 100:.0f}% "
+                f"of their bluff combos -- you mainly block their "
+                f"{'VALUE' if f.blocker_effect == 'value' else 'BLUFFS'}"
+            ]
+            if f.blocker_effect != "neutral"
+            else []
+        ),
         f"POT: {f.pot_bb:g}bb   EFFECTIVE STACK: {f.spot.node.effective_stack_bb:g}bb"
         f"   SPR: {f.spr:.1f}",
     ]

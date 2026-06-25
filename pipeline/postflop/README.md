@@ -112,16 +112,32 @@ decision types (see the calibration note below).
 > `--diversify` round-robins the worthy pool across the four flop decision
 > types so a fill-to-N batch isn't dominated by one archetype.
 
+**Done (June 2026, range-advantage + Layer-7 pass):**
+
+- **Range-vs-range advantage** (`facts.compute_range_advantage`): the node-level
+  "who is ahead on this board" verdict, resolved in PYTHON (the brief's #1 LLM
+  failure mode). `hero_range_equity` (fixed-seed `equity.range_vs_range_equity`),
+  `range_advantage`/`nut_advantage` ∈ hero/villain/even, + two strong-made
+  (two-pair+) shares. Surfaced in the SOLVER DATA block (`RANGE ADVANTAGE` /
+  `NUT ADVANTAGE`), the `range_advantage`/`nut_advantage` concept tags, and the
+  `range_equity` CSV column. Voice rule binds claims to the fact (mirror, never
+  compute/reverse). Verified on v8: BTN (aggressor) gets the edge, BB the deficit.
+- **Layer-7 LLM audit (opt-in), ported from preflop:** `claim_checker.py` (a 2nd
+  pass that FLAGS confusing/wrong postflop claims — range-advantage-to-wrong-
+  player, mislabeled draws, invented blockers, equity-vs-price reversals) and
+  `reviser.py` (a 3rd pass that rewrites flagged prose, re-validated by the hard
+  validators, discarded if it breaks one; optional 4th-call final audit). Same
+  toggles as preflop (`run_claim_checker`/`revise_pass`/`final_audit`), threaded
+  batch→`run.py`→admin Generate + CLI; lifecycle in `meta`. Real-API proof on v8:
+  4/4 flagged→fixed, all catches genuine.
+- **Batch re-verifier:** `scripts/audit_postflop_batch.py` rebuilds every CSV row
+  from the source `.db` (via `meta.provenance`) and diffs (0/0 on real output).
+
 **Next:**
 
-1. **Turn/river nodes + a `.cfr` adapter.** The `.db` adapter does flop nodes
-   only; turn/river is a clean extension (chance tokens reset the street's
-   invested amounts in the walk). A PioSolver `.cfr` adapter (via
-   `pipeline.piosolver` UPI, on a Windows host) is the other source.
+1. **A `.cfr` adapter.** Turn/river `.db` nodes are done; a PioSolver `.cfr`
+   adapter (via `pipeline.piosolver` UPI, on a Windows host) is the other source.
    `validate_solve` is the contract to target.
-   Also wanted: a **board-emoji hard validator** (the LLM occasionally garbles
-   a board suit emoji, e.g. `9♉` for `9♠️` — the preflop pipeline has the
-   analogous suit-emoji check).
 2. **Admin Generate + Review pages — DONE (June 2026).** `admin_panel/app.py:
    _render_generate_page_postflop` is a *solve picker* (scans `solves/postflop/`
    via `discover_db_solves`, launches `run.generate_postflop_batch_from_db`
@@ -140,5 +156,13 @@ decision types (see the calibration note below).
 4. **App table-state format.** `format_writer` renders amounts in bb or dollars;
    porting the preflop `app_table_format` engine would emit the exact Runout
    chip/seat token strings. A formatting concern only — no layer above changes.
-5. **Richer facts.** Detailed blocker analysis (value/bluff combos blocked) and
-   range-vs-range advantage; the reused `equity` module already supports it.
+5. **Parity + tuning.** A postflop Compare page + prompt library; the
+   harder-to-detect skills (`Facing a Check-Raise`, MDF, Reverse Implied Odds —
+   see `skills.py:POSTFLOP_SKILLS_NOT_TAGGED`); LLM prompt tuning against gold
+   examples. (DONE: range-vs-range advantage; **blocker value/bluff
+   decomposition** via `facts.compute_blocker_decomposition` — the LLM now knows
+   deterministically whether it blocks villain's value or bluffs, with prompt +
+   claim-checker + soft-validator guards; the `skills` column; 3-axis + trap
+   difficulty; **curation filters** (hand-strength + decision-type) in
+   `spot_selection.py`; the **solve-quality / node-reach gate** in
+   `quality.py`.)

@@ -26,7 +26,11 @@ import random
 from dataclasses import dataclass, field
 
 from pipeline.fact_extractor.board_texture import classify_board
-from pipeline.fact_extractor.equity import equity_vs_range
+from pipeline.fact_extractor.equity import (
+    equity_vs_range,
+    range_vs_range_equity,
+    rank_hand,
+)
 from pipeline.fact_extractor.hand_class import classify_hand
 from pipeline.postflop.concept_tags import (
     PostflopTagInput,
@@ -42,6 +46,28 @@ from pipeline.postflop.spot_sampler import PostflopSpot, spot_ev_gap_bb
 # concept tags, difficulty) can't flip between runs. 200 keeps a full batch
 # fast; raise for a published-precision figure.
 DEFAULT_EQUITY_RUNOUTS = 200
+
+# Range-vs-range equity sampling bound (the "who has the range advantage on this
+# board" stat). Node-level (same for every hero combo at the node), seeded to a
+# fixed value so generation and the batch re-verifier compute it identically.
+# 400 matchups keeps a batch fast while pinning the equity to ~+/-1pt.
+_RANGE_EQUITY_MATCHUPS = 400
+_RANGE_EQUITY_SEED = 0
+# How far apart two ranges' shares must be to call it an "advantage" (vs "even").
+# Range equities cluster near 50%, so a small but real edge is meaningful; nut
+# shares get a flat 3-point margin.
+_RANGE_ADV_MARGIN = 0.02  # on hero range equity around 0.50 -> hero >= 52%
+_NUT_ADV_MARGIN = 0.03  # 3 percentage points of strong-made share
+
+# Villain made-hand buckets that count as "value" (strong hands that bet/call
+# for value) vs "bluff" (air, no showdown). The medium middle (weak pairs, etc.)
+# is neither -- it's the showdown-value hands that mostly check/call.
+_VALUE_BUCKETS = frozenset({"premium", "strong"})
+_BLUFF_BUCKETS = frozenset({"air"})
+# A blocker effect is only "real" when hero removes a non-trivial share AND one
+# side is removed clearly more than the other.
+_BLOCKER_MIN_PCT = 0.05
+_BLOCKER_MARGIN = 0.03
 
 # Preflop verbs that count as putting in a raise (for the SRP/3bet/4bet tag and
 # "who is the preflop aggressor").
@@ -114,14 +140,155 @@ class PostflopFacts:
     archetype: str
     concept_tags: list[str] = field(default_factory=list)
 
+    # --- range-vs-range (node-level; the "who is ahead here" stat) ---
+    # hero_range_equity: the ACTOR's whole range vs the villain's whole range on
+    # this board, [0,1]. range_advantage / nut_advantage are the RESOLVED verdict
+    # ("hero" / "villain" / "even") the LLM mirrors -- computed in Python so the
+    # model never decides who has the edge. hero/villain_nut_share = weighted
+    # fraction of each range that is two-pair-or-better (the value region).
+    hero_range_equity: float = 0.5
+    range_advantage: str = "even"
+    hero_nut_share: float = 0.0
+    villain_nut_share: float = 0.0
+    nut_advantage: str = "even"
+
+    # --- blocker value/bluff decomposition (do hero's cards remove villain's
+    # value or bluffs?). blocker_effect ∈ "value" / "bluffs" / "neutral" is the
+    # RESOLVED verdict the LLM mirrors; the pcts are the supporting evidence.
+    blocked_value_pct: float = 0.0
+    blocked_bluff_pct: float = 0.0
+    blocker_effect: str = "neutral"
+
     # --- pot context (for tags / writer) ---
     preflop_raise_count: int = 1
     n_players: int = 2
+
+    @property
+    def has_strong_draw(self) -> bool:
+        """True for a REAL draw worth playing as a draw -- a flush draw, an
+        open-ended straight draw, or a combo draw. Excludes backdoors and bare
+        gutshots (which ride in ``draws`` but are not 'drawing hands'). Single
+        source of truth for the difficulty hand axis + the skills tagger."""
+        return any(d in _STRONG_DRAW_TYPES for d in self.draws)
+
+
+# Draw types that make a hand a genuine "drawing hand" (mirrors the strong-draw
+# set the concept-tag archetype logic uses); backdoors / bare gutshots excluded.
+_STRONG_DRAW_TYPES = frozenset({
+    "flush_draw_nut", "flush_draw_weak", "straight_draw_open_ended", "combo_draw",
+})
 
 
 def _spot_rng(spot: PostflopSpot) -> random.Random:
     """Deterministic RNG keyed by the spot's identity (node + combo)."""
     return random.Random(f"{spot.node.node_id}|{spot.hero_combo}")
+
+
+def _range_strong_share(combo_range, board: list[str]) -> float:
+    """Weighted fraction of ``combo_range`` that is two-pair-or-better on ``board``.
+
+    The "nutted / value region" share -- the standard proxy for nut advantage.
+    Board-blocked combos (sharing a card with the board) are skipped, matching
+    the live set the equity calc uses. Pure: hole cards + board -> a category,
+    no runouts, so it is cheap to run over a whole range.
+    """
+    board_set = set(board)
+    strong = total = 0.0
+    for combo, weight in combo_range.items():
+        if weight <= 0:
+            continue
+        cards = [combo[:2], combo[2:]]
+        if set(cards) & board_set:
+            continue
+        total += weight
+        if rank_hand(cards + list(board))[0] >= 2:  # two pair or better
+            strong += weight
+    return strong / total if total else 0.0
+
+
+def _advantage_label(hero_value: float, villain_value: float, margin: float) -> str:
+    """'hero' / 'villain' / 'even' from two comparable shares and a margin.
+
+    The single place the range/nut-advantage *conclusion* is decided -- in
+    Python, never the LLM -- so the explanation can only mirror the verdict the
+    fact carries (the brief's anti-"range advantage to the wrong player" rule).
+    """
+    diff = hero_value - villain_value
+    if diff >= margin:
+        return "hero"
+    if diff <= -margin:
+        return "villain"
+    return "even"
+
+
+def compute_blocker_decomposition(
+    hero_cards: list[str], villain_range, board: list[str]
+) -> tuple[float, float, str]:
+    """How much of villain's VALUE vs BLUFF range hero's cards remove.
+
+    The pedagogically critical postflop blocker fact -- are you blocking the
+    opponent's VALUE (good when bluff-catching: fewer value combos left, so a
+    bet is more often a bluff) or their BLUFFS (bad: you've removed the hands
+    you beat)? Computed deterministically (never the LLM): classify every
+    board-unblocked villain combo's made hand, split into value (strong made
+    hands) and bluff (air, no showdown), and measure the weighted fraction of
+    each that hero removes by card-sharing. Reach-weighted, so on a facing-bet
+    node -- where ``villain_range`` IS the reach-weighted betting range -- this
+    reflects the real composition of the bet hero faces.
+
+    Returns ``(blocked_value_pct, blocked_bluff_pct, effect)`` where ``effect``
+    is ``"value"`` / ``"bluffs"`` / ``"neutral"``.
+    """
+    hero_set = set(hero_cards)
+    board_set = set(board)
+    value_total = value_blocked = bluff_total = bluff_blocked = 0.0
+    for combo, weight in villain_range.items():
+        if weight <= 0:
+            continue
+        cards = [combo[:2], combo[2:]]
+        cs = set(cards)
+        if cs & board_set:
+            continue  # not a real villain holding on this board
+        bucket = classify_hand(cards, board)["strength_bucket"]
+        blocked = bool(cs & hero_set)
+        if bucket in _VALUE_BUCKETS:
+            value_total += weight
+            value_blocked += weight if blocked else 0.0
+        elif bucket in _BLUFF_BUCKETS:
+            bluff_total += weight
+            bluff_blocked += weight if blocked else 0.0
+    value_pct = value_blocked / value_total if value_total else 0.0
+    bluff_pct = bluff_blocked / bluff_total if bluff_total else 0.0
+    diff = value_pct - bluff_pct
+    if max(value_pct, bluff_pct) >= _BLOCKER_MIN_PCT and abs(diff) >= _BLOCKER_MARGIN:
+        effect = "value" if diff > 0 else "bluffs"
+    else:
+        effect = "neutral"
+    return value_pct, bluff_pct, effect
+
+
+def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
+    """Node-level range-vs-range stats for the actor (hero) vs the villain.
+
+    Returns ``(hero_range_equity, range_advantage, hero_nut_share,
+    villain_nut_share, nut_advantage)``. This is a property of the two RANGES on
+    the board -- identical for every hero combo at the node -- so it is the
+    grounded "who is ahead here" fact. Deterministic (fixed seed) so the batch
+    re-verifier reproduces it exactly.
+    """
+    board = list(node.board)
+    hero_eq = range_vs_range_equity(
+        dict(node.hero_range),
+        dict(node.villain_range),
+        board,
+        max_matchups=_RANGE_EQUITY_MATCHUPS,
+        seed=_RANGE_EQUITY_SEED,
+    )
+    range_adv = _advantage_label(hero_eq, 1.0 - hero_eq, _RANGE_ADV_MARGIN)
+    hero_nut = _range_strong_share(node.hero_range, board)
+    villain_nut = _range_strong_share(node.villain_range, board)
+    nut_adv = _advantage_label(hero_nut, villain_nut, _NUT_ADV_MARGIN)
+    return hero_eq, range_adv, hero_nut, villain_nut, nut_adv
 
 
 def preflop_aggressor(solve: PostflopSolve) -> str:
@@ -197,6 +364,20 @@ def extract_facts(
     hero_is_aggressor = bool(aggressor) and node.actor == aggressor
     n_raises = preflop_raise_count(solve)
 
+    # --- range-vs-range advantage (node-level; "who is ahead here") ---
+    (
+        hero_range_equity,
+        range_advantage,
+        hero_nut_share,
+        villain_nut_share,
+        nut_advantage,
+    ) = compute_range_advantage(node)
+
+    # --- blocker value/bluff decomposition (hero-specific) ---
+    blocked_value_pct, blocked_bluff_pct, blocker_effect = (
+        compute_blocker_decomposition(hero_cards, dict(node.villain_range), board)
+    )
+
     # --- archetype + concept tags ---
     hero_bet_prev, prev_checked_through = _prior_street_context(
         node.history, node.actor, node.street
@@ -220,6 +401,9 @@ def extract_facts(
         break_even_equity=break_even,
         hero_bet_prev_street=hero_bet_prev,
         prev_street_checked_through=prev_checked_through,
+        range_advantage=range_advantage,
+        nut_advantage=nut_advantage,
+        blocker_effect=blocker_effect,
     )
     archetype = classify_postflop_archetype(tag_input)
     concept_tags = compute_postflop_tags(tag_input)
@@ -251,6 +435,14 @@ def extract_facts(
         ev_gap_bb=spot_ev_gap_bb(spot),
         archetype=archetype,
         concept_tags=concept_tags,
+        hero_range_equity=hero_range_equity,
+        range_advantage=range_advantage,
+        hero_nut_share=hero_nut_share,
+        villain_nut_share=villain_nut_share,
+        nut_advantage=nut_advantage,
+        blocked_value_pct=blocked_value_pct,
+        blocked_bluff_pct=blocked_bluff_pct,
+        blocker_effect=blocker_effect,
         preflop_raise_count=n_raises,
         n_players=len(solve.positions),
     )
@@ -259,6 +451,8 @@ def extract_facts(
 __all__ = [
     "DEFAULT_EQUITY_RUNOUTS",
     "PostflopFacts",
+    "compute_blocker_decomposition",
+    "compute_range_advantage",
     "extract_facts",
     "preflop_aggressor",
     "preflop_raise_count",

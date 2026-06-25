@@ -20,12 +20,19 @@ never aborts the run.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pipeline.explanation_generator import ExplanationValidationError
+from pipeline.postflop.claim_checker import (
+    POSTFLOP_CHECKER_SYSTEM_PROMPT,
+    ClaimCheckResult,
+    check_postflop_claims,
+    claim_check_to_json,
+)
 from pipeline.postflop.difficulty import compute_difficulty
 from pipeline.postflop.explanation_generator import (
     DEFAULT_MAX_TOKENS,
@@ -38,15 +45,36 @@ from pipeline.postflop.explanation_generator import (
 from pipeline.postflop.facts import DEFAULT_EQUITY_RUNOUTS, extract_facts
 from pipeline.postflop.format_writer import build_postflop_row, write_postflop_csv
 from pipeline.postflop.options import build_options
+from pipeline.postflop.quality import node_quality_issue
 from pipeline.postflop.question_extractor import (
     MAX_FREQUENCY,
     MIN_FREQUENCY,
     evaluate_spot,
 )
+from pipeline.postflop.reviser import revise_postflop_explanation
 from pipeline.postflop.solve import PostflopSolve, validate_solve
 from pipeline.postflop.spot_sampler import enumerate_spots
 
 ProgressCallback = Any  # callable(message: str, done: int, total: int) | None
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_postflop_claim_check(
+    prose: str, solver_data_block: str, client: object, *,
+    model: str, system_prompt: str, node_id: str,
+) -> ClaimCheckResult | None:
+    """Run the postflop claim checker, wrapped so a checker failure never drops
+    a row. Returns the ``ClaimCheckResult`` or ``None`` on error. Shared by the
+    flag-only path and the revise pass (initial gate + final audit)."""
+    try:
+        return check_postflop_claims(
+            prose, solver_data_block, client,
+            model=model, system_prompt=system_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("postflop batch: claim checker failed for %s: %s", node_id, exc)
+        return None
 
 
 @dataclass
@@ -73,11 +101,22 @@ def _collect_worthy(
     min_frequency: float,
     max_frequency: float,
     min_ev_gap_bb: float | None,
-) -> list[Any]:
-    """Every worthy spot in the solve, in a deterministic (node, combo) order."""
-    worthy = []
+    quality_gate: bool = True,
+) -> tuple[list[Any], int]:
+    """Every worthy spot in the solve, in a deterministic (node, combo) order.
+
+    Returns ``(worthy_spots, low_quality_nodes_skipped)``. When ``quality_gate``
+    is on (default), nodes that fail the convergence / reach guard
+    (:func:`pipeline.postflop.quality.node_quality_issue`) are skipped whole --
+    no question is generated off a barely-reached or untrained node.
+    """
+    worthy: list[Any] = []
+    low_quality = 0
     for node_id in sorted(solve.nodes):
         node = solve.nodes[node_id]
+        if quality_gate and node_quality_issue(node) is not None:
+            low_quality += 1
+            continue
         for spot in enumerate_spots(node):
             ev = evaluate_spot(
                 spot,
@@ -87,7 +126,7 @@ def _collect_worthy(
             )
             if ev.is_worthy:
                 worthy.append(spot)
-    return worthy
+    return worthy, low_quality
 
 
 def _node_range_snapshots(node: Any) -> dict[str, dict[str, float]]:
@@ -185,11 +224,18 @@ def generate_postflop_batch(
     min_frequency: float = MIN_FREQUENCY,
     max_frequency: float = MAX_FREQUENCY,
     min_ev_gap_bb: float | None = None,
+    quality_gate: bool = True,
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
     system_prompt: str | None = None,
+    trap_difficulty: bool = False,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
+    revise_pass: bool = False,
+    final_audit: bool = False,
     progress_callback: ProgressCallback = None,
     write_meta: bool = True,
     spot_selector: Callable[[list[Any]], list[Any]] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> PostflopBatchResult:
     """Generate up to ``total_questions`` postflop questions from ``solve``.
 
@@ -213,11 +259,12 @@ def generate_postflop_batch(
         raise ValueError(f"solve {solve.solve_id} is malformed: {problems}")
 
     use_placeholder = dry_run or client is None
-    worthy = _collect_worthy(
+    worthy, low_quality_filtered_out = _collect_worthy(
         solve,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
+        quality_gate=quality_gate,
     )
     worthy_total = len(worthy)
     # Optional caller-supplied curation/ordering (e.g. diversify across node
@@ -232,6 +279,18 @@ def generate_postflop_batch(
     attempted = 0
     soft_flagged = 0
     in_tokens = out_tokens = 0
+    # Layer-7 LLM audit tallies (move only when the opt-in passes run):
+    #   claim_flagged -- shipped rows the claim checker flagged (flag-only path);
+    #   revise_* -- the auto-fix lifecycle (flagged = fixed + discarded + unchanged).
+    claim_flagged = 0
+    revise_flagged = 0
+    revise_fixed = 0
+    revise_discarded = 0
+    revise_unchanged = 0
+    # Counterintuitive "trap" spots floored to Hard by the opt-in trap_difficulty
+    # mode (0 when off) -- lets the user see how many spots it re-rated.
+    trap_floored = 0
+    checker_prompt = claim_checker_prompt or POSTFLOP_CHECKER_SYSTEM_PROMPT
 
     # Visual range data for the Review page (preflop-parity). The FLOP ROOT --
     # OOP to act, no postflop action yet -- holds each player's flop-ENTRY
@@ -273,7 +332,9 @@ def generate_postflop_batch(
 
         facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
         options, correct = build_options(spot, style=answer_style)
-        difficulty = compute_difficulty(facts)
+        difficulty = compute_difficulty(facts, apply_trap_bump=trap_difficulty)
+        if difficulty.trap_bump_applied:
+            trap_floored += 1
 
         try:
             if use_placeholder:
@@ -294,13 +355,118 @@ def generate_postflop_batch(
             })
             continue
 
+        solver_data_block = build_solver_data_block(facts)
+
+        # --- Layer-7 LLM audit / revise passes (opt-in extra LLM calls) ------
+        # Mirrors the preflop lifecycle. Two flows share one "gate" call:
+        #   * run_claim_checker (no revise): the gate FLAGS prose, flag only.
+        #   * revise_pass: if the gate flags, a 3rd call REWRITES the prose,
+        #     re-validated by the hard validators (a rewrite that breaks a rule
+        #     is DISCARDED, the original kept). final_audit is a 4th call that
+        #     claim-checks the KEPT rewrite. Recorded in `revise` for the Review
+        #     page. Real runs only (a placeholder is never checked/revised).
+        claim_check_json = ""
+        claim_issues: list[str] = []
+        final_audit_issues: list[str] = []
+        revise_record: dict[str, Any] | None = None
+        if not use_placeholder and (run_claim_checker or revise_pass):
+            cc = _safe_postflop_claim_check(
+                explanation.answer_explanation, solver_data_block, client,
+                model=model, system_prompt=checker_prompt,
+                node_id=spot.node.node_id,
+            )
+            gate_issues = (
+                [f"{i.claim} -- {i.problem}" for i in cc.issues]
+                if cc is not None else []
+            )
+            if revise_pass:
+                if not gate_issues:
+                    revise_record = {"status": "clean", "gate_issues": []}
+                else:
+                    revise_flagged += 1
+                    original_prose = explanation.answer_explanation
+                    try:
+                        rev = revise_postflop_explanation(
+                            explanation, facts, issues=gate_issues,
+                            client=client, model=model, temperature=temperature,
+                            max_tokens=max_tokens, system_prompt=system_prompt,
+                            usage_callback=_record_usage,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - never drop a row
+                        logger.warning(
+                            "postflop batch: reviser failed for %s: %s",
+                            spot.node.node_id, exc,
+                        )
+                        rev = None
+                    if rev is not None and rev.changed:
+                        revise_fixed += 1
+                        explanation = rev.explanation  # ship the rewrite
+                        revise_record = {
+                            "status": "fixed",
+                            "gate_issues": gate_issues,
+                            "original_explanation": original_prose,
+                            "revised_explanation": rev.explanation.answer_explanation,
+                        }
+                        if final_audit:  # 4th call: claim-check the rewrite
+                            cc4 = _safe_postflop_claim_check(
+                                explanation.answer_explanation, solver_data_block,
+                                client, model=model, system_prompt=checker_prompt,
+                                node_id=spot.node.node_id,
+                            )
+                            if cc4 is not None:
+                                final_audit_issues = [
+                                    f"{i.claim} -- {i.problem}" for i in cc4.issues
+                                ]
+                                claim_check_json = claim_check_to_json(cc4)
+                            revise_record["final_audit_issues"] = final_audit_issues
+                    else:
+                        # Rewrite came back UNCHANGED or was DISCARDED by the
+                        # hard validators -> the ORIGINAL ships, gate issues
+                        # unresolved. Record exactly why.
+                        reason = (
+                            getattr(rev, "rejected_reason", "") if rev
+                            else "the reviser call failed"
+                        )
+                        attempt = getattr(rev, "revised_text", "") if rev else ""
+                        if reason:
+                            revise_discarded += 1
+                            rstatus = "discarded"
+                        else:
+                            revise_unchanged += 1
+                            rstatus = "unchanged"
+                        revise_record = {
+                            "status": rstatus,
+                            "gate_issues": gate_issues,
+                            "rejected_reason": reason,
+                            "attempted_rewrite": attempt,
+                            "original_explanation": original_prose,
+                        }
+                        if cc is not None:  # gate findings describe the shipped original
+                            claim_check_json = claim_check_to_json(cc)
+            elif run_claim_checker:
+                if cc is not None:
+                    claim_check_json = claim_check_to_json(cc)
+                claim_issues = gate_issues
+                if gate_issues:
+                    claim_flagged += 1
+
+        # Issues that REMAIN on the shipped explanation drive the "flagged"
+        # status: the regular checker's, the 4th-call audit's, or gate issues an
+        # auto-fix did NOT resolve (discarded / unchanged).
+        remaining_issues = list(claim_issues) + list(final_audit_issues)
+        if revise_record is not None and revise_record["status"] in (
+            "discarded", "unchanged",
+        ):
+            remaining_issues += list(revise_record.get("gate_issues") or [])
+
         from pipeline.postflop.validators import run_postflop_soft_validators
 
+        # Soft validators run on the FINAL (possibly revised) explanation.
         soft_warnings = (
             [] if use_placeholder
             else run_postflop_soft_validators(explanation, facts)
         )
-        status = "flagged" if soft_warnings else "draft"
+        status = "flagged" if (soft_warnings or remaining_issues) else "draft"
         if soft_warnings:
             soft_flagged += 1
 
@@ -308,6 +474,7 @@ def generate_postflop_batch(
             facts, explanation, solve, difficulty, len(rows) + 1,
             validation_status=status, display_in_bb=display_in_bb,
         )
+        row["claim_check"] = claim_check_json
         rows.append(row)
 
         record: dict[str, Any] = {
@@ -319,9 +486,19 @@ def generate_postflop_batch(
             "archetype": facts.archetype,
             "difficulty": difficulty.score,
             "hero_equity": round(facts.hero_equity_vs_villain, 4),
+            # Node-level range-vs-range stats (the "who is ahead here" facts).
+            "range_equity": round(facts.hero_range_equity, 4),
+            "range_advantage": facts.range_advantage,
+            "hero_nut_share": round(facts.hero_nut_share, 4),
+            "villain_nut_share": round(facts.villain_nut_share, 4),
+            "nut_advantage": facts.nut_advantage,
+            # Blocker value/bluff decomposition.
+            "blocked_value_pct": round(facts.blocked_value_pct, 4),
+            "blocked_bluff_pct": round(facts.blocked_bluff_pct, 4),
+            "blocker_effect": facts.blocker_effect,
             "ev_gap_bb": facts.ev_gap_bb,
             "concept_tags": facts.concept_tags,
-            "solver_data": build_solver_data_block(facts),
+            "solver_data": solver_data_block,
             # Each player's range at THIS (current-street) node, 169-class,
             # keyed by position -- paired with the batch-level preflop_ranges
             # for the Review page's visual range grids.
@@ -334,6 +511,10 @@ def generate_postflop_batch(
         }
         if soft_warnings:
             record["validator_warnings"] = soft_warnings
+        if claim_issues:
+            record["claim_check_issues"] = claim_issues
+        if revise_record is not None:
+            record["revise"] = revise_record
         question_records.append(record)
 
     output_path = Path(output_path)
@@ -352,6 +533,9 @@ def generate_postflop_batch(
             "preflop_entry_actions": preflop_entry_actions,
             "model": model if not use_placeholder else "(dry-run placeholder)",
             "dry_run": use_placeholder,
+            # How to reload the exact source solve for the batch re-verifier
+            # (db_path / streets / max_nodes_per_street). Empty for fixture runs.
+            "provenance": provenance or {},
             "run_settings": {
                 "total_questions": total_questions,
                 "answer_style": answer_style,
@@ -359,15 +543,28 @@ def generate_postflop_batch(
                 "min_frequency": min_frequency,
                 "max_frequency": max_frequency,
                 "min_ev_gap_bb": min_ev_gap_bb,
+                "quality_gate": quality_gate,
                 "equity_runouts": equity_runouts,
                 "temperature": temperature,
+                "trap_difficulty": trap_difficulty,
+                "run_claim_checker": run_claim_checker,
+                "revise_pass": revise_pass,
+                "final_audit": final_audit and revise_pass,
             },
             "counters": {
                 "worthy_spots_available": worthy_total,
                 "worthy_spots_selected": len(worthy),
+                "low_quality_nodes_skipped": low_quality_filtered_out,
                 "questions_attempted": attempted,
                 "questions_written": len(rows),
                 "soft_flagged_rows": soft_flagged,
+                "trap_floored": trap_floored,
+                # Layer-7 audit tallies (0 unless the opt-in passes ran).
+                "claim_flagged_rows": claim_flagged,
+                "revise_flagged": revise_flagged,
+                "revise_fixed": revise_fixed,
+                "revise_discarded": revise_discarded,
+                "revise_unchanged": revise_unchanged,
             },
             "questions": question_records,
             "failures": failures,

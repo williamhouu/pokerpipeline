@@ -26,8 +26,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.postflop.batch import generate_postflop_batch  # noqa: E402
+from pipeline.postflop.facts import preflop_aggressor  # noqa: E402
 from pipeline.postflop.fixtures import btn_vs_bb_srp_2cJs7s  # noqa: E402
-from pipeline.postflop.spot_selection import diversify_spots  # noqa: E402
+from pipeline.postflop.spot_selection import (  # noqa: E402
+    DECISION_TYPES,
+    STRENGTH_BUCKETS,
+    make_spot_selector,
+)
 
 
 def _load_solve(name: str, *, streets: tuple[str, ...], max_nodes_per_street: int | None):
@@ -79,6 +84,42 @@ def main(argv: list[str] | None = None) -> int:
         help="OPTIONAL EV-gap quality filter in bb (off by default, like "
              "preflop): drop spots whose EV gap is below this",
     )
+    parser.add_argument(
+        "--strength", nargs="*", default=[], choices=STRENGTH_BUCKETS,
+        help="keep only spots where hero's made-hand bucket is one of these "
+             "(the postflop hand-strength filter); default = all",
+    )
+    parser.add_argument(
+        "--decision", nargs="*", default=[], choices=DECISION_TYPES,
+        help="keep only these decision situations (the 'action faced' analog); "
+             "default = all",
+    )
+    parser.add_argument(
+        "--no-quality-gate", action="store_true",
+        help="disable the convergence/reach guard (by default low-quality / "
+             "barely-reached nodes are skipped)",
+    )
+    parser.add_argument(
+        "--trap-difficulty", action="store_true",
+        help="opt-in: floor counterintuitive PURE spots (solver folds despite "
+             "equity >= price, etc.) to Hard, like preflop. Score only",
+    )
+    parser.add_argument(
+        "--claim-checker", action="store_true",
+        help="Layer-7: a 2nd LLM pass audits each explanation against the data "
+             "block and FLAGS suspect claims (flag only; one extra call/question)",
+    )
+    parser.add_argument(
+        "--revise", action="store_true",
+        help="Layer-7 auto-fix: when the claim checker flags a question, a 3rd "
+             "LLM pass rewrites the prose (re-validated; discarded if it breaks a "
+             "rule). Implies --claim-checker as the gate",
+    )
+    parser.add_argument(
+        "--final-audit", action="store_true",
+        help="with --revise, re-run the claim checker on the rewrite (4th call, "
+             "flag only)",
+    )
     args = parser.parse_args(argv)
 
     cap = args.max_nodes_per_street if args.max_nodes_per_street > 0 else None
@@ -96,8 +137,17 @@ def main(argv: list[str] | None = None) -> int:
     kwargs = {}
     if args.model:
         kwargs["model"] = args.model
-    if args.diversify:
-        kwargs["spot_selector"] = diversify_spots
+    # Build a curating selector when diversify / hand-strength / decision filters
+    # are requested (the selector handles all three + needs the aggressor/IP for
+    # the decision-type classifier).
+    if args.diversify or args.strength or args.decision:
+        kwargs["spot_selector"] = make_spot_selector(
+            diversify=args.diversify,
+            strength_buckets=tuple(args.strength) or None,
+            decision_types=tuple(args.decision) or None,
+            aggressor=preflop_aggressor(solve),
+            ip_position=solve.ip_position,
+        )
     if args.min_ev_gap is not None:
         kwargs["min_ev_gap_bb"] = args.min_ev_gap
     result = generate_postflop_batch(
@@ -106,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
         total_questions=args.num,
         client=client,
         dry_run=args.dry_run,
+        quality_gate=not args.no_quality_gate,
+        trap_difficulty=args.trap_difficulty,
+        run_claim_checker=args.claim_checker or args.revise,
+        revise_pass=args.revise,
+        final_audit=args.final_audit and args.revise,
         progress_callback=lambda msg, done, total: print(f"  {msg}", file=sys.stderr),
         **kwargs,
     )

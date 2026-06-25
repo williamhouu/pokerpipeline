@@ -337,18 +337,82 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   validators/writer; modifies no shared module.
 - **Layers**: `spot_sampler` → `question_extractor` (worthy: dominant freq
   65–99%; EV-gap gate optional, off by default) → `facts` (equity, hand class, board texture,
-  SPR, pot odds, EV gap, archetype, `concept_tags`) → `action_history`
+  SPR, pot odds, EV gap, archetype, `concept_tags`, **range-vs-range advantage**) → `action_history`
   (**multi-street**: a turn question renders preflop + flop + turn ahead of
   it) → `options`/`difficulty` → `explanation_generator` (Layer 6, dry-run
   placeholder OR real Anthropic call + 1 retry) → `validators` (deterministic
-  hard + soft) → `format_writer` (36-col team CSV: +`neutral_credit`; and
-  `ev_gap_bb` column → full per-action `action_ev_bb`, June 2026) →
-  `batch.generate_postflop_batch`
+  hard + soft) → **Layer-7 LLM audit (opt-in)**: `claim_checker` (2-call flag)
+  / `reviser` (4-call flag→revise→re-audit) → `format_writer` (team CSV:
+  +`neutral_credit`, +`range_equity`, +`claim_check`; `ev_gap_bb` column →
+  full per-action `action_ev_bb`, June 2026) → `batch.generate_postflop_batch`
   (+ `meta.json`). CLI: `scripts/generate_postflop.py --dry-run`
-  (`--solve <path>.db` runs a real vendor solve; `--diversify` for variety).
-- **Deterministic**: seeded per-spot equity + sorted spot order + no
-  meta timestamps ⇒ byte-identical CSV (guarded by a test). 39 tests in
-  `tests/test_postflop_pipeline.py`.
+  (`--solve <path>.db` runs a real vendor solve; `--diversify` for variety;
+  `--claim-checker` / `--revise` / `--final-audit` for the Layer-7 pass).
+- **Range-vs-range advantage (June 2026, the brief's #1 failure mode).**
+  `facts.compute_range_advantage` computes the node-level "who is ahead on this
+  board" verdict in PYTHON (never the LLM): `hero_range_equity`
+  (`equity.range_vs_range_equity`, fixed seed → deterministic),
+  `range_advantage`/`nut_advantage` ∈ `hero`/`villain`/`even` (resolved via
+  `_advantage_label` + a margin), and the two strong-made (two-pair+) shares.
+  Surfaced as the `RANGE ADVANTAGE`/`NUT ADVANTAGE` lines in the SOLVER DATA
+  block + the `range_advantage`/`range_disadvantage`/`nut_advantage`/
+  `nut_disadvantage` concept tags + the `range_equity` CSV column. Voice rule 8
+  (built-in) / rule 18 (`postflop_system.txt`) BIND any range-advantage claim
+  to the fact (mirror it, never compute/reverse). Verified on v8: BTN (the
+  aggressor) correctly gets the range+nut advantage, BB the disadvantage.
+- **Blocker value/bluff decomposition (June 2026 — the brief's #2 LLM failure
+  mode, reversed blocker logic).** `facts.compute_blocker_decomposition` resolves
+  in PYTHON whether hero's cards remove villain's VALUE or their BLUFFS:
+  classify every board-unblocked villain combo (`classify_hand`) into value
+  (premium/strong) vs bluff (air), measure the weighted fraction of each hero
+  removes by card-sharing. On a facing-bet node `villain_range` IS the
+  reach-weighted betting range, so this is the real composition of the bet hero
+  faces. `blocker_effect` ∈ `value`/`bluffs`/`neutral` (resolved verdict;
+  thresholds: ≥5% removal + ≥3pt margin). Emits a `BLOCKERS` line in the data
+  block ONLY when non-neutral + `blocks_value`/`blocks_bluffs` concept tags.
+  **This LIFTS the old "no blocker data" ban**: the prompts now ALLOW blocker
+  talk that matches the fact (rule 9 built-in / rule 12 `postflop_system.txt`),
+  the claim checker flags blocker claims that CONTRADICT it (was: flagged all),
+  and a new soft validator `soft_validate_blocker_direction` flags a reversed
+  claim. Real-API proof: the LLM said "you block ~7% of bluffs, a mark AGAINST
+  calling" (correct direction for a bluff-catch) and the checker flagged a
+  mis-framed one.
+- **Curation filters (June 2026 — the postflop analog of preflop's hand-strength
+  + action-faced filters).** `spot_selection.py`: `spot_strength_bucket` (hero's
+  made-hand bucket via `classify_hand`) + `spot_decision_type` (SITUATION-based —
+  C-bet / Lead / Facing-a-bet / Check-back — so filtering never leaks the
+  answer). `make_spot_selector(strength_buckets=, decision_types=, aggressor=,
+  ip_position=)` filters BEFORE the equity sim (no wasted spend). Admin Generate
+  multiselects + CLI `--strength` / `--decision`. `STRENGTH_BUCKETS` /
+  `DECISION_TYPES` are the option lists.
+- **Solve-quality / node-reach gate (June 2026 — postflop's convergence guard,
+  ON by default).** `quality.py:node_quality_issue` skips a node when too few
+  hero OR villain combos reach it (<6 — rarely-reached / down-sample-stranded)
+  or nearly all combos play one IDENTICAL non-pure mix (an untrained default; a
+  uniform PURE action is legit and kept). Matters most for third-party `.db`
+  solves + down-sampled turn/river. Wired in `_collect_worthy(quality_gate=)`
+  (default True) → `meta.counters.low_quality_nodes_skipped`; admin checkbox +
+  CLI `--no-quality-gate`. Verified on v8: skips only the degenerate big-donk
+  response lines (3-4 combos), keeps every real node; skipped 104/429 turn+river
+  nodes.
+- **Layer-7 LLM audit DONE (June 2026, ported from preflop).** `claim_checker.py`
+  (postflop-specific prompt: range-advantage-to-wrong-player, mislabeled draw,
+  invented blockers, equity-vs-price reversal) + `reviser.py` (prose-only
+  rewrite, re-validated by the hard validators, discarded if it breaks one).
+  Same toggles as preflop (`run_claim_checker`/`revise_pass`/`final_audit`),
+  threaded batch→`run.py`→admin Generate (+ editable
+  `postflop_claim_checker_system.txt`). Lifecycle in `meta.counters`
+  (`claim_flagged_rows`, `revise_*`) + per-question `revise` record; the
+  Postflop Review page reuses the generic claim/revise render helpers + a prompt
+  inspector. Real-API proof on v8: 4/4 flagged→fixed, catches were all genuine
+  (false blocker, position reversal, overcounted outs, contradictory draw logic).
+- **Batch re-verifier DONE** — `scripts/audit_postflop_batch.py <batch.csv>`
+  rebuilds every CSV row from the source `.db` (via `meta.provenance`: db_path +
+  streets + sampling) and diffs EXACT (deterministic) vs TOLERANCED (MC equity);
+  the postflop analogue of `audit_preflop_batch.py`. Proven 0/0 on real Opus output.
+- **Deterministic**: seeded per-spot equity + fixed-seed range equity + sorted
+  spot order + no meta timestamps ⇒ byte-identical CSV (guarded by a test).
+  72 tests in `tests/test_postflop_pipeline.py`.
 - **Real `.db` adapter DONE (June 2026)** — `pipeline/postflop/adapters/
   sqlite_db.py` reads the third-party SQLite postflop solve into the IR (flop
   nodes for v1). It derives check/call + bet/raise from the node-string
@@ -402,13 +466,47 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   (suggested value `MIN_EV_GAP_BB=0.5`); the EV gap still feeds difficulty's
   `easy_ev`. `--diversify` round-robins the worthy pool across the 4 flop
   decision types so a fill-to-N batch isn't dominated by one archetype.
-- **NOT done (seamed extension points)**: turn/river nodes in the `.db`
-  adapter (flop-only today; chance tokens reset the street in the walk), a
-  `.cfr` adapter (Pio UPI), the admin **postflop Review** page (Generate is
-  built — a postflop Review mirroring the preflop one is the next admin step),
-  LLM prompt tuning against gold examples, a **board-emoji hard validator** (the
-  LLM occasionally garbles a board suit emoji), and exact Runout app table-state
-  token formatting. See the README's "Done vs. next".
+- **Difficulty = 3-axis + trap-aware (June 2026, upgraded from 2-axis).**
+  `pipeline/postflop/difficulty.py` is now `freq`/`concept`/`hand` (weights
+  0.55/0.30/0.15), mirroring PLO — it **drops EV from the score** (a worthy
+  postflop spot mixes at ~0 EV gap by construction, so EV is redundant with
+  freq; `easy_ev` is kept as a CSV diagnostic only). `easy_concept` =
+  `ARCHETYPE_BASE_EASE` (per the 13 postflop archetypes — bluff-catch/trap-check
+  hard, value-bet easy) + `CONCEPT_TAG_MODIFIERS` (multiway/wet/range-disadvantage);
+  `easy_hand` = U-shaped on strength bucket (premium & clear air easy, the
+  medium/marginal middle hard; a real draw nudges a weak hand off "clear air").
+  **Trap-aware is an opt-in toggle (off by default, like preflop)**:
+  `compute_difficulty(facts, apply_trap_bump=)` floors a counterintuitive
+  heads-up facing-a-bet spot (solver folds despite equity ≥ price, or continues
+  below it) to `TRAP_DIFFICULTY_FLOOR` (2400). Admin Generate checkbox "🪤
+  Trap-aware difficulty" + a "How is postflop difficulty calculated?" popover;
+  threaded batch→`run.py`→admin + CLI `--trap-difficulty`; `meta.counters.
+  trap_floored` reports the re-rated count. New CSV diagnostics `easy_concept` /
+  `easy_hand` (alongside `easy_freq` / `easy_ev`).
+- **`skills` column DONE (June 2026).** `pipeline/postflop/skills.py` maps
+  `PostflopFacts` → the app's skill catalog (deterministic, never the LLM),
+  using the EXACT canonical names from `pipeline/skill_tagger.py:SKILL_CATALOG`
+  (a parity test guards against drift). Postflop-native (the shared tagger's
+  postflop rules read the OLD `fact_extractor` tag vocab; this reads the new
+  `pipeline.postflop` tags), so the package stays self-contained. ~22 skills
+  tagged (C-Betting, Facing a C-Bet, Check-Raising, Donk/Probe/Overbet, Bet
+  Sizing, Value Betting, Bluffing, Bluff Catching, Floating, Pot Control, Pot
+  Odds, Implied Odds, SPR, Range Polarization, In/Out of Position, Multiway,
+  Drawing Hand Strategy, + tournament when applicable); **Blockers never fires
+  postflop** (no blocker data). Each rule has a plain-English explainer
+  (`POSTFLOP_SKILL_EXPLAINERS`) surfaced in the admin **📋 How each postflop
+  skill is tagged** dropdown (Generate + Review pages); deliberately-untagged
+  skills + why in `POSTFLOP_SKILLS_NOT_TAGGED`. Strict tagging (~2-5/question).
+- **NOT done (seamed extension points)**: a `.cfr` adapter (Pio UPI); LLM
+  prompt tuning against gold postflop examples; exact Runout app table-state
+  token formatting (port preflop's `app_table_format` — postflop is where
+  `Cards on Table` is finally non-empty); a postflop Compare page + prompt
+  library; the harder-to-detect skills (`Facing a Check-Raise`, MDF, Reverse
+  Implied Odds — see `POSTFLOP_SKILLS_NOT_TAGGED`). (DONE since earlier notes:
+  turn/river nodes, board-emoji validator, the postflop Review page, the Layer-7
+  claim-checker/reviser, range-vs-range advantage, the batch re-verifier,
+  3-axis+trap difficulty, the `skills` column, blocker value/bluff
+  decomposition, the curation filters, the solve-quality/node-reach gate.)
 
 ## Build phases & status
 

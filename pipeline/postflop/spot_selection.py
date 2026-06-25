@@ -22,6 +22,40 @@ from typing import Any
 _RANKS = "23456789TJQKA"
 _CARD_RE = re.compile(r"^[2-9TJQKA][cdhs]$")
 
+# Curation axes the admin/CLI expose (the postflop analog of preflop's
+# hand-strength + action-faced filters). Both are applied BEFORE the expensive
+# equity sim, so a filtered spot costs nothing.
+STRENGTH_BUCKETS: tuple[str, ...] = (
+    "premium", "strong", "medium", "vulnerable", "marginal", "air",
+)
+DECISION_TYPES: tuple[str, ...] = (
+    "C-bet / barrel spot", "Lead / probe spot", "Facing a bet", "Check-back spot",
+)
+
+
+def spot_strength_bucket(spot: Any) -> str:
+    """Hero's made-hand strength bucket on the board (premium … air).
+
+    The postflop analog of preflop's hand-strength filter. Uses the shared pure
+    classifier (no runouts), so it is cheap to run as a pre-equity filter."""
+    from pipeline.fact_extractor.hand_class import classify_hand  # noqa: PLC0415
+
+    return classify_hand(spot.hero_cards, list(spot.node.board))["strength_bucket"]
+
+
+def spot_decision_type(spot: Any, *, aggressor: str, ip_position: str) -> str:
+    """The decision SITUATION hero is in -- the postflop analog of preflop's
+    "action faced" filter. Situation-based (never reads hero's chosen action),
+    so filtering on it can't leak the answer."""
+    node = spot.node
+    if node.is_facing_bet:
+        return "Facing a bet"
+    if aggressor and node.actor == aggressor:
+        return "C-bet / barrel spot"  # the preflop raiser, first to act
+    if ip_position and node.actor != ip_position:
+        return "Lead / probe spot"  # OOP non-aggressor leading
+    return "Check-back spot"  # IP non-aggressor, acting after a check
+
 
 def combo_class(combo: str) -> str:
     """``'AsKs'`` -> ``'AKs'``, ``'3s3c'`` -> ``'33'`` (suit-isomorphic 169 class)."""
@@ -137,18 +171,44 @@ def diversify_spots(
 
 
 def make_spot_selector(
-    *, heroes: Sequence[str] | None = None, diversify: bool = False
+    *,
+    heroes: Sequence[str] | None = None,
+    diversify: bool = False,
+    strength_buckets: Sequence[str] | None = None,
+    decision_types: Sequence[str] | None = None,
+    aggressor: str = "",
+    ip_position: str = "",
 ) -> Callable[[Sequence[Any]], list[Any]]:
     """A ``spot_selector`` for ``generate_postflop_batch``.
 
-    Filters the worthy pool to ``heroes`` (the acting positions to keep; ``None``
-    / empty = both players), then optionally :func:`diversify_spots`. Built fresh
-    per run, so it's safe to construct inside a subprocess worker.
+    Filters the worthy pool, in order, by:
+
+    * ``heroes`` -- acting positions to keep (``None`` / empty = both players);
+    * ``strength_buckets`` -- hero's made-hand bucket (premium … air; the
+      postflop analog of preflop's hand-strength filter; ``None`` = all);
+    * ``decision_types`` -- the decision situation (the "action faced" analog;
+      ``None`` = all; needs ``aggressor`` + ``ip_position`` to classify);
+
+    then optionally :func:`diversify_spots`. All filters run BEFORE the equity
+    sim, so a filtered spot costs no compute. Pure + sorted; built fresh per run,
+    so it's safe inside a subprocess worker.
     """
     hero_set = {h for h in heroes} if heroes else None
+    strength_set = {b for b in strength_buckets} if strength_buckets else None
+    decision_set = {d for d in decision_types} if decision_types else None
 
     def _select(worthy: Sequence[Any]) -> list[Any]:
-        pool = [s for s in worthy if hero_set is None or s.node.actor in hero_set]
+        pool: list[Any] = []
+        for s in worthy:
+            if hero_set is not None and s.node.actor not in hero_set:
+                continue
+            if strength_set is not None and spot_strength_bucket(s) not in strength_set:
+                continue
+            if decision_set is not None and spot_decision_type(
+                s, aggressor=aggressor, ip_position=ip_position
+            ) not in decision_set:
+                continue
+            pool.append(s)
         if diversify:
             pool = diversify_spots(pool)
         return list(pool)
@@ -158,8 +218,12 @@ def make_spot_selector(
 
 __all__ = [
     "DECISION_KINDS",
+    "DECISION_TYPES",
+    "STRENGTH_BUCKETS",
     "combo_class",
     "diversify_spots",
     "make_spot_selector",
     "node_kind",
+    "spot_decision_type",
+    "spot_strength_bucket",
 ]
