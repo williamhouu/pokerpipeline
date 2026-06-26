@@ -30,6 +30,7 @@ from pipeline.explanation_generator import ExplanationValidationError
 from pipeline.postflop.claim_checker import (
     POSTFLOP_CHECKER_SYSTEM_PROMPT,
     ClaimCheckResult,
+    ClaimIssue,
     check_postflop_claims,
     claim_check_to_json,
 )
@@ -75,6 +76,42 @@ def _safe_postflop_claim_check(
     except Exception as exc:  # noqa: BLE001
         logger.warning("postflop batch: claim checker failed for %s: %s", node_id, exc)
         return None
+
+
+# The revise gate runs the claim checker this many times and UNIONs the issues.
+# The checker is non-deterministic even at temperature 0 (a single pass can miss
+# a real issue, so a batch sometimes gets a "lucky clean" and no rewrite fires);
+# best-of-N makes the gate reliable. Only the (opt-in, paid) revise pass pays for
+# the extra calls -- the flag-only path stays a single call.
+_REVISE_GATE_PASSES = 2
+
+
+def _gate_check_best_of(
+    prose: str, solver_data_block: str, client: object, *,
+    model: str, system_prompt: str, node_id: str, passes: int,
+) -> ClaimCheckResult | None:
+    """Run the claim-check gate ``passes`` times and union the issues (deduped by
+    claim text). Returns a merged ``ClaimCheckResult`` (``passed`` False if any
+    pass flagged anything), or ``None`` if every pass errored."""
+    merged: list[ClaimIssue] = []
+    seen: set[str] = set()
+    any_ran = False
+    for _ in range(max(1, passes)):
+        cc = _safe_postflop_claim_check(
+            prose, solver_data_block, client,
+            model=model, system_prompt=system_prompt, node_id=node_id,
+        )
+        if cc is None:
+            continue
+        any_ran = True
+        for issue in cc.issues:
+            key = issue.claim.strip().lower()
+            if key not in seen:
+                seen.add(key)
+                merged.append(issue)
+    if not any_ran:
+        return None
+    return ClaimCheckResult(passed=not merged, issues=tuple(merged))
 
 
 @dataclass
@@ -194,6 +231,33 @@ def _villain_decision_node(node: Any, solve: Any) -> Any:
             if best is None or len(cid) > len(best.node_id):
                 best = cand
     return best
+
+
+# The street immediately before each decision street (flop's prior is preflop).
+_PRIOR_STREET = {"turn": "flop", "river": "turn"}
+
+
+def _prior_street_node(node: Any, solve: Any) -> Any:
+    """The decision node on the street BEFORE this one whose ranges to show.
+
+    For the range visuals: a turn question should show the FLOP range (not the
+    preflop / flop-entry range), a river question the TURN range -- "the street
+    before". Returns the deepest node-id PREFIX of the current node that is a
+    real decision node on the prior street (so its ``hero_range`` /
+    ``villain_range`` are the ranges as they were on that street). ``None`` for a
+    flop question (its prior is preflop -> the caller uses the shared flop-entry
+    ranges) or if no prior-street ancestor survived down-sampling (turn nodes are
+    sampled; flop nodes are always kept, so a turn question always resolves).
+    """
+    prior = _PRIOR_STREET.get(node.street)
+    if prior is None:
+        return None
+    parts = node.node_id.split(":")
+    for i in range(len(parts) - 1, 1, -1):  # longest prefix first, excluding self
+        cand = solve.nodes.get(":".join(parts[:i]))
+        if cand is not None and cand.street == prior:
+            return cand
+    return None
 
 
 def _street_strategies(node: Any, solve: Any) -> dict[str, dict]:
@@ -370,10 +434,20 @@ def generate_postflop_batch(
         final_audit_issues: list[str] = []
         revise_record: dict[str, Any] | None = None
         if not use_placeholder and (run_claim_checker or revise_pass):
-            cc = _safe_postflop_claim_check(
-                explanation.answer_explanation, solver_data_block, client,
-                model=model, system_prompt=checker_prompt,
-                node_id=spot.node.node_id,
+            # The revise gate runs best-of-N (union) so a flaky single pass can't
+            # let a real issue through; flag-only stays one call.
+            cc = (
+                _gate_check_best_of(
+                    explanation.answer_explanation, solver_data_block, client,
+                    model=model, system_prompt=checker_prompt,
+                    node_id=spot.node.node_id, passes=_REVISE_GATE_PASSES,
+                )
+                if revise_pass
+                else _safe_postflop_claim_check(
+                    explanation.answer_explanation, solver_data_block, client,
+                    model=model, system_prompt=checker_prompt,
+                    node_id=spot.node.node_id,
+                )
             )
             gate_issues = (
                 [f"{i.claim} -- {i.problem}" for i in cc.issues]
@@ -500,8 +574,7 @@ def generate_postflop_batch(
             "concept_tags": facts.concept_tags,
             "solver_data": solver_data_block,
             # Each player's range at THIS (current-street) node, 169-class,
-            # keyed by position -- paired with the batch-level preflop_ranges
-            # for the Review page's visual range grids.
+            # keyed by position -- the RIGHT range grid on the Review page.
             "street_ranges": _node_range_snapshots(spot.node),
             # BOTH players' per-action strategy for the current street (the actor
             # at this node + the villain at the node where THEY acted), keyed by
@@ -509,6 +582,14 @@ def generate_postflop_batch(
             "street_strategy": _street_strategies(spot.node, solve),
             "street_actor": spot.node.actor,
         }
+        # The LEFT range grid = "the street before" (June 2026): a turn question
+        # shows the FLOP range, a river question the TURN range. Flop questions
+        # leave this empty -> the Review page falls back to the shared flop-entry
+        # (preflop) ranges. So the two grids are always (prior street, current).
+        _prior_node = _prior_street_node(spot.node, solve)
+        if _prior_node is not None:
+            record["prior_street_ranges"] = _node_range_snapshots(_prior_node)
+            record["prior_street_label"] = _prior_node.street
         if soft_warnings:
             record["validator_warnings"] = soft_warnings
         if claim_issues:

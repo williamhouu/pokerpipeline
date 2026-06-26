@@ -5092,9 +5092,11 @@ def _render_revise_panel(qmeta: dict[str, object] | None) -> None:
             st.markdown("**Original draft**")
             st.info(_md_lines(str(rev.get("original_explanation", ""))))
     elif status == "clean":
-        st.caption(
-            "✓ ORIGINAL text (not changed) — the auto-fix gate found no issues, "
-            "so no rewrite was attempted."
+        st.success(
+            "🔎 **Layer-7 audit ran — came back CLEAN.** The auto-fix gate "
+            "checked this explanation (best-of-2 claim-check passes) and flagged "
+            "nothing, so the original text shipped unchanged. (If you still see a "
+            "confusing sentence here, the checker missed it — worth a manual grade.)"
         )
     elif status == "discarded":
         st.warning(
@@ -6073,6 +6075,17 @@ def render_postflop_review_page() -> None:
             None,
         )
         _preflop_ranges = meta.get("preflop_ranges") if isinstance(meta, dict) else None
+        # The LEFT grid = "the street before": a turn question shows the FLOP
+        # range, a river question the TURN range (per-question, June 2026). Empty
+        # on flop questions -> fall back to the shared flop-entry (preflop) ranges.
+        _prior_ranges = next(
+            (q.get("prior_street_ranges") for q in _qrecs if q.get("node_id") == _ref_node),
+            None,
+        )
+        _prior_label = next(
+            (q.get("prior_street_label") for q in _qrecs if q.get("node_id") == _ref_node),
+            None,
+        )
         # street_strategy is {position: {action_label: {class: weight}}} (NEW
         # batches: both players, each at the node where THEY acted). Old batches
         # stored it action-keyed -> .get(pos) misses -> falls back to presence.
@@ -6122,10 +6135,13 @@ def render_postflop_review_page() -> None:
                     "(e.g. the Button opens 33 only ~56%) or board-blocked — it is "
                     "**not** a check. (A specific hand's exact bet/check split is in the "
                     "question's `action_frequencies`; this grid shows the whole range.)\n\n"
-                    "**Preflop** = how each player reached this flop (BTN raised → red, "
-                    "BB called → green; BB's 3-bets are a separate solve, so none show "
-                    "here). **This street** = their strategy at the node where they acted "
-                    "— a heavy donk shows as red."
+                    "**Left grid = the street before** this decision: on a FLOP "
+                    "question it's the preflop entry range (BTN raised → red, BB "
+                    "called → green; BB's 3-bets are a separate solve, so none show "
+                    "here); on a TURN question it's the FLOP range, on a RIVER "
+                    "question the TURN range (shown as presence). **Right grid = this "
+                    "street** — each player's strategy at the node where they acted "
+                    "(a heavy donk shows as red)."
                 )
                 _conditional = st.toggle(
                     "Conditional view — full-height cells (strategy *when the hand is held*)",
@@ -6155,13 +6171,24 @@ def render_postflop_review_page() -> None:
                     _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
                     st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
                     _gp, _gc = st.columns(2)
-                    _pre = (_preflop_ranges or {}).get(_pos)
+                    # LEFT grid = "the street before": the prior-street range on a
+                    # turn/river question (flop/turn), else the flop-entry (preflop)
+                    # range on a flop question.
+                    _left = (_prior_ranges or {}).get(_pos) if _prior_ranges else None
                     _cur = (_street_ranges or {}).get(_pos)
                     _strat = _street_strategy.get(_pos)
                     _entry = _preflop_entry.get(_pos, "call")
                     _entry_word = "raised" if _entry == "raise" else "called"
                     with _gp:
-                        if _pre:
+                        if _left:  # turn/river: the prior street's range (presence)
+                            st.caption(
+                                f"{str(_prior_label).capitalize()} range — "
+                                f"~{range_view.range_pct(_left):.0f}% of hands"
+                            )
+                            st.html(range_view.grid_html(_maybe_conditional(
+                                _segs(_left, range_view.COLOR_INRANGE)
+                            )))
+                        elif (_pre := (_preflop_ranges or {}).get(_pos)):  # flop: preflop entry
                             st.caption(
                                 f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
                             )

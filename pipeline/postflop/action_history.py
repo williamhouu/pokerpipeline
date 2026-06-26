@@ -257,13 +257,15 @@ def format_question(
 
 
 def build_context_line(solve: PostflopSolve, *, display_in_bb: bool = True) -> str:
-    """The short framing line, e.g. 'Online · $0.50/$1 · 8% cap 2bb rake'.
+    """The short framing line, e.g. 'Online · $0.50/$1 · 200bb · 8% cap 2bb rake'.
 
     Cash shows the stakes, a tournament shows the stack depth (bb or the dollar
     equivalent), and the rake structure is appended when the solve carries one --
     different solves use different rake, so stating it keeps the framing
-    unambiguous. The table size is intentionally NOT shown -- the dedicated
-    Table Size column already carries it (dropped June 2026 per the team).
+    unambiguous. **The stack depth in bb is stated whenever it is NOT 100bb** (on
+    cash; tournaments already show it as the tail): readers assume 100bb by
+    default, so a 200bb / 40bb game must say so. The table size is intentionally
+    NOT shown -- the dedicated Table Size column carries it (dropped June 2026).
     """
     venue = solve.live_or_online
     if solve.game_format == "tournament":
@@ -274,6 +276,10 @@ def build_context_line(solve: PostflopSolve, *, display_in_bb: bool = True) -> s
     else:
         tail = solve.stakes or "cash"
     parts = [venue, tail]
+    # Stack depth when it isn't the assumed 100bb (cash only -- tournaments put
+    # the stack in `tail` already). Stated in bb so it's stake-independent.
+    if solve.game_format != "tournament" and round(solve.effective_stack_bb) != 100:  # noqa: PLR2004
+        parts.append(f"{round_to_half_bb(solve.effective_stack_bb):g}bb")
     if solve.rake and solve.rake.strip().lower() != "none":
         parts.append(f"{solve.rake.strip()} rake")
     return " · ".join(parts)

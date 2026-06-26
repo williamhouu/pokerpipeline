@@ -385,6 +385,32 @@ def test_context_line() -> None:
     assert build_context_line(SOLVE) == "Online · $0.50/$1"
 
 
+def test_context_line_states_stack_when_not_100bb() -> None:
+    from dataclasses import replace  # noqa: PLC0415
+
+    # Readers assume 100bb, so a non-100bb game must say so in the Context.
+    assert "bb" not in build_context_line(SOLVE).replace("$", "")  # SOLVE is 100bb
+    assert "200bb" in build_context_line(replace(SOLVE, effective_stack_bb=200.0))
+    assert "40bb" in build_context_line(replace(SOLVE, effective_stack_bb=40.0))
+
+
+def test_prior_street_node_picks_the_street_before() -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from pipeline.postflop.batch import _prior_street_node  # noqa: PLC0415
+
+    nodes = {
+        "r:0": SimpleNamespace(node_id="r:0", street="flop"),
+        "r:0:b214": SimpleNamespace(node_id="r:0:b214", street="flop"),
+        "r:0:b214:c:2c:c": SimpleNamespace(node_id="r:0:b214:c:2c:c", street="turn"),
+    }
+    solve = SimpleNamespace(nodes=nodes)
+    # Turn question -> the deepest FLOP ancestor (the street before).
+    assert _prior_street_node(nodes["r:0:b214:c:2c:c"], solve).node_id == "r:0:b214"
+    # Flop question -> None (caller uses the shared preflop / flop-entry ranges).
+    assert _prior_street_node(nodes["r:0:b214"], solve) is None
+
+
 def test_context_line_appends_rake_when_present() -> None:
     from dataclasses import replace  # noqa: PLC0415
 

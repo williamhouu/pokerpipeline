@@ -574,6 +574,29 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   the literal sum (single-bet spots stay exact); `_seat_states` keeps EXACT
   floats so the stack-invariant test still holds (proving display-only).
   Deterministic ⇒ byte-identical CSV + audit 0/0 still hold.
+- **Claim-checker reliability — best-of-N gate (June 2026).** The claim checker
+  is non-deterministic even at temperature 0 (a single pass can miss a real
+  issue, so a batch sometimes got a "lucky clean" and no rewrite fired). The
+  **revise gate now runs `_REVISE_GATE_PASSES=2` passes and UNIONs the issues**
+  (`batch._gate_check_best_of`) so a flaky miss can't slip through; the flag-only
+  path stays one call. Also strengthened the checker prompt to catch an
+  incoherent CLAUSE (subject that no longer fits its predicate, e.g. "the hands
+  that continue ... fold out the bluffs" — calling hands don't fold anything
+  out). The Review page's "clean" case is now a prominent st.success ("🔎 Layer-7
+  audit ran — came back CLEAN") so a clean question shows EVIDENCE the audit ran,
+  not nothing. Verified live: the muddled sentence went from 0/3 caught to 2/2.
+- **Stack depth in the Context when ≠ 100bb (June 2026, all pipelines).** Readers
+  assume 100bb, so a non-100bb game must say so. Postflop `build_context_line`
+  appends `{stack}bb` for cash when `round(effective_stack_bb) != 100` (e.g.
+  "Live · $1/$2 · 200bb · 8% cap 2bb rake"); preflop `_context_column` appends it
+  when `pack.stack_depth_bb != 100` (the 20bb/30bb packs). 100bb stays clean.
+- **Range visuals = "the street before" + current (June 2026).** The Review
+  range panel's LEFT grid was always the flop-entry (preflop) range; now a TURN
+  question shows the FLOP range and a RIVER question the TURN range (per-question
+  `prior_street_ranges` + `prior_street_label`, via `batch._prior_street_node` =
+  the deepest prior-street decision ancestor by node-id prefix — flop nodes are
+  never down-sampled so a turn question always resolves; flop questions stay on
+  the shared preflop ranges). RIGHT grid unchanged (current-street strategy).
 - **NOT done (seamed extension points)**: a postflop **prompt library** (the
   Compare page uses two free-text boxes today); LLM prompt tuning against gold
   postflop examples; the harder-to-detect skills (`Facing a Check-Raise`, MDF,

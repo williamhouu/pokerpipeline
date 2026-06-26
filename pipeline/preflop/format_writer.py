@@ -755,26 +755,27 @@ def _context_column(
     so it's unambiguous. Venue is omitted when not Online/Live (e.g. "Not
     specified"); rake is omitted for packs without a listed note.
 
-    Two things are intentionally NOT shown here, both already carried by a
-    dedicated column so repeating them in the Context was redundant: the
-    stack size (``Default Stack``) and the table size (``Table Size``) --
-    the latter dropped June 2026 per the team's feedback.
+    The table size is NOT shown (the dedicated Table Size column carries it).
+    The **stack depth IS shown whenever it isn't the assumed 100bb** (June 2026):
+    readers default to 100bb, so a 20bb / 30bb pack must say so even though the
+    Default Stack column also carries it -- the Context is where the eye lands.
+    100bb packs stay clean (no stack shown).
 
     Stakes appear only on cash + dollar display: ``"<stakes>"``. When the
     question renders in big blinds (``display_in_bb``) the stakes are dropped
     too (every amount the player sees is in bb, so "$1/$2" is noise), and a
     tournament has no stakes -- so the Context can be as short as
-    ``"Live · Rake 10% / 3bb cap"``.
+    ``"Live · 20bb · Rake 5% / 0.5bb cap"``.
     """
     parts: list[str] = []
     if live_or_online in ("Online", "Live"):
         parts.append(live_or_online)
-    # Table size is intentionally NOT shown here -- the dedicated Table Size
-    # column already carries it, so repeating it in the Context was redundant
-    # (dropped June 2026 per the team's feedback, like the stack depth before).
     if game_format == "cash" and not display_in_bb:
         sb_dollars = round(stakes_bb_dollars * pack.sb_to_bb_ratio, 2)
         parts.append(f"{_dollars(sb_dollars)}/{_dollars(stakes_bb_dollars)}")
+    # Stack depth when it isn't the assumed 100bb (in bb, stake-independent).
+    if round(pack.stack_depth_bb) != 100:  # noqa: PLR2004
+        parts.append(f"{pack.stack_depth_bb:g}bb")
     rake = _PACK_RAKE_NOTES.get(pack.pack_id, "")
     if rake:
         parts.append(f"Rake {rake}")
