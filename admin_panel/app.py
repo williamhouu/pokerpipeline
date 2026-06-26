@@ -924,9 +924,14 @@ def _render_generate_page_postflop() -> None:
         cols[1].metric("Stack", f"{solve.stack_bb:g}bb" if solve.stack_bb else "—")
         cols[2].metric("Matchup", f"{solve.ip_position} vs {solve.oop_position}")
         cols[3].metric("Flop", solve.flop_pretty)
-        meta_bits = [b for b in (solve.spot, solve.game_format) if b]
-        if solve.rake and solve.rake.lower() != "none":
-            meta_bits.append(f"rake {solve.rake}")
+        # Structure row -- the knobs that DIFFER across solves (game type, rake,
+        # ante). Surfaced explicitly because down the line many solves will mix
+        # structures and the framing must be unambiguous when you pick one.
+        s = st.columns(3)
+        s[0].metric("Game", "Tournament" if solve.game_format == "tournament" else "Cash")
+        s[1].metric("Rake", solve.rake_pretty)
+        s[2].metric("Ante", solve.ante_pretty)
+        meta_bits = [solve.spot] if solve.spot else []
         if solve.solve_date:
             meta_bits.append(f"solved {solve.solve_date}")
         if meta_bits:
@@ -1140,33 +1145,35 @@ def _render_generate_page_postflop() -> None:
             "advantage to the wrong player, a mislabeled draw, a backwards "
             "equity-vs-price line). Real runs only; adds API calls."
         )
-        pf_run_claim_checker = st.checkbox(
-            "Run claim checker (Layer 7)",
-            value=False,
-            key="postflop_run_claim_checker",
-            help="One extra LLM call per question. It only FLAGS (never rejects); "
-            "flags show under the explanation on the Postflop Review page.",
+        # ONE mutually-exclusive choice. The three modes are exclusive in the
+        # batch code: the auto-fix pass runs the claim check ITSELF as its gate,
+        # so a separate "flag only" on top of it does nothing. A radio makes the
+        # do-nothing combination impossible to set.
+        pf_layer7_mode = st.radio(
+            "Layer 7 mode",
+            options=["Off", "Flag only", "Audit & auto-fix"],
+            index=0,
+            horizontal=True,
+            key="postflop_layer7_mode",
+            help="Off = no AI audit. Flag only = one extra LLM call per question "
+            "that FLAGS suspect claims (never rewrites); flags show on the Postflop "
+            "Review page. Audit & auto-fix = when a question is flagged, a further "
+            "LLM pass rewrites the prose to fix it, re-checked by the deterministic "
+            "hard validators (a rewrite that breaks a rule is discarded, the "
+            "original kept). Only the prose changes; the action, numbers, and "
+            "options stay solver-locked. (Auto-fix already includes the claim "
+            "check, so there's no separate 'flag only' to add on top.)",
         )
-        pf_revise_pass = st.checkbox(
-            "Audit & auto-fix pass (experimental)",
-            value=False,
-            key="postflop_revise_pass",
-            help="When the claim checker flags a question, a THIRD LLM pass "
-            "rewrites the explanation to fix it, then the deterministic hard "
-            "validators re-check the rewrite (a rewrite that breaks a rule is "
-            "discarded and the original kept). Only the prose changes; the "
-            "action, numbers, and four options stay solver-locked. Both versions "
-            "are saved so you can compare.",
-        )
-        pf_final_audit = st.checkbox(
-            "Final audit after the fix",
-            value=True,
-            key="postflop_final_audit",
-            disabled=not pf_revise_pass,
-            help="Re-runs the claim checker on the rewritten explanation as a "
-            "last check (flag only; never triggers another rewrite).",
-        )
-        pf_final_audit = pf_final_audit and pf_revise_pass
+        pf_run_claim_checker = pf_layer7_mode == "Flag only"
+        pf_revise_pass = pf_layer7_mode == "Audit & auto-fix"
+        if pf_revise_pass:
+            pf_final_audit = st.checkbox(
+                "Final audit after the fix",
+                value=True,
+                key="postflop_final_audit",
+                help="Re-runs the claim checker on the rewritten explanation as a "
+                "last check (flag only; never triggers another rewrite).",
+            )
         if pf_run_claim_checker or pf_revise_pass:
             ck_key = "postflop_claim_checker_prompt"
             if ck_key not in st.session_state:
@@ -1549,12 +1556,13 @@ def _render_generate_page_preflop() -> None:
             "guard above can't see.\n\n"
 
             "**7. Write the explanation (the only paid step).** Layer 6 turns "
-            "the solved facts into prose. If **Run claim checker** is on, a "
-            "second LLM pass then audits that prose against the solver data — "
-            "flagging any poker claim that contradicts the data, is poker-wrong, "
-            "is invented, contradicts another sentence, or disagrees with the "
-            "action mix (e.g. calling a spot '3-bet or fold' when the hand also "
-            "calls a real share). It only flags for review, never rejects."
+            "the solved facts into prose. If **Layer 7 mode** is 'Flag only' or "
+            "'Audit & auto-fix', a second LLM pass then audits that prose against "
+            "the solver data — flagging any poker claim that contradicts the data, "
+            "is poker-wrong, is invented, contradicts another sentence, or "
+            "disagrees with the action mix (e.g. calling a spot '3-bet or fold' "
+            "when the hand also calls a real share). It only flags for review, "
+            "never rejects; 'Audit & auto-fix' then rewrites the flagged prose."
         )
 
     # Active/last background job panel. Persists across tab switches
@@ -2120,38 +2128,37 @@ def _render_generate_page_preflop() -> None:
     st.divider()
 
     # --- 10. Generate button (kicks off a BACKGROUND job) ---
-    # --- Layer-7 claim checker (opt-in) -------------------------------------
-    run_claim_checker = st.checkbox(
-        "Run claim checker (Layer 7)",
-        value=False,
-        key="preflop_run_claim_checker",
-        help="After each explanation is written, a second LLM pass audits it "
-        "against the data block and flags suspect poker claims. Adds ONE API "
-        "call per question. It only flags (never rejects); flags show under the "
-        "explanation in Review and Compare.",
+    # --- Layer-7 LLM audit (opt-in) -----------------------------------------
+    # ONE mutually-exclusive choice. The three modes are exclusive in the batch
+    # code: the auto-fix pass runs the claim check ITSELF as its gate, so a
+    # separate "flag only" on top of it does nothing. A radio makes the
+    # do-nothing combination impossible to set.
+    layer7_mode = st.radio(
+        "Layer 7 mode",
+        options=["Off", "Flag only", "Audit & auto-fix"],
+        index=0,
+        horizontal=True,
+        key="preflop_layer7_mode",
+        help="Off = no AI audit. Flag only = one extra LLM call per question that "
+        "FLAGS suspect claims (never rewrites); flags show under the explanation in "
+        "Review and Compare. Audit & auto-fix = when a question is flagged, a "
+        "further LLM pass rewrites the prose to fix it, re-checked by the "
+        "deterministic hard validators (a rewrite that breaks a rule is discarded, "
+        "the original kept). Only the prose changes; the action, numbers, and four "
+        "options stay solver-locked. (Auto-fix already includes the claim check, so "
+        "there's no separate 'flag only' to add on top.)",
     )
-    # --- Self-revision pass (opt-in experiment) -----------------------------
-    revise_pass = st.checkbox(
-        "Audit & auto-fix pass (experimental)",
-        value=False,
-        key="preflop_revise_pass",
-        help="When the claim checker flags a question, a SECOND LLM pass "
-        "rewrites the explanation to fix the issue, then the deterministic hard "
-        "validators re-check the rewrite (a rewrite that breaks a rule is "
-        "discarded and the original kept). Only the prose changes; the action, "
-        "numbers, and four options stay solver-locked. Both versions are saved "
-        "so you can compare. Adds up to two API calls per flagged question.",
-    )
-    final_audit = st.checkbox(
-        "Final audit after the fix",
-        value=True,
-        key="preflop_final_audit",
-        disabled=not revise_pass,
-        help="Auto-on when the audit & auto-fix pass is on (uncheck to skip). "
-        "Re-runs the claim checker on the rewritten explanation as a last check "
-        "-- it only flags for review, it never triggers another rewrite.",
-    )
-    final_audit = final_audit and revise_pass  # only applies when revise is on
+    run_claim_checker = layer7_mode == "Flag only"
+    revise_pass = layer7_mode == "Audit & auto-fix"
+    final_audit = False
+    if revise_pass:
+        final_audit = st.checkbox(
+            "Final audit after the fix",
+            value=True,
+            key="preflop_final_audit",
+            help="Re-runs the claim checker on the rewritten explanation as a last "
+            "check -- it only flags for review, it never triggers another rewrite.",
+        )
     with st.popover("ℹ️  How checking & validation works"):
         st.markdown(
             "Two kinds of checks run on every question, and **only one uses "
@@ -5919,12 +5926,15 @@ def render_postflop_review_page() -> None:
     if c1.button("◀ Prev", disabled=idx == 0, use_container_width=True):
         st.session_state[nav_key] = idx - 1
         st.rerun()
+    # NB: the jump selectbox is intentionally UNKEYED (index-driven), matching
+    # the working preflop nav. A persistent key would make Streamlit ignore
+    # `index=` on rerun and return the stale prior value, which fought the
+    # Prev/Next buttons (they set the index, the selectbox snapped it back).
     jump = c2.selectbox(
         "Jump to",
         options=list(range(len(df))),
         index=idx,
         format_func=lambda i: f"#{nos[i]}  ({i + 1}/{len(df)})",
-        key=f"pf_review_jump::{csv_path.name}",
         label_visibility="collapsed",
     )
     if jump != idx:
@@ -6101,12 +6111,46 @@ def render_postflop_review_page() -> None:
                     return segs
 
                 st.caption(
-                    "Hands are coloured by action: 🟦 check · 🟩 call · 🟥 bet/raise. "
+                    "**How to read a cell:** the **fill height = how much of this "
+                    "player's range that hand is here** (its weight), and the "
+                    "**colour = the action** it takes — 🟦 check · 🟩 call · 🟥 "
+                    "bet/raise (every bet size *and* raise shares one red; the chart "
+                    "doesn't split sizes by colour). So a **half-filled, all-red cell "
+                    "means the hand is in range ~half the time and bets it every time** "
+                    "— NOT that it bets half the time. The empty (dark) part is *'not "
+                    "in this player's range here'* — a hand opened at a mixed frequency "
+                    "(e.g. the Button opens 33 only ~56%) or board-blocked — it is "
+                    "**not** a check. (A specific hand's exact bet/check split is in the "
+                    "question's `action_frequencies`; this grid shows the whole range.)\n\n"
                     "**Preflop** = how each player reached this flop (BTN raised → red, "
                     "BB called → green; BB's 3-bets are a separate solve, so none show "
                     "here). **This street** = their strategy at the node where they acted "
                     "— a heavy donk shows as red."
                 )
+                _conditional = st.toggle(
+                    "Conditional view — full-height cells (strategy *when the hand is held*)",
+                    value=False,
+                    key=f"pf_range_conditional::{csv_path.name}",
+                    help="Off (range-weighted, the default): a cell's fill = how much of "
+                    "the range that hand is, so a hand opened at a mixed frequency shows a "
+                    "partial cell. On (conditional): every in-range cell is drawn FULL "
+                    "height and coloured by what the hand does WHEN HELD — so a set that "
+                    "always bets shows a full red cell no matter how often it's in range. "
+                    "Same numbers, two lenses: range-weighted shows range DENSITY, "
+                    "conditional shows the per-hand STRATEGY.",
+                )
+
+                def _maybe_conditional(segs: dict) -> dict:
+                    # Conditional view: normalise each cell's bands to fill the cell, so
+                    # the colours show P(action | hand) instead of reach × P(action).
+                    if not _conditional:
+                        return segs
+                    out: dict = {}
+                    for h, bands in segs.items():
+                        total = sum(w for w, _c in bands)
+                        out[h] = [(w / total, c) for w, c in bands] if total > 0 else bands
+                    return out
+
                 for _pos in _seats:
                     _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
                     st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
@@ -6121,9 +6165,9 @@ def render_postflop_review_page() -> None:
                             st.caption(
                                 f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
                             )
-                            st.html(range_view.grid_html(
+                            st.html(range_view.grid_html(_maybe_conditional(
                                 _segs(_pre, _act_color.get(_entry, range_view.COLOR_CALL))
-                            ))
+                            )))
                         else:
                             st.caption("Preflop — n/a")
                     with _gc:
@@ -6132,13 +6176,15 @@ def render_postflop_review_page() -> None:
                                 f"This street — strategy "
                                 f"(~{range_view.range_pct(_cur):.0f}% of hands in range)"
                             )
-                            st.html(range_view.grid_html(_strat_segs(_strat)))
+                            st.html(range_view.grid_html(_maybe_conditional(_strat_segs(_strat))))
                         elif _cur:
                             st.caption(
                                 f"This street — ~{range_view.range_pct(_cur):.0f}% of hands "
                                 "(not this player's turn on this street)"
                             )
-                            st.html(range_view.grid_html(_segs(_cur, range_view.COLOR_INRANGE)))
+                            st.html(range_view.grid_html(_maybe_conditional(
+                                _segs(_cur, range_view.COLOR_INRANGE)
+                            )))
                         else:
                             st.caption("This street — n/a")
 

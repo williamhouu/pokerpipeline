@@ -159,6 +159,9 @@ def _postflop_chat_context(
     ]
     key_facts: dict[str, object] = {
         "hero_equity_vs_villain_pct": round(facts.hero_equity_vs_villain * 100),
+        # Showdown-equity composition: what share of villain's range hero beats
+        # RIGHT NOW (so the chatbot can explain "ahead of air" vs "drawing").
+        "currently_ahead_of_villain_range_pct": round(facts.currently_ahead_pct * 100),
         "your_range_equity_pct": round(facts.hero_range_equity * 100),
         "range_advantage": facts.range_advantage,
         "nut_advantage": facts.nut_advantage,
@@ -248,7 +251,9 @@ def build_postflop_row(
         "Seats": table["seats"],
         "POT": table["pot"],
         "Question": format_question(facts.spot, solve, display_in_bb=display_in_bb),
-        "Question Type": "Postflop Decision",
+        # Same fixed label as the preflop/PLO writers, no trailing period
+        # (June 2026 -- was "Postflop Decision"; unified per team feedback).
+        "Question Type": "Hand Scenario Question",
         "option 1": opts[0],
         "option 2": opts[1],
         "option 3": opts[2],

@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pipeline.action_history import format_card
+from pipeline.bb_display import round_to_half_bb  # 0.5bb display grid (leaf)
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.node_enumerator import PloDecisionNode
 from pipeline.plo.pack import PloAction, PloActionType
@@ -129,9 +130,13 @@ def _fmt_num(value: float) -> str:
 
 
 def _money(amount: float, *, render_bb: bool) -> str:
-    """``3.5`` -> ``'$3.50'`` (cash) or ``'3.5bb'`` (bb display)."""
+    """``3.5`` -> ``'$3.50'`` (cash) or ``'3.5bb'`` (bb display).
+
+    The bb path snaps to the 0.5bb display grid (pot-relative PLO sizes are
+    otherwise ugly, e.g. 7.34bb); the dollar path keeps exact cents. Display-only
+    -- strategic facts use the exact amount. See :mod:`pipeline.bb_display`."""
     if render_bb:
-        return f"{_fmt_num(amount)}bb"
+        return f"{_fmt_num(round_to_half_bb(amount))}bb"
     if float(amount).is_integer():
         return f"${int(amount):,}"
     return f"${amount:,.2f}"

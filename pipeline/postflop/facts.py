@@ -124,6 +124,12 @@ class PostflopFacts:
 
     # --- equity / pot geometry ---
     hero_equity_vs_villain: float  # hero hand vs villain's full range, [0,1]
+    # Reach-weighted fraction of villain's range hero's made hand BEATS / loses to
+    # at showdown on the CURRENT board (deterministic, exact -- no runouts). The
+    # "where my equity comes from" fact: a made hand ahead of villain's air has
+    # SHOWDOWN equity, not draw equity. See compute_currently_ahead.
+    currently_ahead_pct: float
+    currently_behind_pct: float
     villain_range_combos: int  # live villain combos (not blocked by board/hero)
     hero_blocks_combos: int  # villain combos hero removes by card sharing
     spr: float
@@ -267,6 +273,49 @@ def compute_blocker_decomposition(
     return value_pct, bluff_pct, effect
 
 
+def compute_currently_ahead(
+    hero_cards: list[str], villain_range, board: list[str]
+) -> tuple[float, float]:
+    """How much of villain's range hero's made hand BEATS at showdown right now.
+
+    Returns ``(ahead_pct, behind_pct)`` -- the reach-weighted fraction of
+    villain's (board- and hero-unblocked) range that hero strictly beats / loses
+    to on the CURRENT board (no future cards). Ties count as neither, so
+    ``ahead + behind`` can be < 1.
+
+    The "where does my equity come from" fact (the brief's #1 failure mode --
+    the LLM mis-attributing a made hand's equity to draws). A small pair that is
+    *ahead* of half of villain's betting range has SHOWDOWN equity -- it beats
+    villain's air right now -- which is categorically different from a draw's
+    equity (which comes from IMPROVING). Deterministic: an exact 5-/6-/7-card
+    showdown comparison via the shared evaluator, no runouts, so it reproduces
+    byte-for-byte (unlike the sampled ``hero_equity_vs_villain``). On a
+    facing-bet node ``villain_range`` IS the reach-weighted betting range, so
+    this is "what fraction of the hands villain is BETTING do I currently beat".
+    """
+    hero_set = set(hero_cards)
+    board_set = set(board)
+    hero_rank = rank_hand(list(hero_cards) + list(board))
+    ahead = behind = total = 0.0
+    for combo, weight in villain_range.items():
+        if weight <= 0:
+            continue
+        cards = [combo[:2], combo[2:]]
+        cs = set(cards)
+        if cs & board_set or cs & hero_set:
+            continue  # not a real villain holding (shares a card with board/hero)
+        total += weight
+        villain_rank = rank_hand(cards + list(board))
+        if hero_rank > villain_rank:
+            ahead += weight
+        elif hero_rank < villain_rank:
+            behind += weight
+        # equal ranks (chop) -> neither ahead nor behind
+    if total <= 0:
+        return 0.0, 0.0
+    return ahead / total, behind / total
+
+
 def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
     """Node-level range-vs-range stats for the actor (hero) vs the villain.
 
@@ -378,6 +427,11 @@ def extract_facts(
         compute_blocker_decomposition(hero_cards, dict(node.villain_range), board)
     )
 
+    # --- currently ahead / behind (exact showdown equity composition) ---
+    currently_ahead, currently_behind = compute_currently_ahead(
+        hero_cards, dict(node.villain_range), board
+    )
+
     # --- archetype + concept tags ---
     hero_bet_prev, prev_checked_through = _prior_street_context(
         node.history, node.actor, node.street
@@ -422,6 +476,8 @@ def extract_facts(
         hand_label=hand["label"],
         board_texture=texture,
         hero_equity_vs_villain=hero_equity,
+        currently_ahead_pct=currently_ahead,
+        currently_behind_pct=currently_behind,
         villain_range_combos=live,
         hero_blocks_combos=blocked,
         spr=node.spr,
@@ -452,6 +508,7 @@ __all__ = [
     "DEFAULT_EQUITY_RUNOUTS",
     "PostflopFacts",
     "compute_blocker_decomposition",
+    "compute_currently_ahead",
     "compute_range_advantage",
     "extract_facts",
     "preflop_aggressor",

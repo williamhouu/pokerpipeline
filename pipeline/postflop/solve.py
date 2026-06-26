@@ -170,6 +170,10 @@ class PostflopSolve:
     stakes: str = ""
     live_or_online: str = "Online"
     table_size: int = 6
+    # Rake structure the solve was solved with, e.g. "8% cap 2bb" (already baked
+    # into the solver's EVs; carried for DISPLAY so the question Context can state
+    # the structure -- different solves use different rake/ante). "" / "none" = none.
+    rake: str = ""
     # Free-form provenance carried into the CSV solver_reference column.
     source_reference: str = ""
 

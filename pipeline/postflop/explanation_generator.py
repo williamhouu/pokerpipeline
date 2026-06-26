@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline.bb_display import round_to_half_bb
 from pipeline.explanation_generator import (
     ExplanationValidationError,
     GeneratedExplanation,
@@ -107,6 +108,15 @@ claim a range advantage the data does not give you.
 it states (whether you mainly block villain's value or their bluffs). If there \
 is no BLOCKERS line, do not mention blockers at all. Never invent which specific \
 combos you remove or reverse value vs bluffs.
+10. Equity source: when you say WHERE your equity comes from, follow the \
+CURRENTLY AHEAD line. A made hand that beats much of villain's range has \
+SHOWDOWN equity (it is ahead of their weaker and air hands right now) -- do NOT \
+attribute its equity to draws, outs, backdoors, or "spiking" a card unless you \
+actually hold a draw (a DRAWS line is present). A hand that is behind most of \
+villain's range but holds a real draw gets its equity from improving. If a hand \
+is ahead now yet the answer is to fold or check, frame it as a realization or \
+reverse-implied-odds problem (you cannot profitably continue), not as having low \
+equity.
 Return only the explanation text, no preamble, no headings.
 """
 
@@ -168,6 +178,12 @@ _DRAW_LABELS = {
 def build_solver_data_block(facts: PostflopFacts) -> str:
     """The structured fact block the LLM reads (the data, not the prose)."""
     f = facts
+    # On a facing-bet node villain_range IS the betting range, so name it that.
+    ahead_ref = (
+        f"the hands {f.villain_position} is betting"
+        if f.spot.node.is_facing_bet
+        else f"{f.villain_position}'s range"
+    )
     lines = [
         f"STREET: {f.street}",
         f"BOARD: {' '.join(f.board)}",
@@ -186,6 +202,13 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
         f"{f.board_texture.get('connectedness', '')}, "
         f"{f.board_texture.get('pair_status', '')})",
         f"HERO EQUITY vs villain range: {f.hero_equity_vs_villain * 100:.0f}%",
+        # Where the equity comes from (exact showdown comparison, resolved in
+        # Python). A made hand AHEAD of much of villain's range has SHOWDOWN
+        # equity (it beats their weaker/air hands now) -- NOT draw equity. The
+        # LLM must use this and not mis-attribute a made hand's equity to draws.
+        f"CURRENTLY AHEAD: your hand beats {f.currently_ahead_pct * 100:.0f}% of "
+        f"{ahead_ref} at showdown right now (behind "
+        f"{f.currently_behind_pct * 100:.0f}%)",
         # Node-level "who is ahead on this board" verdicts, resolved in Python
         # (the LLM mirrors them; it must never compute or reverse them). The
         # number is the supporting evidence for the stated verdict.
@@ -207,13 +230,17 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
             if f.blocker_effect != "neutral"
             else []
         ),
-        f"POT: {f.pot_bb:g}bb   EFFECTIVE STACK: {f.spot.node.effective_stack_bb:g}bb"
+        # bb amounts snapped to the 0.5bb display grid so the model writes clean
+        # numbers; SPR / break-even % come from the EXACT amounts (a ratio / a
+        # percentage, no "ugly bb" problem). See pipeline.bb_display.
+        f"POT: {round_to_half_bb(f.pot_bb):g}bb   "
+        f"EFFECTIVE STACK: {round_to_half_bb(f.spot.node.effective_stack_bb):g}bb"
         f"   SPR: {f.spr:.1f}",
     ]
     if f.break_even_equity is not None:
         lines.append(
-            f"FACING A BET: must call {f.to_call_bb:g}bb; break-even equity "
-            f"{f.break_even_equity * 100:.0f}%"
+            f"FACING A BET: must call {round_to_half_bb(f.to_call_bb):g}bb; "
+            f"break-even equity {f.break_even_equity * 100:.0f}%"
         )
     lines.extend([
         f"CORRECT ACTION: {f.dominant_action} (solver frequency "

@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from pipeline.action_history import format_card  # pure, game-agnostic leaf
+from pipeline.bb_display import round_to_half_bb  # 0.5bb display grid (leaf)
 from pipeline.postflop.solve import (
     POSTFLOP_VERBS,
     PostflopSolve,
@@ -72,10 +73,12 @@ _STREET_LABEL = {"flop": "flop", "turn": "turn", "river": "river"}
 
 
 def _bb(amount: float) -> str:
-    """A bb amount: '2.5bb', '1.8bb', '6bb' (drop a trailing '.0')."""
-    rounded = round(amount, 2)
-    text = f"{rounded:g}"
-    return f"{text}bb"
+    """A bb amount snapped to the 0.5bb display grid: '2.5bb', '2bb', '8bb'.
+
+    Solver sizes are pot fractions, so raw bb values are ugly (2.14bb); the
+    0.5bb grid keeps the prose clean. Display-only -- strategic facts use the
+    exact amount. See :mod:`pipeline.bb_display`."""
+    return f"{round_to_half_bb(amount):g}bb"
 
 
 # An amount formatter maps a bb amount -> the display string. Default = bb;
@@ -254,10 +257,12 @@ def format_question(
 
 
 def build_context_line(solve: PostflopSolve, *, display_in_bb: bool = True) -> str:
-    """The short framing line, e.g. 'Online · $0.50/$1'.
+    """The short framing line, e.g. 'Online · $0.50/$1 · 8% cap 2bb rake'.
 
     Cash shows the stakes, a tournament shows the stack depth (bb or the dollar
-    equivalent). The table size is intentionally NOT shown -- the dedicated
+    equivalent), and the rake structure is appended when the solve carries one --
+    different solves use different rake, so stating it keeps the framing
+    unambiguous. The table size is intentionally NOT shown -- the dedicated
     Table Size column already carries it (dropped June 2026 per the team).
     """
     venue = solve.live_or_online
@@ -268,7 +273,10 @@ def build_context_line(solve: PostflopSolve, *, display_in_bb: bool = True) -> s
         tail = fmt(solve.effective_stack_bb)
     else:
         tail = solve.stakes or "cash"
-    return f"{venue} · {tail}"
+    parts = [venue, tail]
+    if solve.rake and solve.rake.strip().lower() != "none":
+        parts.append(f"{solve.rake.strip()} rake")
+    return " · ".join(parts)
 
 
 __all__ = ["build_context_line", "format_card", "format_question"]

@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from pipeline.bb_display import round_to_half_bb  # 0.5bb display grid (leaf)
 from pipeline.plo.action_history import display_seat, resolve_pot_limit
 from pipeline.plo.fact_extractor import PloFacts
 
@@ -53,7 +54,8 @@ def _trim_num(n: float) -> str:
 def _fmt_bb(n: float, *, allow_zero: bool = False) -> str:
     if n == 0 and not allow_zero:
         return ""
-    return _trim_num(n) + "BB"
+    # Snap to the 0.5bb display grid so the app tokens read cleanly (display-only).
+    return _trim_num(round_to_half_bb(n)) + "BB"
 
 
 def _fmt_chips(chips: float, *, render_bb: bool) -> str:

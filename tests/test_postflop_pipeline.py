@@ -50,6 +50,7 @@ from pipeline.postflop.explanation_generator import (  # noqa: E402
 )
 from pipeline.postflop.facts import (  # noqa: E402
     _advantage_label,
+    compute_currently_ahead,
     compute_range_advantage,
     extract_facts,
 )
@@ -355,7 +356,8 @@ def test_question_turn_shows_full_line() -> None:
     q = format_question(_spot("turn_oop", "Jh9c"), SOLVE)
     # The turn question MUST render preflop + flop + turn ahead of it.
     assert "The Button opens to 2.5bb and you call." in q
-    assert "You check, the Button bets 1.8bb, and you call." in q
+    # 1.8bb (33% of the 5.5bb pot) snaps to the 0.5bb display grid -> 2bb.
+    assert "You check, the Button bets 2bb, and you call." in q
     assert "The turn is 2❤️." in q
 
 
@@ -381,6 +383,17 @@ def test_postflop_prompt_override(tmp_path, monkeypatch) -> None:
 
 def test_context_line() -> None:
     assert build_context_line(SOLVE) == "Online · $0.50/$1"
+
+
+def test_context_line_appends_rake_when_present() -> None:
+    from dataclasses import replace  # noqa: PLC0415
+
+    # A solve solved with rake states the structure in the Context (the EVs
+    # already bake it in; this is display so the framing is unambiguous).
+    raked = replace(SOLVE, rake="8% cap 2bb")
+    assert build_context_line(raked) == "Online · $0.50/$1 · 8% cap 2bb rake"
+    # "none" / empty -> no rake suffix (unchanged framing).
+    assert build_context_line(replace(SOLVE, rake="none")) == "Online · $0.50/$1"
 
 
 # --- difficulty -------------------------------------------------------------
@@ -599,6 +612,17 @@ def test_build_row_has_all_columns() -> None:
     assert row["Hand Stage"] == "Flop"
 
 
+def test_round_to_half_bb_grid() -> None:
+    from pipeline.bb_display import round_to_half_bb  # noqa: PLC0415
+
+    assert round_to_half_bb(2.14) == 2.0
+    assert round_to_half_bb(4.36) == 4.5
+    assert round_to_half_bb(7.8) == 8.0
+    assert round_to_half_bb(2.5) == 2.5  # no-op on the grid
+    assert round_to_half_bb(100.0) == 100.0
+    assert round_to_half_bb(0.0) == 0.0
+
+
 # --- app table-state tokens (the Runout chip/seat/board renderer) -----------
 def test_app_table_cbet_spot_tokens_bb() -> None:
     # BTN to act after BB checks (c-bet decision). Hero has not acted this
@@ -626,18 +650,20 @@ def test_app_table_facing_bet_tokens_dollars() -> None:
 
 def test_app_table_turn_multistreet_and_stack_invariant() -> None:
     # Turn, BB to act after flop check/bet 1.8/call. Both players invested 2.5
-    # (preflop) + 1.8 (flop) = 4.3, so each has 95.7bb behind -- which must
-    # equal the IR's aggregate min-stack-behind for the node (the cross-check
-    # that the per-player betting walk is correct). BTN has not acted on the
-    # turn yet -> a bare villain seat.
+    # (preflop) + 1.8 (flop) = 4.3, so each has 95.7bb behind. The DISPLAY tokens
+    # snap to the 0.5bb grid (95.7 -> 95.5, 9.1 -> 9), but the underlying
+    # _seat_states float stays EXACT (95.7) -- proving the rounding is display-only
+    # AND cross-checking that the per-player betting walk matches the IR's
+    # aggregate min-stack-behind. BTN has not acted on the turn -> a bare seat.
     facts = extract_facts(_spot("turn_oop", "Jh9c"), SOLVE)
     t = build_postflop_app_table_columns(facts, SOLVE, display_in_bb=True)
-    assert t["user_seat"] == "BB-95.7BB"
-    assert t["seats"] == "BTN-95.7BB"
+    assert t["user_seat"] == "BB-95.5BB"
+    assert t["seats"] == "BTN-95.5BB"
     assert t["cards_on_table"] == "2-clubs, J-spades, 7-spades, 2-hearts"
-    assert t["pot"] == "9.1BB"
+    assert t["pot"] == "9BB"
     states = _seat_states(facts, SOLVE)
-    behind = min(s["remaining"] for s in states.values())
+    behind = min(s["remaining"] for s in states.values())  # exact float, unrounded
+    assert behind == pytest.approx(95.7)  # display rounds, the math does not
     assert abs(behind - facts.spot.node.effective_stack_bb) < 1e-6
 
 
@@ -865,6 +891,43 @@ def test_range_advantage_concept_tags() -> None:
     assert "nut_disadvantage" in compute_postflop_tags(villain)
     even_tags = compute_postflop_tags(even)
     assert not any("advantage" in t for t in even_tags)
+
+
+# --- currently-ahead (showdown equity composition) --------------------------
+def test_currently_ahead_beats_air_loses_to_pairs() -> None:
+    board = ["Kd", "7s", "3s"]
+    hero = ["2d", "2c"]  # a pair of deuces
+    villain = {
+        "AhQh": 1.0,  # ace-high -> hero (pair of 2s) is AHEAD
+        "JcTd": 1.0,  # jack-high -> AHEAD
+        "KhQc": 1.0,  # pair of kings -> hero is BEHIND
+    }
+    ahead, behind = compute_currently_ahead(hero, villain, board)
+    assert ahead == pytest.approx(2 / 3)  # beats the two unpaired hands
+    assert behind == pytest.approx(1 / 3)  # behind the pair of kings
+
+
+def test_currently_ahead_excludes_blocked_and_is_exact() -> None:
+    board = ["Kd", "7s", "3s"]
+    hero = ["2d", "2c"]
+    # A combo sharing the 2d (hero) or 3s (board) is not a real villain holding.
+    villain = {"2dAh": 1.0, "3sQh": 1.0, "AcQc": 1.0}
+    ahead, behind = compute_currently_ahead(hero, villain, board)
+    # Only AcQc is live (ace-high) -> hero ahead of 100% of the live range.
+    assert ahead == 1.0 and behind == 0.0
+    # Exact + deterministic (no runouts): identical on every call.
+    assert compute_currently_ahead(hero, villain, board) == (ahead, behind)
+    # Empty / all-blocked range -> (0, 0), never a divide-by-zero.
+    assert compute_currently_ahead(hero, {"2d2h": 1.0}, board) == (0.0, 0.0)
+
+
+def test_currently_ahead_in_facts_and_data_block() -> None:
+    # The set on the c-bet node beats nearly everything; the line is in the block.
+    facts = extract_facts(_spot("flop_ip_cbet", "QdQh"), SOLVE)
+    assert 0.0 <= facts.currently_ahead_pct <= 1.0
+    assert facts.currently_ahead_pct > 0.7  # an overpair beats most of BB's range
+    block = build_solver_data_block(facts)
+    assert "CURRENTLY AHEAD:" in block
 
 
 def test_range_equity_column_present() -> None:

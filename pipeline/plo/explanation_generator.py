@@ -30,6 +30,7 @@ from collections.abc import Callable
 from typing import Any
 
 from pipeline.action_history import format_card
+from pipeline.bb_display import round_to_half_bb
 from pipeline.explanation_generator import (
     BANNED_LITERAL_PHRASES,
     DEFAULT_MAX_TOKENS,
@@ -258,9 +259,9 @@ def _villain_action_phrase(facts: PloFacts) -> str:
         if act.seat != seat:
             continue
         if act.verb == "all-in":
-            return f"moves all-in for {(act.to_bb or 0):g}bb"
+            return f"moves all-in for {round_to_half_bb(act.to_bb or 0):g}bb"
         if act.verb in _VILLAIN_RAISE_VERBS:
-            return f"{act.verb}s to {(act.to_bb or 0):g}bb"
+            return f"{act.verb}s to {round_to_half_bb(act.to_bb or 0):g}bb"
     return facts.villain_stats.action_label
 
 

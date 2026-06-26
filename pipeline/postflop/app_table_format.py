@@ -44,6 +44,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pipeline.bb_display import round_to_half_bb  # 0.5bb display grid (leaf)
+
 if TYPE_CHECKING:  # annotations only -- avoid importing the heavy facts module
     from pipeline.postflop.facts import PostflopFacts
     from pipeline.postflop.solve import PostflopSolve
@@ -82,7 +84,9 @@ def _make_fmt(*, display_in_bb: bool, bb_in_dollars: float):
 
     def _fmt(amount_bb: float) -> str:
         if display_in_bb:
-            return f"{_trim_num(amount_bb)}BB"
+            # Snap to the 0.5bb display grid (clean tokens for the app renderer);
+            # the dollar path keeps its exact cents.
+            return f"{_trim_num(round_to_half_bb(amount_bb))}BB"
         return "$" + _trim_num(amount_bb * bb_in_dollars)
 
     return _fmt

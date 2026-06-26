@@ -138,6 +138,10 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         stack_depth_bb=100,
         open_size_bb=2.5,
         sb_to_bb_ratio=0.5,
+        # Snap rendered raise sizes to the 0.5bb grid (parity with the Monker
+        # packs + the postflop/PLO 0.5bb display rounding). A no-op if its
+        # lookup-table sizes are already clean.
+        size_round_bb=0.5,
         description="Ryan's 6-max 100bb 2.5x Open pack, PioViewer format.",
     ),
     # The 9-max Monker pack lives in its own gitignored sibling dir (where

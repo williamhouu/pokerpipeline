@@ -53,6 +53,7 @@ import math
 from dataclasses import dataclass
 from typing import Protocol
 
+from pipeline.bb_display import round_to_half_bb
 from pipeline.postflop.solve import (
     STREETS,
     NodeAction,
@@ -458,12 +459,13 @@ class CfrPioAdapter:
         if token.startswith("b"):
             size = float(token[1:])
             to_bb = round(size / self.bb_chips, 2)
+            disp = round_to_half_bb(to_bb)  # 0.5bb display grid (label only)
             if size >= eff_remaining - 1:
                 return "All-in", ("raise" if facing else "bet"), to_bb, None
             if facing:
-                return f"Raise to {to_bb:g}bb", "raise", to_bb, None
+                return f"Raise to {disp:g}bb", "raise", to_bb, None
             pf = size / pot_before if pot_before > 0 else None
-            label = f"Bet {round(pf * 100)}%" if pf is not None else f"Bet {to_bb:g}bb"
+            label = f"Bet {round(pf * 100)}%" if pf is not None else f"Bet {disp:g}bb"
             return label, "bet", to_bb, pf
         raise ValueError(f"unrecognised child token {token!r}")
 

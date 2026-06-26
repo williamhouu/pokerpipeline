@@ -96,6 +96,34 @@ def test_summarize_db_builds_a_label(tmp_path: Path) -> None:
     assert "BTN vs BB" in s.label and "9-max" in s.label and "Qs Jd 9s" in s.label
 
 
+def test_summarize_db_surfaces_rake_and_ante(tmp_path: Path) -> None:
+    # The Generate-page details box reads these so the structure is unambiguous
+    # when many solves with different rake/ante coexist.
+    # Cash: ante 0 -> "none" and kept OUT of the one-liner; rake shows.
+    cash = tmp_path / "cash.db"
+    _make_meta_db(cash, {**_V8_META, "ante": "0", "rake": "8% cap 2bb"})
+    s = summarize_db(str(cash))
+    assert s.rake_pretty == "8% cap 2bb"
+    assert s.ante_pretty == "none"
+    assert "ante" not in s.label  # cash one-liner stays clean
+    # Tournament: a real ante shows in ante_pretty AND the one-liner.
+    mtt = tmp_path / "mtt.db"
+    _make_meta_db(mtt, {**_V8_META, "ante": "0.125", "rake": "None"})
+    t = summarize_db(str(mtt))
+    assert t.ante_pretty == "0.125"
+    assert t.rake_pretty == "none"
+    assert "0.125 ante" in t.label
+
+
+def test_derive_scenario_reads_eight_max() -> None:
+    # The user's first 8-max solve -- the generic "(\d+)max" parse must read it.
+    sc = derive_scenario({"game_format": "8max NLHE", "spot": "BTN_SRP_8max_noante_200bb",
+                          "ip_range": "BTN_rfi_200bb", "oop_range": "BB_call_vs_BTN_200bb"})
+    assert sc["table_size"] == 8
+    assert sc["ip_position"] == "BTN" and sc["oop_position"] == "BB"
+    assert sc["game_format"] == "cash"
+
+
 def test_summarize_db_flags_a_non_solve(tmp_path: Path) -> None:
     db = tmp_path / "notasolve.db"
     _make_meta_db(db, {"hello": "world"})  # no flop/spot

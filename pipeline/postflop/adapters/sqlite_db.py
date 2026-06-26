@@ -40,6 +40,7 @@ import sqlite3
 import struct
 from dataclasses import dataclass
 
+from pipeline.bb_display import round_to_half_bb
 from pipeline.postflop.solve import (
     STREETS,
     NodeAction,
@@ -314,6 +315,7 @@ class SqliteDbAdapter:
             stakes=self.stakes,
             live_or_online=self.live_or_online,
             table_size=self.table_size,
+            rake=str(s.meta.get("rake", "") or ""),
             source_reference=f"db/{spot}/{''.join(flop)}",
         )
 
@@ -525,10 +527,13 @@ class SqliteDbAdapter:
             # all-in: the bet commits (about) the whole remaining stack.
             if size >= eff_remaining - 1:
                 return "All-in", ("raise" if facing else "bet"), to_bb, None
+            # Label bb amount snapped to the 0.5bb display grid (display-only;
+            # to_bb field + pot_fraction stay exact for the math).
+            disp = round_to_half_bb(to_bb)
             if facing:  # raise TO size
-                return f"Raise to {to_bb:g}bb", "raise", to_bb, None
+                return f"Raise to {disp:g}bb", "raise", to_bb, None
             pf = size / pot_before if pot_before > 0 else None
-            label = f"Bet {round(pf * 100)}%" if pf is not None else f"Bet {to_bb:g}bb"
+            label = f"Bet {round(pf * 100)}%" if pf is not None else f"Bet {disp:g}bb"
             return label, "bet", to_bb, pf
         raise ValueError(f"unrecognised vendor action {db_name!r}")
 
@@ -622,6 +627,7 @@ class DbSolveSummary:
     ip_position: str = "BTN"
     game_format: str = "cash"
     rake: str = ""
+    ante: str = ""  # raw metadata value, e.g. "0" / "12.5%" / "1bb"
     customer: str = ""
     solve_date: str = ""
     label: str = ""  # compact one-liner for the picker
@@ -630,6 +636,18 @@ class DbSolveSummary:
     @property
     def flop_pretty(self) -> str:
         return " ".join(self.flop_cards) if self.flop_cards else self.flop
+
+    @property
+    def rake_pretty(self) -> str:
+        """The rake structure for display, e.g. "8% cap 2bb" or "none"."""
+        r = (self.rake or "").strip()
+        return r if r and r.lower() != "none" else "none"
+
+    @property
+    def ante_pretty(self) -> str:
+        """The ante for display: "none" for 0/absent, else the raw value."""
+        a = (self.ante or "").strip()
+        return "none" if a.lower() in ("", "0", "0%", "none", "-") else a
 
 
 def summarize_db(db_path: str) -> DbSolveSummary:
@@ -653,6 +671,8 @@ def summarize_db(db_path: str) -> DbSolveSummary:
     fmt = str(sc.get("game_format", "cash"))
     rake = meta.get("rake", "") or ""
     rake_short = rake.split(" cap")[0].strip() if rake and rake.lower() != "none" else ""
+    ante = (meta.get("ante", "") or "").strip()
+    has_ante = ante.lower() not in ("", "0", "0%", "none", "-")
     bits = [f"{ip} vs {oop}"]
     if ts:
         bits.append(f"{ts}-max")
@@ -661,6 +681,10 @@ def summarize_db(db_path: str) -> DbSolveSummary:
     bits.append(" ".join(flop_cards) if flop_cards else flop_raw)
     if rake_short:
         bits.append(f"{rake_short} rake")
+    # Only surface the ante in the one-liner when there IS one (tournaments) --
+    # cash solves stay clean. The full structure always shows in the picker details.
+    if has_ante:
+        bits.append(f"{ante} ante")
     return DbSolveSummary(
         path=path,
         ok=True,
@@ -673,6 +697,7 @@ def summarize_db(db_path: str) -> DbSolveSummary:
         ip_position=ip,
         game_format=fmt,
         rake=rake,
+        ante=ante,
         customer=meta.get("customer_id", ""),
         solve_date=meta.get("solve_date", ""),
         label=" · ".join(bits),

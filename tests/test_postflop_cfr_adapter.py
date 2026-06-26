@@ -209,9 +209,10 @@ def test_facing_bet_node_derives_call_raise_and_price() -> None:
     assert node.to_call_bb == pytest.approx(2.2)  # 22 chips / 10
     assert node.pot_bb == pytest.approx(7.7)  # 55 + 22
     labels = {a.label for a in node.actions}
-    assert labels == {"Fold", "Call", "Raise to 6.6bb"}
+    # 66 chips / 10 = 6.6bb, snapped to the 0.5bb display grid -> "Raise to 6.5bb".
+    assert labels == {"Fold", "Call", "Raise to 6.5bb"}
     verbs = {a.label: a.verb for a in node.actions}
-    assert verbs["Call"] == "call" and verbs["Raise to 6.6bb"] == "raise"
+    assert verbs["Call"] == "call" and verbs["Raise to 6.5bb"] == "raise"
 
 
 def test_per_action_evs_are_wired_and_converted_to_bb() -> None:

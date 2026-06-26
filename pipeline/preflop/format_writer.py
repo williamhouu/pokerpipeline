@@ -973,7 +973,7 @@ def build_preflop_row(
             display_in_bb=display_in_bb,
         ),
         "Question": question_text,
-        "Question Type": "Hand Scenario Question.",
+        "Question Type": "Hand Scenario Question",  # no trailing period (June 2026)
         "Hand Stage": "Preflop",
         "option 1": explanation.option_1,
         "option 2": explanation.option_2,

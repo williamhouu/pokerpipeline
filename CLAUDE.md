@@ -539,6 +539,41 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   btn_vs_bb_srp_2cJs7s.cfr`), driven via `load_postflop_cfr`. v1 = flop nodes
   (turn/river is a BFS-through-chance-nodes extension; the walk already handles
   chance tokens). `validate_solve` is the contract both adapters target.
+- **`currently_ahead` showdown-equity fact DONE (June 2026 — the brief's #1 LLM
+  failure mode, mis-attributing a made hand's equity to draws).**
+  `facts.compute_currently_ahead(hero_cards, villain_range, board)` resolves in
+  PYTHON the reach-weighted share of villain's range hero's hand BEATS at
+  showdown RIGHT NOW (exact 5-/6-/7-card comparison via the shared evaluator —
+  no runouts, so it's perfectly deterministic, unlike sampled `hero_equity`).
+  Ties count as neither; board/hero-blocked combos excluded; empty range → 0.
+  `PostflopFacts.currently_ahead_pct`/`currently_behind_pct`; a `CURRENTLY AHEAD`
+  data-block line (worded "the hands villain is betting" on a facing-bet node,
+  else "villain's range") + a `chat_context` field. The point: a small pair
+  AHEAD of 50% of villain's betting range has SHOWDOWN equity (it beats their
+  air now), NOT draw equity — so the LLM stops writing "your equity is backdoor
+  outs / spiking a deuce." Generation rule 10 (built-in) / rule 19
+  (`postflop_system.txt`) bind the equity-source narrative to this line + the
+  DRAWS line; a new claim-checker bullet flags equity pinned to draws when the
+  hand is a made hand ahead of the range. PURELY ADDITIVE — does not touch
+  equity/pot-odds/worthiness/difficulty/tags (one `PostflopFacts` construction
+  site). Verified: 22 facing a K73 c-bet beats 49% (its air); a set beats 99%.
+- **0.5bb display rounding DONE (June 2026, ALL pipelines).** Solver sizes are
+  pot fractions, so bb amounts land on ugly values (2.14bb). NEW shared leaf
+  `pipeline/bb_display.py:round_to_half_bb` snaps DISPLAYED bb amounts to the
+  nearest 0.5bb (2.14→2, 4.36→4.5, 7.8→8). **Display-ONLY** — every strategic
+  fact (equity, pot odds, EV, SPR, worthiness, difficulty, concept tags) uses
+  the EXACT amount; rounding the IR geometry would shift the pot-odds price and
+  could flip a borderline tag, which we explicitly avoid. Applied in: postflop
+  (`action_history.make_amount_fmt`, `app_table_format`, the data block's
+  POT/stack/to_call, the `Raise to X bb`/`Bet X bb` adapter labels — `pot_fraction`
+  "Bet 33%" labels stay exact, computed from chips); PLO (`_money`,
+  `app_table_format._fmt_bb`, the villain-action line); preflop already
+  quantizes via each pack's `size_round_bb=0.5` (now on the Ryan pack too, a
+  verified no-op). **Dollar display untouched.** Accepted cosmetic caveat: a
+  multi-street pot from several independently-rounded wagers can read ≤0.5bb off
+  the literal sum (single-bet spots stay exact); `_seat_states` keeps EXACT
+  floats so the stack-invariant test still holds (proving display-only).
+  Deterministic ⇒ byte-identical CSV + audit 0/0 still hold.
 - **NOT done (seamed extension points)**: a postflop **prompt library** (the
   Compare page uses two free-text boxes today); LLM prompt tuning against gold
   postflop examples; the harder-to-detect skills (`Facing a Check-Raise`, MDF,
@@ -798,6 +833,18 @@ Format conventions from the sample: headers are lowercase `option 1`…`option 4
 the single `composite` word; `solver_reference` is a descriptive cache-style path;
 `Stack Depth` / `Preflop Pot Type` / `Pot Participant` are prose buckets. The current
 `format_writer.py` predates this sample and does not yet fully match it.
+
+**`Question Type` (June 2026):** a fixed label `Hand Scenario Question` with **NO
+trailing period**, emitted identically by all four writers (preflop, postflop,
+PLO, shared). Was `Hand Scenario Question.` (with period) on three writers and
+`Postflop Decision` on the postflop writer; unified + de-periodised per team
+feedback. (The `docs/output_format_examples.xlsx` sample shows sentence-case
+`Hand scenario question`; the code uses title-case per the team's direct ask —
+flag if they want the sheet's casing instead.)
+
+**bb amounts render on a 0.5bb display grid** (`2bb` / `4.5bb`, never `2.14bb`)
+via `pipeline/bb_display.py` — display-only; the dollar path and all strategic
+math use the exact amounts. See the postflop "0.5bb display rounding" bullet.
 
 ## Action history format (deterministic, no LLM)
 

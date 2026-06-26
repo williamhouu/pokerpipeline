@@ -331,9 +331,9 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         # correct answer + explanation (Layer 6).
         "Context": context,
         "Question": question,
-        # Literal per Ryan-feedback Fix 2 (May 2026) -- the team uses this exact
-        # string with the trailing period for every Hand Scenario question.
-        "Question Type": "Hand Scenario Question.",
+        # The team's fixed Question Type label, NO trailing period (June 2026 --
+        # the period was dropped per team feedback; keep all four writers in sync).
+        "Question Type": "Hand Scenario Question",
         "Hand Stage": meta.street.capitalize(),
         "option 1": _LLM_TBD,
         "option 2": _LLM_TBD,
