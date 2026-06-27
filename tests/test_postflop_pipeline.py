@@ -407,12 +407,25 @@ def test_facing_probe_tag_and_new_skill_rules() -> None:
     assert not probe_skill(SimpleNamespace(concept_tags=["probe_bet"]))
 
     blockers = POSTFLOP_SKILL_RULES["Blockers & Card Removal"]
-    facing = ["facing_bet_spot"]
-    assert blockers(SimpleNamespace(blocker_effect="value", concept_tags=facing))
-    assert blockers(SimpleNamespace(blocker_effect="bluffs", concept_tags=facing))
-    assert not blockers(SimpleNamespace(blocker_effect="neutral", concept_tags=facing))
-    # A blocker effect but NOT facing a bet -> not the lesson, not tagged.
-    assert not blockers(SimpleNamespace(blocker_effect="value", concept_tags=["c_bet_spot"]))
+
+    def _b(effect, tags=(), archetype="value_bet"):
+        return SimpleNamespace(
+            blocker_effect=effect, concept_tags=list(tags), archetype=archetype
+        )
+
+    # Facing a bet (bluff-catch): blocking EITHER value or bluffs -> fires.
+    assert blockers(_b("value", ["facing_bet_spot"]))
+    assert blockers(_b("bluffs", ["facing_bet_spot"]))
+    # Bluffing: only blocking their VALUE enables the bluff (the river-air
+    # nut-flush-blocker case) -> fires.
+    assert blockers(_b("value", archetype="bluff"))
+    assert blockers(_b("value", ["bluff_spot"]))
+    # Bluffing while blocking their BLUFFS is irrelevant to a bluff -> not tagged.
+    assert not blockers(_b("bluffs", ["bluff_spot"]))
+    # Neutral effect -> never.
+    assert not blockers(_b("neutral", ["facing_bet_spot"]))
+    # A blocker effect but a value bet / not facing a bet -> incidental, not tagged.
+    assert not blockers(_b("value", ["c_bet_spot"], archetype="value_bet"))
 
 
 # --- action history (multi-street) ------------------------------------------
@@ -1328,17 +1341,23 @@ def test_postflop_skills_strict_count() -> None:
 
 
 def test_postflop_blockers_skill_tracks_blocker_effect() -> None:
-    # Postflop NOW has blocker data (the value/bluff decomposition). The Blockers
-    # skill fires when blocker_effect is non-neutral AND hero faces a bet (scoped
-    # to where card removal drives the call/fold, not every spot that blocks).
+    # The Blockers skill fires when blocker_effect is non-neutral AND the spot is
+    # one where card removal drives the decision: facing a bet (bluff-catch) OR
+    # bluffing (the blocker enables the bet) -- not every spot that happens to block.
     from pipeline.postflop.skills import compute_postflop_skills
     for nid in ("flop_ip_cbet", "flop_ip_facing_bet", "flop_oop_lead"):
         for spot in enumerate_spots(SOLVE.nodes[nid]):
             facts = extract_facts(spot, SOLVE, equity_runouts=40)
             fired = "Blockers & Card Removal" in compute_postflop_skills(facts)
             expect = (
-                facts.blocker_effect in ("value", "bluffs")
-                and "facing_bet_spot" in facts.concept_tags
+                "facing_bet_spot" in facts.concept_tags
+                and facts.blocker_effect in ("value", "bluffs")
+            ) or (
+                facts.blocker_effect == "value"
+                and (
+                    "bluff_spot" in facts.concept_tags
+                    or facts.archetype in ("bluff", "bluff_raise")
+                )
             )
             assert fired == expect
 
@@ -1402,21 +1421,31 @@ def test_reverse_implied_odds_classifier() -> None:
     )
 
 
-def test_mdf_skill_fires_on_marginal_bluffcatch_only() -> None:
+def test_mdf_skill_fires_on_bubble_defender_vs_wide_bet() -> None:
+    # MDF, done properly: fires on a BORDERLINE defender (equity ~ the calling
+    # price) against a bet you must defend WIDE (MDF >= 50%), not a strength bucket.
     from types import SimpleNamespace
 
     from pipeline.postflop.skills import POSTFLOP_SKILL_RULES
     mdf = POSTFLOP_SKILL_RULES["Minimum Defense Frequency (MDF)"]
 
-    def f(tags, verb: str, bucket: str):
+    def f(tags, verb, equity, break_even, pot=4.0, to_call=1.0):
+        # default geometry: a 33% pot bet (pot_before 3, bet 1) -> MDF 0.75, price 0.20.
         return SimpleNamespace(
-            concept_tags=tags, dominant_verb=verb, strength_bucket=bucket
+            concept_tags=tags, dominant_verb=verb,
+            hero_equity_vs_villain=equity, break_even_equity=break_even,
+            pot_bb=pot, to_call_bb=to_call,
         )
 
-    assert mdf(f(["facing_bet_spot"], "call", "marginal"))
-    assert mdf(f(["facing_bet_spot"], "fold", "vulnerable"))
-    assert not mdf(f(["facing_bet_spot"], "call", "premium"))  # clear call, no bubble
-    assert not mdf(f(["c_bet_spot"], "bet", "marginal"))       # not facing a bet
+    # Bubble defender (equity ~ the 0.20 price) vs a 33% bet (defend wide) -> fires.
+    assert mdf(f(["facing_bet_spot"], "call", 0.22, 0.20))
+    assert mdf(f(["facing_bet_spot"], "fold", 0.15, 0.20))
+    # Equity far above the price (a clear call, not the bubble) -> no MDF.
+    assert not mdf(f(["facing_bet_spot"], "call", 0.55, 0.20))
+    # An overbet (pot_before 4, bet 6 -> MDF 0.40 < 0.50): pot-odds, not defend-wide.
+    assert not mdf(f(["facing_bet_spot"], "call", 0.375, 0.375, pot=10.0, to_call=6.0))
+    # Not facing a bet -> no MDF.
+    assert not mdf(f(["c_bet_spot"], "bet", 0.22, 0.20))
 
 
 def test_skills_column_in_csv() -> None:

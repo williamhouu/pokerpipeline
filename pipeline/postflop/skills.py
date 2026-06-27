@@ -130,6 +130,37 @@ def _multiple_bet_sizes(facts: PostflopFacts) -> bool:
     return len(sizes) >= 2
 
 
+# --- MDF (minimum defense frequency) ----------------------------------------
+# MDF = pot / (pot + bet): the share of your range you must continue against a
+# bet, or villain can profitably bluff any two cards. Pure formula, deterministic.
+_MDF_MIN = 0.5             # MDF >= 50% (bet <= pot): a "defend WIDE" spot
+_MDF_BUBBLE_MARGIN = 0.08  # hero's equity within 8 pts of the calling price
+
+
+def _mdf_threshold(facts: PostflopFacts) -> float:
+    """MDF = pot_before / (pot_before + bet). ``pot_bb`` already includes the bet,
+    so pot_before = ``pot_bb - to_call_bb`` and bet = ``to_call_bb``."""
+    bet = facts.to_call_bb
+    pot_before = facts.pot_bb - bet
+    denom = pot_before + bet
+    return pot_before / denom if denom > 0 else 0.0
+
+
+def _mdf_is_the_lesson(facts: PostflopFacts) -> bool:
+    """True when minimum-defense-frequency is the operative concept (done properly,
+    not a strength-bucket proxy): the bet is small/medium so MDF is high (you must
+    defend WIDE -- over-folding is the leak), AND this hand is a BORDERLINE
+    defender -- its equity sits within ``_MDF_BUBBLE_MARGIN`` of the calling price,
+    so whether you defend IT is the decision that determines if you meet MDF.
+    Against an overbet (MDF < ``_MDF_MIN``) it does not fire -- that is a pot-odds
+    / strength decision, not a defend-wide one."""
+    if facts.break_even_equity is None or facts.to_call_bb <= 0:
+        return False
+    if _mdf_threshold(facts) < _MDF_MIN:
+        return False
+    return abs(facts.hero_equity_vs_villain - facts.break_even_equity) <= _MDF_BUBBLE_MARGIN
+
+
 # --- the catalog (postflop-relevant skills; names == the app's catalog) ------
 # Only skills a postflop spot can clearly test are listed. Preflop-only skills
 # (3-Betting, Squeezing, ...) and signals we still can't derive cleanly
@@ -203,14 +234,15 @@ POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
     "Pot Odds": lambda f: (
         "facing_bet_spot" in f.concept_tags and f.dominant_verb in ("call", "fold")
     ),
-    # MDF = the defender's required continue frequency vs a bet. Narrower than Pot
-    # Odds: it fires on the genuine defense-bubble hands (marginal / vulnerable
-    # bluff-catchers facing a bet, deciding call-or-fold), where "am I defending
-    # enough" is the lesson -- not every priced call/fold.
+    # MDF, done PROPERLY (deterministic, no LLM): fire on the BUBBLE defenders
+    # against a bet you must defend WIDE -- a call/fold decision where the bet is
+    # small enough that MDF is high AND this hand sits right at the calling-price
+    # threshold (see _mdf_is_the_lesson). Computes the real MDF from the bet size
+    # instead of the old strength-bucket proxy.
     "Minimum Defense Frequency (MDF)": lambda f: (
         "facing_bet_spot" in f.concept_tags
         and f.dominant_verb in ("call", "fold")
-        and f.strength_bucket in ("marginal", "vulnerable")
+        and _mdf_is_the_lesson(f)
     ),
     "Implied Odds": lambda f: f.archetype == "call_drawing",
     "Reverse Implied Odds": _reverse_implied_odds,
@@ -223,15 +255,26 @@ POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
     # --- Section 5: Hand Analysis & Decision Making ---
     # An overbet (by hero or villain) is THE polarized-range situation.
     "Range Polarization": lambda f: _is_overbet(f) or _facing_overbet(f),
-    # Hero's cards meaningfully remove villain's VALUE or BLUFF combos AND hero is
-    # facing a bet -- where card removal actually drives the decision (a bluff-catch:
-    # "you block their value, so call"). Scoped to facing-bet so it is a useful
-    # filter, not a near-universal tag (blocker effects are non-neutral on most
-    # spots, but only DECISION-relevant when there's a bet to call). Postflop DOES
-    # carry blocker data now; the old "no blocker data" note was stale.
+    # Hero's cards meaningfully remove villain's VALUE or BLUFF combos AND the spot
+    # is one where that removal DRIVES the decision: facing a bet (a bluff-catch --
+    # "you block their value, so call") OR bluffing (you block their continues /
+    # value, so the bet gets through -- e.g. the nut-flush blocker that lets you
+    # keep barrelling air). NOT facing-bet-only (an earlier version was, which
+    # missed the bluff case). Excludes value bets / pure checks where the blocker
+    # is incidental, so it stays a useful filter rather than firing on every
+    # non-neutral spot. Postflop DOES carry blocker data now (the value/bluff
+    # decomposition); the old "no blocker data" note was stale.
     "Blockers & Card Removal": lambda f: (
-        f.blocker_effect in ("value", "bluffs")
-        and "facing_bet_spot" in f.concept_tags
+        # Facing a bet (bluff-catch): blocking EITHER their value (-> call) or
+        # their bluffs (-> fold) drives the call/fold.
+        ("facing_bet_spot" in f.concept_tags and f.blocker_effect in ("value", "bluffs"))
+        # Bluffing: only blocking their VALUE enables the bluff (you remove their
+        # strong calls, so the bet gets through -- the nut-flush-blocker barrel);
+        # blocking their bluffs is irrelevant to a bluff (those hands fold anyway).
+        or (
+            f.blocker_effect == "value"
+            and ("bluff_spot" in f.concept_tags or f.archetype in ("bluff", "bluff_raise"))
+        )
     ),
     # --- Section 6: Positional & Situational ---
     # Using position: checking back / calling in position to control + realize.
@@ -297,9 +340,10 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
     "`pot_control_spot` tag or a pot_control_check frame).",
     "Pot Odds": "Hero faces a bet and the decision is call-or-fold, so the price "
     "is the core math.",
-    "Minimum Defense Frequency (MDF)": "Hero faces a bet with a marginal / "
-    "vulnerable bluff-catcher and is deciding call-or-fold, so the lesson is "
-    "defending often enough to deny villain a profitable bluff.",
+    "Minimum Defense Frequency (MDF)": "Hero faces a small/medium bet (one you "
+    "must defend WIDE, MDF >= 50%) with a borderline hand whose equity sits right "
+    "at the calling price, so whether to defend it is the minimum-defense-frequency "
+    "decision -- defend enough to deny villain a profitable any-two bluff.",
     "Implied Odds": "Hero calls a draw getting the right price plus future-street "
     "value (a call_drawing frame).",
     "Reverse Implied Odds": "Hero has a non-nut flush draw, or a dominated made "
@@ -309,9 +353,10 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
     "(premium/strong/medium), so commitment is driven by the stack-to-pot ratio.",
     "Range Polarization": "An overbet is in play (hero's or villain's) -- the "
     "textbook polarized-range situation.",
-    "Blockers & Card Removal": "Hero faces a bet AND hero's cards meaningfully "
-    "remove villain's value or bluff combos (a non-neutral blocker effect) -- a "
-    "bluff-catch where card removal drives the call/fold.",
+    "Blockers & Card Removal": "Hero's cards meaningfully remove villain's value "
+    "or bluff combos in a spot where it matters: facing a bet (a bluff-catch) OR "
+    "bluffing (your blocker -- e.g. the nut-flush blocker -- removes their "
+    "continues so the bet works).",
     "In Position Play": "Hero acts last and checks back or calls, using position "
     "to control the pot and realize equity.",
     "Out of Position Play": "Hero acts first and is defending a bet, check-raising, "
