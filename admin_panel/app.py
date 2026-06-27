@@ -217,6 +217,14 @@ PREFLOP_PROMPT_OVERRIDE_PATH = (
 POSTFLOP_PROMPT_OVERRIDE_PATH = (
     Path(__file__).resolve().parent / "prompts" / "postflop_system.txt"
 )
+# Postflop prompt LIBRARY (June 2026) -- named postflop system prompts, the
+# postflop analog of the preflop library. Reuses the generic PromptLibrary class
+# pointed at its own dir; the ACTIVE entry is mirrored into
+# POSTFLOP_PROMPT_OVERRIDE_PATH so load_postflop_system_prompt() (the Generate
+# subprocess child, the CLI, the Compare prefill) reads it with no extra wiring.
+POSTFLOP_LIBRARY_DIR = (
+    Path(__file__).resolve().parent / "prompts" / "postflop_library"
+)
 
 # --- repo paths -------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -5044,6 +5052,47 @@ def _save_postflop_claim_checker_prompt(text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+# --- postflop prompt library (mirror of the preflop library) ----------------
+def _postflop_prompt_library():
+    """The postflop PromptLibrary instance (its own dir; same generic class)."""
+    from admin_panel.prompt_library import PromptLibrary  # noqa: PLC0415
+
+    return PromptLibrary(base_dir=POSTFLOP_LIBRARY_DIR)
+
+
+def _sync_postflop_active_to_override(lib) -> None:
+    """Mirror the active library entry into POSTFLOP_PROMPT_OVERRIDE_PATH so
+    load_postflop_system_prompt() (the Generate child, the CLI, the Compare
+    prefill) reads it -- the same legacy-sync trick the preflop library uses."""
+    text = lib.active_text()
+    if text is not None:
+        POSTFLOP_PROMPT_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        POSTFLOP_PROMPT_OVERRIDE_PATH.write_text(text, encoding="utf-8")
+
+
+def _ensure_postflop_library_seeded(lib) -> None:
+    """Seed an empty postflop library with two starting entries: the built-in
+    code default, and (if the legacy single-file override exists) the prompt the
+    user has been generating with -- imported and made active so generation is
+    unchanged. Idempotent."""
+    from pipeline.postflop.explanation_generator import (  # noqa: PLC0415
+        POSTFLOP_SYSTEM_PROMPT,
+    )
+
+    if lib.list():
+        return
+    lib.create("Built-in default", POSTFLOP_SYSTEM_PROMPT)
+    if POSTFLOP_PROMPT_OVERRIDE_PATH.is_file():
+        try:
+            text = POSTFLOP_PROMPT_OVERRIDE_PATH.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if text.strip() and text.strip() != POSTFLOP_SYSTEM_PROMPT.strip():
+            imported = lib.create("Factor-list (imported)", text)
+            lib.set_active(imported.slug)
+    _sync_postflop_active_to_override(lib)
+
+
 def _render_claim_check_panel(row: dict[str, str]) -> None:
     """Layer-7 claim-checker output under the explanation. The ``claim_check``
     cell is "" when the checker did not run (no panel), "[]" when it ran and
@@ -6397,12 +6446,43 @@ def render_postflop_compare_page() -> None:
     solve_sum = by_path[picked]
     st.caption(f"`{solve_sum.label}`")
 
-    # --- 2. the two prompts (prefilled with the active postflop prompt) -------
+    # --- 2. the two prompts: load a saved library entry and/or edit freely ----
+    _pflib = _postflop_prompt_library()
+    _ensure_postflop_library_seeded(_pflib)
+    _pf_entries = _pflib.list()
     active_prompt = load_postflop_system_prompt()
     for k in ("pfcmp_prompt_a", "pfcmp_prompt_b"):
         if k not in st.session_state:
             st.session_state[k] = active_prompt
-    st.markdown("**Prompts** — edit one (or both) to compare. Both start from the active postflop prompt.")
+    st.markdown(
+        "**Prompts** — load a saved library prompt into either side (Prompt page "
+        "→ Postflop to manage them), then edit freely. Both start from the ★ "
+        "active postflop prompt."
+    )
+    if _pf_entries:
+        _slugs = [e.slug for e in _pf_entries]
+        _name_by = {e.slug: e.name for e in _pf_entries}
+        _act = _pflib.active_slug()
+
+        def _pf_lbl(slug: str) -> str:
+            return f"{_name_by[slug]}{'  ★' if slug == _act else ''}"
+
+        lc1, lc2 = st.columns(2)
+        with lc1:
+            pick_a = st.selectbox(
+                "Load A from library", _slugs, format_func=_pf_lbl, key="pfcmp_lib_a"
+            )
+            if st.button("⬇ Load into A", key="pfcmp_loada"):
+                st.session_state["pfcmp_prompt_a"] = _pflib.get_text(pick_a)
+                st.rerun()
+        with lc2:
+            pick_b = st.selectbox(
+                "Load B from library", _slugs, format_func=_pf_lbl,
+                index=min(1, len(_slugs) - 1), key="pfcmp_lib_b",
+            )
+            if st.button("⬇ Load into B", key="pfcmp_loadb"):
+                st.session_state["pfcmp_prompt_b"] = _pflib.get_text(pick_b)
+                st.rerun()
     pc1, pc2 = st.columns(2)
     with pc1:
         prompt_a = st.text_area("Prompt A", key="pfcmp_prompt_a", height=260)
@@ -6656,57 +6736,139 @@ def render_postflop_compare_page() -> None:
         )
 
 
-def _render_postflop_prompt_editor() -> None:
-    """Edit the postflop system prompt.
-
-    Deliberately simpler than the preflop prompt LIBRARY: postflop has one
-    system prompt, so this is a single editable override (auto-saved to
-    ``admin_panel/prompts/postflop_system.txt``, gitignored). Generation reads it
-    on the next run via ``load_postflop_system_prompt`` — no restart. Reset =
-    delete the override.
+def _render_postflop_prompt_library() -> None:
+    """The postflop prompt LIBRARY: create, name, edit, and switch between
+    postflop Layer-6 system prompts -- the postflop analog of the preflop
+    library, using the same generic PromptLibrary class. Entries live under
+    ``admin_panel/prompts/postflop_library/`` (gitignored); the ★ active entry is
+    mirrored into ``postflop_system.txt`` so generation (Generate, the CLI, the
+    Compare prefill) reads it on the next batch -- no restart.
     """
     from pipeline.postflop.explanation_generator import (  # noqa: PLC0415
         POSTFLOP_SYSTEM_PROMPT,
-        load_postflop_system_prompt,
     )
 
-    override = POSTFLOP_PROMPT_OVERRIDE_PATH
-    active = load_postflop_system_prompt()
-    is_custom = override.is_file()
-    st.caption(
-        ("✏️ Custom override active" if is_custom else "Built-in default (no override)")
-        + f" · {len(active):,} chars · ~{len(active) // 4:,} tokens · edits take "
-        "effect on the next batch (no restart)."
-    )
+    lib = _postflop_prompt_library()
+    _ensure_postflop_library_seeded(lib)
 
-    def _save_postflop_prompt() -> None:
-        override.parent.mkdir(parents=True, exist_ok=True)
-        override.write_text(st.session_state["postflop_prompt_edit"], encoding="utf-8")
+    def _sync() -> None:
+        _sync_postflop_active_to_override(lib)
+
+    def _autosave_text(slug: str) -> None:
+        text = st.session_state.get(f"pf_lib_edit_{slug}")
+        if text is not None and text != lib.get_text(slug):
+            lib.update_text(slug, text)
+            if slug == lib.active_slug():
+                _sync()
+
+    def _autosave_name(slug: str) -> None:
+        name = str(st.session_state.get(f"pf_lib_rename_{slug}", "")).strip()
+        if name and name != lib.get(slug).name:
+            lib.rename(slug, name)
+
+    def _autosave_notes(slug: str) -> None:
+        notes = str(st.session_state.get(f"pf_lib_notes_{slug}", ""))
+        if notes != lib.get(slug).notes:
+            lib.update_notes(slug, notes)
+
+    entries = lib.list()
+    with st.expander("➕  New postflop prompt", expanded=not entries):
+        new_name = st.text_input("Name", key="pf_lib_new_name")
+        seed_from = st.radio(
+            "Start from",
+            ["Built-in default", "Copy of active prompt", "Blank"],
+            horizontal=True,
+            key="pf_lib_new_seed",
+        )
+        if st.button("Create prompt", type="primary", key="pf_lib_create"):
+            if not new_name.strip():
+                st.error("Give the prompt a name first.")
+            else:
+                if seed_from == "Built-in default":
+                    seed_text = POSTFLOP_SYSTEM_PROMPT
+                elif seed_from == "Copy of active prompt":
+                    act = lib.active_entry()
+                    seed_text = act.text if act else POSTFLOP_SYSTEM_PROMPT
+                else:
+                    seed_text = ""
+                created = lib.create(new_name, seed_text)
+                lib.set_active(created.slug)
+                _sync()
+                st.session_state["_pf_lib_pending"] = created.slug
+                st.success(f"Created '{created.name}' and made it active.")
+                st.rerun()
+
+    entries = lib.list()
+    if not entries:
+        st.info("No prompts yet — create one above.")
+        return
+
+    active_slug = lib.active_slug()
+    slugs = [e.slug for e in entries]
+    name_by_slug = {e.slug: e.name for e in entries}
+    if "_pf_lib_pending" in st.session_state:
+        st.session_state["pf_lib_select"] = st.session_state.pop("_pf_lib_pending")
+    if st.session_state.get("pf_lib_select") not in slugs:
+        st.session_state["pf_lib_select"] = active_slug or slugs[0]
+
+    def _label(slug: str) -> str:
+        return f"{name_by_slug[slug]}{'  ★ active' if slug == active_slug else ''}"
+
+    sel = st.selectbox("Prompt", options=slugs, format_func=_label, key="pf_lib_select")
+    entry = lib.get(sel)
+
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    with c1:
+        if sel == active_slug:
+            st.success("★ Active")
+        elif st.button("Set active", key="pf_lib_setactive", use_container_width=True):
+            lib.set_active(sel)
+            _sync()
+            st.rerun()
+    with c2:
+        if st.button("Duplicate", key="pf_lib_dup", use_container_width=True):
+            dup = lib.duplicate(sel)
+            st.session_state["_pf_lib_pending"] = dup.slug
+            st.rerun()
+    with c3:
+        if st.button(
+            "Delete", key="pf_lib_del", use_container_width=True,
+            disabled=len(entries) == 1,
+        ):
+            lib.delete(sel)
+            _sync()
+            st.rerun()
+    with c4:
+        updated = f" · updated {entry.updated_at[:10]}" if entry.updated_at else ""
+        st.caption(
+            f"{len(entry.text):,} chars · ~{len(entry.text) // 4:,} tokens{updated}"
+        )
+
+    m1, m2 = st.columns(2)
+    with m1:
+        st.text_input(
+            "Name", value=entry.name, key=f"pf_lib_rename_{sel}",
+            on_change=_autosave_name, args=(sel,),
+        )
+    with m2:
+        st.text_input(
+            "Notes (what you're trying)", value=entry.notes,
+            key=f"pf_lib_notes_{sel}", on_change=_autosave_notes, args=(sel,),
+        )
 
     st.text_area(
-        "Postflop system prompt (auto-saves)",
-        value=active,
-        height=520,
-        key="postflop_prompt_edit",
-        on_change=_save_postflop_prompt,
+        "Postflop system prompt", value=entry.text, height=520,
+        key=f"pf_lib_edit_{sel}", on_change=_autosave_text, args=(sel,),
+        help="Saves automatically on blur/Enter -- no Save button.",
     )
-    cols = st.columns(2)
-    if cols[0].button("💾 Save now", key="pf_prompt_save"):
-        _save_postflop_prompt()
-        st.success("Saved.")
-    if is_custom and cols[1].button(
-        "↩️ Reset to built-in default", key="pf_prompt_reset"
-    ):
-        override.unlink(missing_ok=True)
-        st.session_state.pop("postflop_prompt_edit", None)
-        st.rerun()
+    st.caption(
+        "✓ Auto-saved. The ★ active prompt drives Generate, the CLI, and "
+        "Compare's prefill (mirrored to postflop_system.txt on every edit)."
+    )
     with st.expander("Built-in default (read-only reference)"):
         st.text_area(
-            "default",
-            value=POSTFLOP_SYSTEM_PROMPT,
-            height=300,
-            disabled=True,
-            label_visibility="collapsed",
+            "default", value=POSTFLOP_SYSTEM_PROMPT, height=300,
+            disabled=True, label_visibility="collapsed",
         )
 
 
@@ -6715,14 +6877,14 @@ def render_prompt_page() -> None:
     """The prompt library: create, name, edit, and switch between the
     Layer 6 system prompts you're workshopping.
 
-    Preflop only (postflop is blocked on Pio solves; its prompt is shown
-    read-only for reference). Prompts live under
-    ``admin_panel/prompts/library/`` via
-    :class:`admin_panel.prompt_library.PromptLibrary`. The ACTIVE prompt is
-    the default for new batches and is mirrored into the legacy
-    ``preflop_system.txt`` so any code path that reads
-    ``load_preflop_system_prompt()`` stays in sync. The Generate page can
-    run any library prompt per batch and tags each output with it.
+    Both pipelines now have a library (the Postflop radio renders the postflop
+    one via :func:`_render_postflop_prompt_library`). Prompts live under
+    ``admin_panel/prompts/library/`` (preflop) and ``.../postflop_library/``
+    (postflop) via :class:`admin_panel.prompt_library.PromptLibrary`. The ACTIVE
+    prompt is the default for new batches and is mirrored into the legacy
+    ``preflop_system.txt`` / ``postflop_system.txt`` so any code path that reads
+    ``load_*_system_prompt()`` stays in sync. The Generate page can run any
+    library prompt per batch and tags each output with it.
     """
     st.title("Prompt library")
     st.caption(
@@ -6740,7 +6902,7 @@ def render_prompt_page() -> None:
     )
 
     if mode.startswith("Postflop"):
-        _render_postflop_prompt_editor()
+        _render_postflop_prompt_library()
         return
 
     # --- Preflop mode: the prompt LIBRARY ---

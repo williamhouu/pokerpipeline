@@ -142,3 +142,27 @@ def test_ensure_seeded_is_idempotent(lib: PromptLibrary) -> None:
 def test_set_active_unknown_slug_raises(lib: PromptLibrary) -> None:
     with pytest.raises(KeyError):
         lib.set_active("does-not-exist")
+
+
+def test_postflop_library_seeding(tmp_path: Path, monkeypatch) -> None:
+    # The postflop seeder: the built-in default always, plus the legacy
+    # single-file override imported as a second (active) entry when it exists.
+    import admin_panel.app as app
+
+    # No override file -> just the built-in default, and it's active.
+    monkeypatch.setattr(app, "POSTFLOP_PROMPT_OVERRIDE_PATH", tmp_path / "missing.txt")
+    lib1 = PromptLibrary(base_dir=tmp_path / "lib1")
+    app._ensure_postflop_library_seeded(lib1)
+    assert [e.name for e in lib1.list()] == ["Built-in default"]
+    assert lib1.active_entry() is not None
+    app._ensure_postflop_library_seeded(lib1)  # idempotent
+    assert len(lib1.list()) == 1
+
+    # With an override file -> imported as a 2nd entry and made active.
+    override = tmp_path / "ov.txt"
+    override.write_text("MY CUSTOM FACTOR-LIST POSTFLOP PROMPT", encoding="utf-8")
+    monkeypatch.setattr(app, "POSTFLOP_PROMPT_OVERRIDE_PATH", override)
+    lib2 = PromptLibrary(base_dir=tmp_path / "lib2")
+    app._ensure_postflop_library_seeded(lib2)
+    assert {e.name for e in lib2.list()} == {"Built-in default", "Factor-list (imported)"}
+    assert lib2.active_text() == "MY CUSTOM FACTOR-LIST POSTFLOP PROMPT"
