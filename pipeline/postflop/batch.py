@@ -47,6 +47,7 @@ from pipeline.postflop.explanation_generator import (
 from pipeline.postflop.facts import DEFAULT_EQUITY_RUNOUTS, extract_facts
 from pipeline.postflop.format_writer import build_postflop_row, write_postflop_csv
 from pipeline.postflop.options import build_options
+from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ, line_premise_min_freq
 from pipeline.postflop.quality import node_quality_issue
 from pipeline.postflop.question_extractor import (
     MAX_FREQUENCY,
@@ -143,21 +144,33 @@ def _collect_worthy(
     max_frequency: float,
     min_ev_gap_bb: float | None,
     quality_gate: bool = True,
-) -> tuple[list[Any], int]:
+    min_premise_freq: float | None = None,
+) -> tuple[list[Any], int, int]:
     """Every worthy spot in the solve, in a deterministic (node, combo) order.
 
-    Returns ``(worthy_spots, low_quality_nodes_skipped)``. When ``quality_gate``
-    is on (default), nodes that fail the convergence / reach guard
-    (:func:`pipeline.postflop.quality.node_quality_issue`) are skipped whole --
-    no question is generated off a barely-reached or untrained node.
+    Returns ``(worthy_spots, low_quality_nodes_skipped, premise_filtered_nodes)``.
+    When ``quality_gate`` is on (default), nodes that fail the convergence / reach
+    guard (:func:`pipeline.postflop.quality.node_quality_issue`) are skipped
+    whole. When ``min_premise_freq`` is set, a node whose line includes a PRIOR
+    action taken below that frequency
+    (:func:`pipeline.postflop.premise.line_premise_min_freq`) is also skipped --
+    a question built on an action someone almost never takes. Both are per-NODE
+    gates (the verdict is the same for every hero hand at the node), applied
+    BEFORE any equity sim.
     """
     worthy: list[Any] = []
     low_quality = 0
+    premise_skipped = 0
     for node_id in sorted(solve.nodes):
         node = solve.nodes[node_id]
         if quality_gate and node_quality_issue(node) is not None:
             low_quality += 1
             continue
+        if min_premise_freq is not None:
+            pmf = line_premise_min_freq(node, solve)
+            if pmf is not None and pmf < min_premise_freq:
+                premise_skipped += 1
+                continue
         for spot in enumerate_spots(node):
             ev = evaluate_spot(
                 spot,
@@ -167,7 +180,7 @@ def _collect_worthy(
             )
             if ev.is_worthy:
                 worthy.append(spot)
-    return worthy, low_quality
+    return worthy, low_quality, premise_skipped
 
 
 def _node_range_snapshots(node: Any) -> dict[str, dict[str, float]]:
@@ -293,6 +306,7 @@ def generate_postflop_batch(
     max_frequency: float = MAX_FREQUENCY,
     min_ev_gap_bb: float | None = None,
     quality_gate: bool = True,
+    min_premise_freq: float | None = DEFAULT_MIN_PREMISE_FREQ,
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
     system_prompt: str | None = None,
     trap_difficulty: bool = False,
@@ -327,12 +341,13 @@ def generate_postflop_batch(
         raise ValueError(f"solve {solve.solve_id} is malformed: {problems}")
 
     use_placeholder = dry_run or client is None
-    worthy, low_quality_filtered_out = _collect_worthy(
+    worthy, low_quality_filtered_out, premise_filtered_out = _collect_worthy(
         solve,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
         quality_gate=quality_gate,
+        min_premise_freq=min_premise_freq,
     )
     worthy_total = len(worthy)
     # Optional caller-supplied curation/ordering (e.g. diversify across node
@@ -636,6 +651,7 @@ def generate_postflop_batch(
                 "max_frequency": max_frequency,
                 "min_ev_gap_bb": min_ev_gap_bb,
                 "quality_gate": quality_gate,
+                "min_premise_freq": min_premise_freq,
                 "equity_runouts": equity_runouts,
                 "temperature": temperature,
                 "trap_difficulty": trap_difficulty,
@@ -647,6 +663,7 @@ def generate_postflop_batch(
                 "worthy_spots_available": worthy_total,
                 "worthy_spots_selected": len(worthy),
                 "low_quality_nodes_skipped": low_quality_filtered_out,
+                "premise_filtered_nodes": premise_filtered_out,
                 "questions_attempted": attempted,
                 "questions_written": len(rows),
                 "soft_flagged_rows": soft_flagged,

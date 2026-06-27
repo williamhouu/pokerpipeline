@@ -1107,6 +1107,22 @@ def _render_generate_page_postflop() -> None:
             "for third-party solves and down-sampled turn/river nodes. Count of "
             "skipped nodes is in the batch meta.",
         )
+        premise_pct = st.number_input(
+            "Premise-realism gate — min line-action frequency (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=0.5,
+            step=0.25,
+            key="postflop_premise_pct",
+            help="Realism check on the action HISTORY: drop a spot whose line "
+            "includes a PRIOR action (by either player) the solver takes below "
+            "this often — a question built on a line someone almost never takes "
+            "(e.g. a 0.1% turn overbet-jam, a never-used bet size). 0.5% is "
+            "permissive (drops only clear ghost lines); raise it for stricter "
+            "realism. Set 0 to disable. Skipped-node count is in the batch meta "
+            "(premise_filtered_nodes).",
+        )
+        min_premise_freq = (premise_pct / 100.0) if premise_pct > 0 else None
 
     with st.expander("Presentation — display amounts / stakes / venue"):
         st.caption(
@@ -1257,6 +1273,7 @@ def _render_generate_page_postflop() -> None:
                 strength_buckets=tuple(strength_filter),
                 decision_types=tuple(decision_filter),
                 quality_gate=quality_gate,
+                min_premise_freq=min_premise_freq,
                 answer_style=answer_style,
                 display_in_bb=display_in_bb,
                 stakes=stakes,

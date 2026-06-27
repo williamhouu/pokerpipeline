@@ -141,6 +141,15 @@ TAG_REGISTRY: dict[str, Callable[[PostflopTagInput], bool]] = {
         and not s.hero_in_position
         and s.prev_street_checked_through  # OOP leads after the aggressor declined
     ),
+    # The mirror of probe_bet: hero IS the preflop aggressor, in position, who
+    # checked back the prior street, and now FACES the OOP player's lead.
+    "facing_probe_spot": lambda s: (
+        s.is_facing_bet
+        and s.street in ("turn", "river")
+        and s.hero_is_preflop_aggressor
+        and s.hero_in_position
+        and s.prev_street_checked_through
+    ),
     "river_bet": lambda s: s.dominant_verb == "bet" and s.street == "river",
     "facing_bet_spot": lambda s: s.is_facing_bet,
     "in_position": lambda s: s.hero_in_position,

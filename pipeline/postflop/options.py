@@ -40,6 +40,14 @@ PURE_THRESHOLD = 0.9999
 # the spectrum. Mirrors the preflop auto threshold.
 _AUTO_BASIC_THRESHOLD = 0.80
 
+# Near-binary collapse: a verb taken BELOW this frequency (summed over its sizes)
+# is a GTO-balancing sliver, not a real option. When a 3+-verb spot (e.g. a
+# Fold/Call/Raise facing-bet decision) has exactly TWO verbs at/above this, the
+# slivers are dropped and the two live verbs are spectrum'd -- so a 60/38/2
+# Fold/Call/Raise reads as the Fold-vs-Call binary it really is, instead of
+# falling back to plain labels.
+_NEAR_BINARY_DROP_FREQ = 0.05
+
 # The three answer-option styles (parity with preflop):
 #   * "basic" -- plain action labels (Check / Bet 33% / Fold / Call / Raise to X).
 #   * "gto"   -- the Always/Mostly spectrum for a 2-action spot; a 3+-size spot
@@ -93,20 +101,39 @@ def _spectrum_options(
     return options, correct
 
 
-def _collapsed_spectrum_options(spot: PostflopSpot) -> tuple[list[str], str]:
-    """Collapse a 2-verb MULTI-size spot (e.g. Check + Bet 33%/50%/67%) into a
-    binary Check-vs-Bet spectrum.
+def _verb_frequencies(spot: PostflopSpot) -> dict[str, float]:
+    """Each verb's total solver frequency at this spot (summed over its sizes)."""
+    freqs: dict[str, float] = {}
+    for a in spot.node.actions:
+        freqs[a.verb] = freqs.get(a.verb, 0.0) + spot.action_frequencies.get(a.label, 0.0)
+    return freqs
 
-    The bet size is dropped from the OPTION (the LLM still receives the real
-    size in its data block, and ~99% of hands commit to a single size, so the
-    option loses essentially nothing). The correct answer is the dominant verb
-    FAMILY's claim -- "Always Bet" when the family is ~pure, else "Mostly Bet".
+
+def _live_verbs(spot: PostflopSpot) -> list[str]:
+    """The verbs taken at/above the near-binary threshold (the real options);
+    verbs below it are GTO-balancing slivers."""
+    return [v for v, f in _verb_frequencies(spot).items() if f >= _NEAR_BINARY_DROP_FREQ]
+
+
+def _collapsed_spectrum_options(
+    spot: PostflopSpot, verbs: list[str] | None = None
+) -> tuple[list[str], str]:
+    """Collapse a spot onto a binary spectrum over TWO verbs.
+
+    Used two ways: a 2-verb MULTI-size spot (Check + Bet 33%/50%/67% -> the
+    Check-vs-Bet spectrum), and a near-binary 3+-verb spot where only two verbs
+    are live (``verbs`` names them, e.g. Fold + Call when Raise is a 2% sliver).
+    The bet size is dropped from the OPTION (the LLM still receives the real size
+    in its data block, and ~99% of hands commit to a single size, so the option
+    loses essentially nothing). The correct answer is the dominant verb FAMILY's
+    claim -- "Always Bet" when the family is ~pure, else "Mostly Bet".
     """
     actions = sorted(spot.node.actions, key=_aggression_key)
     by_verb: dict[str, list[NodeAction]] = {}
     for a in actions:
         by_verb.setdefault(a.verb, []).append(a)
-    passive_v, aggr_v = sorted(by_verb, key=lambda v: _VERB_RANK.get(v, 9))[:2]
+    chosen = verbs if verbs is not None else list(by_verb)
+    passive_v, aggr_v = sorted(chosen, key=lambda v: _VERB_RANK.get(v, 9))[:2]
 
     def _family(verb: str) -> str:
         # A single action keeps its own label; a multi-size verb collapses to
@@ -186,16 +213,26 @@ def build_options(
     # multi-SIZE spot with only two action TYPES (Check + Bet 33%/50%/67%)
     # COLLAPSES to its two verbs (Check vs Bet) and spectrums those -- a hand
     # commits to one size ~99% of the time, so the dropped size costs nothing
-    # (the LLM still gets the real size in its data block). A 3+-VERB spot
-    # (Fold/Call/Raise) can't be a 2-rung spectrum, so gto keeps plain labels.
+    # (the LLM still gets the real size in its data block).
     if resolved == "gto":
         if len(actions) == 2:  # noqa: PLR2004
             return _spectrum_options(spot, labels, dominant)
+        n_verbs = len({a.verb for a in actions})
         # Multi-size collapse (Check vs Bet) is EXPLICIT-gto only; "auto" keeps
         # plain size labels on multi-size spots (its long-standing behaviour),
         # so turning on gto is a deliberate "I want the spectrum everywhere".
-        if style == "gto" and len({a.verb for a in actions}) == 2:  # noqa: PLR2004
+        if style == "gto" and n_verbs == 2:  # noqa: PLR2004
             return _collapsed_spectrum_options(spot)
+        # Near-binary collapse: a 3+-VERB spot (Fold/Call/Raise) whose third+
+        # verbs are GTO slivers is really a 2-verb decision -- spectrum the two
+        # LIVE verbs instead of plain labels. Gated to 3+ verbs so it does NOT
+        # touch a 2-verb multi-size spot (handled above, explicit-gto-only).
+        # Applies under auto-resolved gto (a mixed facing-bet spot is the common
+        # case), so it is NOT gated to explicit gto.
+        if n_verbs >= 3:  # noqa: PLR2004
+            live = _live_verbs(spot)
+            if len(live) == 2:  # noqa: PLR2004
+                return _collapsed_spectrum_options(spot, verbs=live)
     return _plain_options(actions, labels, dominant)
 
 

@@ -134,8 +134,10 @@ def _multiple_bet_sizes(facts: PostflopFacts) -> bool:
 # Only skills a postflop spot can clearly test are listed. Preflop-only skills
 # (3-Betting, Squeezing, ...) and signals we still can't derive cleanly
 # (Combinatorics, Hand Reading, Equity Realization, ICM) are intentionally
-# absent -- a strict-tagging choice. (Facing a Check-Raise, MDF, and Reverse
-# Implied Odds were added June 2026 once each had a clean deterministic signal.)
+# absent -- a strict-tagging choice. (Facing a Check-Raise, MDF, Reverse Implied
+# Odds, Blockers & Card Removal, and Facing a Probe Bet were added June 2026 once
+# each had a clean deterministic signal -- Blockers once the value/bluff
+# decomposition gave postflop real blocker data.)
 POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
     # --- Section 2: Betting & Aggression ---
     "C-Betting": lambda f: "c_bet_spot" in f.concept_tags,
@@ -166,6 +168,9 @@ POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
         and f.street == "flop"
     ),
     "Probe Betting": lambda f: "probe_bet" in f.concept_tags,
+    # The mirror: hero (the aggressor who checked back) faces villain's later-
+    # street lead -- a probe bet into the player who showed weakness.
+    "Facing a Probe Bet": lambda f: "facing_probe_spot" in f.concept_tags,
     "Overbetting": _is_overbet,
     "Facing an Overbet": _facing_overbet,
     "Bet Sizing": lambda f: (
@@ -218,6 +223,16 @@ POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
     # --- Section 5: Hand Analysis & Decision Making ---
     # An overbet (by hero or villain) is THE polarized-range situation.
     "Range Polarization": lambda f: _is_overbet(f) or _facing_overbet(f),
+    # Hero's cards meaningfully remove villain's VALUE or BLUFF combos AND hero is
+    # facing a bet -- where card removal actually drives the decision (a bluff-catch:
+    # "you block their value, so call"). Scoped to facing-bet so it is a useful
+    # filter, not a near-universal tag (blocker effects are non-neutral on most
+    # spots, but only DECISION-relevant when there's a bet to call). Postflop DOES
+    # carry blocker data now; the old "no blocker data" note was stale.
+    "Blockers & Card Removal": lambda f: (
+        f.blocker_effect in ("value", "bluffs")
+        and "facing_bet_spot" in f.concept_tags
+    ),
     # --- Section 6: Positional & Situational ---
     # Using position: checking back / calling in position to control + realize.
     "In Position Play": lambda f: (
@@ -262,6 +277,9 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
     "villain has led (donked) into him.",
     "Probe Betting": "Hero bets a later street after the aggressor declined to "
     "c-bet the previous street (the `probe_bet` tag).",
+    "Facing a Probe Bet": "Hero is the preflop aggressor who checked back the "
+    "prior street and now faces the out-of-position player's lead on the "
+    "turn/river (the `facing_probe_spot` tag).",
     "Overbetting": "Hero's chosen bet or raise is larger than the pot (size > "
     "100% pot).",
     "Facing an Overbet": "The bet hero faces is larger than the pot it was bet into.",
@@ -291,6 +309,9 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
     "(premium/strong/medium), so commitment is driven by the stack-to-pot ratio.",
     "Range Polarization": "An overbet is in play (hero's or villain's) -- the "
     "textbook polarized-range situation.",
+    "Blockers & Card Removal": "Hero faces a bet AND hero's cards meaningfully "
+    "remove villain's value or bluff combos (a non-neutral blocker effect) -- a "
+    "bluff-catch where card removal drives the call/fold.",
     "In Position Play": "Hero acts last and checks back or calls, using position "
     "to control the pot and realize equity.",
     "Out of Position Play": "Hero acts first and is defending a bet, check-raising, "
@@ -309,13 +330,10 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
 # Skills the postflop path deliberately does NOT tag yet (no clean signal),
 # shown in the admin explainer so the absence is documented, not a mystery.
 POSTFLOP_SKILLS_NOT_TAGGED: dict[str, str] = {
-    "Facing a Probe Bet": "Needs prior-street check-back detection on hero's side.",
     "Combinatorics": "Nearly every spot involves combo counting; needs a narrower "
     "trigger.",
     "Equity Realization": "Too broad without a realization-gap signal.",
     "Hand Reading": "Universal in poker; would fire on every spot.",
-    "Blockers & Card Removal": "Postflop spots ship NO blocker data, so blocker "
-    "claims are never tagged (or made).",
     "ICM & Tournament Pressure": "Needs tournament-structure metadata (payouts, "
     "stacks) the solves don't carry.",
 }

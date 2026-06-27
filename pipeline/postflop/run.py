@@ -26,6 +26,7 @@ from pipeline.postflop.explanation_generator import (
     DEFAULT_TEMPERATURE,
     load_postflop_system_prompt,
 )
+from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ
 from pipeline.postflop.question_extractor import MAX_FREQUENCY, MIN_FREQUENCY
 from pipeline.postflop.spot_selection import make_spot_selector
 
@@ -57,6 +58,7 @@ def generate_postflop_batch_from_db(
     max_frequency: float = MAX_FREQUENCY,
     min_ev_gap_bb: float | None = None,
     quality_gate: bool = True,
+    min_premise_freq: float | None = DEFAULT_MIN_PREMISE_FREQ,
     equity_runouts: int | None = None,
     system_prompt: str | None = None,
     trap_difficulty: bool = False,
@@ -129,6 +131,7 @@ def generate_postflop_batch_from_db(
         max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
         quality_gate=quality_gate,
+        min_premise_freq=min_premise_freq,
         system_prompt=prompt,
         trap_difficulty=trap_difficulty,
         run_claim_checker=run_claim_checker,
@@ -178,6 +181,7 @@ def compare_postflop_batches_from_db(
     max_frequency: float = MAX_FREQUENCY,
     min_ev_gap_bb: float | None = None,
     quality_gate: bool = True,
+    min_premise_freq: float | None = DEFAULT_MIN_PREMISE_FREQ,
     equity_runouts: int | None = None,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
@@ -263,6 +267,7 @@ def compare_postflop_batches_from_db(
             max_frequency=max_frequency,
             min_ev_gap_bb=min_ev_gap_bb,
             quality_gate=quality_gate,
+            min_premise_freq=min_premise_freq,
             system_prompt=prompt,
             run_claim_checker=run_claim_checker,
             claim_checker_prompt=claim_checker_prompt,

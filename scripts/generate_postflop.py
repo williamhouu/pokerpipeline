@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.postflop.batch import generate_postflop_batch  # noqa: E402
 from pipeline.postflop.facts import preflop_aggressor  # noqa: E402
 from pipeline.postflop.fixtures import btn_vs_bb_srp_2cJs7s  # noqa: E402
+from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ  # noqa: E402
 from pipeline.postflop.spot_selection import (  # noqa: E402
     DECISION_TYPES,
     STRENGTH_BUCKETS,
@@ -100,6 +101,12 @@ def main(argv: list[str] | None = None) -> int:
              "barely-reached nodes are skipped)",
     )
     parser.add_argument(
+        "--min-premise-freq", type=float, default=DEFAULT_MIN_PREMISE_FREQ,
+        help="premise-realism gate (0-1): drop a spot whose line includes a "
+             "PRIOR action taken below this frequency (a question built on a "
+             "line someone almost never takes). Default %(default)s; 0 disables.",
+    )
+    parser.add_argument(
         "--trap-difficulty", action="store_true",
         help="opt-in: floor counterintuitive PURE spots (solver folds despite "
              "equity >= price, etc.) to Hard, like preflop. Score only",
@@ -157,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         client=client,
         dry_run=args.dry_run,
         quality_gate=not args.no_quality_gate,
+        min_premise_freq=(args.min_premise_freq if args.min_premise_freq > 0 else None),
         trap_difficulty=args.trap_difficulty,
         run_claim_checker=args.claim_checker or args.revise,
         revise_pass=args.revise,

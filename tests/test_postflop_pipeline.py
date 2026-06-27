@@ -345,6 +345,76 @@ def test_options_correct_always_in_options() -> None:
                 assert correct in opts, (node_id, spot.hero_combo, style, correct, opts)
 
 
+def test_options_gto_near_binary_collapse() -> None:
+    # A 3-verb facing-bet spot whose third verb is a GTO sliver (<5%) collapses to
+    # the two LIVE verbs' Always/Mostly spectrum, instead of falling back to plain
+    # labels. The live pair is chosen by FREQUENCY, not aggression.
+    from types import SimpleNamespace
+
+    from pipeline.postflop.options import build_options
+    from pipeline.postflop.solve import NodeAction
+    acts = (
+        NodeAction(label="Fold", verb="fold", freq=0.0),
+        NodeAction(label="Call", verb="call", freq=0.0),
+        NodeAction(label="Raise to 12bb", verb="raise", freq=0.0, to_bb=12.0, pot_fraction=1.0),
+    )
+
+    def _stub(freqs, dom, dom_freq):
+        return SimpleNamespace(
+            node=SimpleNamespace(actions=acts, node_id="x"),
+            action_frequencies=freqs, dominant_action=dom, dominant_frequency=dom_freq,
+        )
+
+    # Fold 60 / Call 38 / Raise 2 -> Raise sliver dropped -> Fold-vs-Call.
+    nb = _stub({"Fold": 0.60, "Call": 0.38, "Raise to 12bb": 0.02}, "Fold", 0.60)
+    assert build_options(nb, style="gto") == (
+        ["Always Fold", "Mostly Fold", "Mostly Call", "Always Call"], "Mostly Fold"
+    )
+    # Fold 3 / Call 50 / Raise 47 -> Fold (least aggressive) is the sliver, dropped
+    # -> Call-vs-Raise (proves the pick is by frequency, not aggression order). A
+    # single-size raise keeps its own label ("Raise to 12bb"), per the collapse rule.
+    cr = _stub({"Fold": 0.03, "Call": 0.50, "Raise to 12bb": 0.47}, "Call", 0.50)
+    assert build_options(cr, style="gto") == (
+        ["Always Call", "Mostly Call", "Mostly Raise to 12bb", "Always Raise to 12bb"],
+        "Mostly Call",
+    )
+    # Genuinely 3-way (all >= 5%) -> NO collapse, plain labels (full labels kept).
+    three = _stub({"Fold": 0.40, "Call": 0.35, "Raise to 12bb": 0.25}, "Fold", 0.40)
+    assert build_options(three, style="gto")[0] == ["Fold", "Call", "Raise to 12bb"]
+
+
+def test_facing_probe_tag_and_new_skill_rules() -> None:
+    # facing_probe_spot = hero IS the aggressor, IP, prior street checked through,
+    # now facing a turn/river lead (the mirror of probe_bet).
+    from types import SimpleNamespace
+
+    from pipeline.postflop.concept_tags import compute_postflop_tags
+    from pipeline.postflop.skills import POSTFLOP_SKILL_RULES
+    fires = _tag_input(
+        is_facing_bet=True, street="turn", hero_is_preflop_aggressor=True,
+        hero_in_position=True, prev_street_checked_through=True,
+    )
+    assert "facing_probe_spot" in compute_postflop_tags(fires)
+    # Not a probe if the prior street was bet (not checked through).
+    not_probe = _tag_input(
+        is_facing_bet=True, street="turn", hero_is_preflop_aggressor=True,
+        hero_in_position=True, prev_street_checked_through=False,
+    )
+    assert "facing_probe_spot" not in compute_postflop_tags(not_probe)
+
+    probe_skill = POSTFLOP_SKILL_RULES["Facing a Probe Bet"]
+    assert probe_skill(SimpleNamespace(concept_tags=["facing_probe_spot"]))
+    assert not probe_skill(SimpleNamespace(concept_tags=["probe_bet"]))
+
+    blockers = POSTFLOP_SKILL_RULES["Blockers & Card Removal"]
+    facing = ["facing_bet_spot"]
+    assert blockers(SimpleNamespace(blocker_effect="value", concept_tags=facing))
+    assert blockers(SimpleNamespace(blocker_effect="bluffs", concept_tags=facing))
+    assert not blockers(SimpleNamespace(blocker_effect="neutral", concept_tags=facing))
+    # A blocker effect but NOT facing a bet -> not the lesson, not tagged.
+    assert not blockers(SimpleNamespace(blocker_effect="value", concept_tags=["c_bet_spot"]))
+
+
 # --- action history (multi-street) ------------------------------------------
 def test_question_flop_cbet_shows_preflop_and_flop() -> None:
     q = format_question(_spot("flop_ip_cbet", "AcJc"), SOLVE)
@@ -1257,13 +1327,20 @@ def test_postflop_skills_strict_count() -> None:
         assert 1 <= n <= 6  # noqa: PLR2004
 
 
-def test_postflop_skills_no_blockers_skill() -> None:
-    # Postflop ships no blocker data, so the Blockers skill must never fire.
+def test_postflop_blockers_skill_tracks_blocker_effect() -> None:
+    # Postflop NOW has blocker data (the value/bluff decomposition). The Blockers
+    # skill fires when blocker_effect is non-neutral AND hero faces a bet (scoped
+    # to where card removal drives the call/fold, not every spot that blocks).
     from pipeline.postflop.skills import compute_postflop_skills
     for nid in ("flop_ip_cbet", "flop_ip_facing_bet", "flop_oop_lead"):
         for spot in enumerate_spots(SOLVE.nodes[nid]):
             facts = extract_facts(spot, SOLVE, equity_runouts=40)
-            assert "Blockers & Card Removal" not in compute_postflop_skills(facts)
+            fired = "Blockers & Card Removal" in compute_postflop_skills(facts)
+            expect = (
+                facts.blocker_effect in ("value", "bluffs")
+                and "facing_bet_spot" in facts.concept_tags
+            )
+            assert fired == expect
 
 
 def test_faces_check_raise_line_detects_xr_only() -> None:
@@ -1523,17 +1600,80 @@ def test_quality_gate_flags_low_reach_and_uniform() -> None:
 
 def test_collect_worthy_quality_gate_counts_skips(tmp_path: Path) -> None:
     from pipeline.postflop.batch import _collect_worthy
-    on, skipped_on = _collect_worthy(
+    on, skipped_on, _premise_on = _collect_worthy(
         SOLVE, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
         quality_gate=True,
     )
-    off, skipped_off = _collect_worthy(
+    off, skipped_off, _premise_off = _collect_worthy(
         SOLVE, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
         quality_gate=False,
     )
     # Fixture is clean: gate on or off yields the same worthy set, 0 skipped.
     assert skipped_off == 0
     assert len(on) == len(off)
+
+
+# --- premise-realism gate (the port of preflop's premise gate) --------------
+def _premise_node(node_id, hero_total, villain_total):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        node_id=node_id,
+        hero_range={"_": float(hero_total)},
+        villain_range={"_": float(villain_total)},
+    )
+
+
+def test_line_premise_min_freq_reads_action_frequencies() -> None:
+    # Line r:0 (BB checks) -> r:0:c (BTN bets) -> r:0:c:b50 (hero=BB faces it).
+    # The action freq from parent->child = sum(child.villain_range)/sum(parent.hero_range):
+    # BB check = 80/100 = 0.8; BTN bet = 60/100 = 0.6; min = 0.6.
+    from types import SimpleNamespace
+
+    from pipeline.postflop.premise import line_premise_min_freq
+    nodes = {
+        "r:0": _premise_node("r:0", 100, 100),
+        "r:0:c": _premise_node("r:0:c", 100, 80),       # BB's checked reach mass
+        "r:0:c:b50": _premise_node("r:0:c:b50", 50, 60),  # BTN's betting reach mass
+    }
+    solve = SimpleNamespace(nodes=nodes)
+    assert abs(line_premise_min_freq(nodes["r:0:c:b50"], solve) - 0.6) < 1e-9
+
+
+def test_line_premise_min_freq_none_for_first_to_act() -> None:
+    # A first-to-act node (no prior action on the line) -> None, so the gate passes.
+    from types import SimpleNamespace
+
+    from pipeline.postflop.premise import line_premise_min_freq
+    nodes = {"r:0": _premise_node("r:0", 100, 100)}
+    assert line_premise_min_freq(nodes["r:0"], SimpleNamespace(nodes=nodes)) is None
+
+
+def test_line_premise_min_freq_skips_chance_and_closed_prefixes() -> None:
+    # r:0:b20:c (street closed by the call) is NOT a decision node -> absent from
+    # solve.nodes -> skipped, and the chain still pairs across the chance card.
+    # BTN call (across the turn) = 40/100 = 0.4; BB turn check = 95/100 = 0.95; min = 0.4.
+    from types import SimpleNamespace
+
+    from pipeline.postflop.premise import line_premise_min_freq
+    nodes = {
+        "r:0:b20": _premise_node("r:0:b20", 100, 100),
+        "r:0:b20:c:2c": _premise_node("r:0:b20:c:2c", 100, 40),
+        "r:0:b20:c:2c:c": _premise_node("r:0:b20:c:2c:c", 50, 95),
+    }
+    solve = SimpleNamespace(nodes=nodes)
+    assert abs(line_premise_min_freq(nodes["r:0:b20:c:2c:c"], solve) - 0.4) < 1e-9
+
+
+def test_premise_gate_in_collect_worthy_filters_and_counts() -> None:
+    # The fixture's node ids carry no betting line, so line_premise_min_freq is
+    # None everywhere -> the gate is a no-op (nothing dropped) regardless of the
+    # threshold. Guards the wiring + the new 3-tuple return.
+    from pipeline.postflop.batch import _collect_worthy
+    worthy, _lq, premise_skipped = _collect_worthy(
+        SOLVE, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
+        quality_gate=True, min_premise_freq=0.5,
+    )
+    assert premise_skipped == 0 and len(worthy) > 0
 
 
 def test_batch_quality_gate_counter(tmp_path: Path) -> None:
