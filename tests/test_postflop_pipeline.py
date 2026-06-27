@@ -33,6 +33,7 @@ from pipeline.postflop.app_table_format import (  # noqa: E402
 )
 from pipeline.postflop.batch import generate_postflop_batch  # noqa: E402
 from pipeline.postflop.claim_checker import (  # noqa: E402
+    build_checker_user_prompt,
     check_postflop_claims,
     claim_check_to_json,
     parse_checker_response,
@@ -595,6 +596,29 @@ class _MockClient:
         self.messages = _MockMessages(texts)
 
 
+class _CapturingMessages:
+    """Like _MockMessages but records the last user-message content, so a test
+    can assert what actually reached the prompt (e.g. the action-history line)."""
+
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = texts
+        self.calls = 0
+        self.last_user = ""
+
+    def create(self, **kwargs):
+        msgs = kwargs.get("messages") or []
+        if msgs:
+            self.last_user = msgs[-1].get("content", "")
+        text = self._texts[min(self.calls, len(self._texts) - 1)]
+        self.calls += 1
+        return _Resp(text)
+
+
+class _CapturingClient:
+    def __init__(self, texts: list[str]) -> None:
+        self.messages = _CapturingMessages(texts)
+
+
 def test_generate_with_mock_client_succeeds() -> None:
     facts = _facts_for()
     opts, correct = build_options(facts.spot)
@@ -990,6 +1014,27 @@ def test_check_postflop_claims_with_mock() -> None:
     assert not res.passed and res.issues[0].problem == "wrong"
 
 
+def test_checker_user_prompt_embeds_the_action_line() -> None:
+    # The line is the source of truth for the action sequence; embedding it
+    # (ahead of the data block) is what stops the checker false-flagging a true
+    # earlier-street reference (a donk-lead / check-raise) as invented.
+    line = "The Big Blind bets 2bb, and you call. The turn is 2 of clubs."
+    prompt = build_checker_user_prompt("some prose", "DATA", line)
+    assert "QUESTION" in prompt and line in prompt
+    assert prompt.index(line) < prompt.index("SOLVER DATA")
+    # Blank / whitespace question -> no QUESTION header (older direct callers).
+    assert "QUESTION" not in build_checker_user_prompt("prose", "DATA")
+    assert "QUESTION" not in build_checker_user_prompt("prose", "DATA", "   ")
+
+
+def test_check_postflop_claims_threads_question_through() -> None:
+    cap = _CapturingClient(['{"issues": []}'])
+    check_postflop_claims(
+        "prose", "DATA", cap, question="The Big Blind led the flop for 2bb."
+    )
+    assert "The Big Blind led the flop for 2bb." in cap.messages.last_user
+
+
 def test_reviser_fixes_and_keeps_options() -> None:
     facts = _facts_for()
     opts, correct = build_options(facts.spot)
@@ -1037,6 +1082,22 @@ def test_reviser_noop_without_issues_or_client() -> None:
     assert not revise_postflop_explanation(
         g, facts, issues=["a -- b"], client=None,
     ).changed
+
+
+def test_reviser_threads_question_through() -> None:
+    # The reviser must see the line too, so it keeps a correct line reference
+    # instead of deleting it to satisfy a false "invented line" flag.
+    facts = _facts_for()
+    opts, correct = build_options(facts.spot)
+    original = GeneratedExplanation(
+        *(opts + ["", "", "", ""])[:4], correct, "Bet for value here.",
+    )
+    cap = _CapturingClient(["Bet for value with the best hand here."])
+    revise_postflop_explanation(
+        original, facts, issues=["x -- y"], client=cap,
+        question="The Big Blind led the flop and you called.",
+    )
+    assert "The Big Blind led the flop and you called." in cap.messages.last_user
 
 
 # --- #1: batch lifecycle (claim check / auto-fix) ---------------------------
@@ -1203,6 +1264,82 @@ def test_postflop_skills_no_blockers_skill() -> None:
         for spot in enumerate_spots(SOLVE.nodes[nid]):
             facts = extract_facts(spot, SOLVE, equity_runouts=40)
             assert "Blockers & Card Removal" not in compute_postflop_skills(facts)
+
+
+def test_faces_check_raise_line_detects_xr_only() -> None:
+    # Raise == a second b<size> token (this solve has no `r` token), so a
+    # check-raise faced is the line check, bet, raise => [c, b, b].
+    from pipeline.postflop.skills import _faces_check_raise_line
+    assert _faces_check_raise_line("r:0:c:b214:b436")  # flop: check, bet, raise
+    # later street: only tokens after the last chance card count
+    assert _faces_check_raise_line("r:0:b214:c:2h:c:b722:b19700")
+    # NOT a check-raise:
+    assert not _faces_check_raise_line("r:0:c:b214")          # c-bet faced (no raise)
+    assert not _faces_check_raise_line("r:0:b214:b436")       # donk lead + raise (no check)
+    assert not _faces_check_raise_line("r:0:c:b214:b436:b871")  # re-raise war (4 tokens)
+    assert not _faces_check_raise_line("r:0:c")               # just a check
+    assert not _faces_check_raise_line("flop_ip_cbet")        # fixture id, no tokens
+
+
+def test_facing_check_raise_skill_rule() -> None:
+    from types import SimpleNamespace
+
+    from pipeline.postflop.skills import POSTFLOP_SKILL_RULES
+    xr = POSTFLOP_SKILL_RULES["Facing a Check-Raise"]
+
+    def f(node_id: str, facing: bool):
+        node = SimpleNamespace(node_id=node_id, is_facing_bet=facing)
+        return SimpleNamespace(spot=SimpleNamespace(node=node))
+
+    assert xr(f("r:0:c:b214:b436", True))
+    assert not xr(f("r:0:c:b214:b436", False))  # guard: must be facing a bet
+    assert not xr(f("r:0:c:b214", True))        # c-bet faced, not a check-raise
+
+
+def test_reverse_implied_odds_classifier() -> None:
+    from types import SimpleNamespace
+
+    from pipeline.postflop.skills import _reverse_implied_odds
+
+    def f(made: str, draws=(), archetype: str = "bluff_catch", tags=("facing_bet_spot",)):
+        return SimpleNamespace(
+            made_hand=made, draws=tuple(draws), archetype=archetype,
+            concept_tags=list(tags),
+        )
+
+    # A dominated made hand FACING A BET (pays off the better hand) -> RIO.
+    assert _reverse_implied_odds(f("top_pair_weak_kicker"))
+    assert _reverse_implied_odds(f("flush_weak"))
+    assert _reverse_implied_odds(f("straight_weak"))
+    # A non-nut flush DRAW carries RIO in itself, even when not facing a bet.
+    assert _reverse_implied_odds(f("ace_high", ["flush_draw_weak"], tags=()))
+    # A dominated made hand NOT facing a bet (e.g. betting it thin) -> not the lesson.
+    assert not _reverse_implied_odds(f("top_pair_weak_kicker", tags=()))
+    # Strong / nutted -> not RIO.
+    assert not _reverse_implied_odds(f("top_pair_top_kicker"))
+    assert not _reverse_implied_odds(f("flush_nut"))
+    assert not _reverse_implied_odds(f("ace_high", ["flush_draw_nut"]))
+    # Disjoint from Implied Odds: a clean drawing call never fires RIO.
+    assert not _reverse_implied_odds(
+        f("ace_high", ["flush_draw_weak"], archetype="call_drawing")
+    )
+
+
+def test_mdf_skill_fires_on_marginal_bluffcatch_only() -> None:
+    from types import SimpleNamespace
+
+    from pipeline.postflop.skills import POSTFLOP_SKILL_RULES
+    mdf = POSTFLOP_SKILL_RULES["Minimum Defense Frequency (MDF)"]
+
+    def f(tags, verb: str, bucket: str):
+        return SimpleNamespace(
+            concept_tags=tags, dominant_verb=verb, strength_bucket=bucket
+        )
+
+    assert mdf(f(["facing_bet_spot"], "call", "marginal"))
+    assert mdf(f(["facing_bet_spot"], "fold", "vulnerable"))
+    assert not mdf(f(["facing_bet_spot"], "call", "premium"))  # clear call, no bubble
+    assert not mdf(f(["c_bet_spot"], "bet", "marginal"))       # not facing a bet
 
 
 def test_skills_column_in_csv() -> None:

@@ -23,16 +23,87 @@ see exactly why each skill is (or isn't) tagged.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from pipeline.postflop.facts import PostflopFacts
 
 SkillRule = Callable[[PostflopFacts], bool]
 
+# A dealt chance card in a node-id line (e.g. ``2c``) -- marks a street boundary.
+_CARD_RE = re.compile(r"^[2-9TJQKA][cdhs]$")
+
 
 # --- helpers ----------------------------------------------------------------
 def _dominant_action(facts: PostflopFacts):
     return facts.spot.node.action_by_label(facts.dominant_action)
+
+
+def _current_street_tokens(node_id: str) -> list[str]:
+    """The action tokens on the CURRENT (last) street of a node-id line.
+
+    A node id is ``r:0:<flop tokens>[:<turn card>:<turn tokens>...]``; a dealt
+    chance card (``2c``) marks a street boundary, so the current street is the
+    run of tokens after the last card. ``[]`` for the synthetic fixtures (their
+    ids carry no ``:`` tokens). NB this solve encodes BOTH a bet and a raise as a
+    ``b<size>`` token (a raise is just a second ``b`` -- there is no ``r``
+    token), so two ``b`` tokens on one street == bet-then-raise."""
+    seg: list[str] = []
+    for token in node_id.split(":")[2:]:
+        if _CARD_RE.match(token):
+            seg = []
+        else:
+            seg.append(token)
+    return seg
+
+
+def _faces_check_raise_line(node_id: str) -> bool:
+    """True iff hero faces a CHECK-RAISE: the current street ran check, bet,
+    raise (``[c, b, b]``) and hero is now to act on the raise.
+
+    Villain checked (a street can't open with a call, so the leading ``c`` is a
+    check), hero bet, villain raised -- so hero is the original bettor (always in
+    position here) facing the check-raise. Exactly three tokens excludes both a
+    donk-lead-then-raise (starts with ``b``, not a check-raise) and a deeper
+    re-raise war (4+ tokens)."""
+    seg = _current_street_tokens(node_id)
+    return (
+        len(seg) == 3  # noqa: PLR2004 -- check, bet, raise
+        and seg[0] == "c"
+        and seg[1].startswith("b")
+        and seg[2].startswith("b")
+    )
+
+
+# Dominated made hands prone to reverse implied odds: a second-best top pair
+# (out-kicked), a non-nut made flush, or the ignorant end of a straight -- hands
+# that win small pots and lose big ones. (A non-nut flush DRAW is handled
+# separately via the draw list.)
+_RIO_DOMINATED_MADE = frozenset(
+    {"top_pair_weak_kicker", "flush_weak", "straight_weak"}
+)
+
+
+def _reverse_implied_odds(f: PostflopFacts) -> bool:
+    """Hero holds a hand prone to reverse implied odds -- wins small, loses big.
+
+    Two cases: a non-nut (weak) flush DRAW carries reverse implied odds in
+    itself (make it, still lose to a higher flush) regardless of the action; a
+    dominated MADE hand (second-best top pair / non-nut flush / ignorant-end
+    straight) only has RIO exposure when there is a bet to pay off -- so it must
+    be FACING a bet (betting a weak top pair thinly is not the RIO lesson).
+
+    Excluded when the spot is a clean drawing call (``call_drawing`` = Implied
+    Odds, the opposite concept), so the two stay disjoint -- mirroring the
+    preflop tagger's fold-gating of its RIO skill."""
+    if f.archetype == "call_drawing":
+        return False
+    if "flush_draw_weak" in f.draws:
+        return True
+    return (
+        f.made_hand in _RIO_DOMINATED_MADE
+        and "facing_bet_spot" in f.concept_tags
+    )
 
 
 def _is_overbet(facts: PostflopFacts) -> bool:
@@ -61,9 +132,10 @@ def _multiple_bet_sizes(facts: PostflopFacts) -> bool:
 
 # --- the catalog (postflop-relevant skills; names == the app's catalog) ------
 # Only skills a postflop spot can clearly test are listed. Preflop-only skills
-# (3-Betting, Squeezing, ...) and signals we can't derive yet (Facing a
-# Check-Raise, MDF, Combinatorics, Hand Reading, Reverse Implied Odds, Equity
-# Realization, ICM) are intentionally absent -- a strict-tagging choice.
+# (3-Betting, Squeezing, ...) and signals we still can't derive cleanly
+# (Combinatorics, Hand Reading, Equity Realization, ICM) are intentionally
+# absent -- a strict-tagging choice. (Facing a Check-Raise, MDF, and Reverse
+# Implied Odds were added June 2026 once each had a clean deterministic signal.)
 POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
     # --- Section 2: Betting & Aggression ---
     "C-Betting": lambda f: "c_bet_spot" in f.concept_tags,
@@ -77,6 +149,14 @@ POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
         f.dominant_verb == "raise"
         and "facing_bet_spot" in f.concept_tags
         and not f.hero_in_position
+    ),
+    # The mirror: hero bet and villain check-raised, so hero (the bettor, always
+    # IP here) now faces the raise. Detected from the betting line, not hero's
+    # action, so it can't leak the answer. Disjoint from "Check-Raising" (that
+    # needs hero OOP; a check-raise hero faces always has hero IP).
+    "Facing a Check-Raise": lambda f: (
+        f.spot.node.is_facing_bet
+        and _faces_check_raise_line(f.spot.node.node_id)
     ),
     "Donk Betting": lambda f: "donk_bet_spot" in f.concept_tags,
     # Hero (the preflop raiser) faces a flop bet => villain led into him (a donk).
@@ -118,7 +198,17 @@ POSTFLOP_SKILL_RULES: dict[str, SkillRule] = {
     "Pot Odds": lambda f: (
         "facing_bet_spot" in f.concept_tags and f.dominant_verb in ("call", "fold")
     ),
+    # MDF = the defender's required continue frequency vs a bet. Narrower than Pot
+    # Odds: it fires on the genuine defense-bubble hands (marginal / vulnerable
+    # bluff-catchers facing a bet, deciding call-or-fold), where "am I defending
+    # enough" is the lesson -- not every priced call/fold.
+    "Minimum Defense Frequency (MDF)": lambda f: (
+        "facing_bet_spot" in f.concept_tags
+        and f.dominant_verb in ("call", "fold")
+        and f.strength_bucket in ("marginal", "vulnerable")
+    ),
     "Implied Odds": lambda f: f.archetype == "call_drawing",
+    "Reverse Implied Odds": _reverse_implied_odds,
     # Low SPR turns a made hand into a commitment decision -- where SPR IS the
     # lesson. (High-SPR playability is real too but harder to isolate cleanly.)
     "Stack-to-Pot Ratio (SPR)": lambda f: (
@@ -163,6 +253,9 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
     "(the bettor is the raiser, so it's a c-bet).",
     "Check-Raising": "Hero is out of position and raises a bet (checked, villain "
     "bet, hero raises).",
+    "Facing a Check-Raise": "The betting line ran check, bet, raise on this street, "
+    "so hero bet and villain check-raised and hero now faces the raise (read from "
+    "the line, not hero's action).",
     "Donk Betting": "Hero leads into the preflop raiser from out of position (the "
     "`donk_bet_spot` tag).",
     "Facing a Donk Bet": "Hero IS the preflop raiser and faces a flop bet, so "
@@ -186,8 +279,14 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
     "`pot_control_spot` tag or a pot_control_check frame).",
     "Pot Odds": "Hero faces a bet and the decision is call-or-fold, so the price "
     "is the core math.",
+    "Minimum Defense Frequency (MDF)": "Hero faces a bet with a marginal / "
+    "vulnerable bluff-catcher and is deciding call-or-fold, so the lesson is "
+    "defending often enough to deny villain a profitable bluff.",
     "Implied Odds": "Hero calls a draw getting the right price plus future-street "
     "value (a call_drawing frame).",
+    "Reverse Implied Odds": "Hero has a non-nut flush draw, or a dominated made "
+    "hand (second-best top pair / non-nut flush or straight) while FACING A BET -- "
+    "hands that win small and lose big (excluded on a clean drawing call).",
     "Stack-to-Pot Ratio (SPR)": f"SPR is low (<= {_LOW_SPR}) with a made hand "
     "(premium/strong/medium), so commitment is driven by the stack-to-pot ratio.",
     "Range Polarization": "An overbet is in play (hero's or villain's) -- the "
@@ -210,13 +309,7 @@ POSTFLOP_SKILL_EXPLAINERS: dict[str, str] = {
 # Skills the postflop path deliberately does NOT tag yet (no clean signal),
 # shown in the admin explainer so the absence is documented, not a mystery.
 POSTFLOP_SKILLS_NOT_TAGGED: dict[str, str] = {
-    "Facing a Check-Raise": "Needs hero-bet-then-villain-raised detection from "
-    "the street history (not yet exposed cleanly).",
     "Facing a Probe Bet": "Needs prior-street check-back detection on hero's side.",
-    "Reverse Implied Odds": "No deterministic postflop signal yet (dominated-draw "
-    "detection).",
-    "Minimum Defense Frequency (MDF)": "No defense-threshold signal computed "
-    "postflop yet.",
     "Combinatorics": "Nearly every spot involves combo counting; needs a narrower "
     "trigger.",
     "Equity Realization": "Too broad without a realization-gap signal.",
