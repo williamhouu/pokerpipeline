@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.explanation_generator import ExplanationValidationError
+from pipeline.postflop.action_history import format_question
 from pipeline.postflop.claim_checker import (
     POSTFLOP_CHECKER_SYSTEM_PROMPT,
     ClaimCheckResult,
@@ -63,15 +64,17 @@ logger = logging.getLogger(__name__)
 
 def _safe_postflop_claim_check(
     prose: str, solver_data_block: str, client: object, *,
-    model: str, system_prompt: str, node_id: str,
+    model: str, system_prompt: str, node_id: str, question: str = "",
 ) -> ClaimCheckResult | None:
     """Run the postflop claim checker, wrapped so a checker failure never drops
     a row. Returns the ``ClaimCheckResult`` or ``None`` on error. Shared by the
-    flag-only path and the revise pass (initial gate + final audit)."""
+    flag-only path and the revise pass (initial gate + final audit). ``question``
+    is the action-history narrative, so the checker can verify line references
+    against the truth instead of flagging them as invented."""
     try:
         return check_postflop_claims(
             prose, solver_data_block, client,
-            model=model, system_prompt=system_prompt,
+            question=question, model=model, system_prompt=system_prompt,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("postflop batch: claim checker failed for %s: %s", node_id, exc)
@@ -88,7 +91,7 @@ _REVISE_GATE_PASSES = 2
 
 def _gate_check_best_of(
     prose: str, solver_data_block: str, client: object, *,
-    model: str, system_prompt: str, node_id: str, passes: int,
+    model: str, system_prompt: str, node_id: str, passes: int, question: str = "",
 ) -> ClaimCheckResult | None:
     """Run the claim-check gate ``passes`` times and union the issues (deduped by
     claim text). Returns a merged ``ClaimCheckResult`` (``passed`` False if any
@@ -100,6 +103,7 @@ def _gate_check_best_of(
         cc = _safe_postflop_claim_check(
             prose, solver_data_block, client,
             model=model, system_prompt=system_prompt, node_id=node_id,
+            question=question,
         )
         if cc is None:
             continue
@@ -420,6 +424,11 @@ def generate_postflop_batch(
             continue
 
         solver_data_block = build_solver_data_block(facts)
+        # The action-history narrative (the SAME string the reader + the writer
+        # see). The data block never restates the line, so the Layer-7 checker /
+        # reviser need this to verify line references (a donk-lead, a check-raise)
+        # instead of false-flagging them as invented action history.
+        question_text = format_question(facts.spot, solve, display_in_bb=display_in_bb)
 
         # --- Layer-7 LLM audit / revise passes (opt-in extra LLM calls) ------
         # Mirrors the preflop lifecycle. Two flows share one "gate" call:
@@ -441,12 +450,13 @@ def generate_postflop_batch(
                     explanation.answer_explanation, solver_data_block, client,
                     model=model, system_prompt=checker_prompt,
                     node_id=spot.node.node_id, passes=_REVISE_GATE_PASSES,
+                    question=question_text,
                 )
                 if revise_pass
                 else _safe_postflop_claim_check(
                     explanation.answer_explanation, solver_data_block, client,
                     model=model, system_prompt=checker_prompt,
-                    node_id=spot.node.node_id,
+                    node_id=spot.node.node_id, question=question_text,
                 )
             )
             gate_issues = (
@@ -463,7 +473,8 @@ def generate_postflop_batch(
                         rev = revise_postflop_explanation(
                             explanation, facts, issues=gate_issues,
                             client=client, model=model, temperature=temperature,
-                            max_tokens=max_tokens, system_prompt=system_prompt,
+                            max_tokens=max_tokens, question=question_text,
+                            system_prompt=system_prompt,
                             usage_callback=_record_usage,
                         )
                     except Exception as exc:  # noqa: BLE001 - never drop a row
@@ -485,7 +496,7 @@ def generate_postflop_batch(
                             cc4 = _safe_postflop_claim_check(
                                 explanation.answer_explanation, solver_data_block,
                                 client, model=model, system_prompt=checker_prompt,
-                                node_id=spot.node.node_id,
+                                node_id=spot.node.node_id, question=question_text,
                             )
                             if cc4 is not None:
                                 final_audit_issues = [

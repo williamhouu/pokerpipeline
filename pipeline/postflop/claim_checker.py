@@ -40,10 +40,23 @@ _CHECKER_MAX_TOKENS = 1024
 POSTFLOP_CHECKER_SYSTEM_PROMPT = (
     "You are a sharp No-Limit Hold'em poker editor reviewing ONE answer "
     "explanation for a single POSTFLOP spot (a flop, turn, or river decision). "
-    "You are given a SOLVER DATA block of ground-truth facts and the ANSWER "
-    "EXPLANATION written about them. Your main job is to flag prose a thoughtful "
-    "student would find CONFUSING, MISLEADING, or SELF-CONTRADICTORY, plus any "
-    "outright poker error. You do not rewrite anything.\n\n"
+    "You are given the QUESTION (the exact spot, with the FULL action history "
+    "that led to this decision), a SOLVER DATA block of ground-truth facts, and "
+    "the ANSWER EXPLANATION written about them. Your main job is to flag prose a "
+    "thoughtful student would find CONFUSING, MISLEADING, or SELF-CONTRADICTORY, "
+    "plus any outright poker error. You do not rewrite anything.\n\n"
+    "THE QUESTION IS THE SOURCE OF TRUTH FOR THE ACTION SEQUENCE. It spells out "
+    "every action on every street -- who opened, bet, checked, called, raised, "
+    "or led, and for how much. The SOLVER DATA block does NOT repeat the line; "
+    "it only names the preflop aggressor and the current street. So NEVER flag a "
+    "reference to the line as 'invented' or 'not in the data' just because the "
+    "data block omits it -- VERIFY it against the QUESTION, and flag it only if "
+    "it actually contradicts the QUESTION. A donk-lead, a check-raise, or a probe "
+    "by the player who is NOT the preflop aggressor is a normal line and will be "
+    "in the QUESTION even though the data block names the other player the "
+    "aggressor. (Inventing a specific RANGE composition the facts don't support "
+    "is still flaggable -- but judge that against the RANGE / NUT lines, not the "
+    "action sequence.)\n\n"
     "PRIORITY 1 -- CLARITY AND INTERNAL COHERENCE (the main job). The "
     "explanation is fed the solver's numbers and almost always quotes them "
     "correctly, so do NOT hunt for tiny data mismatches. Flag the exact phrase "
@@ -132,14 +145,27 @@ class ClaimCheckResult:
     raw: str = ""                      # raw checker output, kept for debugging
 
 
-def build_checker_user_prompt(explanation: str, solver_data_block: str) -> str:
-    """The per-call user message: the data block, then the explanation.
+def build_checker_user_prompt(
+    explanation: str, solver_data_block: str, question: str = ""
+) -> str:
+    """The per-call user message: the QUESTION (line), the data block, the explanation.
 
     Postflop's data block is already a formatted string (from
     :func:`pipeline.postflop.explanation_generator.build_solver_data_block`),
-    so it is embedded as-is rather than re-serialised from a dict.
+    so it is embedded as-is rather than re-serialised from a dict. ``question``
+    is the deterministic action-history narrative -- the SAME string the reader
+    and the writer see. It is the source of truth for the LINE, so the checker
+    stops false-flagging true references to earlier-street action (a donk-lead, a
+    check-raise) that the data block never restates. Empty -> omitted (the writer
+    always passes it; only older direct callers leave it blank).
     """
+    head = (
+        f"QUESTION (the spot + full action history):\n{question}\n\n"
+        if question.strip()
+        else ""
+    )
     return (
+        f"{head}"
         "SOLVER DATA:\n"
         f"{solver_data_block}\n\n"
         "ANSWER EXPLANATION:\n"
@@ -177,14 +203,18 @@ def check_postflop_claims(
     solver_data_block: str,
     client: object,
     *,
+    question: str = "",
     model: str = DEFAULT_MODEL,
     temperature: float = 0.0,
     system_prompt: str = POSTFLOP_CHECKER_SYSTEM_PROMPT,
 ) -> ClaimCheckResult:
     """Audit one postflop explanation against its SOLVER DATA block via a
     checker LLM call. Returns a structured verdict (see module docstring). Fails
-    open. ``system_prompt`` defaults to :data:`POSTFLOP_CHECKER_SYSTEM_PROMPT`
-    but the admin panel can pass an edited version so it is tunable.
+    open. ``question`` is the action-history narrative (the line); pass it so the
+    checker verifies line references against the truth instead of flagging them
+    as invented. ``system_prompt`` defaults to
+    :data:`POSTFLOP_CHECKER_SYSTEM_PROMPT` but the admin panel can pass an edited
+    version so it is tunable.
     """
     if client is None:
         import os  # noqa: PLC0415
@@ -192,7 +222,7 @@ def check_postflop_claims(
         from anthropic import Anthropic  # noqa: PLC0415
 
         client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    user = build_checker_user_prompt(explanation, solver_data_block)
+    user = build_checker_user_prompt(explanation, solver_data_block, question)
     response = call_messages_create(
         client,
         model=model,

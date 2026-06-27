@@ -64,6 +64,12 @@ _REVISER_INSTRUCTION = (
     "ADVANTAGE lines settle who is ahead; the DRAWS line settles the draw type; "
     "HERO EQUITY and the FACING A BET break-even settle any ahead/behind or "
     "price claim; the BOARD line settles the cards.\n"
+    "- The QUESTION above gives the exact action history (who bet, checked, "
+    "called, raised, or led on each street). It is the source of truth for the "
+    "LINE: if a flag calls a true line reference 'invented' (e.g. doubting a "
+    "donk-lead or a check-raise that the QUESTION actually shows), that is a "
+    "FALSE flag -- KEEP the correct statement, do not delete it to satisfy the "
+    "flag.\n"
     "- Keep a flagged sentence as-is ONLY if the SOLVER DATA shows it is already "
     "correct (a false flag). Do NOT return the explanation unchanged when any "
     "flag is valid -- rewrite the sentences that are wrong. A no-op response is "
@@ -115,6 +121,7 @@ def revise_postflop_explanation(
     model: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    question: str = "",
     system_prompt: str | None = None,
     usage_callback: UsageCallback | None = None,
 ) -> ReviseResult:
@@ -127,6 +134,9 @@ def revise_postflop_explanation(
         facts: the Layer-5 data block (ground truth + the re-validation input).
         issues: the audit findings to fix (the claim checker's
             ``"<claim> -- <problem>"`` strings). Empty -> no-op.
+        question: the action-history narrative (the line). Passed so the reviser
+            sees the same truth the writer did and keeps correct line references
+            instead of deleting them to satisfy a false "invented line" flag.
         client: an Anthropic client. ``None`` -> no-op (returns the original).
         system_prompt: the generation system prompt to reuse, so the reviser
             obeys the same voice rules. ``None`` -> the active postflop prompt.
@@ -143,7 +153,13 @@ def revise_postflop_explanation(
         system_prompt if system_prompt is not None else load_postflop_system_prompt()
     )
     options = [o for o in explanation.options() if o]  # the fixed answer set
+    head = (
+        f"QUESTION (the spot + full action history):\n{question}\n\n"
+        if question.strip()
+        else ""
+    )
     user = (
+        f"{head}"
         "SOLVER DATA:\n"
         f"{build_solver_data_block(facts)}\n\n"
         f"OPTIONS (fixed, do not change): {options}\n"
