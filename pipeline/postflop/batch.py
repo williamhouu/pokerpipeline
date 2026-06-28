@@ -28,13 +28,7 @@ from typing import Any
 
 from pipeline.explanation_generator import ExplanationValidationError
 from pipeline.postflop.action_history import format_question
-from pipeline.postflop.claim_checker import (
-    POSTFLOP_CHECKER_SYSTEM_PROMPT,
-    ClaimCheckResult,
-    ClaimIssue,
-    check_postflop_claims,
-    claim_check_to_json,
-)
+from pipeline.postflop.claim_checker import POSTFLOP_CHECKER_SYSTEM_PROMPT
 from pipeline.postflop.difficulty import compute_difficulty
 from pipeline.postflop.explanation_generator import (
     DEFAULT_MAX_TOKENS,
@@ -46,6 +40,7 @@ from pipeline.postflop.explanation_generator import (
 )
 from pipeline.postflop.facts import DEFAULT_EQUITY_RUNOUTS, extract_facts
 from pipeline.postflop.format_writer import build_postflop_row, write_postflop_csv
+from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
 from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ, line_premise_min_freq
 from pipeline.postflop.quality import node_quality_issue
@@ -54,69 +49,12 @@ from pipeline.postflop.question_extractor import (
     MIN_FREQUENCY,
     evaluate_spot,
 )
-from pipeline.postflop.reviser import revise_postflop_explanation
 from pipeline.postflop.solve import PostflopSolve, validate_solve
 from pipeline.postflop.spot_sampler import enumerate_spots
 
 ProgressCallback = Any  # callable(message: str, done: int, total: int) | None
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_postflop_claim_check(
-    prose: str, solver_data_block: str, client: object, *,
-    model: str, system_prompt: str, node_id: str, question: str = "",
-) -> ClaimCheckResult | None:
-    """Run the postflop claim checker, wrapped so a checker failure never drops
-    a row. Returns the ``ClaimCheckResult`` or ``None`` on error. Shared by the
-    flag-only path and the revise pass (initial gate + final audit). ``question``
-    is the action-history narrative, so the checker can verify line references
-    against the truth instead of flagging them as invented."""
-    try:
-        return check_postflop_claims(
-            prose, solver_data_block, client,
-            question=question, model=model, system_prompt=system_prompt,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("postflop batch: claim checker failed for %s: %s", node_id, exc)
-        return None
-
-
-# The revise gate runs the claim checker this many times and UNIONs the issues.
-# The checker is non-deterministic even at temperature 0 (a single pass can miss
-# a real issue, so a batch sometimes gets a "lucky clean" and no rewrite fires);
-# best-of-N makes the gate reliable. Only the (opt-in, paid) revise pass pays for
-# the extra calls -- the flag-only path stays a single call.
-_REVISE_GATE_PASSES = 2
-
-
-def _gate_check_best_of(
-    prose: str, solver_data_block: str, client: object, *,
-    model: str, system_prompt: str, node_id: str, passes: int, question: str = "",
-) -> ClaimCheckResult | None:
-    """Run the claim-check gate ``passes`` times and union the issues (deduped by
-    claim text). Returns a merged ``ClaimCheckResult`` (``passed`` False if any
-    pass flagged anything), or ``None`` if every pass errored."""
-    merged: list[ClaimIssue] = []
-    seen: set[str] = set()
-    any_ran = False
-    for _ in range(max(1, passes)):
-        cc = _safe_postflop_claim_check(
-            prose, solver_data_block, client,
-            model=model, system_prompt=system_prompt, node_id=node_id,
-            question=question,
-        )
-        if cc is None:
-            continue
-        any_ran = True
-        for issue in cc.issues:
-            key = issue.claim.strip().lower()
-            if key not in seen:
-                seen.add(key)
-                merged.append(issue)
-    if not any_ran:
-        return None
-    return ClaimCheckResult(passed=not merged, issues=tuple(merged))
 
 
 @dataclass
@@ -446,118 +384,33 @@ def generate_postflop_batch(
         question_text = format_question(facts.spot, solve, display_in_bb=display_in_bb)
 
         # --- Layer-7 LLM audit / revise passes (opt-in extra LLM calls) ------
-        # Mirrors the preflop lifecycle. Two flows share one "gate" call:
-        #   * run_claim_checker (no revise): the gate FLAGS prose, flag only.
-        #   * revise_pass: if the gate flags, a 3rd call REWRITES the prose,
-        #     re-validated by the hard validators (a rewrite that breaks a rule
-        #     is DISCARDED, the original kept). final_audit is a 4th call that
-        #     claim-checks the KEPT rewrite. Recorded in `revise` for the Review
-        #     page. Real runs only (a placeholder is never checked/revised).
+        # Shared with the full-hand driver (pipeline.postflop.layer7) so a leg
+        # gets the same QA as a standalone spot. Real runs only (a placeholder is
+        # never checked/revised).
         claim_check_json = ""
         claim_issues: list[str] = []
-        final_audit_issues: list[str] = []
         revise_record: dict[str, Any] | None = None
+        remaining_issues: list[str] = []
         if not use_placeholder and (run_claim_checker or revise_pass):
-            # The revise gate runs best-of-N (union) so a flaky single pass can't
-            # let a real issue through; flag-only stays one call.
-            cc = (
-                _gate_check_best_of(
-                    explanation.answer_explanation, solver_data_block, client,
-                    model=model, system_prompt=checker_prompt,
-                    node_id=spot.node.node_id, passes=_REVISE_GATE_PASSES,
-                    question=question_text,
-                )
-                if revise_pass
-                else _safe_postflop_claim_check(
-                    explanation.answer_explanation, solver_data_block, client,
-                    model=model, system_prompt=checker_prompt,
-                    node_id=spot.node.node_id, question=question_text,
-                )
+            l7 = run_layer7_audit(
+                explanation, facts,
+                solver_data_block=solver_data_block, question_text=question_text,
+                node_id=spot.node.node_id, client=client, model=model,
+                temperature=temperature, max_tokens=max_tokens,
+                system_prompt=system_prompt, checker_prompt=checker_prompt,
+                run_claim_checker=run_claim_checker, revise_pass=revise_pass,
+                final_audit=final_audit, usage_callback=_record_usage,
             )
-            gate_issues = (
-                [f"{i.claim} -- {i.problem}" for i in cc.issues]
-                if cc is not None else []
-            )
-            if revise_pass:
-                if not gate_issues:
-                    revise_record = {"status": "clean", "gate_issues": []}
-                else:
-                    revise_flagged += 1
-                    original_prose = explanation.answer_explanation
-                    try:
-                        rev = revise_postflop_explanation(
-                            explanation, facts, issues=gate_issues,
-                            client=client, model=model, temperature=temperature,
-                            max_tokens=max_tokens, question=question_text,
-                            system_prompt=system_prompt,
-                            usage_callback=_record_usage,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - never drop a row
-                        logger.warning(
-                            "postflop batch: reviser failed for %s: %s",
-                            spot.node.node_id, exc,
-                        )
-                        rev = None
-                    if rev is not None and rev.changed:
-                        revise_fixed += 1
-                        explanation = rev.explanation  # ship the rewrite
-                        revise_record = {
-                            "status": "fixed",
-                            "gate_issues": gate_issues,
-                            "original_explanation": original_prose,
-                            "revised_explanation": rev.explanation.answer_explanation,
-                        }
-                        if final_audit:  # 4th call: claim-check the rewrite
-                            cc4 = _safe_postflop_claim_check(
-                                explanation.answer_explanation, solver_data_block,
-                                client, model=model, system_prompt=checker_prompt,
-                                node_id=spot.node.node_id, question=question_text,
-                            )
-                            if cc4 is not None:
-                                final_audit_issues = [
-                                    f"{i.claim} -- {i.problem}" for i in cc4.issues
-                                ]
-                                claim_check_json = claim_check_to_json(cc4)
-                            revise_record["final_audit_issues"] = final_audit_issues
-                    else:
-                        # Rewrite came back UNCHANGED or was DISCARDED by the
-                        # hard validators -> the ORIGINAL ships, gate issues
-                        # unresolved. Record exactly why.
-                        reason = (
-                            getattr(rev, "rejected_reason", "") if rev
-                            else "the reviser call failed"
-                        )
-                        attempt = getattr(rev, "revised_text", "") if rev else ""
-                        if reason:
-                            revise_discarded += 1
-                            rstatus = "discarded"
-                        else:
-                            revise_unchanged += 1
-                            rstatus = "unchanged"
-                        revise_record = {
-                            "status": rstatus,
-                            "gate_issues": gate_issues,
-                            "rejected_reason": reason,
-                            "attempted_rewrite": attempt,
-                            "original_explanation": original_prose,
-                        }
-                        if cc is not None:  # gate findings describe the shipped original
-                            claim_check_json = claim_check_to_json(cc)
-            elif run_claim_checker:
-                if cc is not None:
-                    claim_check_json = claim_check_to_json(cc)
-                claim_issues = gate_issues
-                if gate_issues:
-                    claim_flagged += 1
-
-        # Issues that REMAIN on the shipped explanation drive the "flagged"
-        # status: the regular checker's, the 4th-call audit's, or gate issues an
-        # auto-fix did NOT resolve (discarded / unchanged).
-        remaining_issues = list(claim_issues) + list(final_audit_issues)
-        if revise_record is not None and revise_record["status"] in (
-            "discarded", "unchanged",
-        ):
-            remaining_issues += list(revise_record.get("gate_issues") or [])
+            explanation = l7.explanation  # possibly the rewrite
+            claim_check_json = l7.claim_check_json
+            claim_issues = l7.claim_issues
+            revise_record = l7.revise_record
+            remaining_issues = l7.remaining_issues
+            claim_flagged += l7.claim_flagged
+            revise_flagged += l7.revise_flagged
+            revise_fixed += l7.revise_fixed
+            revise_discarded += l7.revise_discarded
+            revise_unchanged += l7.revise_unchanged
 
         from pipeline.postflop.validators import run_postflop_soft_validators
 

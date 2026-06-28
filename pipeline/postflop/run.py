@@ -26,6 +26,7 @@ from pipeline.postflop.explanation_generator import (
     DEFAULT_TEMPERATURE,
     load_postflop_system_prompt,
 )
+from pipeline.postflop.preflop_entry import load_preflop_entry_system_prompt
 from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ
 from pipeline.postflop.question_extractor import MAX_FREQUENCY, MIN_FREQUENCY
 from pipeline.postflop.spot_selection import make_spot_selector
@@ -299,8 +300,187 @@ def compare_postflop_batches_from_db(
     }
 
 
+def generate_full_hand_batch_from_db(
+    *,
+    db_path: str,
+    output_path: str | Path,
+    total_hands: int,
+    heroes: tuple[str, ...] = (),
+    streets: tuple[str, ...] = ("flop", "turn", "river"),
+    max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
+    include_villain: bool = False,
+    include_preflop: bool = True,
+    stakes: str = "$1/$2",
+    live_or_online: str = "Live",
+    bb_in_dollars: float = 2.0,
+    answer_style: str = "auto",
+    display_in_bb: bool = True,
+    model: str = DEFAULT_MODEL,
+    dry_run: bool = False,
+    min_frequency: float = MIN_FREQUENCY,
+    max_frequency: float = MAX_FREQUENCY,
+    min_ev_gap_bb: float | None = None,
+    quality_gate: bool = True,
+    min_premise_freq: float | None = DEFAULT_MIN_PREMISE_FREQ,
+    equity_runouts: int | None = None,
+    system_prompt: str | None = None,
+    preflop_system_prompt: str | None = None,
+    trap_difficulty: bool = False,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
+    revise_pass: bool = False,
+    final_audit: bool = False,
+    progress_callback: Any = None,
+):
+    """Load the ``.db`` (line-closed) and generate ``total_hands`` play-throughs.
+
+    Each hand is several LINKED questions (preflop entry + the hero's decision on
+    each street of one connected line) sharing a ``hand_id`` with an ascending
+    ``sequence_index`` (Option B). ``include_villain`` also emits the villain's
+    line on the same runout. The opt-in Layer-7 audit runs on the postflop legs.
+    Picklable for the admin subprocess job runner.
+    """
+    from pipeline.postflop.full_hand_batch import generate_full_hand_batch
+
+    solve = load_postflop_db(
+        db_path,
+        streets=tuple(streets) or ("flop", "turn", "river"),
+        max_nodes_per_street=max_nodes_per_street,
+        include_ancestors=True,  # the connected line must be fully materialised
+        stakes=stakes,
+        live_or_online=live_or_online,
+        bb_in_dollars=bb_in_dollars,
+    )
+
+    client = None
+    if not dry_run and os.environ.get("ANTHROPIC_API_KEY"):
+        from anthropic import Anthropic  # noqa: PLC0415
+
+        client = Anthropic()
+
+    kwargs: dict[str, Any] = {}
+    if equity_runouts is not None:
+        kwargs["equity_runouts"] = equity_runouts
+    prompt = system_prompt if system_prompt is not None else load_postflop_system_prompt()
+    pre_prompt = (
+        preflop_system_prompt if preflop_system_prompt is not None
+        else load_preflop_entry_system_prompt()
+    )
+
+    return generate_full_hand_batch(
+        solve=solve,
+        output_path=output_path,
+        total_hands=total_hands,
+        client=client,
+        model=model,
+        temperature=DEFAULT_TEMPERATURE,
+        max_tokens=DEFAULT_MAX_TOKENS,
+        dry_run=dry_run or client is None,
+        answer_style=answer_style,
+        display_in_bb=display_in_bb,
+        heroes=tuple(heroes),
+        include_villain=include_villain,
+        include_preflop=include_preflop,
+        min_frequency=min_frequency,
+        max_frequency=max_frequency,
+        min_ev_gap_bb=min_ev_gap_bb,
+        quality_gate=quality_gate,
+        min_premise_freq=min_premise_freq,
+        system_prompt=prompt,
+        preflop_system_prompt=pre_prompt,
+        trap_difficulty=trap_difficulty,
+        run_claim_checker=run_claim_checker,
+        claim_checker_prompt=claim_checker_prompt,
+        revise_pass=revise_pass,
+        final_audit=final_audit,
+        progress_callback=progress_callback,
+        provenance={
+            "db_path": str(db_path),
+            "streets": list(streets) or ["flop", "turn", "river"],
+            "max_nodes_per_street": max_nodes_per_street,
+            "include_ancestors": True,
+            "stakes": stakes,
+            "live_or_online": live_or_online,
+            "bb_in_dollars": bb_in_dollars,
+        },
+        **kwargs,
+    )
+
+
+def generate_preflop_entry_batch_from_db(
+    *,
+    db_path: str,
+    output_path: str | Path,
+    total_questions: int,
+    heroes: tuple[str, ...] = (),
+    stakes: str = "$1/$2",
+    live_or_online: str = "Live",
+    bb_in_dollars: float = 2.0,
+    answer_style: str = "auto",
+    display_in_bb: bool = True,
+    model: str = DEFAULT_MODEL,
+    dry_run: bool = False,
+    min_frequency: float = MIN_FREQUENCY,
+    max_frequency: float = MAX_FREQUENCY,
+    preflop_system_prompt: str | None = None,
+    progress_callback: Any = None,
+):
+    """Load the ``.db`` and generate STANDALONE preflop-entry questions.
+
+    Sourced from the solve's flop-entry range frequencies (the entry decision
+    that started the hand). Only the flop is materialised (the entry ranges come
+    from the preflop-ranges table, not the node walk). Picklable for the admin.
+    """
+    from pipeline.postflop.full_hand_batch import generate_preflop_entry_batch
+
+    solve = load_postflop_db(
+        db_path,
+        streets=("flop",),
+        max_nodes_per_street=1,  # entry ranges don't need the node set
+        stakes=stakes,
+        live_or_online=live_or_online,
+        bb_in_dollars=bb_in_dollars,
+    )
+
+    client = None
+    if not dry_run and os.environ.get("ANTHROPIC_API_KEY"):
+        from anthropic import Anthropic  # noqa: PLC0415
+
+        client = Anthropic()
+
+    pre_prompt = (
+        preflop_system_prompt if preflop_system_prompt is not None
+        else load_preflop_entry_system_prompt()
+    )
+    return generate_preflop_entry_batch(
+        solve=solve,
+        output_path=output_path,
+        total_questions=total_questions,
+        client=client,
+        model=model,
+        temperature=DEFAULT_TEMPERATURE,
+        max_tokens=DEFAULT_MAX_TOKENS,
+        dry_run=dry_run or client is None,
+        answer_style=answer_style,
+        display_in_bb=display_in_bb,
+        heroes=tuple(heroes),
+        min_frequency=min_frequency,
+        max_frequency=max_frequency,
+        preflop_system_prompt=pre_prompt,
+        progress_callback=progress_callback,
+        provenance={
+            "db_path": str(db_path),
+            "stakes": stakes,
+            "live_or_online": live_or_online,
+            "bb_in_dollars": bb_in_dollars,
+        },
+    )
+
+
 __all__ = [
     "POSTFLOP_OUTPUT_DIR",
     "compare_postflop_batches_from_db",
+    "generate_full_hand_batch_from_db",
     "generate_postflop_batch_from_db",
+    "generate_preflop_entry_batch_from_db",
 ]

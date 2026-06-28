@@ -876,7 +876,9 @@ def _render_generate_page_postflop() -> None:
     )
     from pipeline.postflop.run import (  # noqa: PLC0415
         POSTFLOP_OUTPUT_DIR,
+        generate_full_hand_batch_from_db,
         generate_postflop_batch_from_db,
+        generate_preflop_entry_batch_from_db,
     )
 
     _render_postflop_job_panel()
@@ -947,74 +949,199 @@ def _render_generate_page_postflop() -> None:
 
     st.divider()
 
+    # 3b. Question MODE -- independent spots (today), full-hand play-throughs, or
+    # standalone preflop-entry questions. The mode steers which run.py driver the
+    # GENERATE button calls + a couple of mode-only controls below.
+    pf_mode_label = st.radio(
+        "Question mode",
+        options=[
+            "Independent spots",
+            "Full hands (preflop → river)",
+            "Preflop only (entry decisions)",
+        ],
+        index=0,
+        horizontal=True,
+        key="postflop_question_mode",
+        help=(
+            "**Independent spots** — one standalone question per decision (today's "
+            "behaviour). **Full hands** — linked preflop→river sequences a user "
+            "plays street by street (grouped by `hand_id`, ordered by "
+            "`sequence_index`); the count below is the number of HANDS. **Preflop "
+            "only** — standalone preflop-entry questions read from this solve's "
+            "flop-entry frequencies (its call/open mix)."
+        ),
+    )
+    pf_mode = (
+        "full_hand" if pf_mode_label.startswith("Full")
+        else "preflop" if pf_mode_label.startswith("Preflop")
+        else "spots"
+    )
+    pf_include_villain = False
+    if pf_mode == "full_hand":
+        pf_include_villain = st.checkbox(
+            "Also ask the villain's decisions (flip the frame)",
+            value=False,
+            key="postflop_include_villain",
+            help=(
+                "For each hand, also emit the OTHER player's decision line on the "
+                "same runout as a SEPARATE hand — so one tree yields ~8+ questions "
+                "(both perspectives). Off = hero-only."
+            ),
+        )
+        st.caption(
+            "Full-hand depth = the deepest *worthy* decision on each line "
+            "(widen the frequency window in Advanced for deeper hands)."
+        )
+    elif pf_mode == "preflop":
+        st.caption(
+            "Preflop-entry questions come from the solve's flop-entry range "
+            "frequencies (a solve INPUT, not a solved decision — no EVs). Honest "
+            "for the entry that started this hand; not a substitute for the "
+            "preflop range-pack pipeline."
+        )
+
+    st.divider()
+
     # 4. What to ask.
     st.subheader("2. What to ask")
+
+    is_spots = pf_mode == "spots"
+    is_full = pf_mode == "full_hand"
+    is_preflop = pf_mode == "preflop"
+
+    # Per-mode DEFAULTS: every variable the GENERATE button reads must exist even
+    # when its widget is hidden for the current mode (so a hidden control never
+    # NameErrors). The relevant driver simply doesn't receive the irrelevant ones.
+    streets = ("flop", "turn", "river")  # full-hand always spans the hand
+    diversify = False
+    strength_filter: list[str] = []
+    decision_filter: list[str] = []
+    trap_difficulty = False
+    use_ev_gap = False
+    min_ev_gap: float | None = None
+    max_nodes: int = 600
+    quality_gate = True
+    min_premise_freq: float | None = None
+    pf_run_claim_checker = False
+    pf_revise_pass = False
+    pf_final_audit = False
+    pf_claim_checker_prompt: str | None = None
+
     col1, col2 = st.columns(2)
     with col1:
-        total = st.number_input(
-            "Number of questions",
-            min_value=1,
-            max_value=5000,
-            value=20,
-            step=5,
-            key="postflop_total",
-        )
+        if is_full:
+            total = st.number_input(
+                "Number of HANDS",
+                min_value=1,
+                max_value=2000,
+                value=10,
+                step=1,
+                key="postflop_total",
+                help="Each HAND becomes SEVERAL linked questions (a preflop entry "
+                "plus one per street the hero acts on), so the CSV row count is "
+                "much higher than the hand count — see the estimate below.",
+            )
+        else:
+            total = st.number_input(
+                "Number of questions",
+                min_value=1,
+                max_value=5000,
+                value=20,
+                step=5,
+                key="postflop_total",
+            )
     with col2:
+        hero_help = (
+            "Which player's entry decision to ask about. The caller's "
+            "defend is the interesting mix; the opener mostly just opens."
+            if is_preflop else
+            "Which player's decisions each hand follows. Both = a mix of hands "
+            "from each perspective." if is_full else
+            "Generate spots where this player is to act. Both = a mix."
+        )
         heroes = st.multiselect(
             "Whose decisions to ask about",
             options=[solve.ip_position, solve.oop_position],
             default=[solve.ip_position, solve.oop_position],
             key="postflop_heroes",
-            help="Generate spots where this player is to act. Both = a mix.",
+            help=hero_help,
         )
-    streets = st.multiselect(
-        "Streets to ask about",
-        options=["flop", "turn", "river"],
-        default=["flop", "turn", "river"],
-        key="postflop_streets",
-        help=(
-            "Which streets to generate questions from. The solve covers the whole "
-            "tree off its one flop, so turn/river questions branch from that flop. "
-            "Turn/river have huge node counts — they're down-sampled (see advanced)."
-        ),
-    )
-    diversify = st.toggle(
-        "Vary the decision types (recommended)",
-        value=True,
-        key="postflop_diversify",
-        help=(
-            "Round-robin across streets and decision types (c-bet / barrel / "
-            "probe / facing-bet / check / river bet) so a fill-to-N batch isn't "
-            "dominated by one street or type."
-        ),
-    )
-    # Curation filters -- the postflop analog of preflop's hand-strength +
-    # action-faced filters. Applied BEFORE the equity sim (no wasted spend).
-    from pipeline.postflop.spot_selection import (  # noqa: PLC0415
-        DECISION_TYPES,
-        STRENGTH_BUCKETS,
-    )
 
-    fcol1, fcol2 = st.columns(2)
-    with fcol1:
-        strength_filter = st.multiselect(
-            "Hero hand strength (filter)",
-            options=list(STRENGTH_BUCKETS),
-            default=[],
-            key="postflop_strength_filter",
-            help="Keep only spots where hero's made-hand bucket is one of these. "
-            "Empty = all. The postflop analog of the preflop hand-strength filter.",
+    if is_full:
+        n = int(total)
+        st.info(
+            f"🃏 **Full-hand mode counts HANDS, not questions.** One hand is a "
+            f"preflop → river play-through: a preflop-entry question plus the "
+            f"hero's decision on each street, all linked by `hand_id` and played "
+            f"in order. **{n} hands ≈ {n * 4}–{n * 6} questions** in the CSV "
+            f"(depends how deep each line runs)."
+            + ("  Villain-frame is on, so expect roughly double — each tree also "
+               "yields the villain's line." if pf_include_villain else "")
         )
-    with fcol2:
-        decision_filter = st.multiselect(
-            "Decision type (filter)",
-            options=list(DECISION_TYPES),
-            default=[],
-            key="postflop_decision_filter",
-            help="Keep only these decision situations (analog of preflop's "
-            "'action faced'). Empty = all. Situation-based, so it never leaks the "
-            "answer.",
+    elif is_preflop:
+        st.caption(
+            "Preflop-entry questions: one per hand the chosen seat enters with "
+            "(no streets, no play-through linkage)."
         )
+
+    # Streets — ONLY spot mode lets you pick. A full-hand play-through always
+    # spans the whole hand (preflop→river); a preflop-entry question has no
+    # streets. Hiding the picker in those modes is why it no longer appears.
+    if is_spots:
+        streets = st.multiselect(
+            "Streets to ask about",
+            options=["flop", "turn", "river"],
+            default=["flop", "turn", "river"],
+            key="postflop_streets",
+            help=(
+                "Which streets to generate questions from. The solve covers the whole "
+                "tree off its one flop, so turn/river questions branch from that flop. "
+                "Turn/river have huge node counts — they're down-sampled (see advanced)."
+            ),
+        )
+
+    # Variety / curation filters — spot mode only (full-hand assembles whole
+    # connected lines; preflop-entry has no postflop curation to apply).
+    if is_spots:
+        diversify = st.toggle(
+            "Vary the decision types (recommended)",
+            value=True,
+            key="postflop_diversify",
+            help=(
+                "Round-robin across streets and decision types (c-bet / barrel / "
+                "probe / facing-bet / check / river bet) so a fill-to-N batch isn't "
+                "dominated by one street or type."
+            ),
+        )
+        # Curation filters -- the postflop analog of preflop's hand-strength +
+        # action-faced filters. Applied BEFORE the equity sim (no wasted spend).
+        from pipeline.postflop.spot_selection import (  # noqa: PLC0415
+            DECISION_TYPES,
+            STRENGTH_BUCKETS,
+        )
+
+        fcol1, fcol2 = st.columns(2)
+        with fcol1:
+            strength_filter = st.multiselect(
+                "Hero hand strength (filter)",
+                options=list(STRENGTH_BUCKETS),
+                default=[],
+                key="postflop_strength_filter",
+                help="Keep only spots where hero's made-hand bucket is one of these. "
+                "Empty = all. The postflop analog of the preflop hand-strength filter.",
+            )
+        with fcol2:
+            decision_filter = st.multiselect(
+                "Decision type (filter)",
+                options=list(DECISION_TYPES),
+                default=[],
+                key="postflop_decision_filter",
+                help="Keep only these decision situations (analog of preflop's "
+                "'action faced'). Empty = all. Situation-based, so it never leaks the "
+                "answer.",
+            )
+
+    # Answer option style — all modes.
     style_label = st.radio(
         "Answer option style",
         options=list(ANSWER_STYLE_FROM_RADIO_LABEL),
@@ -1029,108 +1156,138 @@ def _render_generate_page_postflop() -> None:
     )
     answer_style = ANSWER_STYLE_FROM_RADIO_LABEL[style_label]
 
-    trap_difficulty = st.checkbox(
-        "🪤 Trap-aware difficulty",
-        value=False,
-        key="postflop_trap_difficulty",
-        help="Floor counterintuitive PURE spots to Hard (2400+). A 'trap' is "
-        "where the solver's action contradicts the equity-vs-price baseline "
-        "(folds a hand whose equity clears the price, or continues one clearly "
-        "below it). Score only -- never changes the answer/options/prose. Off by "
-        "default; recommended for Hard batches. Heads-up facing-a-bet spots only.",
-    )
-    with st.popover("ℹ️ How is postflop difficulty calculated?"):
-        from pipeline.postflop.difficulty import (  # noqa: PLC0415
-            TRAP_DIFFICULTY_FLOOR,
-            W_CONCEPT,
-            W_FREQ,
-            W_HAND,
+    # Trap-aware difficulty + the difficulty/skills explainers apply to POSTFLOP
+    # legs (spots + full-hand). Preflop-entry uses a frequency-only difficulty,
+    # so they don't apply there.
+    if not is_preflop:
+        trap_difficulty = st.checkbox(
+            "🪤 Trap-aware difficulty",
+            value=False,
+            key="postflop_trap_difficulty",
+            help="Floor counterintuitive PURE spots to Hard (2400+). A 'trap' is "
+            "where the solver's action contradicts the equity-vs-price baseline "
+            "(folds a hand whose equity clears the price, or continues one clearly "
+            "below it). Score only -- never changes the answer/options/prose. Off by "
+            "default; recommended for Hard batches. Heads-up facing-a-bet spots only.",
         )
+        with st.popover("ℹ️ How is postflop difficulty calculated?"):
+            from pipeline.postflop.difficulty import (  # noqa: PLC0415
+                TRAP_DIFFICULTY_FLOOR,
+                W_CONCEPT,
+                W_FREQ,
+                W_HAND,
+            )
 
-        st.markdown(
-            f"A **3-axis** weighted ease score (like preflop/PLO), mapped to "
-            f"`3000 - ease*2500` clipped to [400, 3200]:\n\n"
-            f"- **Frequency** (weight {W_FREQ:.0%}) — how dominant the top action "
-            "is. A near-coin-flip (55%) is hard, a pure (100%) action is easy.\n"
-            f"- **Concept** (weight {W_CONCEPT:.0%}) — how hard the strategic "
-            "frame is. A value bet is easy, a thin bluff-catch / trap-check is "
-            "hard.\n"
-            f"- **Hand class** (weight {W_HAND:.0%}) — U-shaped: premium made "
-            "hands and clear air are easy, the medium/marginal middle is hard.\n\n"
-            "The **EV gap is NOT scored** — a worthy postflop spot mixes at ~0 EV "
-            "gap by construction, so it adds no signal (it's kept only as the "
-            "`easy_ev` diagnostic column).\n\n"
-            f"**🪤 Trap-aware (opt-in):** floors a counterintuitive pure spot to "
-            f"{TRAP_DIFFICULTY_FLOOR} so a deceptive but clear-cut spot rates "
-            "Hard. Otherwise a pure spot can't exceed ~Medium."
-        )
+            st.markdown(
+                f"A **3-axis** weighted ease score (like preflop/PLO), mapped to "
+                f"`3000 - ease*2500` clipped to [400, 3200]:\n\n"
+                f"- **Frequency** (weight {W_FREQ:.0%}) — how dominant the top action "
+                "is. A near-coin-flip (55%) is hard, a pure (100%) action is easy.\n"
+                f"- **Concept** (weight {W_CONCEPT:.0%}) — how hard the strategic "
+                "frame is. A value bet is easy, a thin bluff-catch / trap-check is "
+                "hard.\n"
+                f"- **Hand class** (weight {W_HAND:.0%}) — U-shaped: premium made "
+                "hands and clear air are easy, the medium/marginal middle is hard.\n\n"
+                "The **EV gap is NOT scored** — a worthy postflop spot mixes at ~0 EV "
+                "gap by construction, so it adds no signal (it's kept only as the "
+                "`easy_ev` diagnostic column).\n\n"
+                f"**🪤 Trap-aware (opt-in):** floors a counterintuitive pure spot to "
+                f"{TRAP_DIFFICULTY_FLOOR} so a deceptive but clear-cut spot rates "
+                "Hard. Otherwise a pure spot can't exceed ~Medium."
+            )
 
-    _render_postflop_skills_explainer()
+        _render_postflop_skills_explainer()
 
     with st.expander("Worthiness window + filters (advanced)"):
+        # The frequency window applies to EVERY mode: it gates which spots are
+        # worthy (spots), which decisions seed a hand (full-hand), and which
+        # entry hands are a real mix (preflop).
+        if is_full:
+            freq_help = (
+                "A street decision must sit in this band to SEED a hand (so every "
+                "hand has at least one genuine decision). Widen the low end for "
+                "deeper hands that reach the river more often."
+            )
+        elif is_preflop:
+            freq_help = (
+                "Keep entry hands the seat plays at a genuinely-mixed frequency "
+                "(a real defend), not pure folds/calls."
+            )
+        else:
+            freq_help = (
+                "Keep spots where the top action sits in this band. Below 65% "
+                "reads as 'no clear answer'; 99%+ is a gimme. Mirrors preflop."
+            )
         freq_lo, freq_hi = st.slider(
             "Solver frequency window (%) — how dominant the best action is",
             min_value=50,
             max_value=100,
             value=(65, 99),
             key="postflop_freq",
-            help=(
-                "Keep spots where the top action sits in this band. Below 65% "
-                "reads as 'no clear answer'; 99%+ is a gimme. Mirrors preflop."
-            ),
+            help=freq_help,
         )
-        use_ev_gap = st.checkbox(
-            "Also require a minimum EV gap to the 2nd-best action",
-            value=False,
-            key="postflop_use_evgap",
-            help="Off by default (real solves mix at ~0 EV gap). On = a quality gate.",
-        )
-        min_ev_gap = (
-            st.number_input(
-                "Min EV gap (bb)", min_value=0.0, value=0.5, step=0.1, key="postflop_evgap"
+        # EV-gap / node-cap / quality / premise gates operate on POSTFLOP nodes
+        # (spots + full-hand). Preflop-entry reads the flop-entry ranges directly
+        # (it never walks the node tree), so none of these apply there.
+        if not is_preflop:
+            use_ev_gap = st.checkbox(
+                "Also require a minimum EV gap to the 2nd-best action",
+                value=False,
+                key="postflop_use_evgap",
+                help="Off by default (real solves mix at ~0 EV gap). On = a quality gate.",
             )
-            if use_ev_gap
-            else None
-        )
-        max_nodes = st.number_input(
-            "Max nodes per street (turn/river down-sampling)",
-            min_value=50,
-            max_value=20000,
-            value=600,
-            step=50,
-            key="postflop_maxnodes",
-            help=(
-                "Turn (~2k) and river (~130k) have far too many nodes to build "
-                "all of. Each street is down-sampled to this many representative "
-                "nodes — plenty for a batch. Flop (~25) is always built in full."
-            ),
-        )
-        quality_gate = st.checkbox(
-            "Skip low-quality / barely-reached nodes (recommended)",
-            value=True,
-            key="postflop_quality_gate",
-            help="The convergence guard: skip whole nodes that are barely "
-            "reached (only a handful of combos get there) or look untrained "
-            "(nearly every hand plays one identical mixed strategy). Matters most "
-            "for third-party solves and down-sampled turn/river nodes. Count of "
-            "skipped nodes is in the batch meta.",
-        )
-        premise_pct = st.number_input(
-            "Premise-realism gate — min line-action frequency (%)",
-            min_value=0.0,
-            max_value=20.0,
-            value=0.5,
-            step=0.25,
-            key="postflop_premise_pct",
-            help="Realism check on the action HISTORY: drop a spot whose line "
-            "includes a PRIOR action (by either player) the solver takes below "
-            "this often — a question built on a line someone almost never takes "
-            "(e.g. a 0.1% turn overbet-jam, a never-used bet size). 0.5% is "
-            "permissive (drops only clear ghost lines); raise it for stricter "
-            "realism. Set 0 to disable. Skipped-node count is in the batch meta "
-            "(premise_filtered_nodes).",
-        )
-        min_premise_freq = (premise_pct / 100.0) if premise_pct > 0 else None
+            min_ev_gap = (
+                st.number_input(
+                    "Min EV gap (bb)", min_value=0.0, value=0.5, step=0.1, key="postflop_evgap"
+                )
+                if use_ev_gap
+                else None
+            )
+            max_nodes = st.number_input(
+                "Max nodes per street (turn/river down-sampling)",
+                min_value=50,
+                max_value=20000,
+                value=600,
+                step=50,
+                key="postflop_maxnodes",
+                help=(
+                    "Turn (~2k) and river (~130k) have far too many nodes to build "
+                    "all of. Each street is down-sampled to this many representative "
+                    "nodes — plenty for a batch. Flop (~25) is always built in full."
+                ),
+            )
+            quality_gate = st.checkbox(
+                "Skip low-quality / barely-reached nodes (recommended)",
+                value=True,
+                key="postflop_quality_gate",
+                help="The convergence guard: skip whole nodes that are barely "
+                "reached (only a handful of combos get there) or look untrained "
+                "(nearly every hand plays one identical mixed strategy). Matters most "
+                "for third-party solves and down-sampled turn/river nodes. Count of "
+                "skipped nodes is in the batch meta.",
+            )
+            premise_pct = st.number_input(
+                "Premise-realism gate — min line-action frequency (%)",
+                min_value=0.0,
+                max_value=20.0,
+                value=0.5,
+                step=0.25,
+                key="postflop_premise_pct",
+                help="Realism check on the action HISTORY: drop a spot whose line "
+                "includes a PRIOR action (by either player) the solver takes below "
+                "this often — a question built on a line someone almost never takes "
+                "(e.g. a 0.1% turn overbet-jam, a never-used bet size). 0.5% is "
+                "permissive (drops only clear ghost lines); raise it for stricter "
+                "realism. Set 0 to disable. Skipped-node count is in the batch meta "
+                "(premise_filtered_nodes).",
+            )
+            min_premise_freq = (premise_pct / 100.0) if premise_pct > 0 else None
+        else:
+            st.caption(
+                "EV-gap, node-cap, quality and premise gates apply to postflop "
+                "node questions — preflop-entry reads the flop-entry ranges "
+                "directly, so they don't apply here."
+            )
 
     with st.expander("Presentation — display amounts / stakes / venue"):
         st.caption(
@@ -1158,11 +1315,16 @@ def _render_generate_page_postflop() -> None:
         )
 
     # Layer-7 LLM audit (claim checker + optional auto-fix), mirroring preflop.
-    pf_run_claim_checker = False
-    pf_revise_pass = False
-    pf_final_audit = False
-    pf_claim_checker_prompt: str | None = None
-    with st.expander("Layer 7 — claim checker & auto-fix (advanced)"):
+    # Runs on independent spots AND the full-hand POSTFLOP legs (the preflop-entry
+    # leg is skipped -- the checker prompt is postflop-specific). Preflop-only
+    # mode has no postflop legs, so the controls stay hidden there.
+    if is_spots or is_full:
+      with st.expander("Layer 7 — claim checker & auto-fix (advanced)"):
+        if is_full:
+            st.caption(
+                "In full-hand mode this audits the POSTFLOP legs of each hand "
+                "(flop/turn/river); the preflop-entry leg is not audited."
+            )
         st.caption(
             "A second LLM pass that AUDITS each finished explanation against the "
             "solver data and flags confusing or wrong poker claims (range "
@@ -1244,10 +1406,33 @@ def _render_generate_page_postflop() -> None:
         help="Leave blank for an auto-timestamped name. Saved under "
         "test_output/postflop_batches/.",
     )
-    st.caption(
-        "Explanations use the **postflop** system prompt — edit it on the "
-        "**Prompt** page (Postflop mode). Dry-run uses placeholder prose."
-    )
+    if is_preflop:
+        st.caption(
+            "Preflop-entry explanations use the **preflop-entry** prompt (separate "
+            "from the postflop system prompt) — edit it on the **Prompt** page "
+            "(Postflop mode, bottom). Dry-run uses placeholder prose."
+        )
+    else:
+        st.caption(
+            "Explanations use the **postflop** system prompt — edit it on the "
+            "**Prompt** page (Postflop mode). Dry-run uses placeholder prose."
+            + ("  (Full-hand mode applies it to each postflop leg; the preflop leg "
+               "uses the separate preflop-entry prompt — also on the Prompt page.)"
+               if is_full else "")
+        )
+
+    # A one-line summary of exactly what GENERATE will do in this mode.
+    if is_full:
+        st.caption(
+            f"▶ Will build **{int(total)} full hand(s)** "
+            f"(≈ {int(total) * 4}–{int(total) * 6} linked questions)"
+            + (", both perspectives" if pf_include_villain else "")
+            + "."
+        )
+    elif is_preflop:
+        st.caption(f"▶ Will build up to **{int(total)} preflop-entry question(s)**.")
+    else:
+        st.caption(f"▶ Will build up to **{int(total)} independent question(s)**.")
 
     if not dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
         st.warning(
@@ -1256,7 +1441,10 @@ def _render_generate_page_postflop() -> None:
         )
 
     busy = jobs.has_active_job()
-    if not heroes or not streets:
+    # Streets are irrelevant to preflop-entry questions; only require them for the
+    # postflop spot / full-hand modes.
+    needs_streets = pf_mode != "preflop"
+    if not heroes or (needs_streets and not streets):
         st.button("GENERATE", disabled=True, type="primary", use_container_width=True)
         missing = "player" if not heroes else "street"
         st.caption(f"Pick at least one {missing} above.")
@@ -1268,36 +1456,84 @@ def _render_generate_page_postflop() -> None:
             fname += ".csv"
         out_path = POSTFLOP_OUTPUT_DIR / fname
         try:
-            jobs.start_subprocess_job(
-                generate_postflop_batch_from_db,
-                label=f"Postflop: {Path(picked).name} ({int(total)} q)",
-                db_path=picked,
-                output_path=str(out_path),
-                total_questions=int(total),
-                heroes=tuple(heroes),
-                streets=tuple(streets),
-                max_nodes_per_street=int(max_nodes),
-                diversify=diversify,
-                strength_buckets=tuple(strength_filter),
-                decision_types=tuple(decision_filter),
-                quality_gate=quality_gate,
-                min_premise_freq=min_premise_freq,
-                answer_style=answer_style,
-                display_in_bb=display_in_bb,
-                stakes=stakes,
-                live_or_online=live,
-                bb_in_dollars=float(bb_dollars),
-                model=_MODEL_LABEL_TO_API[model_label],
-                dry_run=dry_run,
-                min_frequency=freq_lo / 100.0,
-                max_frequency=freq_hi / 100.0,
-                min_ev_gap_bb=min_ev_gap,
-                trap_difficulty=trap_difficulty,
-                run_claim_checker=pf_run_claim_checker,
-                claim_checker_prompt=pf_claim_checker_prompt,
-                revise_pass=pf_revise_pass,
-                final_audit=pf_final_audit,
-            )
+            if pf_mode == "full_hand":
+                jobs.start_subprocess_job(
+                    generate_full_hand_batch_from_db,
+                    label=f"Postflop full hands: {Path(picked).name} ({int(total)} hands)",
+                    db_path=picked,
+                    output_path=str(out_path),
+                    total_hands=int(total),
+                    heroes=tuple(heroes),
+                    streets=tuple(streets),
+                    max_nodes_per_street=int(max_nodes),
+                    include_villain=pf_include_villain,
+                    quality_gate=quality_gate,
+                    min_premise_freq=min_premise_freq,
+                    answer_style=answer_style,
+                    display_in_bb=display_in_bb,
+                    stakes=stakes,
+                    live_or_online=live,
+                    bb_in_dollars=float(bb_dollars),
+                    model=_MODEL_LABEL_TO_API[model_label],
+                    dry_run=dry_run,
+                    min_frequency=freq_lo / 100.0,
+                    max_frequency=freq_hi / 100.0,
+                    min_ev_gap_bb=min_ev_gap,
+                    trap_difficulty=trap_difficulty,
+                    run_claim_checker=pf_run_claim_checker,
+                    claim_checker_prompt=pf_claim_checker_prompt,
+                    revise_pass=pf_revise_pass,
+                    final_audit=pf_final_audit,
+                )
+            elif pf_mode == "preflop":
+                jobs.start_subprocess_job(
+                    generate_preflop_entry_batch_from_db,
+                    label=f"Preflop entry: {Path(picked).name} ({int(total)} q)",
+                    db_path=picked,
+                    output_path=str(out_path),
+                    total_questions=int(total),
+                    heroes=tuple(heroes),
+                    answer_style=answer_style,
+                    display_in_bb=display_in_bb,
+                    stakes=stakes,
+                    live_or_online=live,
+                    bb_in_dollars=float(bb_dollars),
+                    model=_MODEL_LABEL_TO_API[model_label],
+                    dry_run=dry_run,
+                    min_frequency=freq_lo / 100.0,
+                    max_frequency=freq_hi / 100.0,
+                )
+            else:
+                jobs.start_subprocess_job(
+                    generate_postflop_batch_from_db,
+                    label=f"Postflop: {Path(picked).name} ({int(total)} q)",
+                    db_path=picked,
+                    output_path=str(out_path),
+                    total_questions=int(total),
+                    heroes=tuple(heroes),
+                    streets=tuple(streets),
+                    max_nodes_per_street=int(max_nodes),
+                    diversify=diversify,
+                    strength_buckets=tuple(strength_filter),
+                    decision_types=tuple(decision_filter),
+                    quality_gate=quality_gate,
+                    min_premise_freq=min_premise_freq,
+                    answer_style=answer_style,
+                    display_in_bb=display_in_bb,
+                    stakes=stakes,
+                    live_or_online=live,
+                    bb_in_dollars=float(bb_dollars),
+                    model=_MODEL_LABEL_TO_API[model_label],
+                    dry_run=dry_run,
+                    min_frequency=freq_lo / 100.0,
+                    max_frequency=freq_hi / 100.0,
+                    min_ev_gap_bb=min_ev_gap,
+                    trap_difficulty=trap_difficulty,
+                    run_claim_checker=pf_run_claim_checker,
+                    claim_checker_prompt=pf_claim_checker_prompt,
+                    revise_pass=pf_revise_pass,
+                    final_audit=pf_final_audit,
+                )
             st.rerun()
         except RuntimeError as exc:
             st.error(str(exc))
@@ -1340,14 +1576,30 @@ def _render_postflop_job_panel() -> None:
     from pipeline.postflop.batch import PostflopBatchResult  # noqa: PLC0415
 
     job = jobs.get_current_job()
-    if job is None or not str(job.label).startswith("Postflop:"):
+    # Match all three Generate-page job kinds (independent spots, full hands,
+    # preflop entry) but NOT "PostflopCompare:" (the Compare page has its own panel).
+    if job is None or not str(job.label).startswith(
+        ("Postflop:", "Postflop full hands:", "Preflop entry:")
+    ):
         return
+    is_full_hand_job = str(job.label).startswith("Postflop full hands:")
     with st.container(border=True):
         if job.is_active:
             _render_active_job_progress()
         elif job.status is jobs.JobStatus.COMPLETED:
             st.markdown(f"**✅ Last batch:** {job.label}")
             if isinstance(job.result, PostflopBatchResult):
+                # Log token spend to the lifetime usage log exactly once. This
+                # was previously NEVER done for ANY postflop batch (only the
+                # preflop BatchResult path logged), so the sidebar "Lifetime API
+                # spend" never moved for postflop runs.
+                _maybe_log_completed_postflop_job(job, job.result)
+                if is_full_hand_job:
+                    st.caption(
+                        f"**{job.result.requested_questions} hands → "
+                        f"{job.result.questions_written} linked questions** "
+                        "(grouped by hand_id in the CSV / Postflop Review)."
+                    )
                 _render_postflop_result_ui(job.result)
             else:
                 st.warning("Job finished but returned no PostflopBatchResult.")
@@ -2999,6 +3251,40 @@ def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) ->
         return
     logged.add(job.id)
     _log_batch_result_usage(result)
+
+
+def _maybe_log_completed_postflop_job(job: jobs.Job[Any], result: Any) -> None:
+    """Append a POSTFLOP batch's token spend to the lifetime usage log, once.
+
+    The postflop ``PostflopBatchResult`` has no cache-token fields (postflop
+    doesn't prompt-cache the way preflop does), so they log as 0. Dry-runs and
+    zero-token results are skipped. Idempotent via the same module-level
+    logged-id set as the preflop path."""
+    logged = _logged_job_ids()
+    if job.id in logged:
+        return
+    logged.add(job.id)
+    model = getattr(result, "model_used", "") or ""
+    # dry-run model_used is "(dry-run placeholder)" -> not a real model, skip.
+    if getattr(result, "dry_run", False) or model.startswith("("):
+        return
+    in_tok = int(getattr(result, "total_input_tokens", 0) or 0)
+    out_tok = int(getattr(result, "total_output_tokens", 0) or 0)
+    if not (in_tok or out_tok):
+        return
+    cost = usage.compute_cost_usd(model=model, input_tokens=in_tok, output_tokens=out_tok)
+    out_path = getattr(result, "output_path", None)
+    usage.append_log_entry(
+        USAGE_LOG_PATH,
+        model=model,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cache_creation_tokens=0,
+        cache_read_tokens=0,
+        cost_usd=cost,
+        questions_written=int(getattr(result, "questions_written", 0) or 0),
+        output_filename=out_path.name if out_path else "",
+    )
 
 
 def _render_preflop_failures(failures: list) -> None:
@@ -5052,6 +5338,28 @@ def _save_postflop_claim_checker_prompt(text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _preflop_entry_prompt_path() -> Path:
+    """Override file for the preflop-ENTRY prompt (the play-through preflop leg /
+    the standalone preflop-from-postflop questions). Distinct from the postflop
+    system prompt."""
+    return Path(__file__).resolve().parent / "prompts" / "preflop_entry_system.txt"
+
+
+def _load_preflop_entry_prompt() -> str:
+    """The active preflop-entry prompt (admin override else the built-in)."""
+    from pipeline.postflop.preflop_entry import (  # noqa: PLC0415
+        load_preflop_entry_system_prompt,
+    )
+
+    return load_preflop_entry_system_prompt()
+
+
+def _save_preflop_entry_prompt(text: str) -> None:
+    path = _preflop_entry_prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 # --- postflop prompt library (mirror of the preflop library) ----------------
 def _postflop_prompt_library():
     """The postflop PromptLibrary instance (its own dir; same generic class)."""
@@ -5898,6 +6206,427 @@ def _scan_postflop_outputs() -> pd.DataFrame:
     return df
 
 
+def _street_decision_ordinal(df, row) -> tuple[int, int]:
+    """``(k, n)`` for a leg that is the k-th of n decisions on its street within
+    its hand (e.g. a river check then a river facing-a-bet = 2 decisions). Returns
+    ``(1, 1)`` for a standalone row or a street with a single decision -- so the
+    caller only shows the label when ``n > 1``. Makes an escalating same-street
+    line (check -> face a bet -> face a raise) legible instead of two bare
+    'River' cards."""
+    hid = str(row.get("hand_id", "") or "").strip()
+    stage = str(row.get("Hand Stage", "") or "")
+    if not hid:
+        return (1, 1)
+
+    def _seq(r) -> int:
+        try:
+            return int(float(str(r.get("sequence_index", "") or 0)))
+        except ValueError:
+            return 0
+
+    same = [
+        r for _i, r in df.iterrows()
+        if str(r.get("hand_id", "") or "").strip() == hid
+        and str(r.get("Hand Stage", "") or "") == stage
+    ]
+    if len(same) <= 1:
+        return (1, len(same) or 1)
+    same.sort(key=_seq)
+    my_seq = _seq(row)
+    k = next((i + 1 for i, r in enumerate(same) if _seq(r) == my_seq), 1)
+    return (k, len(same))
+
+
+def _render_postflop_question_card(
+    row, *, df, csv_path: Path, reviews: dict, meta, grouped: bool = False,
+    nav_key: str | None = None, idx: int | None = None,
+) -> None:
+    """Render ONE postflop question with the FULL review UI -- the single source
+    of truth for both the single-question navigator and the grouped play-through
+    view, so a leg in a hand is reviewed exactly like a standalone question.
+
+    Includes: header + grade, question + options (correct/neutral marked),
+    auto-saving explanation editor, Layer-7 revise/claim-check panels + prompt
+    inspector, the facts line, the preflop+this-street range grids, the
+    auto-saving difficulty input, the approve/needs/reject grading, and remove.
+
+    ``grouped`` controls two things: the ranges expander starts collapsed (it's
+    heavy, and a hand has several legs), and grading/remove do NOT advance a nav
+    index (there is none). All widget keys are namespaced by ``No`` so the same
+    card renders many times on one page without colliding.
+    """
+    no = _cell(row, "No")
+    existing = reviews.get(no, {})
+
+    # k-th of n decisions on this street within the hand (only shown when n > 1).
+    _sd_k, _sd_n = _street_decision_ordinal(df, row)
+    _stage_label = _cell(row, "Hand Stage")
+    if _sd_n > 1:
+        _stage_label += f" · decision {_sd_k} of {_sd_n}"
+
+    with st.container(border=True):
+        # In the grouped view each leg leads with its place in the hand.
+        if grouped:
+            seq = _cell(row, "sequence_index")
+            total = _cell(row, "sequence_total")
+            st.markdown(f"**{seq}/{total} · {_stage_label}**  (#{no})")
+        elif _sd_n > 1:
+            # Single-question view: note the same-street decision context too.
+            st.caption(f"Part of a hand — **{_stage_label}**")
+        h = st.columns(4)
+        h[0].markdown(f"**#{no}**")
+        h[1].markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
+        h[2].markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
+        h[3].markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
+        if existing.get("status"):
+            st.caption(
+                "Current grade: **"
+                + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
+                + "**"
+            )
+        elif _cell(row, "validation_status"):
+            st.caption(f"Validation: `{_cell(row, 'validation_status')}`")
+
+        if _cell(row, "Context"):
+            st.caption(_cell(row, "Context"))
+        st.markdown("**Question**")
+        st.markdown(_md_lines(_cell(row, "Question")))
+
+        st.markdown("**Options**")
+        correct = _cell(row, "Correct Answer")
+        neutral = {
+            x.strip() for x in (_cell(row, "neutral_credit") or "").split(",") if x.strip()
+        }
+        for i in (1, 2, 3, 4):
+            opt = _cell(row, f"option {i}")
+            if not opt:
+                continue
+            mark = "✅ " if opt == correct else ("😐 " if opt in neutral else "▫️ ")
+            st.markdown(mark + opt)
+        if neutral:
+            st.caption("✅ correct · 😐 neutral credit · ▫️ mistake")
+
+        st.markdown("**Answer Explanation** _(edits auto-save into the CSV)_")
+        ekey = f"postflop_review_expl::{csv_path.name}::{no}"
+        st.text_area(
+            "Answer Explanation",
+            value=_cell(row, "Answer Explanation"),
+            key=ekey,
+            height=240,
+            label_visibility="collapsed",
+            on_change=_autosave_review_cell,
+            args=(csv_path, no, ekey, "explanation"),
+        )
+        with st.expander("Preview (rendered)", expanded=False):
+            st.info(_md_lines(_cell(row, "Answer Explanation")))
+
+        # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
+        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
+        _meta_node_ids = {q.get("node_id") for q in _qrecs}
+        _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+        _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
+        _ref_combo = _ref_parts[-1] if _ref_parts else ""
+        _qrec = next(
+            (
+                q for q in _qrecs
+                if q.get("node_id") == _ref_node and q.get("hero_combo") == _ref_combo
+            ),
+            None,
+        )
+        row_strs = {c: _cell(row, c) for c in df.columns}
+        _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
+        _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
+        # The preflop leg of a play-through is written by a different (preflop)
+        # prompt than the postflop legs -- say so where the reviewer is looking.
+        _is_preflop_leg = _cell(row, "Hand Stage").lower() == "preflop"
+        with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
+            if _qrec and _qrec.get("solver_data"):
+                st.markdown("**SOLVER DATA block** (the facts the model wrote from)")
+                st.code(str(_qrec["solver_data"]))
+            else:
+                st.caption(
+                    "No solver-data snapshot for this row (preflop-entry leg, "
+                    "older batch, or a reordered row)."
+                )
+            st.markdown("**Question shown**")
+            st.code(_cell(row, "Question"))
+            _opts = [_cell(row, f"option {i}") for i in (1, 2, 3, 4)]
+            st.markdown(f"**Options:** {[o for o in _opts if o]}")
+            st.markdown(f"**Correct answer:** {_cell(row, 'Correct Answer')}")
+            if _is_preflop_leg:
+                st.caption(
+                    "This is the PREFLOP-ENTRY leg: it uses the built-in PREFLOP "
+                    "prompt (not the postflop system prompt, and not yet "
+                    "admin-editable)."
+                )
+            else:
+                st.caption(
+                    "The model writes only the prose, from the SOLVER DATA above, "
+                    "using the active postflop system prompt (Prompt page → Postflop)."
+                )
+
+        st.markdown(f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}")
+        if _cell(row, "action_ev_bb"):
+            st.markdown(f"**Per-action EV (bb):**&nbsp;{_cell(row, 'action_ev_bb')}")
+        fbits = []
+        for col, lbl in (
+            ("hero_equity", "equity"),
+            ("pot_odds", "pot odds"),
+            ("spr", "SPR"),
+            ("board_texture", "board"),
+            ("archetype", "archetype"),
+            ("Position Matchup", "matchup"),
+        ):
+            val = _cell(row, col)
+            if val:
+                fbits.append(f"{lbl}: `{val}`")
+        if fbits:
+            st.caption(" · ".join(fbits))
+        if _cell(row, "skills"):
+            st.caption(f"🎯 skills: {_cell(row, 'skills')}")
+        if _cell(row, "concept_tags"):
+            st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+
+        # --- visual ranges: every player, preflop + current street ---
+        _meta_nodes = {q.get("node_id") for q in _qrecs}
+        _parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+        _ref_node2 = next((p for p in reversed(_parts) if p in _meta_nodes), "")
+        _street_ranges = next(
+            (q.get("street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
+            None,
+        )
+        _preflop_ranges = meta.get("preflop_ranges") if isinstance(meta, dict) else None
+        _prior_ranges = next(
+            (q.get("prior_street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
+            None,
+        )
+        _prior_label = next(
+            (q.get("prior_street_label") for q in _qrecs if q.get("node_id") == _ref_node2),
+            None,
+        )
+        _street_strategy = next(
+            (q.get("street_strategy") for q in _qrecs if q.get("node_id") == _ref_node2),
+            None,
+        )
+        if not isinstance(_street_strategy, dict):
+            _street_strategy = {}
+        _preflop_entry = meta.get("preflop_entry_actions", {}) if isinstance(meta, dict) else {}
+        if _street_ranges or _preflop_ranges:
+            with st.expander(
+                "📊 Player ranges — preflop + this-street strategy", expanded=not grouped
+            ):
+                _hero_seat = _cell(row, "User Seat").split("-", 1)[0]
+                _seats = sorted(set(_street_ranges or {}) | set(_preflop_ranges or {}))
+                _seats.sort(key=lambda p: p != _hero_seat)  # hero first
+
+                _act_rank = {"fold": 0, "check": 1, "call": 2, "bet": 3, "raise": 4, "all-in": 5}
+                _act_color = {
+                    "fold": "#6b7280", "check": range_view.COLOR_FOLD,
+                    "call": range_view.COLOR_CALL, "bet": range_view.COLOR_RAISE,
+                    "raise": range_view.COLOR_ALLIN, "all-in": "#3d0c0c",
+                }
+
+                def _segs(snap: dict | None, color: str) -> dict:  # single-colour
+                    return {h: [(w, color)] for h, w in (snap or {}).items() if w > 0.004}
+
+                def _strat_segs(strat: dict) -> dict:  # action-coloured strategy
+                    segs: dict = {}
+                    for action in sorted(
+                        strat, key=lambda a: _act_rank.get(a.split()[0].lower(), 9)
+                    ):
+                        col = _act_color.get(action.split()[0].lower(), range_view.COLOR_INRANGE)
+                        for h, w in strat[action].items():
+                            if w > 0.004:
+                                segs.setdefault(h, []).append((w, col))
+                    return segs
+
+                st.caption(
+                    "**How to read a cell:** fill height = how much of this player's "
+                    "range that hand is here; colour = the action (🟦 check · 🟩 call "
+                    "· 🟥 bet/raise). Left grid = the street before this decision, "
+                    "right grid = this street."
+                )
+                _cond_key = f"pf_range_conditional::{csv_path.name}::{no}"
+                _conditional = st.toggle(
+                    "Conditional view — full-height cells (strategy *when the hand is held*)",
+                    value=False,
+                    key=_cond_key,
+                    help="Off (range-weighted): a cell's fill = how much of the range "
+                    "that hand is. On (conditional): every in-range cell is full height, "
+                    "coloured by what the hand does WHEN HELD.",
+                )
+
+                def _maybe_conditional(segs: dict) -> dict:
+                    if not _conditional:
+                        return segs
+                    out: dict = {}
+                    for hnd, bands in segs.items():
+                        tot = sum(w for w, _c in bands)
+                        out[hnd] = [(w / tot, c) for w, c in bands] if tot > 0 else bands
+                    return out
+
+                for _pos in _seats:
+                    _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
+                    st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
+                    _gp, _gc = st.columns(2)
+                    _left = (_prior_ranges or {}).get(_pos) if _prior_ranges else None
+                    _cur = (_street_ranges or {}).get(_pos)
+                    _strat = _street_strategy.get(_pos)
+                    _entry = _preflop_entry.get(_pos, "call")
+                    _entry_word = "raised" if _entry == "raise" else "called"
+                    with _gp:
+                        if _left:
+                            st.caption(
+                                f"{str(_prior_label).capitalize()} range — "
+                                f"~{range_view.range_pct(_left):.0f}% of hands"
+                            )
+                            st.html(range_view.grid_html(_maybe_conditional(
+                                _segs(_left, range_view.COLOR_INRANGE)
+                            )))
+                        elif (_pre := (_preflop_ranges or {}).get(_pos)):
+                            st.caption(
+                                f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
+                            )
+                            st.html(range_view.grid_html(_maybe_conditional(
+                                _segs(_pre, _act_color.get(_entry, range_view.COLOR_CALL))
+                            )))
+                        else:
+                            st.caption("Preflop — n/a")
+                    with _gc:
+                        if _strat:
+                            st.caption(
+                                f"This street — strategy "
+                                f"(~{range_view.range_pct(_cur):.0f}% of hands in range)"
+                            )
+                            st.html(range_view.grid_html(_maybe_conditional(_strat_segs(_strat))))
+                        elif _cur:
+                            st.caption(
+                                f"This street — ~{range_view.range_pct(_cur):.0f}% of hands "
+                                "(not this player's turn on this street)"
+                            )
+                            st.html(range_view.grid_html(_maybe_conditional(
+                                _segs(_cur, range_view.COLOR_INRANGE)
+                            )))
+                        else:
+                            st.caption("This street — n/a")
+
+        dkey = f"postflop_review_diff::{csv_path.name}::{no}"
+        try:
+            cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
+        except ValueError:
+            cur_diff = 0
+        st.number_input(
+            "Difficulty Rating (edits auto-save)",
+            min_value=0,
+            max_value=3500,
+            step=10,
+            value=cur_diff,
+            key=dkey,
+            on_change=_autosave_review_cell,
+            args=(csv_path, no, dkey, "difficulty"),
+        )
+
+    # --- grading ---
+    st.markdown("**Grade**")
+    note = st.text_area(
+        "Note (optional)",
+        value=existing.get("note", ""),
+        key=f"postflop_review_note::{csv_path.name}::{no}",
+        height=70,
+    )
+
+    def _grade(status: str) -> None:
+        review.save_review(csv_path, no, status, note)
+        if not grouped and nav_key is not None and idx is not None:
+            st.session_state[nav_key] = min(idx + 1, len(df) - 1)
+        st.rerun()
+
+    g1, g2, g3 = st.columns(3)
+    if g1.button("✅ Approve", use_container_width=True, type="primary",
+                 key=f"pf_grade_ap::{csv_path.name}::{no}"):
+        _grade("approved")
+    if g2.button("⚠️ Needs review", use_container_width=True,
+                 key=f"pf_grade_nr::{csv_path.name}::{no}"):
+        _grade("needs_review")
+    if g3.button("❌ Reject", use_container_width=True,
+                 key=f"pf_grade_rj::{csv_path.name}::{no}"):
+        _grade("rejected")
+
+    if st.button(
+        f"🗑  Remove #{no} from this batch",
+        key=f"pf_review_rm::{csv_path.name}::{no}",
+        help="Deletes this question from the CSV (regenerate to recover).",
+    ):
+        if review.remove_question(csv_path, no):
+            if not grouped and nav_key is not None and idx is not None:
+                st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
+            st.rerun()
+        else:
+            st.warning(f"#{no} was not found in the batch.")
+
+
+def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> None:
+    """Per-hand grouped review for full-hand (play-through) batches.
+
+    Groups rows by ``hand_id`` (ordered by ``sequence_index``) into one
+    expandable card per hand. Each leg is rendered with the SAME full review UI
+    as the single-question navigator (:func:`_render_postflop_question_card`):
+    edit + auto-save the explanation, Layer-7 panels, ranges, difficulty, grade,
+    and remove. Standalone rows (blank ``hand_id``) get their own bucket.
+    """
+    groups: dict[str, list] = {}
+    standalone: list = []
+    for _i, row in df.iterrows():
+        hid = str(row.get("hand_id", "") or "").strip()
+        (standalone if not hid else groups.setdefault(hid, [])).append(row)
+
+    def _seq(r) -> int:
+        try:
+            return int(float(str(r.get("sequence_index", "") or 0)))
+        except ValueError:
+            return 0
+
+    st.caption(
+        f"**{len(groups)}** full hand(s)"
+        + (f" · {len(standalone)} standalone row(s)" if standalone else "")
+        + ". Each card is one hand, played preflop → river — open a hand to "
+        "review every leg exactly as on the single-question view."
+    )
+
+    ordered = sorted(
+        groups.items(),
+        key=lambda kv: min(int(_cell(r, "No") or 0) for r in kv[1]),
+    )
+    for _hid, rows in ordered:
+        legs = sorted(rows, key=_seq)
+        first = legs[0]
+        hero_cards = _cell(first, "User Cards")
+        board = _cell(legs[-1], "Cards on Table")
+        graded = sum(1 for r in legs if reviews.get(_cell(r, "No"), {}).get("status"))
+        title = (
+            f"🃏 {hero_cards}  ·  {len(legs)} questions"
+            + (f"  ·  board {board}" if board else "")
+            + (f"  ·  {graded}/{len(legs)} graded" if graded else "")
+        )
+        with st.expander(title, expanded=False):
+            st.caption(f"`{_hid}`  ·  {_cell(first, 'Context')}")
+            for r in legs:
+                _render_postflop_question_card(
+                    r, df=df, csv_path=csv_path, reviews=reviews, meta=meta,
+                    grouped=True,
+                )
+                st.divider()
+
+    if standalone:
+        with st.expander(f"Standalone rows ({len(standalone)})", expanded=False):
+            for r in standalone:
+                _render_postflop_question_card(
+                    r, df=df, csv_path=csv_path, reviews=reviews, meta=meta,
+                    grouped=True,
+                )
+                st.divider()
+
+
 def render_postflop_review_page() -> None:
     """Review a postflop batch -- mirrors the preflop Review page.
 
@@ -5987,6 +6716,27 @@ def render_postflop_review_page() -> None:
     )
     _render_postflop_skills_explainer()
 
+    # --- grouped play-through view (Option B: hand_id + sequence_index) ---
+    # When the batch has linked full-hand sequences, offer a per-hand grouped
+    # view so a whole hand is reviewable in order before it ships. The single-
+    # question navigator below stays available (toggle off).
+    has_hands = "hand_id" in df.columns and df["hand_id"].astype(str).str.strip().any()
+    if has_hands:
+        grouped = st.toggle(
+            "🔗 Group by hand (play-through view)",
+            value=True,
+            key=f"postflop_review_grouped::{csv_path.name}",
+            help=(
+                "This batch has linked full-hand sequences. Show one expandable "
+                "card per hand (ordered preflop → river); toggle off for the "
+                "single-question navigator."
+            ),
+        )
+        if grouped:
+            _render_postflop_grouped_review(df, csv_path, reviews, meta)
+            _render_postflop_approved_pool()
+            return
+
     # --- navigation ---
     nav_key = f"postflop_review_idx::{csv_path.name}"
     idx = max(0, min(int(st.session_state.get(nav_key, 0)), len(df) - 1))
@@ -6013,325 +6763,16 @@ def render_postflop_review_page() -> None:
         st.rerun()
 
     row = df.iloc[idx]
-    no = _cell(row, "No")
-    existing = reviews.get(no, {})
-
-    # --- question card ---
-    with st.container(border=True):
-        h = st.columns(4)
-        h[0].markdown(f"**#{no}**")
-        h[1].markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
-        h[2].markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
-        h[3].markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
-        if existing.get("status"):
-            st.caption(
-                "Current grade: **"
-                + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
-                + "**"
-            )
-        elif _cell(row, "validation_status"):
-            st.caption(f"Validation: `{_cell(row, 'validation_status')}`")
-
-        if _cell(row, "Context"):
-            st.caption(_cell(row, "Context"))
-        st.markdown("**Question**")
-        st.markdown(_md_lines(_cell(row, "Question")))
-
-        st.markdown("**Options**")
-        correct = _cell(row, "Correct Answer")
-        neutral = {
-            x.strip() for x in (_cell(row, "neutral_credit") or "").split(",") if x.strip()
-        }
-        for i in (1, 2, 3, 4):
-            opt = _cell(row, f"option {i}")
-            if not opt:
-                continue
-            mark = "✅ " if opt == correct else ("😐 " if opt in neutral else "▫️ ")
-            st.markdown(mark + opt)
-        if neutral:
-            st.caption("✅ correct · 😐 neutral credit · ▫️ mistake")
-
-        st.markdown("**Answer Explanation** _(edits auto-save into the CSV)_")
-        ekey = f"postflop_review_expl::{csv_path.name}::{no}"
-        st.text_area(
-            "Answer Explanation",
-            value=_cell(row, "Answer Explanation"),
-            key=ekey,
-            height=240,
-            label_visibility="collapsed",
-            on_change=_autosave_review_cell,
-            args=(csv_path, no, ekey, "explanation"),
-        )
-        with st.expander("Preview (rendered)", expanded=False):
-            st.info(_md_lines(_cell(row, "Answer Explanation")))
-
-        # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
-        # Match this row to its meta record by node id AND combo (a node can host
-        # several combos, so node-id alone would grab the wrong revise record).
-        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
-        _meta_node_ids = {q.get("node_id") for q in _qrecs}
-        _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
-        _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
-        _ref_combo = _ref_parts[-1] if _ref_parts else ""
-        _qrec = next(
-            (
-                q for q in _qrecs
-                if q.get("node_id") == _ref_node and q.get("hero_combo") == _ref_combo
-            ),
-            None,
-        )
-        row_strs = {c: _cell(row, c) for c in df.columns}
-        _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
-        _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
-        with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
-            if _qrec and _qrec.get("solver_data"):
-                st.markdown("**SOLVER DATA block** (the facts the model wrote from)")
-                st.code(str(_qrec["solver_data"]))
-            else:
-                st.caption(
-                    "No solver-data snapshot for this row (older batch, or the "
-                    "row was reordered)."
-                )
-            st.markdown("**Question shown**")
-            st.code(_cell(row, "Question"))
-            _opts = [_cell(row, f"option {i}") for i in (1, 2, 3, 4)]
-            st.markdown(f"**Options:** {[o for o in _opts if o]}")
-            st.markdown(f"**Correct answer:** {_cell(row, 'Correct Answer')}")
-            st.caption(
-                "The model writes only the prose, from the SOLVER DATA above, "
-                "using the active postflop system prompt (Prompt page → Postflop)."
-            )
-
-        st.markdown(f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}")
-        if _cell(row, "action_ev_bb"):
-            st.markdown(f"**Per-action EV (bb):**&nbsp;{_cell(row, 'action_ev_bb')}")
-        fbits = []
-        for col, lbl in (
-            ("hero_equity", "equity"),
-            ("pot_odds", "pot odds"),
-            ("spr", "SPR"),
-            ("board_texture", "board"),
-            ("archetype", "archetype"),
-            ("Position Matchup", "matchup"),
-        ):
-            val = _cell(row, col)
-            if val:
-                fbits.append(f"{lbl}: `{val}`")
-        if fbits:
-            st.caption(" · ".join(fbits))
-        if _cell(row, "skills"):
-            st.caption(f"🎯 skills: {_cell(row, 'skills')}")
-        if _cell(row, "concept_tags"):
-            st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
-
-        # --- visual ranges: every player, preflop + current street ---
-        # Ranges are per-NODE (same for every hero hand at the node), so match
-        # the row to its meta record by node id -- robust to row deletions /
-        # reordering. preflop_ranges (flop-entry) is batch-level; street_ranges
-        # is the node's current-street range. Both 169-class, keyed by seat.
-        # The postflop solver_reference is "db/<spot>/<flop>/<node_id>/<combo>"
-        # -- the COMBO is the last segment, so match whichever segment is a real
-        # meta node id (node_id_from_solver_reference grabbed the combo before).
-        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
-        _meta_nodes = {q.get("node_id") for q in _qrecs}
-        _parts = [p for p in _cell(row, "solver_reference").split("/") if p]
-        _ref_node = next((p for p in reversed(_parts) if p in _meta_nodes), "")
-        _street_ranges = next(
-            (q.get("street_ranges") for q in _qrecs if q.get("node_id") == _ref_node),
-            None,
-        )
-        _preflop_ranges = meta.get("preflop_ranges") if isinstance(meta, dict) else None
-        # The LEFT grid = "the street before": a turn question shows the FLOP
-        # range, a river question the TURN range (per-question, June 2026). Empty
-        # on flop questions -> fall back to the shared flop-entry (preflop) ranges.
-        _prior_ranges = next(
-            (q.get("prior_street_ranges") for q in _qrecs if q.get("node_id") == _ref_node),
-            None,
-        )
-        _prior_label = next(
-            (q.get("prior_street_label") for q in _qrecs if q.get("node_id") == _ref_node),
-            None,
-        )
-        # street_strategy is {position: {action_label: {class: weight}}} (NEW
-        # batches: both players, each at the node where THEY acted). Old batches
-        # stored it action-keyed -> .get(pos) misses -> falls back to presence.
-        _street_strategy = next(
-            (q.get("street_strategy") for q in _qrecs if q.get("node_id") == _ref_node),
-            None,
-        )
-        if not isinstance(_street_strategy, dict):
-            _street_strategy = {}
-        _preflop_entry = meta.get("preflop_entry_actions", {}) if isinstance(meta, dict) else {}
-        if _street_ranges or _preflop_ranges:
-            with st.expander("📊 Player ranges — preflop + this-street strategy", expanded=True):
-                _hero_seat = _cell(row, "User Seat").split("-", 1)[0]
-                _seats = sorted(set(_street_ranges or {}) | set(_preflop_ranges or {}))
-                _seats.sort(key=lambda p: p != _hero_seat)  # hero first
-
-                _act_rank = {"fold": 0, "check": 1, "call": 2, "bet": 3, "raise": 4, "all-in": 5}
-                _act_color = {
-                    "fold": "#6b7280", "check": range_view.COLOR_FOLD,
-                    "call": range_view.COLOR_CALL, "bet": range_view.COLOR_RAISE,
-                    "raise": range_view.COLOR_ALLIN, "all-in": "#3d0c0c",
-                }
-
-                def _segs(snap: dict | None, color: str) -> dict:  # single-colour
-                    return {h: [(w, color)] for h, w in (snap or {}).items() if w > 0.004}
-
-                def _strat_segs(strat: dict) -> dict:  # action-coloured strategy
-                    segs: dict = {}
-                    for action in sorted(
-                        strat, key=lambda a: _act_rank.get(a.split()[0].lower(), 9)
-                    ):
-                        col = _act_color.get(action.split()[0].lower(), range_view.COLOR_INRANGE)
-                        for h, w in strat[action].items():
-                            if w > 0.004:
-                                segs.setdefault(h, []).append((w, col))
-                    return segs
-
-                st.caption(
-                    "**How to read a cell:** the **fill height = how much of this "
-                    "player's range that hand is here** (its weight), and the "
-                    "**colour = the action** it takes — 🟦 check · 🟩 call · 🟥 "
-                    "bet/raise (every bet size *and* raise shares one red; the chart "
-                    "doesn't split sizes by colour). So a **half-filled, all-red cell "
-                    "means the hand is in range ~half the time and bets it every time** "
-                    "— NOT that it bets half the time. The empty (dark) part is *'not "
-                    "in this player's range here'* — a hand opened at a mixed frequency "
-                    "(e.g. the Button opens 33 only ~56%) or board-blocked — it is "
-                    "**not** a check. (A specific hand's exact bet/check split is in the "
-                    "question's `action_frequencies`; this grid shows the whole range.)\n\n"
-                    "**Left grid = the street before** this decision: on a FLOP "
-                    "question it's the preflop entry range (BTN raised → red, BB "
-                    "called → green; BB's 3-bets are a separate solve, so none show "
-                    "here); on a TURN question it's the FLOP range, on a RIVER "
-                    "question the TURN range (shown as presence). **Right grid = this "
-                    "street** — each player's strategy at the node where they acted "
-                    "(a heavy donk shows as red)."
-                )
-                _conditional = st.toggle(
-                    "Conditional view — full-height cells (strategy *when the hand is held*)",
-                    value=False,
-                    key=f"pf_range_conditional::{csv_path.name}",
-                    help="Off (range-weighted, the default): a cell's fill = how much of "
-                    "the range that hand is, so a hand opened at a mixed frequency shows a "
-                    "partial cell. On (conditional): every in-range cell is drawn FULL "
-                    "height and coloured by what the hand does WHEN HELD — so a set that "
-                    "always bets shows a full red cell no matter how often it's in range. "
-                    "Same numbers, two lenses: range-weighted shows range DENSITY, "
-                    "conditional shows the per-hand STRATEGY.",
-                )
-
-                def _maybe_conditional(segs: dict) -> dict:
-                    # Conditional view: normalise each cell's bands to fill the cell, so
-                    # the colours show P(action | hand) instead of reach × P(action).
-                    if not _conditional:
-                        return segs
-                    out: dict = {}
-                    for h, bands in segs.items():
-                        total = sum(w for w, _c in bands)
-                        out[h] = [(w / total, c) for w, c in bands] if total > 0 else bands
-                    return out
-
-                for _pos in _seats:
-                    _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
-                    st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
-                    _gp, _gc = st.columns(2)
-                    # LEFT grid = "the street before": the prior-street range on a
-                    # turn/river question (flop/turn), else the flop-entry (preflop)
-                    # range on a flop question.
-                    _left = (_prior_ranges or {}).get(_pos) if _prior_ranges else None
-                    _cur = (_street_ranges or {}).get(_pos)
-                    _strat = _street_strategy.get(_pos)
-                    _entry = _preflop_entry.get(_pos, "call")
-                    _entry_word = "raised" if _entry == "raise" else "called"
-                    with _gp:
-                        if _left:  # turn/river: the prior street's range (presence)
-                            st.caption(
-                                f"{str(_prior_label).capitalize()} range — "
-                                f"~{range_view.range_pct(_left):.0f}% of hands"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(
-                                _segs(_left, range_view.COLOR_INRANGE)
-                            )))
-                        elif (_pre := (_preflop_ranges or {}).get(_pos)):  # flop: preflop entry
-                            st.caption(
-                                f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(
-                                _segs(_pre, _act_color.get(_entry, range_view.COLOR_CALL))
-                            )))
-                        else:
-                            st.caption("Preflop — n/a")
-                    with _gc:
-                        if _strat:
-                            st.caption(
-                                f"This street — strategy "
-                                f"(~{range_view.range_pct(_cur):.0f}% of hands in range)"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(_strat_segs(_strat))))
-                        elif _cur:
-                            st.caption(
-                                f"This street — ~{range_view.range_pct(_cur):.0f}% of hands "
-                                "(not this player's turn on this street)"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(
-                                _segs(_cur, range_view.COLOR_INRANGE)
-                            )))
-                        else:
-                            st.caption("This street — n/a")
-
-        dkey = f"postflop_review_diff::{csv_path.name}::{no}"
-        try:
-            cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
-        except ValueError:
-            cur_diff = 0
-        st.number_input(
-            "Difficulty Rating (edits auto-save)",
-            min_value=0,
-            max_value=3500,
-            step=10,
-            value=cur_diff,
-            key=dkey,
-            on_change=_autosave_review_cell,
-            args=(csv_path, no, dkey, "difficulty"),
-        )
-
-    # --- grading ---
-    st.markdown("**Grade**")
-    note = st.text_area(
-        "Note (optional)",
-        value=existing.get("note", ""),
-        key=f"postflop_review_note::{csv_path.name}::{no}",
-        height=70,
+    _render_postflop_question_card(
+        row, df=df, csv_path=csv_path, reviews=reviews, meta=meta,
+        grouped=False, nav_key=nav_key, idx=idx,
     )
+    _render_postflop_approved_pool()
 
-    def _grade(status: str) -> None:
-        review.save_review(csv_path, no, status, note)
-        st.session_state[nav_key] = min(idx + 1, len(df) - 1)
-        st.rerun()
 
-    g1, g2, g3 = st.columns(3)
-    if g1.button("✅ Approve", use_container_width=True, type="primary"):
-        _grade("approved")
-    if g2.button("⚠️ Needs review", use_container_width=True):
-        _grade("needs_review")
-    if g3.button("❌ Reject", use_container_width=True):
-        _grade("rejected")
-
-    st.divider()
-    if st.button(
-        f"🗑  Remove #{no} from this batch",
-        key=f"pf_review_rm::{csv_path.name}::{no}",
-        help="Deletes this question from the CSV (regenerate to recover).",
-    ):
-        if review.remove_question(csv_path, no):
-            st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
-            st.rerun()
-        else:
-            st.warning(f"#{no} was not found in the batch.")
-
-    # --- cross-batch approved pool ---
+def _render_postflop_approved_pool() -> None:
+    """Cross-batch approved-question pool + download. Shared by the single and
+    grouped review views (so both end with the same approved set)."""
     st.divider()
     st.subheader("✅ Approved postflop questions (all batches)")
     approved_sources = review.collect_approved_sources(POSTFLOP_OUTPUT_DIR)
@@ -6340,17 +6781,17 @@ def render_postflop_review_page() -> None:
             "No approved questions yet. Grade questions **approved** above and "
             "they collect here across postflop batches."
         )
-    else:
-        appr_rows = [r for _c, _n, r in approved_sources]
-        appr_fields = list(appr_rows[0].keys())
-        st.caption(f"**{len(appr_rows)}** approved across all postflop batches.")
-        st.download_button(
-            "⬇️  Download approved (CSV)",
-            data=review.approved_rows_to_csv(appr_fields, appr_rows),
-            file_name="postflop_approved.csv",
-            mime="text/csv",
-            key="pf_approved_dl",
-        )
+        return
+    appr_rows = [r for _c, _n, r in approved_sources]
+    appr_fields = list(appr_rows[0].keys())
+    st.caption(f"**{len(appr_rows)}** approved across all postflop batches.")
+    st.download_button(
+        "⬇️  Download approved (CSV)",
+        data=review.approved_rows_to_csv(appr_fields, appr_rows),
+        file_name="postflop_approved.csv",
+        mime="text/csv",
+        key="pf_approved_dl",
+    )
 
 
 def render_postflop_compare_page() -> None:
@@ -6868,6 +7309,44 @@ def _render_postflop_prompt_library() -> None:
     with st.expander("Built-in default (read-only reference)"):
         st.text_area(
             "default", value=POSTFLOP_SYSTEM_PROMPT, height=300,
+            disabled=True, label_visibility="collapsed",
+        )
+
+    # --- preflop-ENTRY prompt (the play-through preflop leg) -----------------
+    # The preflop leg of a play-through (and the standalone preflop-from-postflop
+    # questions) is written by a SEPARATE prompt -- that's why it reads
+    # differently from the postflop legs. It's a single editable override (no
+    # library), so it lives here under the postflop prompt page.
+    st.divider()
+    st.subheader("Preflop-entry prompt (play-through preflop leg)")
+    st.caption(
+        "Used for the PREFLOP leg of a full-hand play-through and for standalone "
+        "preflop-from-postflop-solve questions. Separate from the postflop system "
+        "prompt above (which writes the flop/turn/river legs)."
+    )
+    from pipeline.postflop.preflop_entry import (  # noqa: PLC0415
+        PREFLOP_ENTRY_SYSTEM_PROMPT,
+    )
+
+    _pe_key = "preflop_entry_prompt_edit"
+    if _pe_key not in st.session_state:
+        st.session_state[_pe_key] = _load_preflop_entry_prompt()
+    edited_pe = st.text_area(
+        "Preflop-entry system prompt", height=300, key=_pe_key,
+    )
+    pcol1, pcol2 = st.columns([1, 4])
+    if pcol1.button("💾 Save preflop-entry prompt", key="pe_save"):
+        _save_preflop_entry_prompt(edited_pe)
+        st.success("Saved. Takes effect on the next batch.")
+    if pcol2.button("↺ Reset to built-in", key="pe_reset"):
+        p = _preflop_entry_prompt_path()
+        if p.is_file():
+            p.unlink()
+        st.session_state[_pe_key] = PREFLOP_ENTRY_SYSTEM_PROMPT
+        st.rerun()
+    with st.expander("Built-in preflop-entry default (read-only)"):
+        st.text_area(
+            "pe_default", value=PREFLOP_ENTRY_SYSTEM_PROMPT, height=240,
             disabled=True, label_visibility="collapsed",
         )
 

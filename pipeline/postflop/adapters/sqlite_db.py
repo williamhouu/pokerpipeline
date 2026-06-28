@@ -228,12 +228,14 @@ class SqliteDbAdapter:
         *,
         streets: tuple[str, ...] = ("flop",),
         max_nodes_per_street: int | None = None,
+        include_ancestors: bool = False,
     ) -> PostflopSolve:
         con = sqlite3.connect(self.db_path)
         try:
             s = _Solve(con)
             return self._build(
-                s, streets=streets, max_nodes_per_street=max_nodes_per_street
+                s, streets=streets, max_nodes_per_street=max_nodes_per_street,
+                include_ancestors=include_ancestors,
             )
         finally:
             con.close()
@@ -244,6 +246,7 @@ class SqliteDbAdapter:
         *,
         streets: tuple[str, ...],
         max_nodes_per_street: int | None,
+        include_ancestors: bool = False,
     ) -> PostflopSolve:
         requested = tuple(streets)
         bad = [st for st in requested if st not in STREETS]
@@ -289,6 +292,27 @@ class SqliteDbAdapter:
                 ranked = _stride_sample(ranked, max_nodes_per_street)
             selected.extend(ranked)
 
+        # Line-closure for play-through assembly: a down-sampled deep node's
+        # decision-node ANCESTORS may not be in `selected`, which breaks
+        # reconstructing the connected hand that leads to it. When requested, add
+        # every decision-node prefix of every selected node (cheap: ~6-10 extra
+        # per deep node, all sharing cached action reads). Restricted to the
+        # requested streets so it never pulls in a street the caller excluded.
+        if include_ancestors:
+            extra: set[str] = set()
+            for nid in selected:
+                parts = nid.split(":")
+                for i in range(1, len(parts)):  # 'r:0' .. parent (exclude self)
+                    pref = ":".join(parts[:i + 1])
+                    if pref == nid or pref in extra:
+                        continue
+                    if _node_street(pref) not in requested:
+                        continue
+                    if s.actions(pref):  # a real decision node (has action rows)
+                        extra.add(pref)
+            present = set(selected)
+            selected.extend(sorted(p for p in extra if p not in present))
+
         nodes: dict[str, PostflopNode] = {}
         for node_id in selected:
             node = self._build_node(
@@ -317,6 +341,14 @@ class SqliteDbAdapter:
             table_size=self.table_size,
             rake=str(s.meta.get("rake", "") or ""),
             source_reference=f"db/{spot}/{''.join(flop)}",
+            # RAW (un-board-masked) preflop-entry weights per seat -- the source
+            # for preflop-entry questions / the preflop leg of a play-through.
+            # The opener's weights are ~1.0 (opens always); the caller's are a
+            # genuine call-vs-fold mix (e.g. 22 at 0.83 = "calls ~83% vs the open").
+            preflop_entry_ranges={
+                self.oop: dict(pre[self.oop]),
+                self.ip: dict(pre[self.ip]),
+            },
         )
 
     # -- one node --------------------------------------------------------
@@ -472,12 +504,26 @@ class SqliteDbAdapter:
             if token.startswith("b"):
                 size = float(token[1:])
                 verb = "raise" if to_call_now > 0 else "bet"  # raise TO / bet OF size
+                added_full = size - state.invested[acting]
+                # The vendor encodes an all-in as "bet your FLOP-START stack"
+                # (the eff_stack token), which OVERSTATES the wager by whatever
+                # the actor already put in on earlier streets (e.g. a turn call).
+                # Cap the wager at what the actor actually has behind, so the
+                # all-in size, the opponent's to-call, the pot, and the pot-odds
+                # are all exact (a deep river jam was reading ~2bb too big and the
+                # to-call exceeded the caller's stack). All-in == the token wants
+                # at least the whole remaining stack.
+                all_in = added_full >= state.behind[acting] - 1.0
+                added = state.behind[acting] if all_in else added_full
+                actual_to = state.invested[acting] + added  # true total this street
                 history.append(
-                    PostflopStep(street_name, acting, verb, to_bb=round(size / bb, 2))
+                    PostflopStep(
+                        street_name, acting, verb, to_bb=round(actual_to / bb, 2),
+                        all_in=all_in,
+                    )
                 )
-                added = size - state.invested[acting]
                 state.pot_chips += added
-                state.invested[acting] = size
+                state.invested[acting] = actual_to
                 state.behind[acting] -= added
             elif token == "c":
                 if to_call_now > 0:  # call
@@ -729,6 +775,7 @@ def load_postflop_db(
     *,
     streets: tuple[str, ...] = ("flop",),
     max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
+    include_ancestors: bool = False,
     **overrides: object,
 ) -> PostflopSolve:
     """Build a :class:`PostflopSolve` from a vendor ``.db``.
@@ -743,10 +790,14 @@ def load_postflop_db(
     count -- the turn/river sets are huge, so they're deterministically
     down-sampled; pass ``None`` to build every node (use only for flop/small
     solves, or you may exhaust memory on a river-heavy solve).
+    ``include_ancestors`` additionally materialises every selected node's
+    decision-node ancestors, so a down-sampled deep node's connected line is
+    fully present (needed by the play-through assembler).
     """
     derived = derive_scenario(read_db_metadata(db_path))
     return SqliteDbAdapter(db_path, **{**derived, **overrides}).build(  # type: ignore[arg-type]
-        streets=streets, max_nodes_per_street=max_nodes_per_street
+        streets=streets, max_nodes_per_street=max_nodes_per_street,
+        include_ancestors=include_ancestors,
     )
 
 

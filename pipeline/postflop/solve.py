@@ -70,6 +70,11 @@ class PostflopStep:
     position: str
     verb: str
     to_bb: float | None = None
+    # True when this bet/raise committed (about) the player's whole remaining
+    # stack -- so the action-history renderer says "moves all-in" instead of
+    # "raises to 197bb" (which reads as an absurd size on a 200bb table). Set by
+    # the adapter walk from the betting state; check/call/fold leave it False.
+    all_in: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,6 +181,15 @@ class PostflopSolve:
     rake: str = ""
     # Free-form provenance carried into the CSV solver_reference column.
     source_reference: str = ""
+    # RAW preflop-entry ranges per position: {position: {combo: weight}} where
+    # the weight is how often that combo TOOK the entry action that started this
+    # hand (the IP opener's open frequency, the OOP caller's call-vs-open
+    # frequency). Solve INPUTS, not solved decisions (no preflop EVs), but they
+    # carry real frequencies -- the source for preflop-entry questions and the
+    # preflop leg of a play-through. Unlike the flop-root node ranges these are
+    # NOT board-masked (no flop is known preflop). Empty when the source has no
+    # preflop range data. See pipeline/postflop/preflop_entry.py.
+    preflop_entry_ranges: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
 
     @property
     def oop_position(self) -> str:

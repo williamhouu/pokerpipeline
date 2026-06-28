@@ -245,6 +245,108 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
         live_or_online="Online",
         table_size=6,
         source_reference="synthetic/btn_vs_bb_srp/2cJs7s",
+        # Raw preflop-entry weights per seat (open / call-vs-open frequencies).
+        # The BB call range carries genuine mixes (JJ 0.5, A7s 0.6, AJo 0.7),
+        # so preflop-entry questions have worthy (mixed-frequency) hands.
+        preflop_entry_ranges={"BB": dict(_BB_CALL_RANGE), "BTN": dict(_BTN_SRP_RANGE)},
+    )
+
+
+def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
+    """A CONNECTED single-hand line for the play-through assembler.
+
+    Unlike :func:`btn_vs_bb_srp_2cJs7s` (four illustrative, disconnected nodes),
+    this is one coherent runout where BB (the hero) check-calls down: flop
+    ``2c Js 7s``, turn ``2h``, river ``Kd``. Node ids use the ``.db`` grammar
+    (``r:0:c:b180:...``) and every node carries the full action ``history``, so
+    the assembler's connectivity test -- a node is an ancestor of another when
+    its board AND history are prefixes -- is exercised end to end. BB holds
+    ``Jh9c`` (a one-pair bluff-catcher) throughout, making five hero decisions
+    (flop lead, flop facing the c-bet, turn lead, river lead, river facing the
+    bet) plus the preflop entry. Two BTN nodes are included so hero-only
+    filtering (skip the villain's decisions) is testable.
+    """
+    flop = ("2c", "Js", "7s")
+    turn_board = ("2c", "Js", "7s", "2h")
+    river_board = ("2c", "Js", "7s", "2h", "Kd")
+    pre = (PreflopStep("BTN", "open", to_bb=2.5), PreflopStep("BB", "call"))
+    hero = "Jh9c"
+
+    # The flop action sequence shared by every later node (BB check, BTN bet, BB
+    # call), then the turn sequence, then the river sequence.
+    f_check = PostflopStep("flop", "BB", "check")
+    f_bet = PostflopStep("flop", "BTN", "bet", to_bb=1.8)
+    f_call = PostflopStep("flop", "BB", "call", to_bb=1.8)
+    t_check = PostflopStep("turn", "BB", "check")
+    t_bet = PostflopStep("turn", "BTN", "bet", to_bb=4.55)
+    t_call = PostflopStep("turn", "BB", "call", to_bb=4.55)
+    r_check = PostflopStep("river", "BB", "check")
+    r_bet = PostflopStep("river", "BTN", "bet", to_bb=9.0)
+
+    def _node(node_id, street, board, actor, villain, pot, eff, to_call,
+              actions, history, strat):
+        vill_range = _BTN_SRP_RANGE if actor == "BB" else dict(_BB_CALL_RANGE, **{hero: 1.0})
+        hero_range = dict(_BB_CALL_RANGE, **{hero: 1.0}) if actor == "BB" else _BTN_SRP_RANGE
+        return PostflopNode(
+            node_id=node_id, street=street, board=board, actor=actor, villain=villain,
+            pot_bb=pot, effective_stack_bb=eff, to_call_bb=to_call, actions=actions,
+            history=history, hero_range=hero_range, villain_range=vill_range,
+            strategy=strat,
+        )
+
+    lead_a = (_action("Check", "check", 0.80, ev_bb=2.4),
+              _action("Bet 33%", "bet", 0.20, to_bb=1.8, pot_fraction=0.33, ev_bb=2.0))
+    face_a = (_action("Fold", "fold", 0.20, ev_bb=0.0),
+              _action("Call", "call", 0.70, to_bb=1.8, ev_bb=0.9),
+              _action("Raise to 6bb", "raise", 0.10, to_bb=6.0, pot_fraction=0.82, ev_bb=0.6))
+    cbet_a = (_action("Check", "check", 0.40, ev_bb=2.0),
+              _action("Bet 33%", "bet", 0.60, to_bb=1.8, pot_fraction=0.33, ev_bb=2.3))
+
+    n1 = _node("r:0", "flop", flop, "BB", "BTN", 5.5, 97.5, 0.0, lead_a, (),
+               {hero: {"Check": 0.80, "Bet 33%": 0.20}})
+    n2 = _node("r:0:c", "flop", flop, "BTN", "BB", 5.5, 97.5, 0.0, cbet_a, (f_check,),
+               {"AcJc": {"Bet 33%": 0.7, "Check": 0.3}})
+    n3 = _node("r:0:c:b180", "flop", flop, "BB", "BTN", 7.3, 97.5, 1.8, face_a,
+               (f_check, f_bet), {hero: {"Call": 0.70, "Fold": 0.20, "Raise to 6bb": 0.10}})
+    t_lead = (_action("Check", "check", 0.75, ev_bb=4.3),
+              _action("Bet 50%", "bet", 0.25, to_bb=4.55, pot_fraction=0.50, ev_bb=3.7))
+    n4 = _node("r:0:c:b180:c:2h", "turn", turn_board, "BB", "BTN", 9.1, 95.7, 0.0,
+               t_lead, (f_check, f_bet, f_call), {hero: {"Check": 0.75, "Bet 50%": 0.25}})
+    t_face = (_action("Fold", "fold", 0.40, ev_bb=0.0),
+              _action("Call", "call", 0.60, to_bb=4.55, ev_bb=1.2))
+    n5 = _node("r:0:c:b180:c:2h:c:b455", "turn", turn_board, "BB", "BTN", 18.2, 91.2,
+               4.55, t_face, (f_check, f_bet, f_call, t_check, t_bet),
+               {hero: {"Call": 0.60, "Fold": 0.40}})
+    r_lead = (_action("Check", "check", 0.60, ev_bb=5.0),
+              _action("Bet 50%", "bet", 0.40, to_bb=9.0, pot_fraction=0.50, ev_bb=4.6))
+    n6 = _node("r:0:c:b180:c:2h:c:b455:c:Kd", "river", river_board, "BB", "BTN", 18.2,
+               91.2, 0.0, r_lead, (f_check, f_bet, f_call, t_check, t_bet, t_call),
+               {hero: {"Check": 0.60, "Bet 50%": 0.40}})
+    r_face = (_action("Fold", "fold", 0.45, ev_bb=0.0),
+              _action("Call", "call", 0.55, to_bb=9.0, ev_bb=0.8))
+    n7 = _node("r:0:c:b180:c:2h:c:b455:c:Kd:c:b900", "river", river_board, "BB", "BTN",
+               36.2, 82.2, 9.0, r_face,
+               (f_check, f_bet, f_call, t_check, t_bet, t_call, r_check, r_bet),
+               {hero: {"Call": 0.55, "Fold": 0.45}})
+
+    return PostflopSolve(
+        solve_id="btn_vs_bb_full_hand_2cJs7s",
+        positions=("BB", "BTN"),
+        effective_stack_bb=100.0,
+        starting_pot_bb=5.5,
+        flop=flop,
+        preflop_summary=pre,
+        nodes={n.node_id: n for n in (n1, n2, n3, n4, n5, n6, n7)},
+        game_format="cash",
+        bb_in_dollars=1.0,
+        stakes="$0.50/$1",
+        live_or_online="Online",
+        table_size=6,
+        source_reference="synthetic/btn_vs_bb_full_hand/2cJs7s",
+        preflop_entry_ranges={
+            "BB": dict(_BB_CALL_RANGE, **{hero: 0.65}),
+            "BTN": dict(_BTN_SRP_RANGE),
+        },
     )
 
 
@@ -252,4 +354,4 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
 assert all(c[0] in RANKS and c[1] in SUITS for c in btn_vs_bb_srp_2cJs7s().flop)
 
 
-__all__ = ["btn_vs_bb_srp_2cJs7s"]
+__all__ = ["btn_vs_bb_full_hand_2cJs7s", "btn_vs_bb_srp_2cJs7s"]

@@ -55,7 +55,7 @@ EXACT_COLS = (
     "Table Size", "Default Stack", "Seats", "POT", "Question", "Question Type",
     "Relative Position", "Position Matchup", "Cash/Tourney", "Live or Online",
     "action_frequencies", "action_ev_bb", "solver_reference", "archetype",
-    "board_texture", "pot_odds", "spr", "neutral_credit", "Notes",
+    "board_texture", "pot_odds", "spr", "neutral_credit", "Notes", "ranges",
 )
 # Concept tags driven by the MC equity / sampled range-equity estimates --
 # diffed with tolerance, not exactness. Everything else in concept_tags is exact.

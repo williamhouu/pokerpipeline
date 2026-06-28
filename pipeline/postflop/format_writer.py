@@ -26,6 +26,7 @@ from pipeline.postflop.app_table_format import build_postflop_app_table_columns
 from pipeline.postflop.difficulty import PostflopDifficulty
 from pipeline.postflop.facts import PostflopFacts
 from pipeline.postflop.options import frequencies_for_options
+from pipeline.postflop.range_export import build_active_ranges_json
 from pipeline.postflop.skills import compute_postflop_skills
 from pipeline.postflop.solve import PostflopSolve
 from pipeline.postflop.spot_sampler import spot_action_evs_bb
@@ -36,6 +37,16 @@ from pipeline.postflop.spot_sampler import spot_action_evs_bb
 # deliberately separate so neither can disturb the other.)
 POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
     "No",
+    # --- play-through / full-hand sequence tags (Option B, June 2026) ---
+    # A deterministic, globally-unique id shared by every question of ONE hand
+    # (preflop -> flop -> turn -> river), and the explicit 1-based order within
+    # that hand. BLANK for a standalone question (a single-row "group"); the app
+    # GROUPS BY hand_id and ORDERS BY sequence_index to play a hand street by
+    # street. sequence_total is the count in the group ("Q 2 of 4"), also blank
+    # for standalones. See pipeline/postflop/play_through.py.
+    "hand_id",
+    "sequence_index",
+    "sequence_total",
     "Hand Stage",
     "Context",
     "User Seat",
@@ -84,6 +95,12 @@ POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
     "skills",
     "archetype",
     "board_texture",
+    # Each ACTIVE player's range at the CURRENT street (169-class JSON) -- the
+    # postflop analogue of the preflop `ranges` column, for the app's range UI.
+    # Hero carries range + action-mix strategy; villain carries its range
+    # (holdings). Empty on preflop-entry legs (a postflop solve has no accurate
+    # preflop range). See pipeline/postflop/range_export.py.
+    "ranges",
     # Difficulty-axis diagnostics (3-axis: freq + concept + hand; easy_ev is a
     # diagnostic only, NOT in the score -- see difficulty.py).
     "easy_freq",
@@ -212,12 +229,20 @@ def build_postflop_row(
     *,
     validation_status: str = "draft",
     display_in_bb: bool = True,
+    hand_id: str = "",
+    sequence_index: int | str = "",
+    sequence_total: int | str = "",
 ) -> dict[str, str]:
     """Build one CSV row dict from all the layer outputs.
 
     Amounts in the Context / Question / POT / Default Stack render in big blinds
     (``display_in_bb=True``) or in dollars (``solve.bb_in_dollars``). The
     ``action_ev_bb`` / SPR / equity columns are unit-fixed and unaffected.
+
+    ``hand_id`` / ``sequence_index`` / ``sequence_total`` tag this row as one
+    leg of a play-through hand (Option B). They stay blank for a standalone
+    question, so an ordinary batch is byte-identical aside from the new (empty)
+    columns; the full-hand assembler fills them in.
     """
     node = facts.spot.node
     # The app's poker-table render tokens (seats + chips + board), so the CSV
@@ -239,6 +264,9 @@ def build_postflop_row(
     )
     row = {
         "No": str(number),
+        "hand_id": hand_id,
+        "sequence_index": str(sequence_index),
+        "sequence_total": str(sequence_total),
         "Hand Stage": facts.street.capitalize(),
         "Context": build_context_line(solve, display_in_bb=display_in_bb),
         # App table-state tokens (User Seat / User Cards / Cards on Table /
@@ -283,6 +311,9 @@ def build_postflop_row(
         ),
         "archetype": facts.archetype,
         "board_texture": facts.board_texture.get("composite", ""),
+        # Both active players' current-street ranges (169-class JSON) for the
+        # app's range UI -- accurate, from the node's reach-weighted ranges.
+        "ranges": build_active_ranges_json(node),
         "easy_freq": f"{difficulty.easy_freq:.2f}",
         "easy_ev": f"{difficulty.easy_ev:.2f}" if difficulty.easy_ev is not None else "",
         "easy_concept": f"{difficulty.easy_concept:.2f}",

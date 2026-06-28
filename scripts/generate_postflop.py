@@ -36,20 +36,30 @@ from pipeline.postflop.spot_selection import (  # noqa: E402
 )
 
 
-def _load_solve(name: str, *, streets: tuple[str, ...], max_nodes_per_street: int | None):
+def _load_solve(
+    name: str, *, streets: tuple[str, ...], max_nodes_per_street: int | None,
+    include_ancestors: bool = False,
+):
     """Resolve a solve by name or a vendor-file path.
 
     ``fixture`` -> the synthetic in-memory solve (``streets`` is ignored; it is a
-    fixed flop solve). A path ending in ``.db`` -> the third-party SQLite adapter
-    (``streets`` selects flop/turn/river; ``max_nodes_per_street`` caps each). A
+    fixed flop solve). ``full-hand-fixture`` -> the connected single-hand line
+    (for play-through demos). A path ending in ``.db`` -> the third-party SQLite
+    adapter (``streets`` selects flop/turn/river; ``max_nodes_per_street`` caps
+    each; ``include_ancestors`` line-closes for play-through assembly). A
     ``.cfr`` path is the documented next step (the PioSolver UPI client)."""
     if name in ("fixture", "btn_vs_bb_srp_2cJs7s"):
         return btn_vs_bb_srp_2cJs7s()
+    if name in ("full-hand-fixture", "btn_vs_bb_full_hand_2cJs7s"):
+        from pipeline.postflop.fixtures import btn_vs_bb_full_hand_2cJs7s
+
+        return btn_vs_bb_full_hand_2cJs7s()
     if name.endswith(".db"):
         from pipeline.postflop.adapters.sqlite_db import load_postflop_db
 
         return load_postflop_db(
-            name, streets=streets, max_nodes_per_street=max_nodes_per_street
+            name, streets=streets, max_nodes_per_street=max_nodes_per_street,
+            include_ancestors=include_ancestors,
         )
     raise SystemExit(
         f"unknown solve {name!r}. Pass 'fixture' or a vendor '.db' path; a "
@@ -61,7 +71,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate postflop questions.")
     parser.add_argument("--solve", default="fixture", help="'fixture' or a vendor '.db' path")
     parser.add_argument("--out", default="test_output/postflop_demo.csv", help="output CSV path")
-    parser.add_argument("-n", "--num", type=int, default=30, help="max questions")
+    parser.add_argument("-n", "--num", type=int, default=30, help="max questions (or hands, in full-hand mode)")
+    parser.add_argument(
+        "--mode", choices=["spots", "full-hands", "preflop"], default="spots",
+        help="'spots' = independent postflop questions (default); 'full-hands' = "
+             "linked preflop->river play-through sequences (Option B hand_id/"
+             "sequence_index); 'preflop' = standalone preflop-entry questions "
+             "from the solve's flop-entry ranges. -n is the HAND count in "
+             "full-hands mode.",
+    )
+    parser.add_argument(
+        "--heroes", nargs="*", default=[],
+        help="restrict to these hero seats (e.g. BB BTN); default = both",
+    )
+    parser.add_argument(
+        "--include-villain", action="store_true",
+        help="full-hands mode: also emit the villain's line on the same runout "
+             "as a separate hand (the 'flip the frame' path)",
+    )
+    parser.add_argument(
+        "--no-preflop-leg", action="store_true",
+        help="full-hands mode: omit the preflop-entry leg from each hand",
+    )
     parser.add_argument("--dry-run", action="store_true", help="no API call; deterministic placeholder prose")
     parser.add_argument("--model", default=None, help="override the LLM model")
     parser.add_argument(
@@ -130,7 +161,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cap = args.max_nodes_per_street if args.max_nodes_per_street > 0 else None
-    solve = _load_solve(args.solve, streets=tuple(args.streets), max_nodes_per_street=cap)
+    # Full-hand mode needs every selected node's ancestors so a connected line
+    # resolves; for the fixture it's already connected. Default full-hand streets
+    # to all three so play-throughs can reach the river.
+    full_hand = args.mode == "full-hands"
+    streets = tuple(args.streets)
+    if full_hand and streets == ("flop",):
+        streets = ("flop", "turn", "river")
+    solve = _load_solve(
+        args.solve, streets=streets, max_nodes_per_street=cap,
+        include_ancestors=full_hand,
+    )
     client = None
     if not args.dry_run:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -140,6 +181,45 @@ def main(argv: list[str] | None = None) -> int:
             from anthropic import Anthropic  # local import: only needed for a real run
 
             client = Anthropic()
+
+    # --- play-through / preflop-standalone modes (separate drivers) ---------
+    if args.mode in ("full-hands", "preflop"):
+        from pipeline.postflop.full_hand_batch import (
+            generate_full_hand_batch,
+            generate_preflop_entry_batch,
+        )
+
+        common = dict(
+            solve=solve, output_path=args.out, client=client, dry_run=args.dry_run,
+            heroes=tuple(args.heroes), answer_style="auto",
+            progress_callback=lambda msg, done, total: print(f"  {msg}", file=sys.stderr),
+        )
+        if args.model:
+            common["model"] = args.model
+        if args.mode == "full-hands":
+            res = generate_full_hand_batch(
+                total_hands=args.num, include_villain=args.include_villain,
+                include_preflop=not args.no_preflop_leg,
+                min_ev_gap_bb=args.min_ev_gap,
+                quality_gate=not args.no_quality_gate,
+                min_premise_freq=(args.min_premise_freq if args.min_premise_freq > 0 else None),
+                trap_difficulty=args.trap_difficulty,
+                # Layer-7 audit on the postflop legs (same flags as spots mode).
+                run_claim_checker=args.claim_checker or args.revise,
+                revise_pass=args.revise,
+                final_audit=args.final_audit and args.revise,
+                **common,
+            )
+        else:
+            res = generate_preflop_entry_batch(total_questions=args.num, **common)
+        print(
+            f"Wrote {res.questions_written} questions "
+            f"({res.worthy_spots_available} worthy, {len(res.failures)} failed) "
+            f"-> {res.output_path}"
+        )
+        if res.meta_path:
+            print(f"Meta sidecar: {res.meta_path}")
+        return 0
 
     kwargs = {}
     if args.model:

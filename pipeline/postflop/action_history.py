@@ -141,9 +141,16 @@ def _preflop_verb_phrase(step: PreflopStep, *, is_hero: bool, fmt: AmountFmt = _
 
 def _postflop_verb_phrase(step: PostflopStep, *, is_hero: bool, fmt: AmountFmt = _bb) -> str:
     """Conjugated postflop action: 'check' / 'checks', 'bet 1.8bb' / 'bets 1.8bb',
-    'call' / 'calls', 'raise to 6bb' / 'raises to 6bb'."""
+    'call' / 'calls', 'raise to 6bb' / 'raises to 6bb'.
+
+    A bet/raise that committed the whole stack renders as 'move(s) all-in for
+    197bb' instead of the raw size, which reads as an absurd raise on a deep
+    table."""
     if step.verb not in POSTFLOP_VERBS:
         raise ValueError(f"unknown postflop verb {step.verb!r}")
+    if step.all_in and step.verb in ("bet", "raise") and step.to_bb is not None:
+        move = "move" if is_hero else "moves"
+        return f"{move} all-in for {fmt(step.to_bb)}"
     verb = step.verb if is_hero else _third_person(step.verb)
     if step.verb == "bet" and step.to_bb is not None:
         return f"{verb} {fmt(step.to_bb)}"
