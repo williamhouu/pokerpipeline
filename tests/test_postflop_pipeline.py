@@ -733,6 +733,22 @@ def test_generate_raises_after_two_failures() -> None:
 
 
 # --- format writer ----------------------------------------------------------
+def test_postflop_schema_prefix_matches_preflop() -> None:
+    """The postflop CSV's leading columns are byte-identical (name + order) to
+    the preflop CSV, so the app reads ONE layout for both paths; postflop only
+    adds extra columns AFTER that shared prefix. Guards the June-2026 unification
+    against drift."""
+    from pipeline.preflop.format_writer import PREFLOP_CSV_COLUMNS  # noqa: PLC0415
+
+    pre = list(PREFLOP_CSV_COLUMNS)
+    post = list(POSTFLOP_CSV_COLUMNS)
+    assert post[: len(pre)] == pre, "shared prefix drifted from the preflop schema"
+    assert len(post) > len(pre), "postflop should add extra columns after the prefix"
+    # The four shared-schema classification columns are now part of the prefix.
+    for col in ("Preflop Pot Type", "Pot Participant", "Stack Depth", "exploit_notes"):
+        assert col in pre and col in post
+
+
 def test_build_row_has_all_columns() -> None:
     facts = _facts_for()
     opts, correct = build_options(facts.spot)

@@ -62,7 +62,12 @@ COLOR_FOLD = "#5b8fb0"
 COLOR_CALL = "#4a9e5c"
 COLOR_RAISE = "#c2492f"
 COLOR_ALLIN = "#7a1f1f"
-COLOR_INRANGE = "#4a9e5c"
+# Neutral slate for a "holdings" grid (a player IN the pot but NOT acting on this
+# street -- e.g. the villain who already checked back). Deliberately distinct
+# from every ACTION colour: it was previously identical to COLOR_CALL (#4a9e5c),
+# so a holdings grid read as "this player is calling", which is misleading (the
+# player has no action here). Now clearly "just the range, no action".
+COLOR_INRANGE = "#8a8f98"
 
 
 def grid_html(segments_by_hand: dict[str, list[tuple[float, str]]]) -> str:

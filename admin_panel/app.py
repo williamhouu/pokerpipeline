@@ -578,15 +578,17 @@ def _pack_display_framing(pack: PreflopPack) -> tuple[str, float]:
     """Pack-aware ``(venue, stakes_bb_dollars)`` display default.
 
     Venue/stakes are cosmetic -- every solver number is in bb -- but the
-    framing should match the pack's shape. The 9-max Monker pack
-    (``monker_nlhe``: 9-handed, 4x opens, 10%/3bb cap = a $6 cap at $1/$2)
-    reads as a Live $1/$2 game; every other pack keeps the original Online
-    $0.25/$0.50 framing. Both the Generate page (as the widget default) and
-    the Compare page (which has no venue widget) call this, so a pack frames
-    identically wherever it's generated -- the source-of-truth that keeps
-    the two paths from drifting (they did: Compare used to hardcode Online).
+    framing should match the pack's shape. The Monker packs
+    (``monker_nlhe``: 9-handed / short-stack, capped-rake) and the 8-max 200bb
+    pack (``gto_preflop_8max``: a live deep-cash structure -- the DB's own
+    gametype is ``Cash8mLiveGeneral``) read as Live $1/$2 games; the 6-max Ryan
+    pack keeps the original Online $0.25/$0.50 framing. Both the Generate page
+    (as the widget default) and the Compare page (which has no venue widget) call
+    this, so a pack frames identically wherever it's generated -- the
+    source-of-truth that keeps the two paths from drifting (they did: Compare
+    used to hardcode Online).
     """
-    is_live = pack.grammar_name == "monker_nlhe"
+    is_live = pack.grammar_name in ("monker_nlhe", "gto_preflop_8max")
     return ("Live", 2.00) if is_live else ("Online", 0.50)
 
 
@@ -1338,7 +1340,7 @@ def _render_generate_page_postflop() -> None:
         pf_layer7_mode = st.radio(
             "Layer 7 mode",
             options=["Off", "Flag only", "Audit & auto-fix"],
-            index=0,
+            index=2,  # default to Audit & auto-fix (per the user's request)
             horizontal=True,
             key="postflop_layer7_mode",
             help="Off = no AI audit. Flag only = one extra LLM call per question "
@@ -2413,7 +2415,7 @@ def _render_generate_page_preflop() -> None:
     layer7_mode = st.radio(
         "Layer 7 mode",
         options=["Off", "Flag only", "Audit & auto-fix"],
-        index=0,
+        index=2,  # default to Audit & auto-fix (per the user's request)
         horizontal=True,
         key="preflop_layer7_mode",
         help="Off = no AI audit. Flag only = one extra LLM call per question that "
@@ -2489,13 +2491,13 @@ def _render_generate_page_preflop() -> None:
                 st.caption("Saved.")
         claim_checker_prompt = st.session_state[ck_key]
 
-    # --- Fast test mode: fewer equity run-outs (default ON) -----------------
+    # --- Fast test mode: fewer equity run-outs (default OFF) ----------------
     # ON = 200 run-outs (≈2x faster, for iterating); OFF = 400 (most accurate,
-    # for the real questions you'll ship). Defaults ON per the user's testing
-    # workflow.
+    # for the real questions you'll ship). Defaults OFF (accurate) per the
+    # user's request -- flip it ON only when iterating.
     fast_test_mode = st.toggle(
         "⚡ Fast test mode (fewer equity run-outs)",
-        value=True,
+        value=False,
         key="preflop_fast_test_mode",
         help="ON = ~2x faster generation by dealing 200 equity run-outs per "
         "spot instead of 400. The equity % each question shows gets slightly "
@@ -3505,6 +3507,15 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
             f"failures: **{len(result.failures)}**. "
             "Try a wider difficulty band, the Mixed preset, or a wider "
             "worthiness window."
+            + (
+                " — Note: a **Hard** band with a **near-pure worthiness window** "
+                "matches almost nothing unless **🪤 Trap-aware difficulty** is ON "
+                "(pure spots score Easy otherwise), so nearly all the "
+                f"{result.difficulty_filtered_out} difficulty rejections are that. "
+                "Enable trap-aware, or widen the band."
+                if result.difficulty_filtered_out > max(1, result.worthy_spots_available // 2)
+                else ""
+            )
         )
     else:
         _band_note = (
@@ -4012,6 +4023,92 @@ def _autosave_review_cell(
         st.toast(f"Saved #{no}")
 
 
+def _render_inline_spot_ranges(node, pack, *, key_prefix: str) -> None:
+    """Render one decision node's range charts inline: the hero's strategy grid
+    (coloured by action) plus each still-in villain's strategy at the node where
+    THEY acted -- the same charts the Range viewer shows. Lets the preflop Review
+    page show ranges in a dropdown instead of navigating to a separate tab
+    (parity with the postflop Review). Uses the shared range_view renderer.
+    """
+    from pipeline.preflop.action_history import resolve_preflop_history  # noqa: PLC0415
+    from pipeline.preflop.format_writer import _villain_decision_node  # noqa: PLC0415
+    from pipeline.preflop.grammars.types import (  # noqa: PLC0415
+        ParsedAction,
+        PreflopActionType,
+    )
+    from pipeline.preflop_ranges import parse_range_file  # noqa: PLC0415
+
+    _color = {
+        PreflopActionType.FOLD: range_view.COLOR_FOLD,
+        PreflopActionType.CALL: range_view.COLOR_CALL,
+        PreflopActionType.RAISE: range_view.COLOR_RAISE,
+        PreflopActionType.ALL_IN: range_view.COLOR_ALLIN,
+    }
+    _order = {
+        PreflopActionType.FOLD: 0, PreflopActionType.CALL: 1,
+        PreflopActionType.RAISE: 2, PreflopActionType.ALL_IN: 3,
+    }
+    _verbs = {
+        PreflopActionType.FOLD: "folds", PreflopActionType.CALL: "calls",
+        PreflopActionType.ALL_IN: "shoves all-in",
+    }
+    all_hands = [range_view.hand_at(i, j) for i in range(13) for j in range(13)]
+    state = resolve_preflop_history(node.history_before, pack)
+
+    def _verb(a: ParsedAction, size: float | None) -> str:
+        if a.action_type is PreflopActionType.RAISE and size is not None:
+            return f"raises to {size:g}bb"
+        return _verbs.get(a.action_type, a.action_type.value.lower())
+
+    if node.history_before:
+        st.caption(
+            "Action so far → "
+            + " · ".join(
+                f"{a.position} {_verb(a, size)}"
+                for a, size in zip(node.history_before, state.sizes_bb, strict=True)
+            )
+        )
+    legend = "".join(
+        f'<span style="display:inline-block;width:12px;height:12px;background:{c};'
+        f'border-radius:2px;margin:0 5px 0 14px;vertical-align:middle;"></span>{n}'
+        for n, c in (("fold", range_view.COLOR_FOLD), ("call", range_view.COLOR_CALL),
+                     ("raise", range_view.COLOR_RAISE), ("all-in", range_view.COLOR_ALLIN))
+    )
+    st.html(f'<div style="font-size:13px;margin-bottom:4px;">{legend}</div>')
+
+    def _mix(grid_node) -> dict[str, list[tuple[float, str]]]:
+        segs: dict[str, list[tuple[float, str]]] = {h: [] for h in all_hands}
+        for opt in sorted(grid_node.actions, key=lambda o: _order.get(o.action_type, 9)):
+            try:
+                weights = parse_range_file(opt.range_file.path)
+            except (OSError, ValueError):
+                weights = {}
+            col = _color.get(opt.action_type, "#888888")
+            for hand in all_hands:
+                fr = weights.get(hand, 0.0)
+                if fr > 0.0:
+                    segs[hand].append((fr, col))
+        return segs
+
+    st.markdown(f"**{node.actor} — strategy (this decision)**")
+    st.html(range_view.grid_html(_mix(node)))
+
+    last: dict[str, tuple[ParsedAction, float | None]] = {}
+    for a, size in zip(node.history_before, state.sizes_bb, strict=True):
+        if a.position == node.actor:
+            continue
+        if a.action_type is PreflopActionType.FOLD:
+            last.pop(a.position, None)
+        else:
+            last[a.position] = (a, size)
+    for pos, (action, size) in last.items():
+        vnode = _villain_decision_node(node, pos, pack)
+        if vnode is None:
+            continue
+        st.markdown(f"**{pos}** {_verb(action, size)} — their range/strategy")
+        st.html(range_view.grid_html(_mix(vnode)))
+
+
 def render_review_page() -> None:
     """Read each generated question in full and grade it.
 
@@ -4315,23 +4412,31 @@ def render_review_page() -> None:
         if _cell(row, "skills"):
             st.caption(f"skills: {_cell(row, 'skills')}")
 
-        # Ranges: a button to the visual Range viewer, raw JSON tucked away.
+        # Ranges: shown INLINE in a dropdown (like the postflop Review) instead
+        # of navigating to a separate Range-viewer tab. Resolve the pack from
+        # the batch meta's pack_id and the node from the solver_reference.
         ranges_val = _cell(row, "ranges")
         n_players = review.range_player_count(ranges_val)
-        if st.button(
-            "📊  View ranges for this spot",
-            key=f"view_ranges::{csv_path.name}::{no}",
-            use_container_width=True,
-            help="Open the Range viewer tab with this question's node loaded.",
-        ):
-            st.session_state["ranges_node_id"] = (
-                range_view.node_id_from_solver_reference(
+        with st.expander("📊  Ranges for this spot"):
+            _rng_pack = None
+            _pid = (_meta or {}).get("pack_id") if isinstance(_meta, dict) else None
+            if _pid:
+                _rng_pack = {p.pack_id: p for p in _cached_preflop_packs()}.get(_pid)
+            _rng_node = None
+            if _rng_pack is not None:
+                _nid = range_view.node_id_from_solver_reference(
                     _cell(row, "solver_reference")
                 )
-            )
-            st.session_state["ranges_from_q"] = no
-            st.session_state["_pending_nav"] = "Ranges"
-            st.rerun()
+                _rng_node = _cached_ranges_index(_rng_pack.pack_id)[0].get(_nid)
+            if _rng_node is not None:
+                _render_inline_spot_ranges(
+                    _rng_node, _rng_pack, key_prefix=f"{csv_path.name}::{no}"
+                )
+            else:
+                st.caption(
+                    "Couldn't resolve this spot's node inline "
+                    "(older batch, or the pack isn't on disk). Raw JSON below."
+                )
         if n_players:
             with st.expander(f"raw ranges JSON · {n_players} players"):
                 try:
@@ -6320,6 +6425,11 @@ def _render_postflop_question_card(
         with st.expander("Preview (rendered)", expanded=False):
             st.info(_md_lines(_cell(row, "Answer Explanation")))
 
+        # The deterministic "Show the math" strip (pot odds / equity / currently
+        # ahead / blockers / SPR), from the row's stat_notes column -- now
+        # populated on postflop rows, so it renders here like the preflop Review.
+        _render_stat_panel(row)
+
         # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
         _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
         _meta_node_ids = {q.get("node_id") for q in _qrecs}
@@ -6413,7 +6523,8 @@ def _render_postflop_question_card(
         _preflop_entry = meta.get("preflop_entry_actions", {}) if isinstance(meta, dict) else {}
         if _street_ranges or _preflop_ranges:
             with st.expander(
-                "📊 Player ranges — preflop + this-street strategy", expanded=not grouped
+                "📊 Player ranges — the street before + this-street strategy",
+                expanded=not grouped,
             ):
                 _hero_seat = _cell(row, "User Seat").split("-", 1)[0]
                 _seats = sorted(set(_street_ranges or {}) | set(_preflop_ranges or {}))
@@ -6443,9 +6554,34 @@ def _render_postflop_question_card(
                 st.caption(
                     "**How to read a cell:** fill height = how much of this player's "
                     "range that hand is here; colour = the action (🟦 check · 🟩 call "
-                    "· 🟥 bet/raise). Left grid = the street before this decision, "
-                    "right grid = this street."
+                    "· 🟥 bet/raise · ⬜ in range, no action yet). Left grid = the "
+                    "street before this decision, right grid = this street."
                 )
+                with st.popover("ℹ️ Where does each range come from?"):
+                    st.markdown(
+                        "**Hero (the player to act)**\n"
+                        "- **Left grid** — hero's range as it stood on the *street "
+                        "before* this decision (a turn question shows the flop range, "
+                        "a river question the turn range). It's the set of hands hero "
+                        "could still have coming into this street.\n"
+                        "- **Right grid** — hero's *strategy on this street*: every "
+                        "hand coloured by what the solver does with it here "
+                        "(🟦 check / 🟩 call / 🟥 bet or raise). This is the decision "
+                        "the question is asking about.\n\n"
+                        "**Villain (the other player)**\n"
+                        "- **Left grid** — villain's range on the street before.\n"
+                        "- **Right grid** — if villain has NOT acted yet this street "
+                        "(e.g. they checked back the previous street), this is the "
+                        "hands they can still have *right now* (⬜ neutral = holdings "
+                        "only, no action to colour) — \"what you're up against\", "
+                        "carried forward from earlier streets. If villain DID already "
+                        "act this street (e.g. they bet into you), it instead shows "
+                        "*their* strategy at that action (🟦/🟩/🟥), so you see the "
+                        "range behind the bet you face.\n\n"
+                        "Toggle **Conditional view** to make every in-range cell full "
+                        "height, coloured by what that specific hand does when held "
+                        "(useful for reading a mixed strategy hand-by-hand)."
+                    )
                 _cond_key = f"pf_range_conditional::{csv_path.name}::{no}"
                 _conditional = st.toggle(
                     "Conditional view — full-height cells (strategy *when the hand is held*)",
@@ -6501,14 +6637,23 @@ def _render_postflop_question_card(
                             st.html(range_view.grid_html(_maybe_conditional(_strat_segs(_strat))))
                         elif _cur:
                             st.caption(
-                                f"This street — ~{range_view.range_pct(_cur):.0f}% of hands "
-                                "(not this player's turn on this street)"
+                                f"**{_pos}'s current holdings** — every hand "
+                                f"{_pos} can still have right now "
+                                f"(~{range_view.range_pct(_cur):.0f}% of all hands). "
+                                "⬜ Grey = holdings only: it is NOT this player's turn "
+                                "to act on this street, so there is no strategy to "
+                                "colour. This is just \"what you're up against\", not "
+                                "an action."
                             )
                             st.html(range_view.grid_html(_maybe_conditional(
                                 _segs(_cur, range_view.COLOR_INRANGE)
                             )))
                         else:
                             st.caption("This street — n/a")
+
+        # Deterministic exploit adjustments (vs nit / station / maniac). Reads
+        # the baked exploit_notes column, now populated on postflop rows too.
+        _render_exploit_panel(row)
 
         dkey = f"postflop_review_diff::{csv_path.name}::{no}"
         try:

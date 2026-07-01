@@ -457,7 +457,14 @@ def test_postflop_ranges_column(tmp_path: Path) -> None:
         hero = rg[actors[0]]
         assert hero["range"] and hero["strategy"]      # hero: range + action mix
         villain = rg[[p for p in rg if p != actors[0]][0]]
-        assert villain["range"] and "strategy" not in villain  # villain: range only
+        # Villain always carries their range (holdings). When they ALSO acted on
+        # this street, the entry adds their action-mix strategy at their own
+        # action point (acted_this_street=True); otherwise it is range-only.
+        assert villain["range"]
+        if villain.get("acted_this_street"):
+            assert villain["strategy"]
+        else:
+            assert "strategy" not in villain
         # strategy frequencies are within a class's presence (segments <= weight+eps)
         for hand, acts in hero["strategy"].items():
             assert sum(acts.values()) <= hero["range"].get(hand, 0) + 0.02

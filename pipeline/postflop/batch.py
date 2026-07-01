@@ -40,6 +40,7 @@ from pipeline.postflop.explanation_generator import (
 )
 from pipeline.postflop.facts import DEFAULT_EQUITY_RUNOUTS, extract_facts
 from pipeline.postflop.format_writer import build_postflop_row, write_postflop_csv
+from pipeline.postflop.range_export import _villain_decision_node
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
 from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ, line_premise_min_freq
@@ -169,25 +170,6 @@ def _node_actor_strategy(node: Any) -> dict[str, dict[str, float]]:
     return out
 
 
-def _villain_decision_node(node: Any, solve: Any) -> Any:
-    """The most recent node where ``node.villain`` acted -- so we can show the
-    VILLAIN's own strategy (e.g. BB's check/donk) rather than flat presence.
-
-    The villain's decision is the longest node-id PREFIX of the current node
-    whose actor is the villain. Returns None when the villain has not acted on
-    this line yet (they are first to act on the current street), or when that
-    node was down-sampled out of the solve.
-    """
-    villain = node.villain
-    nid = node.node_id
-    best = None
-    for cid, cand in solve.nodes.items():
-        if cand.actor == villain and nid.startswith(cid + ":"):
-            if best is None or len(cid) > len(best.node_id):
-                best = cand
-    return best
-
-
 # The street immediately before each decision street (flop's prior is preflop).
 _PRIOR_STREET = {"turn": "flop", "river": "turn"}
 
@@ -216,14 +198,20 @@ def _prior_street_node(node: Any, solve: Any) -> Any:
 
 
 def _street_strategies(node: Any, solve: Any) -> dict[str, dict]:
-    """Both players' action strategies for the current street, keyed by
-    position: the ACTOR at this node, and the VILLAIN at the node where THEY
-    last acted (so BB's flop check/donk shows on BB's grid even when BTN is the
-    hero). Villain omitted when they have not acted on this street yet.
+    """Both players' action strategies FOR THE CURRENT STREET, keyed by position:
+    the ACTOR at this node, and the VILLAIN only when they ALSO acted on this
+    street (so BB's turn donk shows on BB's grid even when BTN is the hero).
+
+    The villain is omitted when they have not acted on the CURRENT street -- e.g.
+    they checked back the previous street and it is now hero's turn first.
+    Colouring their PRIOR-street action as "this street's strategy" would be
+    misleading, so those spots fall back to a neutral holdings grid. The street
+    guard is what restricts ``_villain_decision_node`` (a range_export leaf,
+    imported to avoid a circular import) to the current street.
     """
     out: dict[str, dict] = {node.actor: _node_actor_strategy(node)}
     vnode = _villain_decision_node(node, solve)
-    if vnode is not None:  # vnode.actor == node.villain
+    if vnode is not None and vnode.street == node.street:  # vnode.actor == node.villain
         out[vnode.actor] = _node_actor_strategy(vnode)
     return out
 

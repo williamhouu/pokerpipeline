@@ -125,6 +125,9 @@ def _raise_size_bb(
 # Question prose, the POT column, the EV engine, and the ranges-column
 # action mixes all read from it and can't drift apart.
 _MONKER_GRAMMAR = "monker_nlhe"
+# Grammar whose raise tokens are already in big blinds (raise TO X bb), so the
+# token is used directly with no pot-fraction conversion or size lookup.
+_BB_NATIVE_GRAMMAR = "gto_preflop_8max"
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,7 @@ def resolve_preflop_history(
     math would need per-seat stack tracking, deferred.
     """
     is_monker = pack.grammar_name == _MONKER_GRAMMAR
+    is_bb_native = pack.grammar_name == _BB_NATIVE_GRAMMAR
     committed: dict[str, float] = {"SB": pack.sb_to_bb_ratio, "BB": 1.0}
     high_bet = 1.0  # everyone has to match the BB to enter
     raise_level = 0
@@ -246,7 +250,11 @@ def resolve_preflop_history(
             sizes.append(stack)
             continue
         # RAISE
-        if is_monker:
+        if is_bb_native:
+            # This pack stores raise sizes directly in bb (raise TO X bb), so
+            # the token IS the bb amount -- no pot-fraction or lookup needed.
+            raise_to = _quantize_raise(float(parsed.raise_size_pct or 0.0), pack)
+        elif is_monker:
             if parsed.raise_size_pct == MIN_RAISE_PCT:
                 raise_to = _quantize_raise(
                     _monker_min_raise_to_bb(high_bet), pack
@@ -366,6 +374,9 @@ def raise_to_bb(
     to 13.5bb" matches what the prose would say if taken); PioViewer
     packs hit the token lookup at ``state.raise_level + 1``.
     """
+    if pack.grammar_name == _BB_NATIVE_GRAMMAR:
+        # Token is already the bb amount to raise TO.
+        return _quantize_raise(float(raise_size_pct or 0.0), pack)
     if pack.grammar_name == _MONKER_GRAMMAR:
         if raise_size_pct == MIN_RAISE_PCT:
             return _quantize_raise(

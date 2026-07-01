@@ -99,7 +99,10 @@ _DRAW_HAND_EASE = 0.55
 _LINEAR_CEILING = 3000  # difficulty when easy=0
 _LINEAR_FLOOR = 500     # difficulty when easy=1
 _LINEAR_SPAN = _LINEAR_CEILING - _LINEAR_FLOOR  # 2500
-_HARD_FLOOR = 400
+# The brief's documented scale is 500-3000 (500 = easiest). Clamp the hard floor
+# to 500 so no spot prints below "easiest" -- matters for the trivial entry legs
+# (see preflop_entry.difficulty, which uses the same 500 floor).
+_HARD_FLOOR = 500
 _HARD_CEILING = 3200
 
 # === trap-aware difficulty (opt-in, mirrors preflop) =========================
@@ -181,8 +184,13 @@ def _is_counterintuitive_spot(facts: PostflopFacts) -> bool:
     continues = facts.dominant_verb != "fold"
     if continues and eq <= price - _TRAP_EQUITY_MARGIN:
         return True  # equity clearly below the price, yet the solver continues
-    if (not continues) and eq >= price + _TRAP_EQUITY_MARGIN:
-        return True  # equity clearly clears the price, yet the solver folds
+    # A FOLD is a trap only if equity clears the price by the base margin PLUS a
+    # rake cushion: rake (and poor realisation) mean you win less than the naive
+    # price implies, so a fold whose raw equity barely beats it is usually just
+    # correct, not a trap. Stops over-flagging normal folds on raked solves.
+    rake_cushion = getattr(facts, "rake_pct", 0.0)
+    if (not continues) and eq >= price + _TRAP_EQUITY_MARGIN + rake_cushion:
+        return True  # equity clears the (rake-adjusted) price, yet the solver folds
     return False
 
 

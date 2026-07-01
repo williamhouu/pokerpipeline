@@ -34,7 +34,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.preflop.batch import _placeholder_explanation  # noqa: E402
 from pipeline.preflop.difficulty import compute_difficulty  # noqa: E402
-from pipeline.preflop.batch import ev_gap_from_action_evs  # noqa: E402
+from pipeline.preflop.batch import (  # noqa: E402
+    _NEAR_PURE_DOMINANT_FREQ,
+    _NEAR_PURE_EV_CREDIT_BB,
+    ev_gap_from_action_evs,
+)
 from pipeline.preflop.ev_engine import compute_ev_gap_bb  # noqa: E402
 from pipeline.preflop.fact_extractor import extract_facts  # noqa: E402
 from pipeline.preflop.format_writer import build_preflop_row  # noqa: E402
@@ -56,6 +60,11 @@ EXACT_COLS = (
 EQUITY_TAGS = frozenset({
     "equity_favorite", "coinflip", "equity_underdog",
     "priced_in", "priced_out", "dominated",
+    # Range-vs-range advantage tags come from the SAME Monte-Carlo equity
+    # machinery (preflop_range_vs_range_equity) as the hand-equity tags above,
+    # so a borderline range can flip its bucket on re-estimate just like a
+    # borderline hand. Tolerated (not a hard rebuild failure) on that basis.
+    "hero_range_advantage", "villain_range_advantage", "roughly_equal_ranges",
 })
 
 _SUIT = {"spades": "s", "hearts": "h", "diamonds": "d", "clubs": "c"}
@@ -107,6 +116,16 @@ def audit_batch(csv_path: Path) -> int:
         ev_gap = ev_gap_from_action_evs(facts, pack)
         if ev_gap is None:
             ev_gap = compute_ev_gap_bb(facts, pack)
+        # Mirror generation's near-pure EV-credit override (batch.py): a >=96%
+        # dominant spot is an EASY decision, and its tiny mixed action is GTO
+        # balancing at ~0 EV gap -- which would mis-rate it HARD on the EV axis.
+        # Generation gives the EV axis full credit for difficulty there; the
+        # audit must do the same or it false-flags every near-pure spot's
+        # difficulty (it only bit once packs shipped per-action file EVs, which
+        # make ev_gap_from_action_evs non-None for these spots).
+        ev_gap_for_difficulty = ev_gap
+        if spot.dominant_frequency >= _NEAR_PURE_DOMINANT_FREQ:
+            ev_gap_for_difficulty = _NEAR_PURE_EV_CREDIT_BB
         # Infer the batch's answer style from the option shape (meta does
         # not record it -- noted as a gap): the gto style is the 4-option
         # Always/Mostly spectrum.
@@ -117,12 +136,12 @@ def audit_batch(csv_path: Path) -> int:
             and all(o.startswith(("Always ", "Mostly ")) for o in csv_opts_probe)
             else "auto"
         )
-        options, correct = build_options(facts, style=style)
+        options, correct = build_options(facts, style=style, pack=pack)
         rebuilt = build_preflop_row(
             facts,
             _placeholder_explanation(options, correct),
             pack=pack,
-            difficulty=compute_difficulty(facts, ev_gap_bb=ev_gap),
+            difficulty=compute_difficulty(facts, ev_gap_bb=ev_gap_for_difficulty),
             number=int(no),
             stakes_bb_dollars=stakes,
             live_or_online=live_or_online,

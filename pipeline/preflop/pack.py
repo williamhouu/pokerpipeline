@@ -87,6 +87,12 @@ class PreflopPack:
     size_round_bb: float | None = None
     description: str = ""
     ev_units_per_bb: float | None = None
+    # Rake as a fraction of the pot (e.g. 0.10 for 10%). Used as an extra equity
+    # cushion in the trap-aware difficulty detector so a hand the solver folds
+    # despite raw equity clearing the NAIVE pot-odds price -- correct because
+    # rake (and, at depth, realisation) make it -EV -- is not mislabelled a
+    # "trap". None/0 = no cushion. Not (yet) applied to displayed pot odds.
+    rake_pct: float | None = None
 
     def __post_init__(self) -> None:
         if not 2 <= self.table_size <= 10:
@@ -125,6 +131,7 @@ class PreflopPackSignature:
     size_round_bb: float | None = None
     description: str = ""
     ev_units_per_bb: float | None = None
+    rake_pct: float | None = None
 
 
 # Known packs ship pre-registered here. Adding a new pack = appending a
@@ -132,6 +139,7 @@ class PreflopPackSignature:
 KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
     PreflopPackSignature(
         pack_id="ryan_preflop_tree_6max_100bb",
+        rake_pct=0.04,
         relative_pack_root=("ryan_preflop_tree/PioViewer - NLH 6max 100bb 2.5x Open"),
         grammar_name="ryan_pack",
         table_size=6,
@@ -149,6 +157,7 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
     # ".." hop is deliberate; discover_packs resolves it away.
     PreflopPackSignature(
         pack_id="monker_nlhe_9max_100bb",
+        rake_pct=0.1,
         relative_pack_root="../nlhe9_ranges/ranges/Hold'em/9-way/100bb[10p-3bb]",
         grammar_name="monker_nlhe",
         table_size=9,
@@ -169,6 +178,7 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
     # scripts/audit_nlhe6_pack.py; details in docs/nlhe6_pack_notes.md.
     PreflopPackSignature(
         pack_id="monker_nlhe_6max_20bb",
+        rake_pct=0.05,
         relative_pack_root="../nlhe6_ranges/ranges/Hold'em/6-way/20bb(5p-0.5bb)",
         grammar_name="monker_nlhe",
         table_size=6,
@@ -183,8 +193,28 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
             "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
         ),
     ),
+    # 8-max 200bb LIVE cash pack, materialised from a flat SQLite solve by
+    # scripts/convert_preflop_db_to_pack.py into bb-native .rng files (the
+    # `gto_preflop_8max` grammar). Full open->4-bet tree; vs_5bet EXCLUDED at
+    # conversion (the only under-converged layer). EVs are per-action in bb
+    # (ev_units_per_bb=1.0). Source provider deliberately not named.
+    PreflopPackSignature(
+        pack_id="preflop_8max_200bb",
+        rake_pct=0.1,
+        relative_pack_root="preflop_8max_200bb",
+        grammar_name="gto_preflop_8max",
+        table_size=8,
+        stack_depth_bb=200,
+        open_size_bb=3.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # bb sizes already clean; parity no-op
+        ev_units_per_bb=1.0,  # file EVs are already in bb
+        description="8-max 200bb LIVE cash preflop pack (open->4-bet; vs-5bet excluded).",
+    ),
     PreflopPackSignature(
         pack_id="monker_nlhe_6max_30bb",
+        rake_pct=0.05,
         relative_pack_root="../nlhe6_ranges/ranges/Hold'em/6-way/30bb(5p-0.5bb)",
         grammar_name="monker_nlhe",
         table_size=6,
@@ -287,6 +317,7 @@ def discover_packs(
             size_round_bb=sig.size_round_bb,
             description=sig.description,
             ev_units_per_bb=sig.ev_units_per_bb,
+            rake_pct=sig.rake_pct,
         )
         register_pack(pack)
         found.append(pack)

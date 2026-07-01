@@ -45,6 +45,7 @@ from __future__ import annotations
 from pipeline.explanation_generator import frequency_to_verb_prefix
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.grammars.types import PreflopActionType
+from pipeline.preflop.pack import PreflopPack
 
 # Frequency threshold above which a non-played action is dropped from the
 # option set. Below 5% the action is essentially noise (Pio occasionally
@@ -234,6 +235,8 @@ def _canonical_dominant(facts: PreflopFacts) -> str:
 def _pick_gto_secondary(
     facts: PreflopFacts,
     dominant_label: str,
+    *,
+    pack: PreflopPack | None = None,
 ) -> str | None:
     """Pick the ``B`` action for the 2-action GTO template.
 
@@ -255,9 +258,30 @@ def _pick_gto_secondary(
         return None
     max_freq = max(candidates.values())
     tied_at_max = [label for label, freq in candidates.items() if freq == max_freq]
-    if len(tied_at_max) > 1 and "Fold" in tied_at_max:
+    if len(tied_at_max) == 1:
+        return tied_at_max[0]
+    if "Fold" in tied_at_max:
         return "Fold"
-    return tied_at_max[0]
+    # Multiple non-fold actions tied (typically all ~0% at a near-pure FOLD
+    # spot). Old code returned ``tied_at_max[0]`` (dict order), which surfaced
+    # All-in -- a nonsense "Always All-in" option facing a single raise 200bb
+    # deep. Pick the HIGHEST-EV alternative: the genuinely most-tempting
+    # mistake, and correct where "least aggressive" would be wrong (an SB
+    # fold-or-3-bet hand never calls, so its alternative should be the 3-bet,
+    # not Call). Fall back to least-aggressive only when the pack ships no
+    # per-action EVs (the EV-less Ryan pack).
+    if pack is not None:
+        from pipeline.preflop.format_writer import action_evs_bb  # noqa: PLC0415
+
+        try:
+            evs = action_evs_bb(facts, pack)
+        except (OSError, ValueError):
+            evs = None
+        if evs:
+            ranked = [lbl for lbl in tied_at_max if lbl in evs]
+            if ranked:
+                return max(ranked, key=lambda lbl: evs[lbl])
+    return min(tied_at_max, key=_action_aggression)
 
 
 # --- the three builders ------------------------------------------------------
@@ -337,6 +361,8 @@ def build_options_basic(
 
 def build_options_gto(
     facts: PreflopFacts,
+    *,
+    pack: PreflopPack | None = None,
 ) -> tuple[list[str], str]:
     """Always/Mostly 4-option spectrum -- unified for all preflop spots.
 
@@ -392,7 +418,7 @@ def build_options_gto(
     if len(meaningful) >= 2:
         secondary_label = meaningful[1][0]
     else:
-        picked = _pick_gto_secondary(facts, dominant_label)
+        picked = _pick_gto_secondary(facts, dominant_label, pack=pack)
         if picked is None:
             # Pio's tree only offers one action -- worthiness filter
             # would normally drop this, but fall back to basic just
@@ -416,6 +442,8 @@ def build_options_gto(
 
 def build_options_auto(
     facts: PreflopFacts,
+    *,
+    pack: PreflopPack | None = None,
 ) -> tuple[list[str], str]:
     """Pick basic vs gto based on dominant-action frequency.
 
@@ -426,7 +454,7 @@ def build_options_auto(
     """
     if facts.spot.dominant_frequency >= _BINARY_ACTION_FREQ_THRESHOLD:
         return build_options_basic(facts)
-    return build_options_gto(facts)
+    return build_options_gto(facts, pack=pack)
 
 
 # --- the dispatcher ---------------------------------------------------------
@@ -434,6 +462,7 @@ def build_options(
     facts: PreflopFacts,
     *,
     style: str = "auto",
+    pack: PreflopPack | None = None,
 ) -> tuple[list[str], str]:
     """Compute ``(options, correct_answer)`` for one preflop spot.
 
@@ -454,9 +483,9 @@ def build_options(
     if style == "basic":
         return build_options_basic(facts)
     if style == "gto":
-        return build_options_gto(facts)
+        return build_options_gto(facts, pack=pack)
     if style == "auto":
-        return build_options_auto(facts)
+        return build_options_auto(facts, pack=pack)
     raise ValueError(f"unknown answer style {style!r}; expected one of {ANSWER_STYLES}")
 
 

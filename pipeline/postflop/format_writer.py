@@ -20,10 +20,16 @@ from pathlib import Path
 
 from pipeline.chat_context import StrategyEntry, build_chat_context
 from pipeline.explanation_generator import GeneratedExplanation
+from pipeline.format_writer import CSV_COLUMNS
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line, format_question
 from pipeline.postflop.app_table_format import build_postflop_app_table_columns
 from pipeline.postflop.difficulty import PostflopDifficulty
+from pipeline.postflop.exploit import (
+    exploit_adjustments_for_facts,
+    exploit_notes_to_json,
+)
+from pipeline.postflop.stat_notes import build_stat_notes, stat_notes_to_json
 from pipeline.postflop.facts import PostflopFacts
 from pipeline.postflop.options import frequencies_for_options
 from pipeline.postflop.range_export import build_active_ranges_json
@@ -31,97 +37,58 @@ from pipeline.postflop.skills import compute_postflop_skills
 from pipeline.postflop.solve import PostflopSolve
 from pipeline.postflop.spot_sampler import spot_action_evs_bb
 
-# The postflop CSV schema. A focused, documented column set: the app table
-# state, the question content, the classification block, and the postflop
-# diagnostics. (The preflop pipeline has its own 40-column writer; postflop is
-# deliberately separate so neither can disturb the other.)
-POSTFLOP_CSV_COLUMNS: tuple[str, ...] = (
-    "No",
-    # --- play-through / full-hand sequence tags (Option B, June 2026) ---
-    # A deterministic, globally-unique id shared by every question of ONE hand
-    # (preflop -> flop -> turn -> river), and the explicit 1-based order within
-    # that hand. BLANK for a standalone question (a single-row "group"); the app
-    # GROUPS BY hand_id and ORDERS BY sequence_index to play a hand street by
-    # street. sequence_total is the count in the group ("Q 2 of 4"), also blank
-    # for standalones. See pipeline/postflop/play_through.py.
-    "hand_id",
-    "sequence_index",
-    "sequence_total",
-    "Hand Stage",
-    "Context",
-    "User Seat",
-    "User Cards",
-    "Cards on Table",
-    "Table Size",
-    "Default Stack",
-    # Villain seat tokens in the app's poker-table format (e.g.
-    # "BB-$95.7-$1.8-bet"); same grammar as User Seat. Built by
-    # pipeline/postflop/app_table_format.py. Sits between Default Stack and POT,
-    # matching the app's table-state column order.
-    "Seats",
-    "POT",
-    "Question",
-    "Question Type",
-    "option 1",
-    "option 2",
-    "option 3",
-    "option 4",
-    "Correct Answer",
-    # Deterministic neutral-credit options (the 20-point rule); "" when the
-    # spot has one clear answer. Right after Correct Answer, like the other paths.
-    "neutral_credit",
-    "Answer Explanation",
-    "Cash/Tourney",
-    "Live or Online",
-    "Relative Position",
-    "Position Matchup",
-    "Difficulty Rating",
-    "action_frequencies",
-    # Per-action solver EV (bb) for the hero hand, ordered to match
-    # action_frequencies -- the full per-option breakdown (replaced the
-    # single-number ev_gap_bb column, mirroring the preflop writer; the gap is
-    # still computed internally for the worthiness gate + difficulty).
-    "action_ev_bb",
-    "hero_equity",
-    # Node-level range-vs-range equity (the actor's whole range vs villain's on
-    # this board) -- the "who is ahead here" number. The resolved verdict
-    # (range_advantage / nut_advantage) rides in concept_tags.
-    "range_equity",
-    "pot_odds",
-    "spr",
-    "concept_tags",
-    # User-facing skill labels (the app's catalog) mapped from the facts -- the
-    # postflop analogue of the preflop `skills` column. See pipeline/postflop/skills.py.
-    "skills",
-    "archetype",
-    "board_texture",
-    # Each ACTIVE player's range at the CURRENT street (169-class JSON) -- the
-    # postflop analogue of the preflop `ranges` column, for the app's range UI.
-    # Hero carries range + action-mix strategy; villain carries its range
-    # (holdings). Empty on preflop-entry legs (a postflop solve has no accurate
-    # preflop range). See pipeline/postflop/range_export.py.
-    "ranges",
-    # Difficulty-axis diagnostics (3-axis: freq + concept + hand; easy_ev is a
-    # diagnostic only, NOT in the score -- see difficulty.py).
-    "easy_freq",
-    "easy_ev",
-    "easy_concept",
-    "easy_hand",
-    "Notes",
-    "solver_reference",
-    "validation_status",
-    # Per-question chatbot context: one JSON blob of ALL deterministic facts for
-    # the app's "chat about this question" AI (full strategy + EVs, equity,
-    # range/nut advantage, blockers, villain summary, the answer + alternatives,
-    # the explanation shown, and a guardrails line). See pipeline/chat_context.py.
-    "chat_context",
-    # Layer-7 claim-checker output (opt-in): "" = not run, "[]" = run + clean,
-    # a JSON list of {claim, problem} = flagged. Same shape as the preflop
-    # column, so the admin Review panel reads it with the same parser.
-    "claim_check",
+# The postflop CSV schema, UNIFIED with the preflop schema (June 2026). The
+# FIRST columns are byte-identical -- same names, same order -- to
+# ``PREFLOP_CSV_COLUMNS``, so the app reads ONE column layout for both paths;
+# postflop then appends its extra columns at the END (it carries more
+# decision-math + the play-through tags than the preflop CSV keeps). A parity
+# test (tests/test_postflop_pipeline.py) asserts the shared prefix stays aligned.
+#
+# The shared prefix = the shared ``CSV_COLUMNS`` minus exactly the columns the
+# preflop writer drops. That drop set is MIRRORED here (not imported) so the
+# postflop package does not depend on the preflop writer -- it stays
+# self-contained; the parity test guards against the two drifting apart.
+_SHARED_PREFIX_DROP: frozenset[str] = frozenset({
+    "pot_odds", "hero_equity", "range_equity", "blocker_combos",
+    "top_villain_combos", "ev_gap_bb",
+    "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+})
+_SHARED_PREFIX: tuple[str, ...] = tuple(
+    c for c in CSV_COLUMNS if c not in _SHARED_PREFIX_DROP
 )
+# Postflop-only extras, appended AFTER the shared prefix:
+#   * play-through tags  -- preflop has no linked preflop->river sequences. The
+#     app GROUPS BY hand_id + ORDERS BY sequence_index; reading by header name,
+#     so their position does not matter (moved from the front, June 2026).
+#   * decision-math + difficulty diagnostics the preflop CSV drops but postflop
+#     keeps (pot_odds / hero_equity / range_equity / easy_*), plus ``spr``
+#     (postflop-only, not in the shared schema at all).
+_POSTFLOP_EXTRA_COLUMNS: tuple[str, ...] = (
+    "hand_id", "sequence_index", "sequence_total",
+    "pot_odds", "hero_equity", "range_equity", "spr",
+    "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+)
+POSTFLOP_CSV_COLUMNS: tuple[str, ...] = _SHARED_PREFIX + _POSTFLOP_EXTRA_COLUMNS
 
 _NOTES = "Auto-generated by poker-pipeline (postflop path)."
+
+# Preflop pot type by raise count -- prose form, matching the preflop/shared
+# writers so a "Three bet pot" reads identically whether the question is preflop
+# or postflop. (1 raise = a single raised pot, the SRP baseline.)
+_PREFLOP_POT_TYPE: dict[int, str] = {
+    0: "Limped pot", 1: "Single raise pot",
+    2: "Three bet pot", 3: "Four bet pot",
+}
+
+
+def _stack_depth_bucket(effective_stack_bb: float) -> str:
+    """Prose Stack Depth bucket -- thresholds match the preflop/shared writers
+    (< 40bb short, 40-150bb standard, > 150bb deep)."""
+    if effective_stack_bb < 40:  # noqa: PLR2004
+        return "Short stack"
+    if effective_stack_bb <= 150:  # noqa: PLR2004
+        return "Standard Stack"
+    return "Deep stack"
 
 
 def _emoji_cards(cards: Iterable[str]) -> str:
@@ -295,6 +262,13 @@ def build_postflop_row(
         "Cash/Tourney": "Tournament" if solve.game_format == "tournament" else "Cash",
         "Live or Online": solve.live_or_online,
         "Relative Position": "In Position" if facts.hero_in_position else "Out of Position",
+        # Shared-schema classification columns, now populated for postflop too
+        # (June 2026 unification) so the first 41 columns match the preflop CSV.
+        "Preflop Pot Type": _PREFLOP_POT_TYPE.get(
+            facts.preflop_raise_count, "Multi-raised pot"
+        ),
+        "Pot Participant": "Heads-Up" if facts.n_players <= 2 else "Multi-Way",  # noqa: PLR2004
+        "Stack Depth": _stack_depth_bucket(solve.effective_stack_bb),
         "Position Matchup": f"{facts.hero_position}_vs_{facts.villain_position}",
         "Difficulty Rating": str(difficulty.score),
         "action_frequencies": _format_frequencies(facts.spot.action_frequencies),
@@ -305,6 +279,12 @@ def build_postflop_row(
         "range_equity": f"{facts.hero_range_equity * 100:.0f}%",
         "pot_odds": pot_odds,
         "spr": f"{facts.spr:.1f}",
+        "stat_notes": stat_notes_to_json(build_stat_notes(facts)),
+        # Deterministic exploitative adjustments (nit / station / maniac), keyed
+        # on the postflop archetype + refined by this hand's equity / showdown
+        # standing / draw / blockers. Same JSON shape as the preflop column, so
+        # the admin exploit panel renders both. See pipeline.postflop.exploit.
+        "exploit_notes": exploit_notes_to_json(exploit_adjustments_for_facts(facts)),
         "concept_tags": ", ".join(facts.concept_tags),
         "skills": ", ".join(
             compute_postflop_skills(facts, game_format=solve.game_format)
@@ -313,7 +293,7 @@ def build_postflop_row(
         "board_texture": facts.board_texture.get("composite", ""),
         # Both active players' current-street ranges (169-class JSON) for the
         # app's range UI -- accurate, from the node's reach-weighted ranges.
-        "ranges": build_active_ranges_json(node),
+        "ranges": build_active_ranges_json(node, solve),
         "easy_freq": f"{difficulty.easy_freq:.2f}",
         "easy_ev": f"{difficulty.easy_ev:.2f}" if difficulty.easy_ev is not None else "",
         "easy_concept": f"{difficulty.easy_concept:.2f}",

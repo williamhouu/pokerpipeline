@@ -525,8 +525,15 @@ def _is_counterintuitive_spot(facts: PreflopFacts) -> bool:
     solver_continues = not facts.spot.dominant_action.startswith("Fold")
     if solver_continues and eq <= price - _TRAP_EQUITY_MARGIN:
         return True  # equity clearly below the price, yet the solver continues
-    if (not solver_continues) and eq >= price + _TRAP_EQUITY_MARGIN:
-        return True  # equity clearly clears the price, yet the solver folds
+    # A FOLD is only a "trap" if equity clears the price by the base margin PLUS
+    # a rake cushion: rake (and, at depth, poor realisation) mean you win less
+    # than the naive pot-odds price implies, so a fold whose raw equity barely
+    # beats that price is usually just correct, not a surprising trap. Without
+    # this, the detector over-flagged normal deep folds on raked packs (the
+    # 8-max 200bb pack at ~10% rake). rake_pct defaults 0 -> unchanged behaviour.
+    rake_cushion = getattr(facts, "rake_pct", 0.0)
+    if (not solver_continues) and eq >= price + _TRAP_EQUITY_MARGIN + rake_cushion:
+        return True  # equity clearly clears the (rake-adjusted) price, yet folds
     return False
 
 

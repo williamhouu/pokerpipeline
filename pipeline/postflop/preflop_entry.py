@@ -44,7 +44,9 @@ from pipeline.explanation_generator import (
 )
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line
+from pipeline.postflop.format_writer import _PREFLOP_POT_TYPE, _stack_depth_bucket
 from pipeline.postflop.solve import PostflopSolve
+from pipeline.postflop.stat_notes import StatNote, stat_notes_to_json
 from pipeline.preflop_ranges import combo_str_to_hand_class
 
 # Standard cash blinds in bb (this line is BTN-open vs BB; the SB folds and its
@@ -113,14 +115,15 @@ class PreflopEntryFacts:
 
     @property
     def difficulty(self) -> int:
-        """A frequency-only difficulty on the brief's 400-3000 Elo scale.
+        """A frequency-only difficulty on the brief's 500-3000 Elo scale.
 
         A pure entry (always call / always open) is easy; a close mix is hard.
         Mirrors the brief's MVP formula on the dominant frequency (here the
-        more-frequent of continue / fold)."""
+        more-frequent of continue / fold). Floored at 500 (the documented
+        "easiest"), matching pipeline.postflop.difficulty._HARD_FLOOR."""
         dom = max(self.continue_freq, self.fold_freq)
         raw = 3000.0 - ((dom - 0.55) / 0.40) * 2500.0
-        return int(round(min(3000.0, max(400.0, raw))))
+        return int(round(min(3000.0, max(500.0, raw))))
 
 
 # --- ranges / spot enumeration ---------------------------------------------
@@ -694,6 +697,20 @@ def build_preflop_entry_row(
         "Cash/Tourney": "Tournament" if f.solve.game_format == "tournament" else "Cash",
         "Live or Online": f.solve.live_or_online,
         "Relative Position": "In Position" if f.hero_in_position else "Out of Position",
+        # Shared-schema classification columns (June 2026 unification) so the
+        # entry leg's first 41 columns line up with every other row. The pot type
+        # = raises in the solve's preflop line (open=1 -> single raised pot).
+        "Preflop Pot Type": _PREFLOP_POT_TYPE.get(
+            sum(1 for st in f.solve.preflop_summary
+                if st.verb in ("open", "raise", "3bet", "4bet", "5bet")),
+            "Multi-raised pot",
+        ),
+        "Pot Participant": "Heads-Up" if len(f.solve.positions) <= 2 else "Multi-Way",  # noqa: PLR2004
+        "Stack Depth": _stack_depth_bucket(f.solve.effective_stack_bb),
+        # No exploit guidance on a preflop-ENTRY leg: its archetype vocabulary is
+        # preflop's, and the postflop exploit engine is keyed on postflop
+        # archetypes. Column present (schema parity), value blank.
+        "exploit_notes": "",
         "Position Matchup": f"{f.hero_position}_vs_{f.villain_position}",
         "Difficulty Rating": str(f.difficulty),
         "action_frequencies": action_freq_str,
@@ -702,6 +719,19 @@ def build_preflop_entry_row(
         "range_equity": "",
         "pot_odds": pot_odds,
         "spr": "",
+        # "Show the math" panel: a preflop-entry leg only has the price (a
+        # postflop solve carries no preflop equity), so just the pot-odds row --
+        # same JSON shape the app parses on every other question.
+        "stat_notes": stat_notes_to_json(
+            [
+                StatNote(
+                    "pot_odds", "Pot odds", pot_odds,
+                    f"Your pot odds here are {pot_odds}.",
+                )
+            ]
+            if pot_odds
+            else []
+        ),
         "concept_tags": ", ".join(f.concept_tags),
         "skills": ", ".join(skills),
         "archetype": f.archetype,

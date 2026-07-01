@@ -36,6 +36,8 @@ from pipeline.postflop.batch import (
     PostflopBatchResult,
     _collect_worthy,
     _node_range_snapshots,
+    _prior_street_node,
+    _street_strategies,
 )
 from pipeline.postflop.claim_checker import POSTFLOP_CHECKER_SYSTEM_PROMPT
 from pipeline.postflop.difficulty import compute_difficulty
@@ -166,8 +168,20 @@ def _postflop_leg_row(
         "correct_answer": correct, "options": options,
         "archetype": facts.archetype, "difficulty": difficulty.score,
         "solver_data": solver_data_block,
+        # Range-visual metadata, identical to generate_postflop_batch so the
+        # grouped (play-through) Review shows the SAME panel as a standalone
+        # batch: the current-street ranges (right grid), both players'
+        # per-action strategy (action-coloured), and the street-before ranges
+        # (left grid). Without these the panel degraded to a misleading green
+        # "holdings" grid + a "Preflop -- n/a" left grid.
         "street_ranges": _node_range_snapshots(spot.node),
+        "street_strategy": _street_strategies(spot.node, solve),
+        "street_actor": spot.node.actor,
     }
+    _prior_node = _prior_street_node(spot.node, solve)
+    if _prior_node is not None:
+        record["prior_street_ranges"] = _node_range_snapshots(_prior_node)
+        record["prior_street_label"] = _prior_node.street
     if revise_record is not None:
         record["revise"] = revise_record
     if claim_issues:

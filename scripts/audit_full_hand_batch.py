@@ -57,6 +57,8 @@ EXACT_COLS = (
     "Relative Position", "Position Matchup", "Cash/Tourney", "Live or Online",
     "action_frequencies", "action_ev_bb", "solver_reference", "archetype",
     "board_texture", "pot_odds", "spr", "neutral_credit", "Notes", "ranges",
+    # Shared-schema classification columns (deterministic; no MC equity).
+    "Preflop Pot Type", "Pot Participant", "Stack Depth",
 )
 # Concept tags driven by the MC equity estimate -- toleranced on postflop legs.
 EQUITY_TAGS = frozenset({

@@ -210,6 +210,13 @@ class PreflopFacts:
     # geometry); None when hero faces no bet to call or it isn't computable.
     break_even_equity: float | None = None
 
+    # Pack rake as a fraction of pot (e.g. 0.10). Set by the batch from
+    # ``pack.rake_pct``; used only as an extra equity cushion in the trap-aware
+    # difficulty detector (a fold whose raw equity beats the NAIVE price is
+    # often correct once rake + realisation are counted, so it isn't a "trap").
+    # 0.0 = no cushion (unchanged behaviour). See difficulty._is_counterintuitive_spot.
+    rake_pct: float = 0.0
+
     # EV gap (in bb) between the dominant action and the second-best action --
     # the cost of taking the tempting wrong answer. Populated by the batch
     # (compute_ev_gap_bb, which needs the pack). None for raise-involved spots
@@ -324,6 +331,17 @@ def construct_villain_range_path(
         stem_tokens = option_path.stem.split(".")
         villain_stem = ".".join(stem_tokens[: villain_index + 1])
         return pack.root_path / f"{villain_stem}{option_path.suffix}"
+
+    if pack.grammar_name == "gto_preflop_8max":
+        # Same slice-the-stem idea as Monker, but tokens are "_"-separated and
+        # files live in a per-actor subfolder. The prefix ending at the
+        # villain's action token IS the villain's own decision-node range file
+        # (e.g. the BB's 3-bet file in the BB/ folder). Sliced from a real
+        # option filename so the size spelling (R17 / R38.5) is preserved.
+        option_path = node.actions[0].range_file.path
+        stem_tokens = option_path.stem.split("_")
+        villain_stem = "_".join(stem_tokens[: villain_index + 1])
+        return pack.root_path / villain.position / f"{villain_stem}{option_path.suffix}"
 
     chain = node.history_before[: villain_index + 1]
     tokens = []
@@ -815,6 +833,33 @@ def compute_blockers(
 
 
 # --- chunk 2: archetype classifier -----------------------------------------
+def _is_speculative_hand(hand_class: str) -> bool:
+    """True for a set-miner / implied-odds hand: a pocket pair, a suited
+    connector / small-gapper, or a suited ace (nut-flush + wheel potential).
+
+    Used to gate the ``fold_pot_odds`` archetype -- that frame (and the exploit
+    engine's speculative_fold role) is about set-mining and implied odds, which
+    only fits these hands. An offsuit high card that folds with equity (A9o,
+    QJo) is dominated, not a set-miner, so it should be ``fold_dominated``.
+    """
+    from pipeline.preflop.playability import hand_playability  # noqa: PLC0415
+
+    play = hand_playability(hand_class)
+    if not play.get("recognized"):
+        return False
+    if play.get("pocket_pair"):
+        return True
+    if not play.get("suited"):
+        return False
+    # Suited: a connector/small-gapper (straight potential) or a suited ace
+    # (nut flush + wheel) is speculative; a suited high card (KQs) is not.
+    return (
+        play.get("straight_potential") in ("open_ender", "one_gapper", "two_gapper")
+        or play.get("flush_potential") == "nut_flush"
+        or bool(play.get("makes_wheel_straight"))
+    )
+
+
 def classify_archetype(
     spot: PreflopSpot,
     villain: ParsedAction | None,
@@ -932,7 +977,19 @@ def classify_archetype(
             return "fold_no_continue"
         if eq_for_split is not None and eq_for_split < 0.40:
             return "fold_dominated"
-        return "fold_pot_odds"  # folding despite some equity = wrong-priced
+        # A fold with real equity is `fold_pot_odds` ONLY for a SPECULATIVE hand
+        # (a set-miner / implied-odds hand: a pocket pair, suited connector /
+        # small-gapper, or suited ace). Its whole downstream frame -- and the
+        # exploit engine's speculative_fold role -- is about set-mining and
+        # implied odds, which is nonsense for a dominated high-card fold like
+        # A9o (offsuit, no draws). Route those to `fold_dominated` instead, whose
+        # frame is domination / poor realisation (matching how the hand actually
+        # plays). Was equity-only, so A9o at 43% equity wrongly got "set-mine".
+        return (
+            "fold_pot_odds"
+            if _is_speculative_hand(spot.hero_hand_class)
+            else "fold_dominated"
+        )
 
     if dominant == "Call":
         # Calling an all-in means no future streets -- it's a pure pot-odds /

@@ -1059,7 +1059,9 @@ def generate_preflop_batch(
             # chip geometry) so Layer 6 can cite it instead of computing
             # pot odds itself. None on spots with no bet to call.
             facts = replace(
-                facts, break_even_equity=compute_break_even_equity(facts, pack)
+                facts,
+                break_even_equity=compute_break_even_equity(facts, pack),
+                rake_pct=pack.rake_pct or 0.0,  # trap-detector equity cushion
             )
             # Prefer the solver's OWN per-action EVs (accurate on multiway
             # pots, and defined for raise-involved spots too); fall back to the
@@ -1132,7 +1134,7 @@ def generate_preflop_batch(
         options: list[str] = []
         correct: str = ""
         try:
-            options, correct = build_options(facts, style=answer_style)
+            options, correct = build_options(facts, style=answer_style, pack=pack)
             if dry_run:
                 explanation = _placeholder_explanation(options, correct)
             else:

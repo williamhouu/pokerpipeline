@@ -146,16 +146,24 @@ def _canonical_dominant(facts: PloFacts) -> str:
 
 def _pick_gto_secondary(facts: PloFacts, dominant_label: str) -> str | None:
     """The ``B`` action for the 2-action GTO template: highest-frequency
-    non-dominant action, preferring Fold on ties; None if none exists."""
+    non-dominant action, preferring Fold on ties; None if none exists.
+
+    When several non-fold actions tie at ~0% (a near-pure FOLD spot), break the
+    tie by LEAST aggression rather than dict order -- the old ``tied[0]`` could
+    surface All-in as a nonsense "Always All-in" option. (Mirrors the preflop
+    fix; preflop additionally uses per-action EVs, which PLO's raw-labelled
+    ``ev_by_action`` doesn't map cleanly onto here -- a possible refinement.)"""
     canonical = canonicalize_strategy(facts)
     candidates = {lbl: f for lbl, f in canonical.items() if lbl != dominant_label}
     if not candidates:
         return None
     max_freq = max(candidates.values())
     tied = [lbl for lbl, f in candidates.items() if f == max_freq]
-    if len(tied) > 1 and "Fold" in tied:
+    if len(tied) == 1:
+        return tied[0]
+    if "Fold" in tied:
         return "Fold"
-    return tied[0]
+    return min(tied, key=_action_aggression)
 
 
 def _meaningful_canonical_actions(facts: PloFacts) -> list[tuple[str, float]]:

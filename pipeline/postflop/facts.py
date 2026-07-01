@@ -145,6 +145,12 @@ class PostflopFacts:
     ev_gap_bb: float | None
     archetype: str
     concept_tags: list[str] = field(default_factory=list)
+    # Rake as a fraction of pot (parsed from the solve's rake string, e.g.
+    # "8% cap 2bb" -> 0.08). Used ONLY as an extra equity cushion in the
+    # trap-aware difficulty detector so a fold whose raw equity beats the naive
+    # price -- but is correct once rake is counted -- isn't mislabelled a trap.
+    # 0.0 = no cushion. See difficulty._is_counterintuitive_spot.
+    rake_pct: float = 0.0
 
     # --- range-vs-range (node-level; the "who is ahead here" stat) ---
     # hero_range_equity: the ACTOR's whole range vs the villain's whole range on
@@ -354,6 +360,17 @@ def preflop_raise_count(solve: PostflopSolve) -> int:
     return sum(1 for step in solve.preflop_summary if step.verb in _RAISE_VERBS)
 
 
+def _parse_rake_pct(rake: str) -> float:
+    """Parse a fraction-of-pot rake from the solve's free-text rake string,
+    e.g. ``"8% cap 2bb"`` -> 0.08, ``"10% 3bb cap"`` -> 0.10. Returns 0.0 when
+    no percent is present (``""`` / ``"none"``). Used only as the trap
+    detector's equity cushion."""
+    import re  # noqa: PLC0415
+
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", rake or "")
+    return float(m.group(1)) / 100.0 if m else 0.0
+
+
 def extract_facts(
     spot: PostflopSpot,
     solve: PostflopSolve,
@@ -485,6 +502,7 @@ def extract_facts(
         to_call_bb=node.to_call_bb,
         break_even_equity=break_even,
         equity_runouts_used=equity_runouts,
+        rake_pct=_parse_rake_pct(solve.rake),
         dominant_action=spot.dominant_action,
         dominant_verb=spot.dominant_verb,
         dominant_frequency=spot.dominant_frequency,

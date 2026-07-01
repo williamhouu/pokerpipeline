@@ -434,6 +434,8 @@ def _spot_with(
     history: tuple[ParsedAction, ...] = (),
     *,
     actor: str = "BTN",
+    hand_class: str = "AKo",
+    combo: str = "AhKc",
 ) -> PreflopSpot:
     """Build a PreflopSpot with rigged values for archetype testing."""
     node = PreflopDecisionNode(
@@ -445,8 +447,8 @@ def _spot_with(
     dom_freq = frequencies[dominant_action]
     return PreflopSpot(
         node=node,
-        hero_hand_class="AKo",
-        hero_card_combo="AhKc",
+        hero_hand_class=hand_class,
+        hero_card_combo=combo,
         action_frequencies=frequencies,
         dominant_action=dominant_action,
         dominant_frequency=dom_freq,
@@ -586,12 +588,29 @@ def test_archetype_fold_dominated():
     assert arch == "fold_dominated"
 
 
-def test_archetype_fold_pot_odds_when_call_offered():
-    """Dominant Fold with decent equity AND a call offered -> fold_pot_odds."""
+def test_archetype_fold_pot_odds_when_call_offered_and_speculative():
+    """Dominant Fold, decent equity, a call offered, AND a SPECULATIVE hand
+    (set-miner / implied-odds) -> fold_pot_odds. The pot-odds/set-mine frame
+    only fits speculative hands (a pocket pair here)."""
     history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
-    spot = _spot_with("Fold", {"Fold": 1.0, "Call": 0.0}, history)
+    spot = _spot_with(
+        "Fold", {"Fold": 1.0, "Call": 0.0}, history, hand_class="55", combo="5h5c"
+    )
     arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.47)
     assert arch == "fold_pot_odds"
+
+
+def test_archetype_dominated_highcard_fold_not_pot_odds():
+    """A DOMINATED high-card fold (A9o) with decent equity is NOT a set-miner,
+    so it routes to fold_dominated -- NOT fold_pot_odds. Guards the June-2026
+    fix: A9o folding to a 3-bet was wrongly getting the 'call and set-mine'
+    exploit frame."""
+    history = (ParsedAction("UTG", PreflopActionType.RAISE, 60.0),)
+    spot = _spot_with(
+        "Fold", {"Fold": 1.0, "Call": 0.0}, history, hand_class="A9o", combo="Ah9c"
+    )
+    arch = classify_archetype(spot, history[0], hero_equity_vs_villain=0.43)
+    assert arch == "fold_dominated"
 
 
 def test_archetype_fold_no_continue_when_no_call_offered():

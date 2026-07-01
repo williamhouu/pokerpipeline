@@ -70,10 +70,36 @@ def _actor_strategy_classes(node, board: list[str]) -> dict[str, dict[str, float
     return out
 
 
-def build_active_ranges(node) -> dict[str, Any]:
-    """The ``ranges`` dict for one postflop decision node (see module docstring)."""
+def _villain_decision_node(node, solve):
+    """The most recent node where ``node.villain`` acted -- the longest node-id
+    PREFIX of the current node whose actor is the villain. ``None`` when the
+    villain has not acted on this line yet, or that node was down-sampled out.
+
+    (Lives in this leaf, not batch.py, so both the CSV ``ranges`` builder and the
+    batch's Review-panel strategy snapshots can resolve the villain's own
+    decision without a circular import.)"""
+    villain = node.villain
+    nid = node.node_id
+    best = None
+    for cid, cand in solve.nodes.items():
+        if cand.actor == villain and nid.startswith(cid + ":"):
+            if best is None or len(cid) > len(best.node_id):
+                best = cand
+    return best
+
+
+def build_active_ranges(node, solve=None) -> dict[str, Any]:
+    """The ``ranges`` dict for one postflop decision node (see module docstring).
+
+    When ``solve`` is given and the villain ALREADY acted on THIS street, the
+    villain entry carries their range AND strategy at the node where THEY acted
+    (their "current action point"), not just their holdings here -- so the column
+    shows every player at their own action point. When the villain has not acted
+    on this street yet (e.g. they checked back the previous street and it is now
+    hero's turn first), only their holdings here are well-defined, so the entry
+    stays range-only."""
     board = list(node.board)
-    return {
+    out: dict[str, Any] = {
         node.actor: {
             "acting": True,
             "street": node.street,
@@ -86,11 +112,27 @@ def build_active_ranges(node) -> dict[str, Any]:
             "range": _range_classes(node.villain_range, board),
         },
     }
+    if solve is not None:
+        vnode = _villain_decision_node(node, solve)
+        if vnode is not None and vnode.street == node.street:
+            vboard = list(vnode.board)
+            # vnode.actor == villain, so vnode.hero_range IS the villain's range
+            # and _actor_strategy_classes(vnode) IS the villain's action mix.
+            out[node.villain] = {
+                "acting": False,
+                "acted_this_street": True,
+                "street": vnode.street,
+                "range": _range_classes(vnode.hero_range, vboard),
+                "strategy": _actor_strategy_classes(vnode, vboard),
+            }
+    return out
 
 
-def build_active_ranges_json(node) -> str:
+def build_active_ranges_json(node, solve=None) -> str:
     """``build_active_ranges`` as a compact, sorted (byte-stable) JSON string."""
-    return json.dumps(build_active_ranges(node), separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        build_active_ranges(node, solve), separators=(",", ":"), sort_keys=True
+    )
 
 
-__all__ = ["build_active_ranges", "build_active_ranges_json"]
+__all__ = ["build_active_ranges", "build_active_ranges_json", "_villain_decision_node"]
