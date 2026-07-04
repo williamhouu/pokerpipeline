@@ -222,7 +222,12 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     # Possessive name for the opponent (the most-recent raiser) so multiway
     # spots make clear which seat the numbers are measured against.
     villain = _villain_poss(facts.villain_stats) if facts.villain_stats else "their"
-    if facts.break_even_equity is not None:
+    # Pot odds are shown ONLY when hero actually faces a bet (a villain raise
+    # exists). On a first-in open the EV engine still computes a break-even
+    # number (the open's risk-vs-blinds price, used internally), but labelling
+    # it "pot odds" in the panel reads as a calling price that doesn't exist —
+    # QC 2026-07-01 caught "Pot odds = 40%" on an A2s first-in open.
+    if facts.break_even_equity is not None and facts.villain_stats is not None:
         notes.append(_pot_odds_note(facts.break_even_equity))
     # Multi-way all-in: show the FIELD equity (beat everyone) as the headline,
     # since the heads-up number overstates hero's real chance. Otherwise the

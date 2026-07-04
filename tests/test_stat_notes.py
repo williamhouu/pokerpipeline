@@ -127,7 +127,14 @@ def test_format_top_villain_combos() -> None:
 def test_pot_odds_states_price_only() -> None:
     # Same note no matter the hand's equity. It never frames "equity needed
     # to call" -- implied odds can make a sub-threshold call correct.
-    note = _note(_facts(break_even_equity=0.41, hero_equity_vs_villain=0.40), "pot_odds")
+    note = _note(
+        _facts(
+            break_even_equity=0.41,
+            hero_equity_vs_villain=0.40,
+            villain_stats=_villain(),
+        ),
+        "pot_odds",
+    )
     assert note is not None and note.value == "41%"
     assert note.note == "Your pot odds here are 41%."
     for banned in ("profitable", "losing", "marginal", "breakeven", "to call", "need"):
@@ -135,8 +142,18 @@ def test_pot_odds_states_price_only() -> None:
 
 
 def test_pot_odds_same_note_without_equity() -> None:
-    note = _note(_facts(break_even_equity=0.33), "pot_odds")
+    note = _note(
+        _facts(break_even_equity=0.33, villain_stats=_villain()), "pot_odds"
+    )
     assert note is not None and note.note == "Your pot odds here are 33%."
+
+
+def test_pot_odds_suppressed_on_first_in_open() -> None:
+    # A first-in open faces no bet: the EV engine still computes a break-even
+    # number (the open's risk-vs-blinds price), but showing it as "Pot odds"
+    # invents a calling price. villain_stats is None on opens -> no row.
+    # (QC 2026-07-01: "Pot odds = 40%" on an A2s first-in open.)
+    assert _note(_facts(break_even_equity=0.40), "pot_odds") is None
 
 
 # --- your equity vs range average -------------------------------------------

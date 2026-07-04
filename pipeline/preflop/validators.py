@@ -709,7 +709,8 @@ def validate_blocker_claims(
         return PreflopValidationResult.ok()
 
     for sentence in _SENTENCE_SPLIT.split(text):
-        if not _BLOCK_WORD.search(sentence):
+        block_match = _BLOCK_WORD.search(sentence)
+        if not block_match:
             continue
         low = sentence.lower()
         if any(marker in low for marker in _NEGATION_MARKERS):
@@ -721,10 +722,24 @@ def validate_blocker_claims(
                 "Remove all blocker talk: nothing licenses it. Offending "
                 f"sentence: {sentence.strip()!r}"
             )
+        # Scope the token scan to the block-word's own clause ONWARD: a hand
+        # named in an EARLIER clause of the sentence ("the only hand that has
+        # you crushed is AA, and your KK blocks ... AKo and KQs") is not part
+        # of the block claim -- scanning the whole sentence false-rejected
+        # correct prose (QC 2026-07-03). Block objects follow the verb, so
+        # later clauses stay in scope ("you block their value, including AA").
+        clause_start = max(
+            sentence.rfind(",", 0, block_match.start()),
+            sentence.rfind(";", 0, block_match.start()),
+        ) + 1  # rfind -> -1 when absent, +1 -> 0 = sentence start
         unlicensed = sorted({
-            f"{core}{suffix or ''}"
-            for core, suffix in _HAND_CLASS_TOKEN.findall(sentence)
-            if not _hand_blocked_in_fact(core, suffix, facts.blockers)
+            f"{m.group(1)}{m.group(2) or ''}"
+            for m in _HAND_CLASS_TOKEN.finditer(sentence)
+            if m.start() >= clause_start
+            # Hero's own class is never a reversed-blocker claim: hero's cards
+            # ALWAYS remove villain's combos of hero's own class.
+            and f"{m.group(1)}{m.group(2) or ''}" != facts.spot.hero_hand_class
+            and not _hand_blocked_in_fact(m.group(1), m.group(2), facts.blockers)
         })
         if unlicensed:
             return PreflopValidationResult.fail(
@@ -1317,11 +1332,19 @@ def soft_validate_named_combo_in_range(
         low = sentence.lower()
         if any(marker in low for marker in _RANGE_NEGATION):
             continue
-        absent = sorted({
-            f"{core}{suffix or ''}"
-            for core, suffix in _HAND_CLASS_TOKEN.findall(sentence)
-            if not _class_in_range(core, suffix, played)
-        })
+        absent = set()
+        for m in _HAND_CLASS_TOKEN.finditer(sentence):
+            core, suffix = m.group(1), m.group(2)
+            # Skip HERO-possessive mentions ("...an edge on your T5s"): the
+            # token names hero's own hand inside a villain-range sentence, not
+            # a claim that villain holds it (QC 2026-07-03 false positives on
+            # "your T5s" / "your QJs").
+            prefix = sentence[max(0, m.start() - 8):m.start()].lower()
+            if prefix.rstrip().endswith("your"):
+                continue
+            if not _class_in_range(core, suffix, played):
+                absent.add(f"{core}{suffix or ''}")
+        absent = sorted(absent)
         if absent:
             return [
                 "prose says villain's range has "
@@ -1365,6 +1388,24 @@ def soft_validate_fold_as_equity_favorite(
     ]
 
 
+def soft_validate_no_ante_mention(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,  # noqa: ARG001 -- text-only check
+) -> list[str]:
+    """Flag prose that mentions antes -- every registered preflop pack is a
+    no-ante cash game (``has_ante=0`` in the vendor solves; the Ryan/Monker
+    packs likewise), so "you pick up the blinds and antes" is an LLM invention
+    (QC 2026-07-01, A2s open on the 8-max 100bb pack). Revisit the
+    unconditional flag if an ante game is ever registered."""
+    text = generated.answer_explanation.lower()
+    if re.search(r"\bantes?\b", text):
+        return [
+            "the explanation mentions antes, but every current preflop pack is "
+            "a no-ante cash game -- the ante is invented. Remove the mention."
+        ]
+    return []
+
+
 def run_preflop_soft_validators(
     generated: GeneratedExplanation,
     facts: PreflopFacts,
@@ -1383,6 +1424,7 @@ def run_preflop_soft_validators(
         soft_validate_verdict_vs_answer,
         soft_validate_named_combo_in_range,
         soft_validate_fold_as_equity_favorite,
+        soft_validate_no_ante_mention,
     ):
         warnings.extend(check(generated, facts))
     return warnings

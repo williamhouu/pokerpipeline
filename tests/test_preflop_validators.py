@@ -34,6 +34,7 @@ from pipeline.preflop.validators import (  # noqa: E402
     run_preflop_soft_validators,
     soft_validate_named_combo_in_range,
     soft_validate_fold_as_equity_favorite,
+    soft_validate_no_ante_mention,
     soft_validate_number_vs_data,
     soft_validate_position_words,
     soft_validate_verdict_vs_answer,
@@ -839,6 +840,23 @@ def test_soft_fold_favorite_silent_when_not_folding() -> None:
     assert soft_validate_fold_as_equity_favorite(_gen(prose="Call."), facts) == []
 
 
+def test_soft_flags_invented_antes() -> None:
+    """Every current pack is a no-ante cash game, so 'blinds and antes' is an
+    LLM invention (QC 2026-07-01) -> flag. Plain 'blinds' prose is silent."""
+    facts = _facts()
+    warned = soft_validate_no_ante_mention(
+        _gen(prose="When you get folds you pick up the blinds and antes."), facts)
+    assert len(warned) == 1 and "ante" in warned[0].lower()
+    warned2 = soft_validate_no_ante_mention(
+        _gen(prose="A raise picks up an ante-free pot? No: the ante."), facts)
+    assert len(warned2) == 1
+    assert soft_validate_no_ante_mention(
+        _gen(prose="When you get folds you pick up the blinds."), facts) == []
+    # No false positive on words containing 'ante' (anticipate, dominante).
+    assert soft_validate_no_ante_mention(
+        _gen(prose="Anticipate pressure; your hand dominates their range."), facts) == []
+
+
 def test_soft_number_break_even_cue_wins_over_equity_word() -> None:
     """'need 41% equity to call' is a BREAK-EVEN threshold, not hero's actual
     equity -- the 'to call' cue must route it to break_even_equity (40%), not
@@ -1177,3 +1195,54 @@ def test_terminology_skips_sentence_with_second_person() -> None:
     gen = _gen(correct="Fold",
                prose="The SB cold 4-bet and you simply have to let it go.")
     assert validate_terminology(gen, facts).is_valid
+
+
+# --- QC 2026-07-03 false-positive regressions -------------------------------
+def test_blocker_claim_ignores_hands_in_earlier_clauses() -> None:
+    """'The only hand that has you crushed is AA, and your kings block AKo and
+    KQs' names AA in a NON-blocker clause -- must NOT reject (the block claim
+    itself, AKo/KQs, is fully licensed). QC 2026-07-03 false reject."""
+    facts = _facts(hero_card_combo="KcKd",
+                   blockers={"AKo": 3, "AKs": 1, "KK": 5, "KQs": 2})
+    gen = _gen(prose=(
+        "The only hand that has you crushed is AA, and your kings block a "
+        "chunk of villain's other top-value combos like AKo and KQs."
+    ))
+    result = validate_blocker_claims(gen, facts)
+    assert result.is_valid, result.error_message
+
+
+def test_blocker_claim_ignores_heros_own_class() -> None:
+    """Naming hero's own hand class near a block-word is never a reversed
+    blocker (you always block your own class). QC 2026-07-03: 'you can defend
+    AQo more often and lean on your ace blocker' was rejected."""
+    # The fixture's hero class is AKo; mirror the QC sentence shape with it.
+    facts = _facts(blockers={"AA": 3, "QQ": 3})
+    gen = _gen(prose="You can defend AKo more often and lean on your ace blocker.")
+    result = validate_blocker_claims(gen, facts)
+    assert result.is_valid, result.error_message
+
+
+def test_blocker_claim_still_rejects_real_reversed_blocker() -> None:
+    """The flagship disease still fails: claiming blocks on classes the fact
+    doesn't license, inside the block clause."""
+    facts = _facts(hero_card_combo="QhQc", blockers={"QQ": 5, "AQs": 2})
+    gen = _gen(prose="Your queens block a chunk of villain's KK and AA combos.")
+    result = validate_blocker_claims(gen, facts)
+    assert not result.is_valid
+    assert "KK" in result.error_message and "AA" in result.error_message
+
+
+def test_soft_named_combo_skips_hero_possessive_mention() -> None:
+    """'villain's range ... has a meaningful edge on your T5s' names HERO's
+    hand -- not a claim that villain holds T5s. QC 2026-07-03 false flag."""
+    facts = _facts(
+        villain_played_classes=frozenset({"A2o", "A3o", "A4o"}),
+    )
+    gen = _gen(prose=(
+        "Villain's range is wide but still has a meaningful edge on your T5s."
+    ))
+    assert soft_validate_named_combo_in_range(gen, facts) == []
+    # A REAL absent-class possession claim still flags.
+    gen2 = _gen(prose="Villain's range has plenty of T5s in it.")
+    assert len(soft_validate_named_combo_in_range(gen2, facts)) == 1

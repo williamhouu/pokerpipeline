@@ -27,6 +27,8 @@ from pipeline.preflop.batch import (  # noqa: E402
     ACTION_CONTEXTS,
     BatchResult,
     _build_batch_meta,
+    _diversify_spots,
+    _spot_diversity_key,
     collect_worthy_spots,
     filter_nodes,
     generate_preflop_batch,
@@ -1379,3 +1381,61 @@ def test_batch_revise_pass_off_by_default_keeps_draft(
     assert rows and all(r["Answer Explanation"] == "DRAFT prose." for r in rows)
     meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
     assert all("revise" not in q for q in meta["questions"])
+
+
+# --- situation diversification (_diversify_spots) --------------------------
+def _fake_spot(actor: str, n_raises: int, dom: str, hc: str):
+    """A minimal spot for the diversifier: it only reads node.actor,
+    node.history_before action types, dominant_action, and hero_hand_class."""
+    hist = [SimpleNamespace(action_type=PreflopActionType.RAISE) for _ in range(n_raises)]
+    node = SimpleNamespace(actor=actor, history_before=hist)
+    return SimpleNamespace(node=node, dominant_action=dom, hero_hand_class=hc)
+
+
+def test_spot_diversity_key_buckets_by_situation() -> None:
+    # A fold and a call at the same seat/context are DIFFERENT buckets (action
+    # class differs) -- so the round-robin can't front-load all folds.
+    fold = _fake_spot("CO", 2, "Fold", "AJo")
+    call = _fake_spot("CO", 2, "Call", "76s")
+    assert _spot_diversity_key(fold) != _spot_diversity_key(call)
+    assert _spot_diversity_key(fold)[2] == "fold"
+    assert _spot_diversity_key(call)[2] == "call"
+    # Two ace-high offsuit folds vs a 3-bet from the same seat share a bucket.
+    a = _fake_spot("CO", 2, "Fold", "AJo")
+    b = _fake_spot("CO", 2, "Fold", "AQo")
+    assert _spot_diversity_key(a) == _spot_diversity_key(b)
+
+
+def test_diversify_interleaves_actions_instead_of_front_loading_folds() -> None:
+    import random
+
+    # 20 ace-high folds vs a 3-bet (the pool that collapses a Hard batch) plus
+    # 4 suited-connector calls vs a 3-bet (the non-fold traps that exist).
+    folds = [(_fake_spot("CO", 2, "Fold", hc), None)
+             for hc in ["AJo", "AQo", "ATo", "A9o", "KJo"] * 4]
+    calls = [(_fake_spot("HJ", 2, "Call", hc), None)
+             for hc in ["76s", "65s", "54s", "T9s"]]
+    pool = folds + calls  # calls are a small minority, at the very end
+
+    ordered = _diversify_spots(pool, random.Random(0))
+
+    # Same multiset, just reordered.
+    assert len(ordered) == len(pool)
+    # A non-fold spot appears WELL before it would in the flat order (index 20).
+    first_call = next(
+        i for i, (s, _) in enumerate(ordered) if s.dominant_action == "Call"
+    )
+    assert first_call < 8, f"first call at {first_call}, diversification not spreading"
+    # Deterministic given the seed.
+    assert [s.hero_hand_class for s, _ in ordered] == [
+        s.hero_hand_class for s, _ in _diversify_spots(pool, random.Random(0))
+    ]
+
+
+def test_diversify_preserves_every_spot() -> None:
+    import random
+
+    pool = [(_fake_spot("BTN", 1, "Raise", f"{r}5s"), None) for r in "KQJT9"]
+    pool += [(_fake_spot("SB", 2, "Fold", "72o"), None)]
+    ordered = _diversify_spots(pool, random.Random(3))
+    assert sorted(id(s) for s, _ in ordered) == sorted(id(s) for s, _ in pool)

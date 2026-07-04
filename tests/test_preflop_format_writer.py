@@ -1201,6 +1201,35 @@ def test_format_action_evs_orders_by_freq_with_signed_bb() -> None:
     assert pure.startswith("All-in: +0.53")
 
 
+def test_unreasonable_deep_all_in_is_hidden_from_ev_panel() -> None:
+    """A deep-stack all-in the solver never takes and that is badly dominated
+    (e.g. 200bb facing an open) is dropped from the per-action EV display, so it
+    doesn't waste space or squash the other bars. A live jam stays."""
+    from pipeline.preflop.format_writer import _format_action_evs
+
+    # 200bb facing an open: jam is 0% and catastrophically -EV -> hidden.
+    evs = {"Fold": 0.0, "Call": 0.12, "All-in": -197.0}
+    strategy = {"Fold": 0.7, "Call": 0.3, "All-in": 0.0}
+    out = _format_action_evs(evs, strategy)
+    assert "All-in" not in out
+    assert "Call: +0.12" in out and "Fold: +0.00" in out
+
+    # A short-stack jam the solver actually mixes is kept (real frequency).
+    kept = _format_action_evs(
+        {"Fold": -1.0, "Call": 0.1, "All-in": 0.2},
+        {"All-in": 0.4, "Fold": 0.4, "Call": 0.2},
+    )
+    assert "All-in: +0.20" in kept
+
+    # A 0%-frequency jam that is NOT clearly dominated (near-even, e.g. a
+    # borderline short-stack spot) is also kept -- the domination guard.
+    near_even = _format_action_evs(
+        {"Fold": 0.0, "Call": 0.30, "All-in": 0.10},
+        {"Fold": 0.6, "Call": 0.4, "All-in": 0.0},
+    )
+    assert "All-in: +0.10" in near_even
+
+
 def test_action_ev_bb_populated_on_real_monker_pack() -> None:
     """A real Monker pack ships per-action EVs; action_evs_bb reads them and
     AA's best action is clearly +EV. Asserts on the raw reader, which is what
@@ -1246,3 +1275,31 @@ def test_chat_context_column_preflop() -> None:
     assert ctx["full_strategy"]  # the action mix with frequencies
     assert ctx["recommended_action"] == row["Correct Answer"]
     assert ctx["guardrails"]
+
+
+def test_exploit_blocker_clause_names_most_blocked_first() -> None:
+    """The exploit nit-bluff refinement names the first 3 blocker classes, so
+    they must arrive most-blocked-first — naming 1-combo junk (J9s, JTs) while
+    QQ/AJo (3 combos each) go unmentioned undercuts the clause (QC 2026-07-01,
+    QJo BB vs BTN)."""
+    from types import SimpleNamespace
+
+    from pipeline.preflop.format_writer import _exploit_notes_for_facts
+    from pipeline.preflop.exploit import parse_exploit_notes
+
+    facts = SimpleNamespace(
+        archetype="3bet_as_bluff",
+        hero_equity_vs_villain=0.47,
+        villain_stats=None,
+        # Deliberately insertion-ordered with the junk first.
+        blockers={"J9s": 1, "JTs": 1, "JTo": 3, "QQ": 3, "AJo": 3, "QJo": 5},
+        spot=SimpleNamespace(
+            hero_hand_class="QJo",
+            node=SimpleNamespace(history_before=()),
+        ),
+    )
+    notes = {n["opponent"]: n for n in parse_exploit_notes(_exploit_notes_for_facts(facts))}
+    detail = notes["nit"]["detail"]
+    # Top-3 by count (ties alphabetical): QJo(5), AJo(3), JTo(3).
+    assert "QJo" in detail and "AJo" in detail
+    assert "J9s" not in detail and "JTs" not in detail  # 1-combo junk not named

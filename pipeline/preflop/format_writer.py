@@ -314,6 +314,39 @@ def action_evs_bb(facts: PreflopFacts, pack: PreflopPack) -> dict[str, float] | 
     return evs or None
 
 
+# A deep-stacked spot (e.g. 200bb facing an open or a 3-bet) carries an all-in
+# option the solver never takes. Its EV is a huge negative number that is pure
+# noise in the "EV of each action" panel AND squashes every other bar on the
+# chart's shared scale. We drop the All-in EV row when BOTH hold: the solver
+# effectively never jams here (freq ~0) AND the jam is clearly dominated (well
+# below the best action). Both guards together mean we never hide an all-in that
+# is a live, mixed, or near-even option -- at short stacks a jam IS a real line
+# and carries real frequency, so it stays. Tune against reviewer feedback.
+_ALLIN_DISPLAY_MAX_FREQ = 0.02          # jams below this are "never played"
+_ALLIN_DISPLAY_MIN_DOMINATION_BB = 1.0  # ...and this far below the best action
+
+
+def _drop_unreasonable_all_in(
+    evs: dict[str, float], strategy: dict[str, float]
+) -> dict[str, float]:
+    """Filter an unreasonable all-in out of the per-action EV map (display only).
+
+    The all-in is canonically labelled ``"All-in"`` (see
+    :func:`pipeline.preflop.options.canonicalize_action_label`). Keeps it when
+    the solver plays it with any real frequency, or when it isn't clearly
+    dominated -- so a live short-stack jam is always shown. No-op when there's
+    no all-in at the node.
+    """
+    all_in_ev = evs.get("All-in")
+    if all_in_ev is None:
+        return evs
+    if strategy.get("All-in", 0.0) >= _ALLIN_DISPLAY_MAX_FREQ:
+        return evs  # the solver actually jams here -- keep it
+    if max(evs.values()) - all_in_ev < _ALLIN_DISPLAY_MIN_DOMINATION_BB:
+        return evs  # near-even jam (short stacks) -- keep it
+    return {label: ev for label, ev in evs.items() if label != "All-in"}
+
+
 def _format_action_evs(
     evs: dict[str, float] | None,
     strategy: dict[str, float],
@@ -323,10 +356,13 @@ def _format_action_evs(
     Ordered by descending action frequency so it aligns column-for-column
     with ``action_frequencies``. Each EV is in bb to two decimals with an
     explicit sign. ``None`` (pack has no EVs) -> empty string. Shown for every
-    spot, including near-pure ones (the real per-action EVs are the truth).
+    spot, including near-pure ones (the real per-action EVs are the truth) --
+    except an unreasonable deep-stack all-in, which is dropped as noise (see
+    :func:`_drop_unreasonable_all_in`).
     """
     if not evs:
         return ""
+    evs = _drop_unreasonable_all_in(evs, strategy)
     ordered = sorted(evs.keys(), key=lambda label: -strategy.get(label, 0.0))
     return ", ".join(f"{label}: {evs[label]:+.2f}" for label in ordered)
 
@@ -783,15 +819,31 @@ def _context_column(
 
 
 # --- the main row builder ----------------------------------------------------
+def _is_pocket_pair_class(hand_class: str) -> bool:
+    """True when hero's hand is a pocket pair (the only hand that flops a set).
+    Gates set-mining wording in the exploit engine off suited connectors /
+    suited aces, which are speculative but never flop sets. Uses the same
+    playability source as the archetype's speculative-hand gate."""
+    from pipeline.preflop.playability import hand_playability  # noqa: PLC0415
+
+    play = hand_playability(hand_class)
+    return bool(play.get("recognized") and play.get("pocket_pair"))
+
+
 def _exploit_notes_for_facts(facts: PreflopFacts) -> str:
     """Deterministic exploitative adjustments for the CSV ``exploit_notes``
     column, computed from the archetype + this hand's facts (equity, domination
     vs villain's heaviest in-range classes, blockers). "" when the archetype
     has no exploit role. Same computation the admin exploit panel shows."""
     if facts.villain_stats is not None:
+        # most_common_combos, NOT top_combos: weight-sorted top_combos lets
+        # 100%-weight junk classes crowd out 99%-weight dominators (AKo), so
+        # the exploit clauses named A3s-A6s instead of the hands villain
+        # actually shows up with (QC 2026-07-03; same fix as the data block's
+        # domination_vs_villain_range).
         dom = dominating_map(
             facts.spot.hero_hand_class,
-            [c for c, _ in facts.villain_stats.top_combos],
+            [c for c, _ in facts.villain_stats.most_common_combos],
         )
     else:
         dom = {"dominated_by": [], "you_dominate": [], "coinflips": []}
@@ -800,10 +852,17 @@ def _exploit_notes_for_facts(facts: PreflopFacts) -> str:
         hero_equity=facts.hero_equity_vs_villain,
         dominated_by=dom["dominated_by"] or None,
         you_dominate=dom["you_dominate"] or None,
-        blockers=list(facts.blockers.keys()) or None,
-        # Raises hero faces (1 = a single open, 2 = a 3-bet, 3+ = a 4-bet+):
-        # the fold_or_raise role's nit advice flips on it.
+        # Most-blocked classes FIRST (same order as the blocker_combos cell):
+        # the refinement clause names the first few, and naming 1-combo junk
+        # ("J9s, JTs") instead of the 3-combo premiums (QQ, AQo) undercuts it.
+        blockers=sorted(facts.blockers, key=lambda c: (-facts.blockers[c], c)) or None,
+        # Raises hero faces (1 = a single open, 2 = a 3-bet, 3+ = a 4-bet+): names
+        # hero's isolation re-raise correctly (a 4-bet vs a 3-bet) and flips the
+        # fold_or_raise nit advice.
         facing_raise_level=_count_prior_raises(facts.spot.node.history_before),
+        # Gates set-mining wording to actual pocket pairs (a suited connector /
+        # suited ace on a speculative fold does not flop a set).
+        is_pocket_pair=_is_pocket_pair_class(facts.spot.hero_hand_class),
     )
     return exploit_notes_to_json(notes)
 

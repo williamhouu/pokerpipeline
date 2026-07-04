@@ -2039,6 +2039,25 @@ def _render_generate_page_preflop() -> None:
     with st.popover("ℹ️  What is Trap-aware difficulty? (read before using)"):
         _render_trap_difficulty_explainer()
 
+    # Situation diversification. The worthy pool is walked in order until N
+    # rows are collected, so a fill-to-N batch (especially Hard trap-aware)
+    # collapses onto the most common situation -- every question an ace-high
+    # fold facing a blind 3-bet. ON round-robins the pool across
+    # seat / action-context / dominant-action / hand-category buckets so the
+    # batch spreads across positions, hands, and actions. Default ON.
+    diversify = st.checkbox(
+        "🎲 Diversify situations — spread the batch across seats, hands & actions",
+        value=True,
+        key="preflop_diversify",
+        help=(
+            "ON (default) = round-robin the eligible spots across situation "
+            "buckets, so a batch isn't a run of near-identical spots (e.g. all "
+            "ace-high folds vs a blind 3-bet). Especially important with "
+            "Trap-aware on. OFF = the old flat-random fill. Never changes any "
+            "answer or difficulty — only WHICH worthy spots are picked."
+        ),
+    )
+
     # Advanced: question-worthiness window + EV-gap quality gate. These
     # are SEPARATE from difficulty -- worthiness decides whether a spot is
     # teachable at all; the EV gate drops near-coinflip call/fold spots.
@@ -2569,6 +2588,7 @@ def _render_generate_page_preflop() -> None:
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
             trap_difficulty=bool(trap_difficulty),
+            diversify=bool(diversify),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
             min_villain_line_pct=(
                 None if min_villain_pct == 0.0 else float(min_villain_pct)
@@ -2609,6 +2629,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     min_difficulty: int,
     max_difficulty: int,
     trap_difficulty: bool,
+    diversify: bool,
     min_ev_gap_bb: float | None,
     min_villain_line_pct: float | None,
     min_hero_premise_freq: float | None,
@@ -2692,6 +2713,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             min_difficulty=min_difficulty,
             max_difficulty=max_difficulty,
             trap_difficulty=trap_difficulty,
+            diversify=diversify,
             min_ev_gap_bb=min_ev_gap_bb,
             min_villain_line_pct=min_villain_line_pct,
             min_hero_premise_freq=min_hero_premise_freq,
@@ -4001,26 +4023,59 @@ def _cell(row: pd.Series, col: str) -> str:
 
 def _md_lines(text: str) -> str:
     """Render multi-line CSV text in Markdown with line breaks preserved
-    (Markdown collapses single newlines otherwise)."""
-    return text.replace("\n", "  \n")
+    (Markdown collapses single newlines otherwise).
+
+    Dollar signs are escaped: st.markdown treats ``$...$`` as inline LaTeX, so
+    a dollar-stakes question like "You open to $6. The Small Blind 3-bets to
+    $24." rendered everything between the two amounts as math (teal
+    code-style text). ``\\$`` renders as a literal dollar sign."""
+    return text.replace("$", "\\$").replace("\n", "  \n")
 
 
-def _autosave_review_cell(
-    csv_path: Path, no: str, widget_key: str, kind: str
+# NOTE: the old `_autosave_review_cell` on_change callback was DELETED
+# (2026-07-04). on-blur autosave + plain nav buttons is the racy pattern that
+# kept losing edits; the Review pages now save via per-question st.forms whose
+# submits carry the edit atomically. Do not reintroduce on_change autosave.
+def _flush_review_edit(
+    csv_path: Path, no: str, *, key_prefix: str = "review"
 ) -> None:
-    """on_change callback: persist a Review edit (explanation or difficulty)
-    straight into the batch CSV, so there's no Save button to forget.
+    """Persist the CURRENTLY-shown question's pending editor + difficulty to the
+    CSV, reading straight from ``session_state``.
 
-    Runs before the rerun Streamlit triggers after a widget change, so the
-    re-read of the CSV at the top of the page reflects the edit immediately.
+    WHY THIS EXISTS (and must stay): the Prev/Next/Jump buttons are rendered
+    ABOVE the answer-explanation editor and short-circuit with ``st.rerun()`` the
+    moment they're clicked -- so on a navigation rerun the editor is never
+    re-rendered, and persistence cannot rely on the editor's ``on_change`` firing
+    at exactly the right instant. This flush closes that gap: Streamlit copies
+    the incoming widget values into ``session_state`` BEFORE the script body runs,
+    so by the time a nav button's handler calls this, the user's just-typed edit
+    is already in ``session_state`` and gets written before we leave the question.
+    Race-free and independent of callback timing. ``_update_cell`` no-ops when the
+    value is unchanged, so calling this on every navigation is free.
+
+    Invariant for future refactors: ANY control that navigates away from the
+    current question (changes ``review_idx`` / grades / removes a row) MUST be
+    a ``form_submit_button`` of the question's form, and the submit handler
+    MUST call this first. A plain ``st.button`` RACES the text_area's on-blur
+    commit (type -> click could rerun without the edit ever reaching
+    ``session_state``) -- that race was the recurring "my edit vanished" bug;
+    the form's atomic submit removes the timing dependence entirely. Covered
+    by ``tests/test_review_autosave.py``.
+
+    ``key_prefix``: "review" (preflop page) or "postflop_review" (postflop
+    page) -- the two pages namespace their widget keys differently.
     """
-    value = st.session_state.get(widget_key, "")
-    if kind == "difficulty":
-        ok = review.update_difficulty(csv_path, no, str(int(value)))
-    else:
-        ok = review.update_explanation(csv_path, no, str(value))
-    if ok:
-        st.toast(f"Saved #{no}")
+    expl_key = f"{key_prefix}_expl::{csv_path.name}::{no}"
+    diff_key = f"{key_prefix}_diff::{csv_path.name}::{no}"
+    if expl_key in st.session_state:
+        review.update_explanation(csv_path, no, str(st.session_state[expl_key]))
+    if diff_key in st.session_state:
+        try:
+            review.update_difficulty(
+                csv_path, no, str(int(st.session_state[diff_key]))
+            )
+        except (ValueError, TypeError):
+            pass
 
 
 def _render_inline_spot_ranges(node, pack, *, key_prefix: str) -> None:
@@ -4076,8 +4131,8 @@ def _render_inline_spot_ranges(node, pack, *, key_prefix: str) -> None:
     )
     st.html(f'<div style="font-size:13px;margin-bottom:4px;">{legend}</div>')
 
-    def _mix(grid_node) -> dict[str, list[tuple[float, str]]]:
-        segs: dict[str, list[tuple[float, str]]] = {h: [] for h in all_hands}
+    def _mix(grid_node) -> dict[str, list[tuple[float, str, str]]]:
+        segs: dict[str, list[tuple[float, str, str]]] = {h: [] for h in all_hands}
         for opt in sorted(grid_node.actions, key=lambda o: _order.get(o.action_type, 9)):
             try:
                 weights = parse_range_file(opt.range_file.path)
@@ -4087,7 +4142,8 @@ def _render_inline_spot_ranges(node, pack, *, key_prefix: str) -> None:
             for hand in all_hands:
                 fr = weights.get(hand, 0.0)
                 if fr > 0.0:
-                    segs[hand].append((fr, col))
+                    # Label -> grid_html renders a tap/hover frequency tooltip.
+                    segs[hand].append((fr, col, opt.label))
         return segs
 
     st.markdown(f"**{node.actor} — strategy (this decision)**")
@@ -4231,299 +4287,327 @@ def render_review_page() -> None:
     idx = max(0, min(int(idx), len(df) - 1))
 
     nos = df["No"].tolist()
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    with nav1:
-        if st.button("◀ Prev", use_container_width=True, disabled=idx == 0):
-            st.session_state[nav_key] = idx - 1
-            st.rerun()
-    with nav3:
-        if st.button(
-            "Next ▶", use_container_width=True, disabled=idx >= len(df) - 1
-        ):
-            st.session_state[nav_key] = idx + 1
-            st.rerun()
-    with nav2:
-        jump = st.selectbox(
-            "Jump to question",
-            options=range(len(df)),
-            index=idx,
-            format_func=lambda i: f"#{nos[i]}  ({i + 1}/{len(df)})",
-            label_visibility="collapsed",
-        )
-        if jump != idx:
-            st.session_state[nav_key] = jump
-            st.rerun()
-
     row = df.iloc[idx]
     no = str(row["No"])
     existing = reviews.get(no, {})
 
-    # Persistent confirmation of the last removal. After a remove the view
-    # shifts to the NEXT question (it slides into this slot) and remaining
-    # questions keep their original numbers (gaps are intentional), so spell
-    # out exactly what happened -- otherwise it looks like the wrong question
-    # was removed or things got reordered.
-    _removed = st.session_state.pop("_review_last_removed", None)
-    if _removed is not None and str(_removed) != no:
-        st.success(f"🗑 Removed #{_removed}. Now showing #{no}.")
-
-    # --- the question card ---
-    with st.container(border=True):
-        h1, h2, h3, h4 = st.columns([1, 2, 2, 2])
-        h1.markdown(f"**#{_cell(row, 'No')}**")
-        h2.markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
-        h3.markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
-        h4.markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
-        if existing.get("status"):
-            st.markdown(
-                "Current grade: "
-                + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
+    # EDIT-LOSS INVARIANT (the recurring "my explanation edit vanished" bug):
+    # every control that can leave this question -- Prev/Next/Go, the grade
+    # buttons, Remove -- MUST be an st.form_submit_button of THIS form, with the
+    # editor + difficulty inside the same form. A form submit ships the current
+    # widget values ATOMICALLY with the click (framework contract). A plain
+    # st.button races the text_area's on-blur commit: type -> click Next could
+    # rerun WITHOUT the edit ever reaching session_state, and the server can
+    # never recover it. NEVER add a plain st.button that navigates here.
+    _form = st.form(key=f"review_form::{csv_path.name}::{no}", border=False)
+    with _form:
+        nav1, nav2, nav3 = st.columns([1, 2, 1])
+        with nav1:
+            _prev_clicked = st.form_submit_button(
+                "◀ Prev", use_container_width=True, disabled=idx == 0
+            )
+        with nav2:
+            _jcol, _gcol = st.columns([3, 1])
+            jump = _jcol.selectbox(
+                "Jump to question",
+                options=range(len(df)),
+                index=idx,
+                format_func=lambda i: f"#{nos[i]}  ({i + 1}/{len(df)})",
+                label_visibility="collapsed",
+            )
+            _go_clicked = _gcol.form_submit_button("Go", use_container_width=True)
+        with nav3:
+            _next_clicked = st.form_submit_button(
+                "Next ▶", use_container_width=True, disabled=idx >= len(df) - 1
             )
 
-        # Per-question meta record (join on user_cards + solver_reference);
-        # used for the soft-flag text and the revise-pass lifecycle panel.
-        _qmeta = (
-            review.meta_question_for(
-                _meta,
-                user_cards=_cell(row, "User Cards"),
-                solver_reference=_cell(row, "solver_reference"),
-            )
-            if _meta
-            else None
-        )
-        # Flag visibility: a row that SHIPPED but was flagged. The two sources
-        # are shown SEPARATELY and labeled by what they are -- deterministic
-        # soft validators (rule checks) vs the AI claim checker (a second LLM
-        # pass). Previously both were lumped under one "soft validator" badge,
-        # which made the LLM checker's eloquent notes look like a rule check.
-        _vstatus = _cell(row, "validation_status")
-        if _vstatus in ("flagged", "needs_review"):
-            _soft = (
-                [str(w) for w in (_qmeta.get("validator_warnings") or [])]
-                if _qmeta else []
-            )
-            _claims = (
-                [str(w) for w in (_qmeta.get("claim_check_issues") or [])]
-                if _qmeta else []
-            )
-            if _vstatus == "needs_review":
-                st.warning("⚠️ **Marked needs-review.**")
-            if _soft:
-                st.warning(
-                    "🟠 **Soft validator (deterministic rule check)** — shipped "
-                    "to the CSV but flagged:\n\n"
-                    + "\n".join(f"- {w}" for w in _soft)
+        # Persistent confirmation of the last removal. After a remove the view
+        # shifts to the NEXT question (it slides into this slot) and remaining
+        # questions keep their original numbers (gaps are intentional), so spell
+        # out exactly what happened -- otherwise it looks like the wrong question
+        # was removed or things got reordered.
+        _removed = st.session_state.pop("_review_last_removed", None)
+        if _removed is not None and str(_removed) != no:
+            st.success(f"🗑 Removed #{_removed}. Now showing #{no}.")
+
+        # --- the question card ---
+        with st.container(border=True):
+            h1, h2, h3, h4 = st.columns([1, 2, 2, 2])
+            h1.markdown(f"**#{_cell(row, 'No')}**")
+            h2.markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
+            h3.markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
+            h4.markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
+            if existing.get("status"):
+                st.markdown(
+                    "Current grade: "
+                    + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
                 )
-            if _claims:
-                st.warning(
-                    "🤖 **AI claim checker (a second LLM pass, not a rule "
-                    "check)** — review these:\n\n"
-                    + "\n".join(f"- {w}" for w in _claims)
-                )
-            # Bare fallback only when nothing else explains the flag. A revise
-            # batch's discarded/unchanged rows are explained by the auto-fix
-            # panel below, so don't double up with a generic badge.
-            _has_revise = bool(_qmeta and _qmeta.get("revise"))
-            if _vstatus == "flagged" and not _soft and not _claims and not _has_revise:
-                st.warning("🟠 **Flagged.**")
-        # Audit & auto-fix lifecycle (revise_pass batches): how this question's
-        # final shipped version was produced, plus any distinct 4th-call flags.
-        _render_revise_panel(_qmeta)
 
-        ctx = _cell(row, "Context")
-        if ctx:
-            st.caption(ctx)
-        st.markdown("**Question**")
-        st.markdown(_md_lines(_cell(row, "Question")))
-
-        st.markdown("**Options**")
-        correct = _cell(row, "Correct Answer")
-        for i in (1, 2, 3, 4):
-            opt = _cell(row, f"option {i}")
-            if opt:
-                st.markdown(("✅ " if opt == correct else "▫️ ") + opt)
-
-        st.markdown("**Answer Explanation** _(edits auto-save into the CSV)_")
-        _expl_key = f"review_expl::{csv_path.name}::{no}"
-        st.text_area(
-            "Answer Explanation",
-            value=_cell(row, "Answer Explanation"),
-            key=_expl_key,
-            # Tall enough to show a full in-depth explanation (250-400 words)
-            # without scrolling -- the in-depth prompts run long.
-            height=500,
-            label_visibility="collapsed",
-            on_change=_autosave_review_cell,
-            args=(csv_path, no, _expl_key, "explanation"),
-        )
-        # The deterministic "Show the math" strip, right under the
-        # explanation (the decision-math stats: pot odds, equity, range
-        # advantage, blockers, what you're up against).
-        # The panels expect a clean {str: str} dict; the raw Series carries
-        # NaN floats for empty cells (the review page's read_csv doesn't
-        # fillna), which would crash a `.get(col).strip()`. _cell coerces
-        # NaN -> "" and everything to str.
-        row_strs = {str(c): _cell(row, c) for c in row.index}
-        _render_stat_panel(row_strs)
-        _render_why_factors_panel(row_strs)
-        _render_exploit_panel(row_strs)
-        _render_claim_check_panel(row_strs)
-        # Editable difficulty -- auto-saves into the CSV just like the
-        # explanation (no Save button; the on_change callback writes it).
-        _diff_key = f"review_diff::{csv_path.name}::{no}"
-        try:
-            _cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
-        except ValueError:
-            _cur_diff = 0
-        st.number_input(
-            "Difficulty Rating (edits auto-save)",
-            min_value=0,
-            max_value=3500,
-            step=10,
-            value=_cur_diff,
-            key=_diff_key,
-            on_change=_autosave_review_cell,
-            args=(csv_path, no, _diff_key, "difficulty"),
-        )
-        # Rendered preview (suit emojis etc.) of the saved explanation.
-        with st.expander("Preview (rendered)", expanded=False):
-            st.info(_md_lines(_cell(row, "Answer Explanation")))
-
-        st.markdown(
-            "**Solver frequencies:**&nbsp;"
-            + _cell(row, "action_frequencies")
-        )
-
-        # Compact strategic facts.
-        bits = []
-        for col, label in (
-            ("archetype", "archetype"),
-            ("ev_gap_bb", "EV gap"),
-            ("Position Matchup", "matchup"),
-            ("Pot Participant", "pot"),
-        ):
-            val = _cell(row, col)
-            if val:
-                bits.append(f"{label}: `{val}`")
-        if bits:
-            st.caption(" · ".join(bits))
-        if _cell(row, "concept_tags"):
-            st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
-        if _cell(row, "skills"):
-            st.caption(f"skills: {_cell(row, 'skills')}")
-
-        # Ranges: shown INLINE in a dropdown (like the postflop Review) instead
-        # of navigating to a separate Range-viewer tab. Resolve the pack from
-        # the batch meta's pack_id and the node from the solver_reference.
-        ranges_val = _cell(row, "ranges")
-        n_players = review.range_player_count(ranges_val)
-        with st.expander("📊  Ranges for this spot"):
-            _rng_pack = None
-            _pid = (_meta or {}).get("pack_id") if isinstance(_meta, dict) else None
-            if _pid:
-                _rng_pack = {p.pack_id: p for p in _cached_preflop_packs()}.get(_pid)
-            _rng_node = None
-            if _rng_pack is not None:
-                _nid = range_view.node_id_from_solver_reference(
-                    _cell(row, "solver_reference")
-                )
-                _rng_node = _cached_ranges_index(_rng_pack.pack_id)[0].get(_nid)
-            if _rng_node is not None:
-                _render_inline_spot_ranges(
-                    _rng_node, _rng_pack, key_prefix=f"{csv_path.name}::{no}"
-                )
-            else:
-                st.caption(
-                    "Couldn't resolve this spot's node inline "
-                    "(older batch, or the pack isn't on disk). Raw JSON below."
-                )
-        if n_players:
-            with st.expander(f"raw ranges JSON · {n_players} players"):
-                try:
-                    st.code(
-                        json.dumps(json.loads(ranges_val), indent=2),
-                        language="json",
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    st.code(ranges_val)
-
-        # --- prompt + inputs inspector (read-only) ---
-        with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
-            _q = None
-            if _meta:
-                _q = review.meta_question_for(
+            # Per-question meta record (join on user_cards + solver_reference);
+            # used for the soft-flag text and the revise-pass lifecycle panel.
+            _qmeta = (
+                review.meta_question_for(
                     _meta,
                     user_cards=_cell(row, "User Cards"),
                     solver_reference=_cell(row, "solver_reference"),
                 )
-            if _meta is None or _q is None:
-                st.caption(
-                    "No matching inputs in this batch's metadata "
-                    "(older batch, or generated outside the admin panel)."
+                if _meta
+                else None
+            )
+            # Flag visibility: a row that SHIPPED but was flagged. The two sources
+            # are shown SEPARATELY and labeled by what they are -- deterministic
+            # soft validators (rule checks) vs the AI claim checker (a second LLM
+            # pass). Previously both were lumped under one "soft validator" badge,
+            # which made the LLM checker's eloquent notes look like a rule check.
+            _vstatus = _cell(row, "validation_status")
+            if _vstatus in ("flagged", "needs_review"):
+                _soft = (
+                    [str(w) for w in (_qmeta.get("validator_warnings") or [])]
+                    if _qmeta else []
                 )
-            else:
-                _raw_opts = _q.get("options", [])
-                _opts = (
-                    [o for o in _raw_opts if isinstance(o, str)]
-                    if isinstance(_raw_opts, list)
-                    else []
+                _claims = (
+                    [str(w) for w in (_qmeta.get("claim_check_issues") or [])]
+                    if _qmeta else []
                 )
-                st.markdown("**Per-question inputs** (computed, not editable)")
-                st.markdown("Options: " + ", ".join(f"`{o}`" for o in _opts))
-                st.markdown(f"Correct answer: `{_q.get('correct_answer', '')}`")
-                st.markdown("SOLVER DATA fed to the LLM:")
-                st.code(
-                    json.dumps(_q.get("solver_data"), indent=2, default=str),
-                    language="json",
-                )
-                st.markdown("**Full assembled prompt** (system + gold + this spot)")
-                st.code(review.assembled_prompt(_meta, _q))
+                if _vstatus == "needs_review":
+                    st.warning("⚠️ **Marked needs-review.**")
+                if _soft:
+                    st.warning(
+                        "🟠 **Soft validator (deterministic rule check)** — shipped "
+                        "to the CSV but flagged:\n\n"
+                        + "\n".join(f"- {w}" for w in _soft)
+                    )
+                if _claims:
+                    st.warning(
+                        "🤖 **AI claim checker (a second LLM pass, not a rule "
+                        "check)** — review these:\n\n"
+                        + "\n".join(f"- {w}" for w in _claims)
+                    )
+                # Bare fallback only when nothing else explains the flag. A revise
+                # batch's discarded/unchanged rows are explained by the auto-fix
+                # panel below, so don't double up with a generic badge.
+                _has_revise = bool(_qmeta and _qmeta.get("revise"))
+                if _vstatus == "flagged" and not _soft and not _claims and not _has_revise:
+                    st.warning("🟠 **Flagged.**")
+            # Audit & auto-fix lifecycle (revise_pass batches): how this question's
+            # final shipped version was produced, plus any distinct 4th-call flags.
+            _render_revise_panel(_qmeta)
 
-    # --- grading ---
-    st.markdown("**Grade**")
-    note = st.text_area(
-        "Note (optional)",
-        value=existing.get("note", ""),
-        key=f"review_note::{csv_path.name}::{no}",
-        height=70,
-    )
+            ctx = _cell(row, "Context")
+            if ctx:
+                st.caption(ctx)
+            st.markdown("**Question**")
+            st.markdown(_md_lines(_cell(row, "Question")))
 
-    def _grade(status: str) -> None:
-        review.save_review(csv_path, no, status, note)
-        # Auto-advance to the next ungraded-friendly question (just next).
-        st.session_state[nav_key] = min(idx + 1, len(df) - 1)
-        st.rerun()
+            st.markdown("**Options**")
+            correct = _cell(row, "Correct Answer")
+            for i in (1, 2, 3, 4):
+                opt = _cell(row, f"option {i}")
+                if opt:
+                    st.markdown(("✅ " if opt == correct else "▫️ ") + opt)
 
-    g1, g2, g3 = st.columns(3)
-    if g1.button("✅ Approve", use_container_width=True, type="primary"):
-        _grade("approved")
-    if g2.button("⚠️ Needs review", use_container_width=True):
-        _grade("needs_review")
-    if g3.button("❌ Reject", use_container_width=True):
-        _grade("rejected")
+            st.markdown(
+                "**Answer Explanation** _(saves on any button click: "
+                "Save, Prev/Next, grade)_"
+            )
+            _expl_key = f"review_expl::{csv_path.name}::{no}"
+            st.text_area(
+                "Answer Explanation",
+                value=_cell(row, "Answer Explanation"),
+                key=_expl_key,
+                # Tall enough to show a full in-depth explanation (250-400 words)
+                # without scrolling -- the in-depth prompts run long.
+                height=500,
+                label_visibility="collapsed",
+            )
+            _save_clicked = st.form_submit_button("💾 Save edits")
+            # The deterministic "Show the math" strip, right under the
+            # explanation (the decision-math stats: pot odds, equity, range
+            # advantage, blockers, what you're up against).
+            # The panels expect a clean {str: str} dict; the raw Series carries
+            # NaN floats for empty cells (the review page's read_csv doesn't
+            # fillna), which would crash a `.get(col).strip()`. _cell coerces
+            # NaN -> "" and everything to str.
+            row_strs = {str(c): _cell(row, c) for c in row.index}
+            _render_stat_panel(row_strs)
+            _render_why_factors_panel(row_strs)
+            _render_exploit_panel(row_strs)
+            _render_claim_check_panel(row_strs)
+            # Editable difficulty -- auto-saves into the CSV just like the
+            # explanation (no Save button; the on_change callback writes it).
+            _diff_key = f"review_diff::{csv_path.name}::{no}"
+            try:
+                _cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
+            except ValueError:
+                _cur_diff = 0
+            st.number_input(
+                "Difficulty Rating (saves with any button click)",
+                min_value=0,
+                max_value=3500,
+                step=10,
+                value=_cur_diff,
+                key=_diff_key,
+            )
+            # Rendered preview (suit emojis etc.) of the saved explanation.
+            with st.expander("Preview (rendered)", expanded=False):
+                st.info(_md_lines(_cell(row, "Answer Explanation")))
 
-    # --- remove from batch: ONE click (destructive -- edits the CSV -- but
-    #     recoverable by regenerating). No confirm gate by request; the
-    #     button names the # it'll remove and the persistent note up top
-    #     confirms it afterward, so a misclick is obvious and cheap. ---
-    st.divider()
-    if st.button(
-        f"🗑  Remove #{no} from this batch",
-        key=f"review_rm_btn::{csv_path.name}::{no}",
-        help=(
-            "Deletes this question from the CSV in one click. Remaining "
-            "questions keep their original numbers (gaps are fine). Can't be "
-            "undone here, but you can regenerate the batch."
-        ),
-    ):
-        if review.remove_question(csv_path, no):
-            # Stay in this slot so the NEXT question slides into view; clamp
-            # against the now-shorter batch. The note up top names what went.
-            st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
-            st.session_state["_review_last_removed"] = no
-            st.rerun()
-        else:
+            st.markdown(
+                "**Solver frequencies:**&nbsp;"
+                + _cell(row, "action_frequencies")
+            )
+
+            # Compact strategic facts.
+            bits = []
+            for col, label in (
+                ("archetype", "archetype"),
+                ("ev_gap_bb", "EV gap"),
+                ("Position Matchup", "matchup"),
+                ("Pot Participant", "pot"),
+            ):
+                val = _cell(row, col)
+                if val:
+                    bits.append(f"{label}: `{val}`")
+            if bits:
+                st.caption(" · ".join(bits))
+            if _cell(row, "concept_tags"):
+                st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+            if _cell(row, "skills"):
+                st.caption(f"skills: {_cell(row, 'skills')}")
+
+            # Ranges: shown INLINE in a dropdown (like the postflop Review) instead
+            # of navigating to a separate Range-viewer tab. Resolve the pack from
+            # the batch meta's pack_id and the node from the solver_reference.
+            ranges_val = _cell(row, "ranges")
+            n_players = review.range_player_count(ranges_val)
+            with st.expander("📊  Ranges for this spot"):
+                _rng_pack = None
+                _pid = (_meta or {}).get("pack_id") if isinstance(_meta, dict) else None
+                if _pid:
+                    _rng_pack = {p.pack_id: p for p in _cached_preflop_packs()}.get(_pid)
+                _rng_node = None
+                if _rng_pack is not None:
+                    _nid = range_view.node_id_from_solver_reference(
+                        _cell(row, "solver_reference")
+                    )
+                    _rng_node = _cached_ranges_index(_rng_pack.pack_id)[0].get(_nid)
+                if _rng_node is not None:
+                    _render_inline_spot_ranges(
+                        _rng_node, _rng_pack, key_prefix=f"{csv_path.name}::{no}"
+                    )
+                else:
+                    st.caption(
+                        "Couldn't resolve this spot's node inline "
+                        "(older batch, or the pack isn't on disk). Raw JSON below."
+                    )
+            if n_players:
+                with st.expander(f"raw ranges JSON · {n_players} players"):
+                    try:
+                        st.code(
+                            json.dumps(json.loads(ranges_val), indent=2),
+                            language="json",
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        st.code(ranges_val)
+
+            # --- prompt + inputs inspector (read-only) ---
+            with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
+                _q = None
+                if _meta:
+                    _q = review.meta_question_for(
+                        _meta,
+                        user_cards=_cell(row, "User Cards"),
+                        solver_reference=_cell(row, "solver_reference"),
+                    )
+                if _meta is None or _q is None:
+                    st.caption(
+                        "No matching inputs in this batch's metadata "
+                        "(older batch, or generated outside the admin panel)."
+                    )
+                else:
+                    _raw_opts = _q.get("options", [])
+                    _opts = (
+                        [o for o in _raw_opts if isinstance(o, str)]
+                        if isinstance(_raw_opts, list)
+                        else []
+                    )
+                    st.markdown("**Per-question inputs** (computed, not editable)")
+                    st.markdown("Options: " + ", ".join(f"`{o}`" for o in _opts))
+                    st.markdown(f"Correct answer: `{_q.get('correct_answer', '')}`")
+                    st.markdown("SOLVER DATA fed to the LLM:")
+                    st.code(
+                        json.dumps(_q.get("solver_data"), indent=2, default=str),
+                        language="json",
+                    )
+                    st.markdown("**Full assembled prompt** (system + gold + this spot)")
+                    st.code(review.assembled_prompt(_meta, _q))
+
+        # --- grading (inside the form: grade clicks also carry the edit) ---
+        st.markdown("**Grade**")
+        note = st.text_area(
+            "Note (optional)",
+            value=existing.get("note", ""),
+            key=f"review_note::{csv_path.name}::{no}",
+            height=70,
+        )
+        g1, g2, g3 = st.columns(3)
+        _approve_clicked = g1.form_submit_button(
+            "✅ Approve", use_container_width=True, type="primary"
+        )
+        _needs_clicked = g2.form_submit_button(
+            "⚠️ Needs review", use_container_width=True
+        )
+        _reject_clicked = g3.form_submit_button(
+            "❌ Reject", use_container_width=True
+        )
+
+        # --- remove from batch: ONE click (destructive -- edits the CSV -- but
+        #     recoverable by regenerating). No confirm gate by request; the
+        #     button names the # it'll remove and the persistent note up top
+        #     confirms it afterward, so a misclick is obvious and cheap. ---
+        st.divider()
+        _remove_clicked = st.form_submit_button(
+            f"🗑  Remove #{no} from this batch",
+            help=(
+                "Deletes this question from the CSV in one click. Remaining "
+                "questions keep their original numbers (gaps are fine). Can't "
+                "be undone here, but you can regenerate the batch."
+            ),
+        )
+    # --- the single post-form handler: the ONLY place navigation happens.
+    # The form submit delivered the editor/difficulty/note values atomically
+    # with whichever button was clicked, so saving first can never lose an
+    # in-flight edit (see the EDIT-LOSS INVARIANT above).
+    if any((_prev_clicked, _next_clicked, _go_clicked, _save_clicked,
+            _approve_clicked, _needs_clicked, _reject_clicked, _remove_clicked)):
+        _flush_review_edit(csv_path, no)
+        if _remove_clicked:
+            if review.remove_question(csv_path, no):
+                # Stay in this slot so the NEXT question slides into view;
+                # clamp against the now-shorter batch.
+                st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
+                st.session_state["_review_last_removed"] = no
+                st.rerun()
             st.warning(f"#{no} was not found in the batch.")
+        else:
+            new_idx = idx
+            if _approve_clicked or _needs_clicked or _reject_clicked:
+                status = (
+                    "approved" if _approve_clicked
+                    else "needs_review" if _needs_clicked
+                    else "rejected"
+                )
+                review.save_review(csv_path, no, status, note)
+                # Auto-advance to the next question after grading.
+                new_idx = min(idx + 1, len(df) - 1)
+            elif _prev_clicked:
+                new_idx = idx - 1
+            elif _next_clicked:
+                new_idx = idx + 1
+            elif _go_clicked:
+                new_idx = int(jump)
+            st.session_state[nav_key] = new_idx
+            st.rerun()
 
     # --- cross-batch approved pool (mirrors the PLO Review page) ------------
     # Every question graded "approved" -- here or finalized on the Compare
@@ -4919,16 +5003,18 @@ def render_ranges_page() -> None:
             acts.append(
                 (opt.label, weights, _action_color.get(opt.action_type, "#888888"))
             )
-        segments: dict[str, list[tuple[float, str]]] = {}
+        segments: dict[str, list[tuple[float, str, str]]] = {}
         freqs: dict[str, dict[str, float]] = {}
         for hand in all_hands:
-            segs: list[tuple[float, str]] = []
+            segs: list[tuple[float, str, str]] = []
             fr: dict[str, float] = {}
             for label, hand_weights, color in acts:
                 freq = hand_weights.get(hand, 0.0)
                 fr[label] = freq
                 if freq > 0.0:
-                    segs.append((freq, color))
+                    # 3rd element = label -> grid_html renders a tap/hover
+                    # tooltip on the cell with each action's frequency.
+                    segs.append((freq, color, label))
             segments[hand] = segs
             freqs[hand] = fr
         return segments, freqs
@@ -4969,11 +5055,12 @@ def render_ranges_page() -> None:
             )
             st.html(range_view.grid_html(v_segments))
 
-    # --- inspect one hand across everyone (the "click a cell" stand-in) ---
+    # --- inspect one hand across everyone ---
     st.markdown("### Inspect a hand")
     st.caption(
-        "Streamlit can't capture a click on a coloured cell, so pick a hand "
-        "here to see its exact breakdown across every player."
+        "Tip: you can also tap/click any cell in the grids above for a quick "
+        "frequency readout. This picker shows one hand's breakdown across "
+        "EVERY player at once."
     )
     pick = st.selectbox("Hand", options=all_hands, key="ranges_inspect_hand")
     if pick:
@@ -5296,6 +5383,78 @@ def _parse_blocker_classes(cell: str) -> list[str]:
     return out
 
 
+def _facing_raise_level_from_row(row: dict[str, str]) -> int | None:
+    """The number of raises hero faces (1 = single open, 2 = a 3-bet, 3 = a
+    4-bet, ...), reconstructed from a CSV row so the exploit engine names hero's
+    re-raise correctly. The archetype is authoritative for value/bluff raise
+    spots; otherwise (folds) the deterministic Question narrative names the
+    villain's raise. 0 for a first-in open; None when nothing indicates a raise.
+    """
+    by_arch = {
+        "open_for_value": 0,
+        "3bet_for_value": 1, "3bet_as_bluff": 1,
+        "squeeze_for_value": 1, "squeeze_as_bluff": 1,
+        "4bet_for_value": 2, "4bet_as_bluff": 2,
+        "5bet_for_value": 3, "5bet_as_bluff": 3,
+    }
+    arch = (row.get("archetype") or "").strip()
+    if arch in by_arch:
+        return by_arch[arch]
+    q = (row.get("Question") or "").lower()
+    for token, level in (("5-bet", 4), ("4-bet", 3), ("3-bet", 2)):
+        if token in q:
+            return level
+    if "raise" in q or "opens" in q or "open " in q:
+        return 1  # a single open in the narrative
+    return None
+
+
+def recompute_exploit_notes_for_row(row: dict[str, str]) -> str:
+    """Recompute the ``exploit_notes`` JSON for one CSV row from the CURRENT
+    engine. The single source of truth used by BOTH the Review panel (which
+    always recomputes, so an exploit-engine fix shows immediately for every
+    batch) and ``scripts/rerender_exploit_notes.py`` (which re-bakes the column
+    in existing CSVs). Returns "" for a blank / unclassified archetype.
+
+    INVARIANT: display and re-bake must go through THIS function so a fix to
+    `pipeline.preflop.exploit` can never be silently overridden by a stale baked
+    column again. Do not read `row["exploit_notes"]` for display.
+    """
+    from pipeline.preflop.domination import dominating_map  # noqa: PLC0415
+    from pipeline.preflop.exploit import (  # noqa: PLC0415
+        exploit_adjustments,
+        exploit_notes_to_json,
+    )
+
+    archetype = (row.get("archetype") or "").strip()
+    if not archetype or archetype == "unclassified":
+        return ""
+    raw_eq = (row.get("hero_equity") or "").strip().rstrip("%")
+    try:
+        hero_equity: float | None = float(raw_eq) / 100.0
+    except ValueError:
+        hero_equity = None
+    dominated_by = you_dominate = None
+    hand_class = _user_cards_to_class(row.get("User Cards", ""))
+    villain_classes = _parse_top_villain_classes(row.get("top_villain_combos", ""))
+    if hand_class and villain_classes:
+        dm = dominating_map(hand_class, villain_classes)
+        dominated_by = dm["dominated_by"] or None
+        you_dominate = dm["you_dominate"] or None
+    blockers = _parse_blocker_classes(row.get("blocker_combos", "")) or None
+    is_pp = bool(hand_class and len(hand_class) == 2 and hand_class[0] == hand_class[1])
+    notes = exploit_adjustments(
+        archetype,
+        hero_equity=hero_equity,
+        dominated_by=dominated_by,
+        you_dominate=you_dominate,
+        blockers=blockers,
+        is_pocket_pair=is_pp,
+        facing_raise_level=_facing_raise_level_from_row(row),
+    )
+    return exploit_notes_to_json(notes)
+
+
 def _render_exploit_panel(row: dict[str, str]) -> None:
     """A "🎯 Exploit adjustments" strip: how to deviate from GTO vs a nit /
     station / maniac, computed deterministically from this hand's archetype
@@ -5303,43 +5462,16 @@ def _render_exploit_panel(row: dict[str, str]) -> None:
     Directional guidance, not solver-exact frequencies. No-ops on rows with no
     archetype (an open spot still has one; only blank / unclassified skip).
     """
-    from pipeline.preflop.domination import dominating_map  # noqa: PLC0415
-    from pipeline.preflop.exploit import (  # noqa: PLC0415
-        exploit_adjustments,
-        parse_exploit_notes,
-    )
+    from pipeline.preflop.exploit import parse_exploit_notes  # noqa: PLC0415
 
-    # Prefer the baked exploit_notes column (new batches) so the displayed
-    # notes match the CSV export exactly; fall back to on-the-fly for older
-    # batches generated before the column existed.
-    notes: list[dict[str, str]] = parse_exploit_notes(row.get("exploit_notes", ""))
-    if not notes:
-        archetype = (row.get("archetype") or "").strip()
-        if not archetype or archetype == "unclassified":
-            return
-        raw_eq = (row.get("hero_equity") or "").strip().rstrip("%")
-        try:
-            hero_equity: float | None = float(raw_eq) / 100.0
-        except ValueError:
-            hero_equity = None
-        dominated_by = you_dominate = None
-        hand_class = _user_cards_to_class(row.get("User Cards", ""))
-        villain_classes = _parse_top_villain_classes(row.get("top_villain_combos", ""))
-        if hand_class and villain_classes:
-            dm = dominating_map(hand_class, villain_classes)
-            dominated_by = dm["dominated_by"] or None
-            you_dominate = dm["you_dominate"] or None
-        blockers = _parse_blocker_classes(row.get("blocker_combos", "")) or None
-        notes = [
-            {"label": n.label, "headline": n.headline, "detail": n.detail}
-            for n in exploit_adjustments(
-                archetype,
-                hero_equity=hero_equity,
-                dominated_by=dominated_by,
-                you_dominate=you_dominate,
-                blockers=blockers,
-            )
-        ]
+    # ALWAYS recompute from the current engine -- NEVER read the baked
+    # exploit_notes column here. Old batches baked notes from an earlier engine;
+    # trusting that column silently overrode later fixes (the "my exploit fix
+    # doesn't show up" bug). recompute_exploit_notes_for_row is the shared source
+    # of truth (same function the re-bake script uses).
+    notes: list[dict[str, str]] = parse_exploit_notes(
+        recompute_exploit_notes_for_row(row)
+    )
     if not notes:
         return
     with st.expander("🎯 Exploit adjustments (vs player types)"):
@@ -6369,345 +6501,387 @@ def _render_postflop_question_card(
     if _sd_n > 1:
         _stage_label += f" · decision {_sd_k} of {_sd_n}"
 
-    with st.container(border=True):
-        # In the grouped view each leg leads with its place in the hand.
-        if grouped:
-            seq = _cell(row, "sequence_index")
-            total = _cell(row, "sequence_total")
-            st.markdown(f"**{seq}/{total} · {_stage_label}**  (#{no})")
-        elif _sd_n > 1:
-            # Single-question view: note the same-street decision context too.
-            st.caption(f"Part of a hand — **{_stage_label}**")
-        h = st.columns(4)
-        h[0].markdown(f"**#{no}**")
-        h[1].markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
-        h[2].markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
-        h[3].markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
-        if existing.get("status"):
-            st.caption(
-                "Current grade: **"
-                + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
-                + "**"
+    # EDIT-LOSS INVARIANT: the editor, difficulty, and EVERY control that can
+    # leave this question (nav / grade / remove) live inside ONE st.form, so a
+    # click ships the current edit atomically with the click (framework
+    # contract -- see _flush_review_edit). A plain st.button here races the
+    # text_area's blur commit and loses edits. NEVER add a plain st.button
+    # that navigates.
+    _has_nav = not grouped and nav_key is not None and idx is not None
+    _prev_clicked = _next_clicked = _go_clicked = False
+    _jump_val = idx if idx is not None else 0
+    with st.form(key=f"pf_review_form::{csv_path.name}::{no}", border=False):
+        if _has_nav:
+            _n1, _n2, _n3 = st.columns([1, 2, 1])
+            _prev_clicked = _n1.form_submit_button(
+                "◀ Prev", use_container_width=True, disabled=idx == 0
             )
-        elif _cell(row, "validation_status"):
-            st.caption(f"Validation: `{_cell(row, 'validation_status')}`")
-
-        if _cell(row, "Context"):
-            st.caption(_cell(row, "Context"))
-        st.markdown("**Question**")
-        st.markdown(_md_lines(_cell(row, "Question")))
-
-        st.markdown("**Options**")
-        correct = _cell(row, "Correct Answer")
-        neutral = {
-            x.strip() for x in (_cell(row, "neutral_credit") or "").split(",") if x.strip()
-        }
-        for i in (1, 2, 3, 4):
-            opt = _cell(row, f"option {i}")
-            if not opt:
-                continue
-            mark = "✅ " if opt == correct else ("😐 " if opt in neutral else "▫️ ")
-            st.markdown(mark + opt)
-        if neutral:
-            st.caption("✅ correct · 😐 neutral credit · ▫️ mistake")
-
-        st.markdown("**Answer Explanation** _(edits auto-save into the CSV)_")
-        ekey = f"postflop_review_expl::{csv_path.name}::{no}"
-        st.text_area(
-            "Answer Explanation",
-            value=_cell(row, "Answer Explanation"),
-            key=ekey,
-            height=240,
-            label_visibility="collapsed",
-            on_change=_autosave_review_cell,
-            args=(csv_path, no, ekey, "explanation"),
-        )
-        with st.expander("Preview (rendered)", expanded=False):
-            st.info(_md_lines(_cell(row, "Answer Explanation")))
-
-        # The deterministic "Show the math" strip (pot odds / equity / currently
-        # ahead / blockers / SPR), from the row's stat_notes column -- now
-        # populated on postflop rows, so it renders here like the preflop Review.
-        _render_stat_panel(row)
-
-        # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
-        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
-        _meta_node_ids = {q.get("node_id") for q in _qrecs}
-        _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
-        _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
-        _ref_combo = _ref_parts[-1] if _ref_parts else ""
-        _qrec = next(
-            (
-                q for q in _qrecs
-                if q.get("node_id") == _ref_node and q.get("hero_combo") == _ref_combo
-            ),
-            None,
-        )
-        row_strs = {c: _cell(row, c) for c in df.columns}
-        _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
-        _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
-        # The preflop leg of a play-through is written by a different (preflop)
-        # prompt than the postflop legs -- say so where the reviewer is looking.
-        _is_preflop_leg = _cell(row, "Hand Stage").lower() == "preflop"
-        with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
-            if _qrec and _qrec.get("solver_data"):
-                st.markdown("**SOLVER DATA block** (the facts the model wrote from)")
-                st.code(str(_qrec["solver_data"]))
-            else:
-                st.caption(
-                    "No solver-data snapshot for this row (preflop-entry leg, "
-                    "older batch, or a reordered row)."
+            with _n2:
+                _jc, _gc = st.columns([3, 1])
+                _nos = df["No"].tolist()
+                _jump_val = _jc.selectbox(
+                    "Jump to",
+                    options=list(range(len(df))),
+                    index=idx,
+                    format_func=lambda i: f"#{_nos[i]}  ({i + 1}/{len(df)})",
+                    label_visibility="collapsed",
                 )
-            st.markdown("**Question shown**")
-            st.code(_cell(row, "Question"))
-            _opts = [_cell(row, f"option {i}") for i in (1, 2, 3, 4)]
-            st.markdown(f"**Options:** {[o for o in _opts if o]}")
-            st.markdown(f"**Correct answer:** {_cell(row, 'Correct Answer')}")
-            if _is_preflop_leg:
+                _go_clicked = _gc.form_submit_button("Go", use_container_width=True)
+            _next_clicked = _n3.form_submit_button(
+                "Next ▶", use_container_width=True, disabled=idx >= len(df) - 1
+            )
+        with st.container(border=True):
+            # In the grouped view each leg leads with its place in the hand.
+            if grouped:
+                seq = _cell(row, "sequence_index")
+                total = _cell(row, "sequence_total")
+                st.markdown(f"**{seq}/{total} · {_stage_label}**  (#{no})")
+            elif _sd_n > 1:
+                # Single-question view: note the same-street decision context too.
+                st.caption(f"Part of a hand — **{_stage_label}**")
+            h = st.columns(4)
+            h[0].markdown(f"**#{no}**")
+            h[1].markdown(f"Seat&nbsp;**{_cell(row, 'User Seat')}**")
+            h[2].markdown(f"Hand&nbsp;**{_cell(row, 'User Cards')}**")
+            h[3].markdown(f"Difficulty&nbsp;**{_cell(row, 'Difficulty Rating')}**")
+            if existing.get("status"):
                 st.caption(
-                    "This is the PREFLOP-ENTRY leg: it uses the built-in PREFLOP "
-                    "prompt (not the postflop system prompt, and not yet "
-                    "admin-editable)."
+                    "Current grade: **"
+                    + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
+                    + "**"
                 )
-            else:
-                st.caption(
-                    "The model writes only the prose, from the SOLVER DATA above, "
-                    "using the active postflop system prompt (Prompt page → Postflop)."
-                )
+            elif _cell(row, "validation_status"):
+                st.caption(f"Validation: `{_cell(row, 'validation_status')}`")
 
-        st.markdown(f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}")
-        if _cell(row, "action_ev_bb"):
-            st.markdown(f"**Per-action EV (bb):**&nbsp;{_cell(row, 'action_ev_bb')}")
-        fbits = []
-        for col, lbl in (
-            ("hero_equity", "equity"),
-            ("pot_odds", "pot odds"),
-            ("spr", "SPR"),
-            ("board_texture", "board"),
-            ("archetype", "archetype"),
-            ("Position Matchup", "matchup"),
-        ):
-            val = _cell(row, col)
-            if val:
-                fbits.append(f"{lbl}: `{val}`")
-        if fbits:
-            st.caption(" · ".join(fbits))
-        if _cell(row, "skills"):
-            st.caption(f"🎯 skills: {_cell(row, 'skills')}")
-        if _cell(row, "concept_tags"):
-            st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+            if _cell(row, "Context"):
+                st.caption(_cell(row, "Context"))
+            st.markdown("**Question**")
+            st.markdown(_md_lines(_cell(row, "Question")))
 
-        # --- visual ranges: every player, preflop + current street ---
-        _meta_nodes = {q.get("node_id") for q in _qrecs}
-        _parts = [p for p in _cell(row, "solver_reference").split("/") if p]
-        _ref_node2 = next((p for p in reversed(_parts) if p in _meta_nodes), "")
-        _street_ranges = next(
-            (q.get("street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
-            None,
-        )
-        _preflop_ranges = meta.get("preflop_ranges") if isinstance(meta, dict) else None
-        _prior_ranges = next(
-            (q.get("prior_street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
-            None,
-        )
-        _prior_label = next(
-            (q.get("prior_street_label") for q in _qrecs if q.get("node_id") == _ref_node2),
-            None,
-        )
-        _street_strategy = next(
-            (q.get("street_strategy") for q in _qrecs if q.get("node_id") == _ref_node2),
-            None,
-        )
-        if not isinstance(_street_strategy, dict):
-            _street_strategy = {}
-        _preflop_entry = meta.get("preflop_entry_actions", {}) if isinstance(meta, dict) else {}
-        if _street_ranges or _preflop_ranges:
-            with st.expander(
-                "📊 Player ranges — the street before + this-street strategy",
-                expanded=not grouped,
-            ):
-                _hero_seat = _cell(row, "User Seat").split("-", 1)[0]
-                _seats = sorted(set(_street_ranges or {}) | set(_preflop_ranges or {}))
-                _seats.sort(key=lambda p: p != _hero_seat)  # hero first
+            st.markdown("**Options**")
+            correct = _cell(row, "Correct Answer")
+            neutral = {
+                x.strip() for x in (_cell(row, "neutral_credit") or "").split(",") if x.strip()
+            }
+            for i in (1, 2, 3, 4):
+                opt = _cell(row, f"option {i}")
+                if not opt:
+                    continue
+                mark = "✅ " if opt == correct else ("😐 " if opt in neutral else "▫️ ")
+                st.markdown(mark + opt)
+            if neutral:
+                st.caption("✅ correct · 😐 neutral credit · ▫️ mistake")
 
-                _act_rank = {"fold": 0, "check": 1, "call": 2, "bet": 3, "raise": 4, "all-in": 5}
-                _act_color = {
-                    "fold": "#6b7280", "check": range_view.COLOR_FOLD,
-                    "call": range_view.COLOR_CALL, "bet": range_view.COLOR_RAISE,
-                    "raise": range_view.COLOR_ALLIN, "all-in": "#3d0c0c",
-                }
+            st.markdown(
+                "**Answer Explanation** _(saves on any button click: "
+                "Save, Prev/Next, grade)_"
+            )
+            ekey = f"postflop_review_expl::{csv_path.name}::{no}"
+            st.text_area(
+                "Answer Explanation",
+                value=_cell(row, "Answer Explanation"),
+                key=ekey,
+                height=240,
+                label_visibility="collapsed",
+            )
+            _save_clicked = st.form_submit_button("💾 Save edits")
+            with st.expander("Preview (rendered)", expanded=False):
+                st.info(_md_lines(_cell(row, "Answer Explanation")))
 
-                def _segs(snap: dict | None, color: str) -> dict:  # single-colour
-                    return {h: [(w, color)] for h, w in (snap or {}).items() if w > 0.004}
+            # The deterministic "Show the math" strip (pot odds / equity / currently
+            # ahead / blockers / SPR), from the row's stat_notes column -- now
+            # populated on postflop rows, so it renders here like the preflop Review.
+            _render_stat_panel(row)
 
-                def _strat_segs(strat: dict) -> dict:  # action-coloured strategy
-                    segs: dict = {}
-                    for action in sorted(
-                        strat, key=lambda a: _act_rank.get(a.split()[0].lower(), 9)
-                    ):
-                        col = _act_color.get(action.split()[0].lower(), range_view.COLOR_INRANGE)
-                        for h, w in strat[action].items():
-                            if w > 0.004:
-                                segs.setdefault(h, []).append((w, col))
-                    return segs
-
-                st.caption(
-                    "**How to read a cell:** fill height = how much of this player's "
-                    "range that hand is here; colour = the action (🟦 check · 🟩 call "
-                    "· 🟥 bet/raise · ⬜ in range, no action yet). Left grid = the "
-                    "street before this decision, right grid = this street."
-                )
-                with st.popover("ℹ️ Where does each range come from?"):
-                    st.markdown(
-                        "**Hero (the player to act)**\n"
-                        "- **Left grid** — hero's range as it stood on the *street "
-                        "before* this decision (a turn question shows the flop range, "
-                        "a river question the turn range). It's the set of hands hero "
-                        "could still have coming into this street.\n"
-                        "- **Right grid** — hero's *strategy on this street*: every "
-                        "hand coloured by what the solver does with it here "
-                        "(🟦 check / 🟩 call / 🟥 bet or raise). This is the decision "
-                        "the question is asking about.\n\n"
-                        "**Villain (the other player)**\n"
-                        "- **Left grid** — villain's range on the street before.\n"
-                        "- **Right grid** — if villain has NOT acted yet this street "
-                        "(e.g. they checked back the previous street), this is the "
-                        "hands they can still have *right now* (⬜ neutral = holdings "
-                        "only, no action to colour) — \"what you're up against\", "
-                        "carried forward from earlier streets. If villain DID already "
-                        "act this street (e.g. they bet into you), it instead shows "
-                        "*their* strategy at that action (🟦/🟩/🟥), so you see the "
-                        "range behind the bet you face.\n\n"
-                        "Toggle **Conditional view** to make every in-range cell full "
-                        "height, coloured by what that specific hand does when held "
-                        "(useful for reading a mixed strategy hand-by-hand)."
+            # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
+            _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
+            _meta_node_ids = {q.get("node_id") for q in _qrecs}
+            _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+            _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
+            _ref_combo = _ref_parts[-1] if _ref_parts else ""
+            _qrec = next(
+                (
+                    q for q in _qrecs
+                    if q.get("node_id") == _ref_node and q.get("hero_combo") == _ref_combo
+                ),
+                None,
+            )
+            row_strs = {c: _cell(row, c) for c in df.columns}
+            _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
+            _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
+            # The preflop leg of a play-through is written by a different (preflop)
+            # prompt than the postflop legs -- say so where the reviewer is looking.
+            _is_preflop_leg = _cell(row, "Hand Stage").lower() == "preflop"
+            with st.expander("🔍 Prompt & inputs — exactly what the LLM saw"):
+                if _qrec and _qrec.get("solver_data"):
+                    st.markdown("**SOLVER DATA block** (the facts the model wrote from)")
+                    st.code(str(_qrec["solver_data"]))
+                else:
+                    st.caption(
+                        "No solver-data snapshot for this row (preflop-entry leg, "
+                        "older batch, or a reordered row)."
                     )
-                _cond_key = f"pf_range_conditional::{csv_path.name}::{no}"
-                _conditional = st.toggle(
-                    "Conditional view — full-height cells (strategy *when the hand is held*)",
-                    value=False,
-                    key=_cond_key,
-                    help="Off (range-weighted): a cell's fill = how much of the range "
-                    "that hand is. On (conditional): every in-range cell is full height, "
-                    "coloured by what the hand does WHEN HELD.",
-                )
+                st.markdown("**Question shown**")
+                st.code(_cell(row, "Question"))
+                _opts = [_cell(row, f"option {i}") for i in (1, 2, 3, 4)]
+                st.markdown(f"**Options:** {[o for o in _opts if o]}")
+                st.markdown(f"**Correct answer:** {_cell(row, 'Correct Answer')}")
+                if _is_preflop_leg:
+                    st.caption(
+                        "This is the PREFLOP-ENTRY leg: it uses the built-in PREFLOP "
+                        "prompt (not the postflop system prompt, and not yet "
+                        "admin-editable)."
+                    )
+                else:
+                    st.caption(
+                        "The model writes only the prose, from the SOLVER DATA above, "
+                        "using the active postflop system prompt (Prompt page → Postflop)."
+                    )
 
-                def _maybe_conditional(segs: dict) -> dict:
-                    if not _conditional:
+            st.markdown(f"**Solver frequencies:**&nbsp;{_cell(row, 'action_frequencies')}")
+            if _cell(row, "action_ev_bb"):
+                st.markdown(f"**Per-action EV (bb):**&nbsp;{_cell(row, 'action_ev_bb')}")
+            fbits = []
+            for col, lbl in (
+                ("hero_equity", "equity"),
+                ("pot_odds", "pot odds"),
+                ("spr", "SPR"),
+                ("board_texture", "board"),
+                ("archetype", "archetype"),
+                ("Position Matchup", "matchup"),
+            ):
+                val = _cell(row, col)
+                if val:
+                    fbits.append(f"{lbl}: `{val}`")
+            if fbits:
+                st.caption(" · ".join(fbits))
+            if _cell(row, "skills"):
+                st.caption(f"🎯 skills: {_cell(row, 'skills')}")
+            if _cell(row, "concept_tags"):
+                st.caption(f"concept tags: {_cell(row, 'concept_tags')}")
+
+            # --- visual ranges: every player, preflop + current street ---
+            _meta_nodes = {q.get("node_id") for q in _qrecs}
+            _parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+            _ref_node2 = next((p for p in reversed(_parts) if p in _meta_nodes), "")
+            _street_ranges = next(
+                (q.get("street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
+                None,
+            )
+            _preflop_ranges = meta.get("preflop_ranges") if isinstance(meta, dict) else None
+            _prior_ranges = next(
+                (q.get("prior_street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
+                None,
+            )
+            _prior_label = next(
+                (q.get("prior_street_label") for q in _qrecs if q.get("node_id") == _ref_node2),
+                None,
+            )
+            _street_strategy = next(
+                (q.get("street_strategy") for q in _qrecs if q.get("node_id") == _ref_node2),
+                None,
+            )
+            if not isinstance(_street_strategy, dict):
+                _street_strategy = {}
+            _preflop_entry = meta.get("preflop_entry_actions", {}) if isinstance(meta, dict) else {}
+            if _street_ranges or _preflop_ranges:
+                with st.expander(
+                    "📊 Player ranges — the street before + this-street strategy",
+                    expanded=not grouped,
+                ):
+                    _hero_seat = _cell(row, "User Seat").split("-", 1)[0]
+                    _seats = sorted(set(_street_ranges or {}) | set(_preflop_ranges or {}))
+                    _seats.sort(key=lambda p: p != _hero_seat)  # hero first
+
+                    _act_rank = {"fold": 0, "check": 1, "call": 2, "bet": 3, "raise": 4, "all-in": 5}
+                    _act_color = {
+                        "fold": "#6b7280", "check": range_view.COLOR_FOLD,
+                        "call": range_view.COLOR_CALL, "bet": range_view.COLOR_RAISE,
+                        "raise": range_view.COLOR_ALLIN, "all-in": "#3d0c0c",
+                    }
+
+                    def _segs(snap: dict | None, color: str) -> dict:  # single-colour
+                        return {h: [(w, color)] for h, w in (snap or {}).items() if w > 0.004}
+
+                    def _strat_segs(strat: dict) -> dict:  # action-coloured strategy
+                        segs: dict = {}
+                        for action in sorted(
+                            strat, key=lambda a: _act_rank.get(a.split()[0].lower(), 9)
+                        ):
+                            col = _act_color.get(action.split()[0].lower(), range_view.COLOR_INRANGE)
+                            for h, w in strat[action].items():
+                                if w > 0.004:
+                                    segs.setdefault(h, []).append((w, col))
                         return segs
-                    out: dict = {}
-                    for hnd, bands in segs.items():
-                        tot = sum(w for w, _c in bands)
-                        out[hnd] = [(w / tot, c) for w, c in bands] if tot > 0 else bands
-                    return out
 
-                for _pos in _seats:
-                    _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
-                    st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
-                    _gp, _gc = st.columns(2)
-                    _left = (_prior_ranges or {}).get(_pos) if _prior_ranges else None
-                    _cur = (_street_ranges or {}).get(_pos)
-                    _strat = _street_strategy.get(_pos)
-                    _entry = _preflop_entry.get(_pos, "call")
-                    _entry_word = "raised" if _entry == "raise" else "called"
-                    with _gp:
-                        if _left:
-                            st.caption(
-                                f"{str(_prior_label).capitalize()} range — "
-                                f"~{range_view.range_pct(_left):.0f}% of hands"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(
-                                _segs(_left, range_view.COLOR_INRANGE)
-                            )))
-                        elif (_pre := (_preflop_ranges or {}).get(_pos)):
-                            st.caption(
-                                f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(
-                                _segs(_pre, _act_color.get(_entry, range_view.COLOR_CALL))
-                            )))
-                        else:
-                            st.caption("Preflop — n/a")
-                    with _gc:
-                        if _strat:
-                            st.caption(
-                                f"This street — strategy "
-                                f"(~{range_view.range_pct(_cur):.0f}% of hands in range)"
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(_strat_segs(_strat))))
-                        elif _cur:
-                            st.caption(
-                                f"**{_pos}'s current holdings** — every hand "
-                                f"{_pos} can still have right now "
-                                f"(~{range_view.range_pct(_cur):.0f}% of all hands). "
-                                "⬜ Grey = holdings only: it is NOT this player's turn "
-                                "to act on this street, so there is no strategy to "
-                                "colour. This is just \"what you're up against\", not "
-                                "an action."
-                            )
-                            st.html(range_view.grid_html(_maybe_conditional(
-                                _segs(_cur, range_view.COLOR_INRANGE)
-                            )))
-                        else:
-                            st.caption("This street — n/a")
+                    st.caption(
+                        "**How to read a cell:** fill height = how much of this player's "
+                        "range that hand is here; colour = the action (🟦 check · 🟩 call "
+                        "· 🟥 bet/raise · ⬜ in range, no action yet). Left grid = the "
+                        "street before this decision, right grid = this street."
+                    )
+                    with st.popover("ℹ️ Where does each range come from?"):
+                        st.markdown(
+                            "**Hero (the player to act)**\n"
+                            "- **Left grid** — hero's range as it stood on the *street "
+                            "before* this decision (a turn question shows the flop range, "
+                            "a river question the turn range). It's the set of hands hero "
+                            "could still have coming into this street.\n"
+                            "- **Right grid** — hero's *strategy on this street*: every "
+                            "hand coloured by what the solver does with it here "
+                            "(🟦 check / 🟩 call / 🟥 bet or raise). This is the decision "
+                            "the question is asking about.\n\n"
+                            "**Villain (the other player)**\n"
+                            "- **Left grid** — villain's range on the street before.\n"
+                            "- **Right grid** — if villain has NOT acted yet this street "
+                            "(e.g. they checked back the previous street), this is the "
+                            "hands they can still have *right now* (⬜ neutral = holdings "
+                            "only, no action to colour) — \"what you're up against\", "
+                            "carried forward from earlier streets. If villain DID already "
+                            "act this street (e.g. they bet into you), it instead shows "
+                            "*their* strategy at that action (🟦/🟩/🟥), so you see the "
+                            "range behind the bet you face.\n\n"
+                            "Toggle **Conditional view** to make every in-range cell full "
+                            "height, coloured by what that specific hand does when held "
+                            "(useful for reading a mixed strategy hand-by-hand)."
+                        )
+                    _cond_key = f"pf_range_conditional::{csv_path.name}::{no}"
+                    _conditional = st.toggle(
+                        "Conditional view — full-height cells (strategy *when the hand is held*)",
+                        value=False,
+                        key=_cond_key,
+                        help="Off (range-weighted): a cell's fill = how much of the range "
+                        "that hand is. On (conditional): every in-range cell is full height, "
+                        "coloured by what the hand does WHEN HELD.",
+                    )
 
-        # Deterministic exploit adjustments (vs nit / station / maniac). Reads
-        # the baked exploit_notes column, now populated on postflop rows too.
-        _render_exploit_panel(row)
+                    def _maybe_conditional(segs: dict) -> dict:
+                        if not _conditional:
+                            return segs
+                        out: dict = {}
+                        for hnd, bands in segs.items():
+                            tot = sum(w for w, _c in bands)
+                            out[hnd] = [(w / tot, c) for w, c in bands] if tot > 0 else bands
+                        return out
 
-        dkey = f"postflop_review_diff::{csv_path.name}::{no}"
-        try:
-            cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
-        except ValueError:
-            cur_diff = 0
-        st.number_input(
-            "Difficulty Rating (edits auto-save)",
-            min_value=0,
-            max_value=3500,
-            step=10,
-            value=cur_diff,
-            key=dkey,
-            on_change=_autosave_review_cell,
-            args=(csv_path, no, dkey, "difficulty"),
+                    for _pos in _seats:
+                        _role = "🎯 hero (to act)" if _pos == _hero_seat else "villain"
+                        st.markdown(f"**{_pos}** &nbsp;·&nbsp; _{_role}_")
+                        _gp, _gc = st.columns(2)
+                        _left = (_prior_ranges or {}).get(_pos) if _prior_ranges else None
+                        _cur = (_street_ranges or {}).get(_pos)
+                        _strat = _street_strategy.get(_pos)
+                        _entry = _preflop_entry.get(_pos, "call")
+                        _entry_word = "raised" if _entry == "raise" else "called"
+                        with _gp:
+                            if _left:
+                                st.caption(
+                                    f"{str(_prior_label).capitalize()} range — "
+                                    f"~{range_view.range_pct(_left):.0f}% of hands"
+                                )
+                                st.html(range_view.grid_html(_maybe_conditional(
+                                    _segs(_left, range_view.COLOR_INRANGE)
+                                )))
+                            elif (_pre := (_preflop_ranges or {}).get(_pos)):
+                                st.caption(
+                                    f"Preflop — {_entry_word} ~{range_view.range_pct(_pre):.0f}% of hands"
+                                )
+                                st.html(range_view.grid_html(_maybe_conditional(
+                                    _segs(_pre, _act_color.get(_entry, range_view.COLOR_CALL))
+                                )))
+                            else:
+                                st.caption("Preflop — n/a")
+                        with _gc:
+                            if _strat:
+                                st.caption(
+                                    f"This street — strategy "
+                                    f"(~{range_view.range_pct(_cur):.0f}% of hands in range)"
+                                )
+                                st.html(range_view.grid_html(_maybe_conditional(_strat_segs(_strat))))
+                            elif _cur:
+                                st.caption(
+                                    f"**{_pos}'s current holdings** — every hand "
+                                    f"{_pos} can still have right now "
+                                    f"(~{range_view.range_pct(_cur):.0f}% of all hands). "
+                                    "⬜ Grey = holdings only: it is NOT this player's turn "
+                                    "to act on this street, so there is no strategy to "
+                                    "colour. This is just \"what you're up against\", not "
+                                    "an action."
+                                )
+                                st.html(range_view.grid_html(_maybe_conditional(
+                                    _segs(_cur, range_view.COLOR_INRANGE)
+                                )))
+                            else:
+                                st.caption("This street — n/a")
+
+            # Deterministic exploit adjustments (vs nit / station / maniac). Reads
+            # the baked exploit_notes column, now populated on postflop rows too.
+            _render_exploit_panel(row)
+
+            dkey = f"postflop_review_diff::{csv_path.name}::{no}"
+            try:
+                cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
+            except ValueError:
+                cur_diff = 0
+            st.number_input(
+                "Difficulty Rating (saves with any button click)",
+                min_value=0,
+                max_value=3500,
+                step=10,
+                value=cur_diff,
+                key=dkey,
+            )
+
+        # --- grading (inside the form: grade clicks also carry the edit) ---
+        st.markdown("**Grade**")
+        note = st.text_area(
+            "Note (optional)",
+            value=existing.get("note", ""),
+            key=f"postflop_review_note::{csv_path.name}::{no}",
+            height=70,
         )
-
-    # --- grading ---
-    st.markdown("**Grade**")
-    note = st.text_area(
-        "Note (optional)",
-        value=existing.get("note", ""),
-        key=f"postflop_review_note::{csv_path.name}::{no}",
-        height=70,
-    )
-
-    def _grade(status: str) -> None:
-        review.save_review(csv_path, no, status, note)
-        if not grouped and nav_key is not None and idx is not None:
-            st.session_state[nav_key] = min(idx + 1, len(df) - 1)
-        st.rerun()
-
-    g1, g2, g3 = st.columns(3)
-    if g1.button("✅ Approve", use_container_width=True, type="primary",
-                 key=f"pf_grade_ap::{csv_path.name}::{no}"):
-        _grade("approved")
-    if g2.button("⚠️ Needs review", use_container_width=True,
-                 key=f"pf_grade_nr::{csv_path.name}::{no}"):
-        _grade("needs_review")
-    if g3.button("❌ Reject", use_container_width=True,
-                 key=f"pf_grade_rj::{csv_path.name}::{no}"):
-        _grade("rejected")
-
-    if st.button(
-        f"🗑  Remove #{no} from this batch",
-        key=f"pf_review_rm::{csv_path.name}::{no}",
-        help="Deletes this question from the CSV (regenerate to recover).",
-    ):
-        if review.remove_question(csv_path, no):
-            if not grouped and nav_key is not None and idx is not None:
-                st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
-            st.rerun()
-        else:
+        g1, g2, g3 = st.columns(3)
+        _approve_clicked = g1.form_submit_button(
+            "✅ Approve", use_container_width=True, type="primary"
+        )
+        _needs_clicked = g2.form_submit_button(
+            "⚠️ Needs review", use_container_width=True
+        )
+        _reject_clicked = g3.form_submit_button(
+            "❌ Reject", use_container_width=True
+        )
+        _remove_clicked = st.form_submit_button(
+            f"🗑  Remove #{no} from this batch",
+            help="Deletes this question from the CSV (regenerate to recover).",
+        )
+    # --- the single post-form handler: saving first can never lose an edit
+    # (the submit shipped editor/difficulty/note atomically with the click).
+    if any((_prev_clicked, _next_clicked, _go_clicked, _save_clicked,
+            _approve_clicked, _needs_clicked, _reject_clicked, _remove_clicked)):
+        _flush_review_edit(csv_path, no, key_prefix="postflop_review")
+        if _remove_clicked:
+            if review.remove_question(csv_path, no):
+                if _has_nav:
+                    st.session_state[nav_key] = max(0, min(idx, len(df) - 2))
+                st.rerun()
             st.warning(f"#{no} was not found in the batch.")
+        else:
+            if _approve_clicked or _needs_clicked or _reject_clicked:
+                status = (
+                    "approved" if _approve_clicked
+                    else "needs_review" if _needs_clicked
+                    else "rejected"
+                )
+                review.save_review(csv_path, no, status, note)
+                if _has_nav:
+                    st.session_state[nav_key] = min(idx + 1, len(df) - 1)
+            elif _has_nav and _prev_clicked:
+                st.session_state[nav_key] = idx - 1
+            elif _has_nav and _next_clicked:
+                st.session_state[nav_key] = idx + 1
+            elif _has_nav and _go_clicked:
+                st.session_state[nav_key] = int(_jump_val)
+            st.rerun()
 
 
 def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> None:
@@ -6885,27 +7059,9 @@ def render_postflop_review_page() -> None:
     # --- navigation ---
     nav_key = f"postflop_review_idx::{csv_path.name}"
     idx = max(0, min(int(st.session_state.get(nav_key, 0)), len(df) - 1))
-    c1, c2, c3 = st.columns([1, 2, 1])
-    if c1.button("◀ Prev", disabled=idx == 0, use_container_width=True):
-        st.session_state[nav_key] = idx - 1
-        st.rerun()
-    # NB: the jump selectbox is intentionally UNKEYED (index-driven), matching
-    # the working preflop nav. A persistent key would make Streamlit ignore
-    # `index=` on rerun and return the stale prior value, which fought the
-    # Prev/Next buttons (they set the index, the selectbox snapped it back).
-    jump = c2.selectbox(
-        "Jump to",
-        options=list(range(len(df))),
-        index=idx,
-        format_func=lambda i: f"#{nos[i]}  ({i + 1}/{len(df)})",
-        label_visibility="collapsed",
-    )
-    if jump != idx:
-        st.session_state[nav_key] = jump
-        st.rerun()
-    if c3.button("Next ▶", disabled=idx >= len(df) - 1, use_container_width=True):
-        st.session_state[nav_key] = idx + 1
-        st.rerun()
+    # Nav (Prev / Jump+Go / Next) renders INSIDE the question card's form so a
+    # nav click atomically carries any in-flight explanation edit -- see the
+    # EDIT-LOSS INVARIANT in _render_postflop_question_card.
 
     row = df.iloc[idx]
     _render_postflop_question_card(

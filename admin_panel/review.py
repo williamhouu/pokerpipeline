@@ -200,6 +200,10 @@ def _update_cell(csv_path: Path, no: str | int, column: str, value: str) -> bool
     found = False
     for row in rows:
         if str(row.get("No")) == str(no):
+            if row.get(column, "") == value:
+                return True  # already up to date -- skip the rewrite (and the
+                # mtime bump), so an unconditional flush on every navigation is
+                # free when nothing changed.
             row[column] = value
             found = True
             break

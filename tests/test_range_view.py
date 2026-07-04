@@ -89,3 +89,46 @@ def test_grid_html_renders_segment_widths_and_colors() -> None:
 
 def test_grid_html_clamps_fraction_to_100() -> None:
     assert "width:100.0%" in range_view.grid_html({"AA": [(1.5, "#abc123")]})
+
+
+# --- tap-a-cell frequency tooltip (July 2026) -------------------------------
+def test_grid_html_labelled_segments_render_tooltip() -> None:
+    """A cell with labelled segments becomes tappable (tabindex) and carries a
+    tooltip listing each action's frequency; the style block is included."""
+    html = range_view.grid_html(
+        {"AA": [(0.7, "#c2492f", "Raise 3"), (0.3, "#5b8fb0", "Fold")]}
+    )
+    assert "<style>" in html and ".rgtip" in html
+    assert 'tabindex="0"' in html
+    assert "Raise 3 70%" in html and "Fold 30%" in html
+    # The bars still render alongside the tooltip.
+    assert "width:70.0%" in html and "width:30.0%" in html
+
+
+def test_grid_html_unlabelled_segments_unchanged() -> None:
+    """Plain (frac, color) segments keep the old behaviour: no tooltip, no
+    tabindex, no style block -- full backward compatibility."""
+    html = range_view.grid_html({"AA": [(0.7, "#abc123"), (0.3, "#def456")]})
+    assert "<style>" not in html
+    assert "tabindex" not in html
+    assert "rgtip" not in html
+
+
+def test_grid_html_tooltip_placement_flips_at_edges() -> None:
+    """Top rows tip below (rgtip-dn), bottom rows above (rgtip-up); leftmost
+    columns anchor left, rightmost anchor right, middle centre -- so a tooltip
+    never clips outside the grid."""
+    seg = [(1.0, "#c2492f", "Raise")]
+    top_left = range_view.grid_html({"AA": seg})       # row 0, col 0
+    assert "rgtip-dn" in top_left and "rgtip-l" in top_left
+    bottom_right = range_view.grid_html({"22": seg})   # row 12, col 12
+    assert "rgtip-up" in bottom_right and "rgtip-r" in bottom_right
+    middle = range_view.grid_html({"87s": seg})        # row 6, col 7 -> dn + centre
+    assert "rgtip-dn" in middle and "rgtip-c" in middle
+
+
+def test_grid_html_tooltip_pct_formatting() -> None:
+    """Whole percentages render clean; sub-1% slivers keep one decimal."""
+    html = range_view.grid_html({"AA": [(0.845, "#c2492f", "Raise"), (0.005, "#5b8fb0", "Fold")]})
+    assert "Raise 84%" in html or "Raise 85%" in html
+    assert "Fold 0.5%" in html

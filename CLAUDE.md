@@ -895,6 +895,34 @@ postflop), card-emoji formatting, and validation hooks for legal action order.
 5. **Under-spec'd bet sizing trees.** One bet size per node makes questions feel
    artificial. Two per node is the floor.
 
+## Fix durability — make regressions impossible, not just gone
+
+The admin panel (Streamlit) has a history of the SAME bug returning every few
+days — most infamously "edit an Answer Explanation in Review, navigate away,
+come back, edit gone." A bug recurs when all three hold: the logic lives in an
+**untestable framework seam** (Streamlit callback timing, `session_state` GC,
+`value=`-vs-`key` precedence), it has **no automated test**, and the page gets
+**refactored often**. Fix-by-hand + no test + churn = guaranteed regression.
+
+So a fix is not "done" until it's the version that **can't silently come back**.
+Before calling any non-trivial fix done, ensure all three:
+
+1. **Root cause, not symptom.** Fix the upstream layer (a tagger rule, a data
+   contract), not the surface. Re-patching the fragile layer IS the loop.
+2. **A regression test that runs in CI without a browser.** Move the logic OUT
+   of the untestable seam into a pure function the test can call directly. (The
+   Review save fix: `_flush_review_edit` writes the pending edit from
+   `session_state` on every navigation; `tests/test_review_autosave.py` fakes
+   `session_state` as a dict — no Streamlit runtime needed.)
+3. **An invariant comment at the code point** stating the contract, so the next
+   refactor knows what must hold ("ANY control that navigates away MUST call
+   `_flush_review_edit` first").
+
+**Mandatory** for: anything that has ALREADY recurred, anything in the
+admin/Streamlit UI seam, and anything touching persistence or the CSV/data.
+**Skip** only for genuinely trivial mechanical edits. If a fix can't be tested
+without a browser, that difficulty IS the signal to restructure it so it can.
+
 ## Environment
 
 - **Python 3.11+** (`venv/` is 3.13.13). Activate before running anything:

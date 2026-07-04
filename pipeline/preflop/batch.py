@@ -434,6 +434,71 @@ def collect_worthy_spots(
     return out
 
 
+# --- spot diversification ---------------------------------------------------
+# The worthy pool is walked in order until N questions are collected, so without
+# diversification a fill-to-N batch collapses onto whatever situation dominates
+# the pool -- most painfully, a "Hard trap-aware" batch becomes ALL "ace-high
+# folds facing a blind 3-bet" (the canonical trap). Round-robining the pool
+# across CHEAP buckets (seat / action-context / dominant-action / hand category
+# -- no equity or fact extraction needed) spreads the kept questions across
+# positions, hands, and actions. Reordering only; per-spot logic is unchanged.
+def _spot_diversity_key(spot: PreflopSpot) -> tuple[str, str, str, str]:
+    """(hero seat, action context, dominant-action class, hand bucket) -- a
+    coarse situation fingerprint used to interleave the worthy pool."""
+    node = spot.node
+    raises = sum(
+        1
+        for a in node.history_before
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN)
+    )
+    ctx = {0: "open", 1: "vs_open", 2: "vs_3bet", 3: "vs_4bet"}.get(
+        raises, "vs_5bet+"
+    )
+    dom = spot.dominant_action
+    if dom.startswith("Fold"):
+        action = "fold"
+    elif dom.startswith("Raise"):
+        action = "raise"
+    elif dom.startswith("AllIn"):
+        action = "allin"
+    else:
+        action = "call"
+    hc = spot.hero_hand_class
+    if len(hc) == 2 and hc[0] == hc[1]:
+        bucket = "pair"
+    else:
+        suited = hc.endswith("s")
+        if hc[0] == "A":
+            bucket = "Ax_s" if suited else "Ax_o"
+        elif set(hc[:2]) <= set("AKQJT"):
+            bucket = "broadway_s" if suited else "broadway_o"
+        else:
+            bucket = "other_s" if suited else "other_o"
+    return (node.actor, ctx, action, bucket)
+
+
+def _diversify_spots(
+    worthy: list[tuple[PreflopSpot, "PreflopQuestionEvaluation"]],
+    rng: random.Random,
+) -> list[tuple[PreflopSpot, "PreflopQuestionEvaluation"]]:
+    """Round-robin the worthy pool across diversity buckets (see
+    :func:`_spot_diversity_key`). Deterministic given ``rng``; a straight
+    shuffle within each bucket + a shuffled bucket order keeps it unbiased."""
+    groups: dict[tuple[str, str, str, str], list] = {}
+    for item in worthy:
+        groups.setdefault(_spot_diversity_key(item[0]), []).append(item)
+    buckets = list(groups.values())
+    for g in buckets:
+        rng.shuffle(g)
+    rng.shuffle(buckets)
+    out: list[tuple[PreflopSpot, "PreflopQuestionEvaluation"]] = []
+    while any(buckets):
+        for g in buckets:
+            if g:
+                out.append(g.pop())
+    return out
+
+
 # --- convergence guard ------------------------------------------------------
 # AA must CONTINUE (call/raise/jam) ~100% of the time preflop in cash (no
 # ICM) -- it never folds and is never under-allocated. So an AA continue
@@ -803,6 +868,7 @@ def generate_preflop_batch(
     min_difficulty: int = DIFFICULTY_MIN,
     max_difficulty: int = DIFFICULTY_MAX,
     trap_difficulty: bool = False,
+    diversify: bool = False,
     min_ev_gap_bb: float | None = None,
     min_villain_line_pct: float | None = 0.25,
     min_hero_premise_freq: float | None = 0.05,
@@ -925,8 +991,15 @@ def generate_preflop_batch(
         )
     # Randomise order so the difficulty-band / EV-gap filter doesn't bias
     # toward whichever nodes happen to enumerate first; we then walk the
-    # shuffled pool until total_questions rows are collected.
-    rng.shuffle(worthy)
+    # pool until total_questions rows are collected. With ``diversify`` on we
+    # round-robin across situation buckets instead of a flat shuffle, so a
+    # fill-to-N batch spreads across seats/hands/actions rather than collapsing
+    # onto one over-represented situation (the "all ace-high folds vs a blind
+    # 3-bet" problem on Hard trap-aware batches).
+    if diversify:
+        worthy = _diversify_spots(worthy, rng)
+    else:
+        rng.shuffle(worthy)
 
     # 5. Per-spot: extract facts, compute the 4-axis difficulty, apply the
     #    difficulty-band + min-EV-gap filters BEFORE the (paid) LLM call,
@@ -1343,6 +1416,7 @@ def generate_preflop_batch(
                 "min_difficulty": min_difficulty,
                 "max_difficulty": max_difficulty,
                 "trap_difficulty": trap_difficulty,
+                "diversify": diversify,
                 "min_ev_gap_bb": min_ev_gap_bb,
                 "min_villain_line_pct": min_villain_line_pct,
                 "min_hero_premise_freq": min_hero_premise_freq,

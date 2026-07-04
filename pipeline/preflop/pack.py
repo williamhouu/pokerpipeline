@@ -193,11 +193,58 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
             "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
         ),
     ),
-    # 8-max 200bb LIVE cash pack, materialised from a flat SQLite solve by
-    # scripts/convert_preflop_db_to_pack.py into bb-native .rng files (the
-    # `gto_preflop_8max` grammar). Full open->4-bet tree; vs_5bet EXCLUDED at
-    # conversion (the only under-converged layer). EVs are per-action in bb
-    # (ev_units_per_bb=1.0). Source provider deliberately not named.
+    # 8-max LIVE cash packs (100/200/300bb), each materialised from a flat
+    # SQLite solve by scripts/convert_preflop_db_to_pack.py into bb-native
+    # .rng files (the `gto_preflop_8max` grammar). Full open->4-bet tree;
+    # vs_5bet EXCLUDED at conversion (the only under-converged layer). EVs are
+    # per-action in bb (ev_units_per_bb=1.0). Source provider deliberately not
+    # named. All three share the same 91-node/358-file structure and the 3bb
+    # open. Audited 2026-07-01 (100/300) mirroring the 200bb audit: premiums
+    # clean, RFI widths depth-sensible, EVs distinct per depth; known same-class
+    # artifact = single-pair fold islands on a few deep vs_4bet nodes (TT/88 at
+    # 100bb, 55 at 300bb — same shape as 200bb's documented 44 flaw).
+    PreflopPackSignature(
+        pack_id="preflop_8max_100bb",
+        rake_pct=0.1,
+        relative_pack_root="preflop_8max_100bb",
+        grammar_name="gto_preflop_8max",
+        table_size=8,
+        stack_depth_bb=100,
+        open_size_bb=3.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # bb sizes already clean; parity no-op
+        ev_units_per_bb=1.0,  # file EVs are already in bb
+        description="8-max 100bb LIVE cash preflop pack (open->4-bet; vs-5bet excluded).",
+    ),
+    # IMPROVED variant of the 100bb pack (user-supplied; final refresh from
+    # improved_2 on 2026-07-02): the adjustment pass (whole-percent frequency
+    # grid, <=3% slivers snapped to 0, >=97% near-pures to 100) PLUS open-node
+    # inversion repairs (HJ K7s/K8s equalized; softened 0%-vs-100% cliffs next
+    # to wheel hands -- the A5>A6/K5s>K6s ordering itself is real GTO
+    # structure, kept) PLUS the vs_4bet 88 fold-island repairs (88 fold 93% ->
+    # 30% where 77/99 continue). Audited each round: sums exact, EV ripples
+    # negligible, RFI stable, no premium inversions. Remaining known artifact:
+    # 3 TT vs_4bet fold-islands (CO|LJ, UTG1|UTG, HJ|LJ). pack_id/description
+    # say IMPROVED so the dropdown disambiguates.
+    PreflopPackSignature(
+        pack_id="preflop_8max_100bb_IMPROVED",
+        rake_pct=0.1,
+        relative_pack_root="preflop_8max_100bb_improved",
+        grammar_name="gto_preflop_8max",
+        table_size=8,
+        stack_depth_bb=100,
+        open_size_bb=3.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # bb sizes already clean; parity no-op
+        ev_units_per_bb=1.0,  # file EVs are already in bb
+        description=(
+            "IMPROVED 8-max 100bb LIVE cash preflop pack (whole-percent grid, "
+            "slivers snapped, open-node inversion repairs; open->4-bet; "
+            "vs-5bet excluded)."
+        ),
+    ),
     PreflopPackSignature(
         pack_id="preflop_8max_200bb",
         rake_pct=0.1,
@@ -211,6 +258,73 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         size_round_bb=0.5,  # bb sizes already clean; parity no-op
         ev_units_per_bb=1.0,  # file EVs are already in bb
         description="8-max 200bb LIVE cash preflop pack (open->4-bet; vs-5bet excluded).",
+    ),
+    # IMPROVED variant of the 200bb pack (user-supplied 2026-07-03): the same
+    # adjustment pass as the 100/300bb IMPROVED packs -- whole-percent grid,
+    # sliver/near-pure snapping, open-node cliff softening (LJ K6s 0->38%,
+    # HJ A6o 100->71%), AJs vs-open/vs-3bet smoothing, and the vs_4bet 88
+    # fold-island repair (CO|HJ 92->33%). Audited vs the original: sums exact,
+    # EV ripples <=0.24bb, RFI identical, no premium inversions. Remaining
+    # known artifacts: the documented 44 vs_3bet island (BTN vs BB -- the real
+    # one; the SB-node ones are phantom, reach-gated out) + one TT vs_4bet
+    # island (SB|LJ).
+    PreflopPackSignature(
+        pack_id="preflop_8max_200bb_IMPROVED",
+        rake_pct=0.1,
+        relative_pack_root="preflop_8max_200bb_improved",
+        grammar_name="gto_preflop_8max",
+        table_size=8,
+        stack_depth_bb=200,
+        open_size_bb=3.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # bb sizes already clean; parity no-op
+        ev_units_per_bb=1.0,  # file EVs are already in bb
+        description=(
+            "IMPROVED 8-max 200bb LIVE cash preflop pack (whole-percent grid, "
+            "slivers snapped, open-node inversion repairs; open->4-bet; "
+            "vs-5bet excluded)."
+        ),
+    ),
+    PreflopPackSignature(
+        pack_id="preflop_8max_300bb",
+        rake_pct=0.1,
+        relative_pack_root="preflop_8max_300bb",
+        grammar_name="gto_preflop_8max",
+        table_size=8,
+        stack_depth_bb=300,
+        open_size_bb=3.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # bb sizes already clean; parity no-op
+        ev_units_per_bb=1.0,  # file EVs are already in bb
+        description="8-max 300bb LIVE cash preflop pack (open->4-bet; vs-5bet excluded).",
+    ),
+    # IMPROVED variant of the 300bb pack (user-supplied 2026-07-02): the same
+    # adjustment pass as the 100bb IMPROVED -- whole-percent frequency grid,
+    # sliver/near-pure snapping, open-node inversion repairs (LJ K8s/K7s
+    # equalized, HJ A6o cliff softened), plus KJs/AJs vs-open/vs-3bet
+    # smoothing. Audited vs the original 300bb: sums exact, EV ripples
+    # <=0.29bb, RFI stable, no premium inversions. Remaining known artifact:
+    # the 55 vs_4bet fold-islands (55 folds ~100% while 44/66 continue) --
+    # inherited, not this pass's target.
+    PreflopPackSignature(
+        pack_id="preflop_8max_300bb_IMPROVED",
+        rake_pct=0.1,
+        relative_pack_root="preflop_8max_300bb_improved",
+        grammar_name="gto_preflop_8max",
+        table_size=8,
+        stack_depth_bb=300,
+        open_size_bb=3.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,  # bb sizes already clean; parity no-op
+        ev_units_per_bb=1.0,  # file EVs are already in bb
+        description=(
+            "IMPROVED 8-max 300bb LIVE cash preflop pack (whole-percent grid, "
+            "slivers snapped, open-node inversion repairs; open->4-bet; "
+            "vs-5bet excluded)."
+        ),
     ),
     PreflopPackSignature(
         pack_id="monker_nlhe_6max_30bb",

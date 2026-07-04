@@ -781,8 +781,12 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         # claims like A9s having "wheelish straights" (it is disconnected).
         "postflop_playability": hand_playability(spot.hero_hand_class),
     }
-    if facts.break_even_equity is not None:
+    if facts.break_even_equity is not None and facts.villain_stats is not None:
         # Pot-odds threshold to call -- cite this instead of doing the math.
+        # Gated on a villain raise existing: on a first-in open the EV engine
+        # still computes a break-even number, but there is no call to price, so
+        # feeding a "_to_call" field invites pot-odds prose about a bet nobody
+        # made (mirrors the stat-panel gate; QC 2026-07-01).
         out["break_even_equity_to_call"] = round(facts.break_even_equity, 4)
     if facts.ev_gap_bb is not None:
         # "Cost of the mistake": bb lost by the 2nd-best (tempting wrong)
@@ -812,11 +816,19 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
                 for hand_class, weight in v.most_common_combos
             ],
         }
-        # Domination map: which of villain's heaviest in-range classes have
+        # Domination map: which of villain's MOST COMMON in-range classes have
         # hero dominated, and which hero dominates. Names come ONLY from these
         # weight-gated classes, so the prose can't invent a dominator villain
         # doesn't hold. Surfaced only when something fires.
-        dom = dominating_map(spot.hero_hand_class, [c for c, _ in v.top_combos])
+        # MUST use most_common_combos (combo-share ranked), NOT top_combos:
+        # top_combos sorts by raw weight, so on a wide range every 100%-weight
+        # junk class outranks a 99%-weight AKo -- QC 2026-07-03 caught AQo's
+        # domination fact reading "dominated by AA; you dominate A3s-A6s" with
+        # AKo (a true dominator) missing entirely, which then made the claim
+        # checker false-flag correct prose.
+        dom = dominating_map(
+            spot.hero_hand_class, [c for c, _ in v.most_common_combos]
+        )
         if dom["dominated_by"] or dom["you_dominate"]:
             out["domination_vs_villain_range"] = dom
     # Hand equity. Two cases, named unambiguously so the model can't conflate
