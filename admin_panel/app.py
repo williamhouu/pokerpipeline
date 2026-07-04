@@ -167,16 +167,26 @@ USAGE_LOG_PATH = (
 
 
 @st.cache_data(show_spinner=False)
-def _read_csv_cached(path: str, _mtime: float, *, as_str: bool = False) -> pd.DataFrame:
+def _read_csv_cached(path: str, mtime: float, *, as_str: bool = False) -> pd.DataFrame:
     """A batch CSV parsed once per (path, mtime) instead of on every rerun.
 
     Streamlit re-runs the whole page script on every interaction, so the
     Review / Compare / Browse pages were re-reading and re-parsing their CSV
-    on each keystroke or click. This keys on the file's ``_mtime`` (passed
-    in, not read here) so an edit -- the auto-save bumps mtime -- misses the
+    on each keystroke or click. This keys on the file's ``mtime`` (passed in,
+    not read here) so an edit -- a Review save bumps the mtime -- misses the
     cache and re-reads fresh, while plain navigation reuses the parse.
     ``cache_data`` returns a COPY each call, so callers may mutate the frame
     without corrupting the cache.
+
+    ``mtime`` MUST NOT be renamed with a leading underscore: ``st.cache_data``
+    EXCLUDES underscore-prefixed parameters from the cache key. This function
+    originally took ``_mtime`` (meant as "passed in, not read here"), which
+    silently made the cache key (path, as_str) only -- the first parse of a
+    batch was served for the whole session, so every Review edit LOOKED
+    unsaved on navigate-back even though the CSV on disk was correct. That
+    stale-display was the true root of the recurring "my edit vanished" bug
+    (2026-07-04; reproduced + pinned by tests/test_review_autosave.py's
+    cache test and the scripts/verify_review_editor_e2e.py AppTest).
 
     ``as_str``: load every cell as a string with ``""`` for blanks (the
     Compare pages need that; the Review page coerces per-cell via ``_cell``).

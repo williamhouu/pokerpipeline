@@ -148,3 +148,24 @@ def test_review_pages_have_no_racy_nav_buttons() -> None:
                         f"{fn.__name__} renders {label!r} via plain st.button -- "
                         "must be a form_submit_button (EDIT-LOSS INVARIANT)"
                     )
+
+
+def test_read_csv_cache_respects_mtime(tmp_path) -> None:
+    """THE true root cause of the recurring 'my edit vanished' bug: the CSV
+    read cache took `_mtime`, and st.cache_data EXCLUDES underscore-prefixed
+    params from the cache key -- so the first parse of a batch was served for
+    the entire session and every saved edit looked lost on navigate-back.
+    This pins the contract: same path + newer mtime => fresh content."""
+    csv_path = tmp_path / "b.csv"
+    _write(csv_path, [{"No": "1", "Answer Explanation": "before"}],
+           ["No", "Answer Explanation"])
+    df1 = admin_app._read_csv_cached(str(csv_path), csv_path.stat().st_mtime)
+    assert df1.iloc[0]["Answer Explanation"] == "before"
+
+    review.update_explanation(csv_path, "1", "after")
+    df2 = admin_app._read_csv_cached(str(csv_path), csv_path.stat().st_mtime)
+    assert df2.iloc[0]["Answer Explanation"] == "after", (
+        "stale cache: _read_csv_cached ignored the mtime -- if this fails, "
+        "check that the mtime parameter has NOT been renamed with a leading "
+        "underscore (st.cache_data skips underscore-prefixed params)"
+    )
