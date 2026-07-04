@@ -382,12 +382,12 @@ def render_why_text(breakdown: WhyBreakdown) -> str:
     if for_answer:
         lines.append(f"\nArguing for {breakdown.answer}:")
         lines += [
-            f"  {marks[f.strength]} {f.label} — {f.detail}" for f in for_answer
+            f"  {marks[f.strength]} {f.label}: {f.detail}" for f in for_answer
         ]
     if against:
         lines.append(f"\nArguing for {breakdown.alternative}:")
         lines += [
-            f"  {marks[f.strength]} {f.label} — {f.detail}" for f in against
+            f"  {marks[f.strength]} {f.label}: {f.detail}" for f in against
         ]
     lines.append(f"\nSummary: {breakdown.summary}")
     lines.append(
