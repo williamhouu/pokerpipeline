@@ -836,14 +836,14 @@ def _exploit_notes_for_facts(facts: PreflopFacts) -> str:
     vs villain's heaviest in-range classes, blockers). "" when the archetype
     has no exploit role. Same computation the admin exploit panel shows."""
     if facts.villain_stats is not None:
-        # most_common_combos, NOT top_combos: weight-sorted top_combos lets
-        # 100%-weight junk classes crowd out 99%-weight dominators (AKo), so
-        # the exploit clauses named A3s-A6s instead of the hands villain
-        # actually shows up with (QC 2026-07-03; same fix as the data block's
-        # domination_vs_villain_range).
+        # in_range_classes (the FULL weight-gated range), never a top-N
+        # digest: any cap silently drops real dominators, so the exploit
+        # clauses named A3s-A6s while AKo was missing (QC 2026-07-03) and
+        # A8o vs a BTN open showed no dominators at all (QC 2026-07-04;
+        # same fix as the data block's domination_vs_villain_range).
         dom = dominating_map(
             facts.spot.hero_hand_class,
-            [c for c, _ in facts.villain_stats.most_common_combos],
+            [c for c, _ in facts.villain_stats.in_range_classes],
         )
     else:
         dom = {"dominated_by": [], "you_dominate": [], "coinflips": []}

@@ -21,12 +21,14 @@ so the EV gap is ~0 across the whole worthy pool and adds no signal beyond the
 frequency axis -- exactly why PLO dropped its EV axis. ``easy_ev`` is still
 computed and surfaced as a CSV diagnostic, it just doesn't feed the score.
 
-**Trap-aware floor (opt-in, mirrors preflop).** The freq axis rates a PURE spot
-"easy", but a genuinely counterintuitive pure spot (the solver folds a hand
-whose equity clears the price, or continues one whose equity is clearly below
-it) is HARD for a human. When ``apply_trap_bump`` is on, such a spot's score is
-floored to :data:`TRAP_DIFFICULTY_FLOOR` (solidly Hard). Heads-up facing-a-bet
-spots only; off by default so the default rating is unchanged.
+**Trap-aware floor (opt-in, mirrors preflop; GRADED July 2026).** The freq axis
+rates a PURE spot "easy", but a genuinely counterintuitive pure spot (the
+solver folds a hand whose equity clears the price, or continues one whose
+equity is clearly below it) is HARD for a human. When ``apply_trap_bump`` is
+on, such a spot's score is floored to a value GRADED by the size of the
+|equity - price| contradiction (upper-Medium for a mild trap, deep-Hard for an
+extreme one -- see :mod:`pipeline.trap_grading`). Heads-up facing-a-bet spots
+only; off by default so the default rating is unchanged.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pipeline.postflop.facts import PostflopFacts
+from pipeline.trap_grading import TRAP_MARGIN_AT_MIN, graded_trap_floor
 
 # === axis weights (sum to 1) =================================================
 # Frequency carries most of the signal; concept + hand refine it. Mirrors PLO's
@@ -106,11 +109,14 @@ _HARD_FLOOR = 500
 _HARD_CEILING = 3200
 
 # === trap-aware difficulty (opt-in, mirrors preflop) =========================
-TRAP_DIFFICULTY_FLOOR = 2400
-_TRAP_EASY_CAP = (_LINEAR_CEILING - TRAP_DIFFICULTY_FLOOR) / _LINEAR_SPAN
+# July 2026: the flat 2400 floor became a GRADED floor -- it scales with the
+# size of the |equity - price| contradiction, from TRAP_FLOOR_MIN
+# (upper-Medium) to TRAP_FLOOR_MAX (deep-Hard), so traps spread across the
+# Medium-to-Hard range instead of all pinning to one number. Shared pure leaf
+# pipeline.trap_grading (allowed import: same precedent as bb_display).
 # Equity is Monte-Carlo sampled (~1-2%), so only call a spot a trap when equity
 # is CLEARLY on the wrong side of the price by this margin.
-_TRAP_EQUITY_MARGIN = 0.04
+_TRAP_EQUITY_MARGIN = TRAP_MARGIN_AT_MIN
 
 
 @dataclass(frozen=True)
@@ -200,8 +206,9 @@ def compute_difficulty(
     """Difficulty for a fully-extracted spot (3-axis: freq + concept + hand).
 
     ``apply_trap_bump`` (opt-in) floors a counterintuitive heads-up facing-a-bet
-    spot to :data:`TRAP_DIFFICULTY_FLOOR` so a pure-but-deceptive spot rates Hard.
-    Default off = unchanged behaviour.
+    spot to its GRADED trap floor (scaled by the |equity - price| contradiction,
+    see :func:`pipeline.trap_grading.graded_trap_floor`) so a pure-but-deceptive
+    spot rates Medium-to-Hard. Default off = unchanged behaviour.
     """
     e_freq = easy_freq_axis(facts.dominant_frequency)
     e_concept = easy_concept_axis(facts)
@@ -213,7 +220,15 @@ def compute_difficulty(
     trap_applied = False
     if apply_trap_bump and _is_counterintuitive_spot(facts):
         trap_applied = True
-        easy = min(easy, _TRAP_EASY_CAP)
+        # The grading margin is the RAKE-BLIND |equity - price| a player
+        # naively feels; detection's rake cushion already decided the spot
+        # IS a trap. _is_counterintuitive_spot returned True, so the price
+        # is set.
+        margin = abs(facts.hero_equity_vs_villain - facts.break_even_equity)
+        trap_easy_cap = (
+            _LINEAR_CEILING - graded_trap_floor(margin)
+        ) / _LINEAR_SPAN
+        easy = min(easy, trap_easy_cap)
 
     score = round(_clip(_LINEAR_CEILING - easy * _LINEAR_SPAN, _HARD_FLOOR, _HARD_CEILING))
     return PostflopDifficulty(
@@ -231,7 +246,6 @@ __all__ = [
     "ARCHETYPE_BASE_EASE",
     "CONCEPT_TAG_MODIFIERS",
     "PostflopDifficulty",
-    "TRAP_DIFFICULTY_FLOOR",
     "W_CONCEPT",
     "W_FREQ",
     "W_HAND",

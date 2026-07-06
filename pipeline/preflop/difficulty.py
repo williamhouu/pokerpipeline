@@ -84,6 +84,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pipeline.preflop.fact_extractor import PreflopFacts
+from pipeline.trap_grading import (
+    TRAP_FLOOR_MAX,
+    TRAP_FLOOR_MIN,
+    TRAP_MARGIN_AT_MIN,
+    graded_trap_floor,
+)
 
 # === axis weights ============================================================
 # Sum to 1.0. When ev_gap_bb is unavailable (raise-involved spots),
@@ -276,6 +282,18 @@ _HARD_FLOOR: int = 400       # clamp; allows ~100 of "easier than easy" room
 _HARD_CEILING: int = 3200    # clamp; allows ~200 of "harder than hard" room
 
 
+# === near-pure EV credit =====================================================
+# Near-pure spots (>= 96% dominant) are EASY decisions, but the tiny mixed
+# action is GTO balancing at ~equal EV, so the spot's EV gap is ~0 -- which
+# would mis-rate it HARD on the EV axis. The batch driver therefore feeds the
+# difficulty computation FULL EV credit for near-pure spots (the CSV + SOLVER
+# DATA still carry the real per-action EVs). The constants live here, next to
+# the axis they modify, so :func:`max_achievable_difficulty` can mirror the
+# batch's scoring path exactly.
+NEAR_PURE_DOMINANT_FREQ: float = 0.96
+NEAR_PURE_EV_CREDIT_BB: float = _EV_GAP_FULL_CREDIT_BB  # full credit
+
+
 # === trap-aware difficulty (opt-in) ==========================================
 # A "trap" spot is one where the solver's dominant action CONTRADICTS the
 # simple pot-odds (equity-vs-price) baseline a naive player reasons from:
@@ -284,20 +302,19 @@ _HARD_CEILING: int = 3200    # clamp; allows ~200 of "harder than hard" room
 # is pure (one clear-cut action, a big EV gap) -- so the frequency + EV axes,
 # which both score a pure spot "easy", measure exactly the wrong thing here.
 # When trap-aware difficulty is ON, such a spot's "easy" score is CAPPED so it
-# lands at least at TRAP_DIFFICULTY_FLOOR (solidly in the Hard band), regardless
-# of how pure / +EV the line is -- this is what lets a 100%-frequency
-# ("Always X") spot be rated Hard. Opt-in (a batch flag), so the DEFAULT rating
-# behaviour is unchanged. Only defined for spots facing a price to call; opening
-# spots (no price) are never traps.
-TRAP_DIFFICULTY_FLOOR: int = 2400
-# easy_blend cap that maps to TRAP_DIFFICULTY_FLOOR via the linear score map, so
-# the floored score still derives cleanly from easy_blend (no separate clamp).
-_TRAP_EASY_CAP: float = (_LINEAR_CEILING - TRAP_DIFFICULTY_FLOOR) / _LINEAR_SPAN
+# lands at least at a GRADED floor (July 2026, was a flat 2400): the floor
+# scales with the size of the equity-vs-price contradiction, from
+# TRAP_FLOOR_MIN (upper-Medium, a barely-qualifying trap) to TRAP_FLOOR_MAX
+# (deep-Hard) -- see pipeline.trap_grading. This is what lets a
+# 100%-frequency ("Always X") spot be rated Medium-to-Hard, with real
+# gradation instead of every trap pinning to one number. Opt-in (a batch
+# flag), so the DEFAULT rating behaviour is unchanged. Only defined for
+# spots facing a price to call; opening spots (no price) are never traps.
 # Noise guard: equity is Monte-Carlo sampled (~1-2% at 400 runouts), so only
 # call a spot a trap when equity is CLEARLY on the wrong side of the price by
 # this margin. A spot whose equity sits within the margin of the price is a
 # genuine close-call at the price, not a counterintuitive trap.
-_TRAP_EQUITY_MARGIN: float = 0.04
+_TRAP_EQUITY_MARGIN: float = TRAP_MARGIN_AT_MIN
 
 
 # === result dataclass ========================================================
@@ -326,8 +343,14 @@ class DifficultyResult:
         ev_available: True iff ``ev_gap_bb`` was provided.
         trap_bump_applied: True iff trap-aware difficulty was ON AND this
             spot is a counterintuitive "trap" (so its score was floored to
-            at least :data:`TRAP_DIFFICULTY_FLOOR`). Always False when the
-            trap bump is off.
+            at least its graded trap floor -- see
+            :func:`pipeline.trap_grading.graded_trap_floor`). Always False
+            when the trap bump is off.
+        razor_bump_applied: True iff razor's-edge difficulty was ON AND
+            the hand sits on a range boundary (a grid neighbor's dominant
+            action differs at the same node), so its score was floored to
+            the graded razor floor (see :mod:`pipeline.preflop.razor_edge`).
+            Always False when the razor bump is off.
     """
 
     score: int
@@ -339,6 +362,7 @@ class DifficultyResult:
     bumps_applied: tuple[str, ...] = field(default_factory=tuple)
     ev_available: bool = True
     trap_bump_applied: bool = False
+    razor_bump_applied: bool = False
 
 
 # === main entry point ========================================================
@@ -347,6 +371,7 @@ def compute_difficulty(
     *,
     ev_gap_bb: float | None = None,
     apply_trap_bump: bool = False,
+    apply_razor_bump: bool = False,
 ) -> DifficultyResult:
     """Compute the per-spot difficulty rating with full breakdown.
 
@@ -358,10 +383,21 @@ def compute_difficulty(
             in that case rather than treating EV as neutral 0.5.
         apply_trap_bump: Opt-in trap-aware difficulty. When True, a
             counterintuitive "trap" spot (the solver's dominant action
-            contradicts the equity-vs-price baseline) is floored to at
-            least :data:`TRAP_DIFFICULTY_FLOOR`, so a pure / clear-cut
-            but deceptive spot rates Hard. Default False = unchanged
-            behaviour. See :func:`_is_counterintuitive_spot`.
+            contradicts the equity-vs-price baseline) is floored to a
+            GRADED value between TRAP_FLOOR_MIN and TRAP_FLOOR_MAX,
+            scaling with the size of the equity-vs-price contradiction
+            (see :func:`pipeline.trap_grading.graded_trap_floor`), so a
+            pure / clear-cut but deceptive spot rates Medium-to-Hard.
+            Default False = unchanged behaviour. See
+            :func:`_is_counterintuitive_spot`.
+        apply_razor_bump: Opt-in razor's-edge difficulty. When True, a
+            spot whose hand sits on a range BOUNDARY (a grid neighbor's
+            dominant action differs at the same node -- ATo folds where
+            AJo calls) is floored to a graded value by how many
+            neighbors oppose it (see :mod:`pipeline.preflop.razor_edge`),
+            so pure cutoff hands rate Medium-to-Hard. Default False =
+            unchanged behaviour. Composes with the trap bump: a spot
+            that is both keeps the higher floor.
 
     Returns:
         DifficultyResult: score in roughly [400, 3200] (most in
@@ -445,15 +481,51 @@ def compute_difficulty(
             easy_blend += rule.easy_delta
             bumps_applied.append(rule.name)
 
-    # --- trap-aware floor (opt-in) -------------------------------------------
+    # --- trap-aware floor (opt-in, graded July 2026) --------------------------
     # A counterintuitive spot is hard for a human even when the solver is pure,
     # so cap its "easy" score (-> floor its difficulty). The freq/EV axes rated
     # it easy precisely because the line is clear-cut -- the wrong signal for a
-    # trap. Spots already harder than the floor keep their (lower) easy_blend.
+    # trap. The floor is GRADED by the naive |equity - price| contradiction
+    # (rake-blind: what the pot odds look like to a player; detection's rake
+    # cushion already decided the spot IS a trap), so mild traps rate
+    # upper-Medium and extreme ones deep-Hard instead of everything pinning to
+    # one flat number. Spots already harder than their floor keep their
+    # (lower) easy_blend. The cap conversion keeps the score derivable from
+    # easy_blend (no separate clamp).
     trap_bump_applied = False
     if apply_trap_bump and _is_counterintuitive_spot(facts):
         trap_bump_applied = True
-        easy_blend = min(easy_blend, _TRAP_EASY_CAP)
+        # _is_counterintuitive_spot returned True, so both fields are set.
+        margin = abs(
+            facts.hero_equity_vs_villain - facts.break_even_equity  # type: ignore[operator]
+        )
+        trap_easy_cap = (
+            _LINEAR_CEILING - graded_trap_floor(margin)
+        ) / _LINEAR_SPAN
+        easy_blend = min(easy_blend, trap_easy_cap)
+
+    # --- razor's-edge floor (opt-in, July 2026) --------------------------------
+    # A pure hand on a range BOUNDARY (a grid neighbor's dominant action
+    # differs at this same node) is hard for a human even though the action
+    # is clear-cut: the skill being tested is knowing exactly where the
+    # cutoff sits. Floor graded by how many neighbors oppose (an island
+    # doing what none of its neighbors do is hardest). Composes with the
+    # trap floor via min() on the easy cap -- the higher floor wins.
+    razor_bump_applied = False
+    if apply_razor_bump:
+        # Lazy import: razor_edge reads node strategies via spot_sampler.
+        from pipeline.preflop.razor_edge import (  # noqa: PLC0415
+            find_opposite_neighbors,
+            razor_floor_for_count,
+        )
+
+        floor = razor_floor_for_count(
+            len(find_opposite_neighbors(facts.spot))
+        )
+        if floor is not None:
+            razor_bump_applied = True
+            razor_easy_cap = (_LINEAR_CEILING - floor) / _LINEAR_SPAN
+            easy_blend = min(easy_blend, razor_easy_cap)
 
     # --- map to integer difficulty with soft bounds --------------------------
     raw_difficulty = _LINEAR_CEILING - easy_blend * _LINEAR_SPAN
@@ -469,7 +541,149 @@ def compute_difficulty(
         bumps_applied=tuple(bumps_applied),
         ev_available=ev_available,
         trap_bump_applied=trap_bump_applied,
+        razor_bump_applied=razor_bump_applied,
     )
+
+
+# === achievable-score ceiling ================================================
+def max_achievable_difficulty(
+    min_frequency: float,
+    *,
+    trap_difficulty: bool = False,
+    razor_difficulty: bool = False,
+) -> int:
+    """Theoretical CEILING on the computed difficulty rating for any spot
+    whose dominant frequency is at least ``min_frequency``.
+
+    Answers "can a difficulty band even be reached at this worthiness
+    frequency?" WITHOUT touching a pack, an equity sim, or the LLM. The
+    batch driver uses it to skip spots that cannot possibly reach the
+    requested ``min_difficulty`` (no wasted equity sims), and the admin
+    Generate page uses it to warn upfront when a band + frequency combo is
+    structurally empty (the infamous "Hard band + 100% frequency" grind:
+    a pure spot maxes out around 1125 unless trap-aware is on).
+
+    The bound mirrors :func:`compute_difficulty` plus the batch driver's
+    near-pure EV credit: it takes the frequency axis at ``min_frequency``
+    (the score is non-increasing in frequency, so the window's hardest
+    spots sit at its minimum), gives every other axis its hardest possible
+    value (concept ease at the clip floor, the hardest hand-class ease, a
+    0bb EV gap when the EV credit isn't forced), and applies any
+    hardening (negative) bump rules.
+
+    INVARIANT: for every spot with ``dominant_frequency >= min_frequency``,
+    ``compute_difficulty(...).score <= max_achievable_difficulty(...)``
+    (with matching ``trap_difficulty``). ``tests/test_preflop_difficulty.py``
+    guards this against retuning of the weights/tables.
+
+    Args:
+        min_frequency: Lower edge of the dominant-frequency range the
+            spots can have, in [0, 1] (e.g. 1.0 for a 100%-only window).
+        trap_difficulty: Match the batch's trap-aware flag. When True the
+            ceiling includes :data:`pipeline.trap_grading.TRAP_FLOOR_MAX`
+            (the highest graded trap floor), since a maximally
+            counterintuitive trap is floored there regardless of its axes.
+        razor_difficulty: Match the batch's razor's-edge flag. When True
+            the ceiling includes
+            :data:`pipeline.preflop.razor_edge.RAZOR_FLOOR_MAX` (an island
+            hand opposed by 3+ neighbors is floored there).
+
+    Returns:
+        The highest integer score any such spot can be assigned.
+    """
+    easy_freq = _clip01((min_frequency - _FREQ_FLOOR) / _FREQ_SPAN)
+    min_concept = _CONCEPT_EASE_MIN
+    min_hand = min(min(HAND_CLASS_EASE.values()), _HAND_DEFAULT_EASE)
+    if min_frequency >= NEAR_PURE_DOMINANT_FREQ:
+        # The batch driver forces full EV credit on near-pure spots, so the
+        # EV axis contributes its full (easy) weight -- no way around it.
+        easy_ev = _clip01(NEAR_PURE_EV_CREDIT_BB / _EV_GAP_FULL_CREDIT_BB)
+        min_blend = (
+            W_FREQ * easy_freq
+            + W_EV * easy_ev
+            + W_CONCEPT * min_concept
+            + W_HAND * min_hand
+        )
+    else:
+        # Hardest case is EV available with a 0bb gap. (EV-unavailable
+        # redistribution divides by the remaining weight < 1, which only
+        # RAISES the blend, i.e. lowers the score.)
+        min_blend = (
+            W_FREQ * easy_freq
+            + W_CONCEPT * min_concept
+            + W_HAND * min_hand
+        )
+    # Hardening bump rules (negative easy_delta) could push a spot above
+    # the axis-only ceiling; account for them. BUMP_RULES is empty today.
+    min_blend += sum(min(0.0, rule.easy_delta) for rule in BUMP_RULES)
+    score = round(
+        _clip(_LINEAR_CEILING - min_blend * _LINEAR_SPAN,
+              _HARD_FLOOR, _HARD_CEILING)
+    )
+    if trap_difficulty:
+        # A trap spot's score is max(natural score, its graded floor); the
+        # graded floor tops out at TRAP_FLOOR_MAX.
+        score = max(score, TRAP_FLOOR_MAX)
+    if razor_difficulty:
+        from pipeline.preflop.razor_edge import RAZOR_FLOOR_MAX  # noqa: PLC0415
+
+        score = max(score, RAZOR_FLOOR_MAX)
+    return score
+
+
+def classify_band_reachability(
+    band_low: int,
+    band_high: int,
+    min_frequency: float,
+    *,
+    trap_difficulty: bool = False,
+    razor_difficulty: bool = False,
+) -> str:
+    """Classify whether a difficulty band can be reached at a frequency window.
+
+    Pure decision logic for the admin Generate page's upfront warning (kept
+    OUT of the Streamlit seam so it is browserlessly testable). At a given
+    minimum dominant frequency the reachable scores are:
+
+      * the "natural" range, capped at :func:`max_achievable_difficulty`
+        (both special modes off);
+      * with trap-aware ON, additionally the trap scores -- a trap rates
+        ``max(its natural score, graded_trap_floor(margin))`` with the
+        graded floor spanning [TRAP_FLOOR_MIN, TRAP_FLOOR_MAX]; and
+      * with razor's-edge ON, additionally the razor scores -- graded
+        floors from :data:`pipeline.preflop.razor_edge.RAZOR_FLOOR_BY_COUNT`
+        up to RAZOR_FLOOR_MAX.
+
+    The band reaches a special tier iff it overlaps that tier's floor range.
+
+    Returns:
+        ``"empty"`` -- no spot can score inside the band: 0 questions
+        guaranteed, don't run the batch.
+        ``"special_only"`` -- only specially-rated spots (traps and/or
+        razor's-edge boundary hands) can land in the band: a valid but
+        smaller pool than the natural one.
+        ``"reachable"`` -- ordinary spots can score inside the band.
+    """
+    natural_ceiling = max_achievable_difficulty(min_frequency)
+    band_has_natural = band_low <= natural_ceiling
+    band_has_trap = trap_difficulty and (
+        band_low <= TRAP_FLOOR_MAX and band_high >= TRAP_FLOOR_MIN
+    )
+    if razor_difficulty:
+        from pipeline.preflop.razor_edge import (  # noqa: PLC0415
+            RAZOR_FLOOR_BY_COUNT,
+            RAZOR_FLOOR_MAX,
+        )
+
+        razor_min = min(RAZOR_FLOOR_BY_COUNT.values())
+        band_has_razor = band_low <= RAZOR_FLOOR_MAX and band_high >= razor_min
+    else:
+        band_has_razor = False
+    if not band_has_natural and not (band_has_trap or band_has_razor):
+        return "empty"
+    if not band_has_natural:
+        return "special_only"
+    return "reachable"
 
 
 # === helpers =================================================================
@@ -544,10 +758,15 @@ __all__ = [
     "CONCEPT_TAG_MODIFIERS",
     "DifficultyResult",
     "HAND_CLASS_EASE",
-    "TRAP_DIFFICULTY_FLOOR",
+    "NEAR_PURE_DOMINANT_FREQ",
+    "NEAR_PURE_EV_CREDIT_BB",
+    "TRAP_FLOOR_MAX",
+    "TRAP_FLOOR_MIN",
     "W_CONCEPT",
     "W_EV",
     "W_FREQ",
     "W_HAND",
+    "classify_band_reachability",
     "compute_difficulty",
+    "max_achievable_difficulty",
 ]

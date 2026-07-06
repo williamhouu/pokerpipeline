@@ -12,9 +12,13 @@ from __future__ import annotations
 from pipeline.preflop.fact_extractor import PreflopFacts
 
 # Postflop action order: SB acts first ... BTN acts last. A higher rank means
-# the seat acts LATER postflop = is in position. The blind-vs-blind case is
-# the standard exception: with only SB + BB live, the SB is the dealer and
-# acts LAST postflop, so SB is IP and BB is OOP.
+# the seat acts LATER postflop = is in position. NOTE there is deliberately NO
+# blind-vs-blind exception (July 2026 bugfix): at a ring table (6/8/9-max) the
+# BvB SB still acts FIRST on every postflop street -- the BB has position.
+# "The SB is the dealer" is true only at a literal 2-player table (heads-up
+# format), which none of the packs are. An earlier version special-cased BvB
+# to SB-is-IP and shipped wrong Relative Position / position prose / position
+# skills on every BvB SB row; tests now pin the ring-table rule.
 _POSTFLOP_RANK: dict[str, int] = {
     "SB": 0, "BB": 1, "UTG": 2, "UTG+1": 3, "UTG+2": 4,
     "LJ": 5, "HJ": 6, "CO": 7, "BTN": 8,
@@ -24,11 +28,10 @@ _POSTFLOP_RANK: dict[str, int] = {
 def ip_oop_positions(hero_pos: str, villain_pos: str) -> tuple[str, str]:
     """Return ``(ip_position, oop_position)`` for a 2-way preflop spot.
 
-    BvB (only SB + BB): SB acts last postflop, so SB is IP. Otherwise the
-    seat with the higher postflop rank (acts later) is in position.
+    The seat with the higher postflop rank (acts later) is in position.
+    Blind-vs-blind follows the same rule: the BB acts after the SB postflop,
+    so the BB is IP (no special case -- see the module comment).
     """
-    if {hero_pos, villain_pos} == {"SB", "BB"}:
-        return ("SB", "BB")
     hero_rank = _POSTFLOP_RANK.get(hero_pos, -1)
     villain_rank = _POSTFLOP_RANK.get(villain_pos, -1)
     if hero_rank > villain_rank:
@@ -39,15 +42,15 @@ def ip_oop_positions(hero_pos: str, villain_pos: str) -> tuple[str, str]:
 def hero_relative_position(facts: PreflopFacts) -> str:
     """Hero's IP/OOP standing as ``"In Position"`` / ``"Out of Position"``.
 
-    With a villain: hero is IP iff it acts last postflop (the BvB-SB
-    exception included via :func:`ip_oop_positions`). On open spots (no
+    With a villain: hero is IP iff it acts last postflop. On open spots (no
     villain yet) the opener is in position only when nobody behind acts
-    later postflop -- true for the BTN, and for the SB in a BvB open (SB
-    is the dealer). Every other open leaves a seat to act behind hero.
+    later postflop -- true only for the BTN. Every other open (including
+    the SB first-in, where the BB is behind preflop AND in position
+    postflop) leaves a seat acting after hero.
     """
     hero = facts.spot.node.actor
     if facts.villain_stats is None:
-        return "In Position" if hero in ("BTN", "SB") else "Out of Position"
+        return "In Position" if hero == "BTN" else "Out of Position"
     ip_pos, _oop_pos = ip_oop_positions(hero, facts.villain_stats.position)
     return "In Position" if hero == ip_pos else "Out of Position"
 

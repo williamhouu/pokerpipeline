@@ -411,14 +411,28 @@ def test_out_of_position_play_blinds_facing_raise() -> None:
     )
 
 
-def test_bvb_small_blind_is_in_position_not_out() -> None:
-    """In blind-vs-blind the SB acts last postflop, so it's IN position --
-    NOT out of position (which the blind-defending heuristic would wrongly
-    fire). Mirrors the Relative Position column's BvB-SB rule."""
+def test_bvb_small_blind_is_out_of_position() -> None:
+    """In blind-vs-blind at a ring table the SB acts FIRST on every postflop
+    street, so it is OUT of position. (July 2026 bugfix -- an earlier version
+    asserted the opposite via an 'SB is the dealer' exception that holds only
+    at a literal 2-player table.) Mirrors pipeline.preflop.position."""
     ctx = _ctx(
         hero_position="SB",
         n_prior_raises=2,
         concept_tags=frozenset({"small_blind", "facing_3bet", "bvb_spot"}),
+    )
+    assert _has("Out of Position Play", ctx)
+    assert not _has("In Position Play", ctx)
+
+
+def test_bvb_big_blind_is_in_position() -> None:
+    """The other seat of the same fix: the BB in a BvB pot acts last
+    postflop, so it is IN position -- the blind-defending OOP heuristic
+    must not fire on it."""
+    ctx = _ctx(
+        hero_position="BB",
+        n_prior_raises=1,
+        concept_tags=frozenset({"big_blind", "facing_single_raise", "bvb_spot"}),
     )
     assert _has("In Position Play", ctx)
     assert not _has("Out of Position Play", ctx)

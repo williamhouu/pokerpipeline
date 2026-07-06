@@ -23,6 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pipeline.preflop import batch as batch_module  # noqa: E402
 from pipeline.preflop.batch import (  # noqa: E402
     ACTION_CONTEXTS,
     BatchResult,
@@ -1439,3 +1440,120 @@ def test_diversify_preserves_every_spot() -> None:
     pool += [(_fake_spot("SB", 2, "Fold", "72o"), None)]
     ordered = _diversify_spots(pool, random.Random(3))
     assert sorted(id(s) for s, _ in ordered) == sorted(id(s) for s, _ in pool)
+
+
+def test_difficulty_fail_fast_skips_equity_sim_on_unreachable_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The July 2026 grind fix: a difficulty band no spot can reach at its
+    frequency (e.g. 1500+ at a 100%-only window; pure spots cap at ~1125)
+    must be rejected by the CHEAP frequency-ceiling gate BEFORE
+    extract_facts pays the ~1.5s/spot equity sim. Every skip still counts
+    in difficulty_filtered_out so the result UI can explain the empty
+    batch."""
+    pack = _build_open_only_pack(tmp_path)
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("extract_facts must not run: ceiling gate first")
+
+    monkeypatch.setattr("pipeline.preflop.batch.extract_facts", _boom)
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        min_frequency=1.0,  # pure-only window
+        max_frequency=1.0,
+        min_difficulty=1500,  # unreachable: ceiling at 100% freq is 1125
+        dry_run=True,
+        random_seed=42,
+    )
+    assert result.questions_written == 0
+    assert result.questions_attempted == 0
+    assert not result.failures  # _boom never ran, so nothing errored
+    assert result.difficulty_filtered_out == result.worthy_spots_available
+    assert result.worthy_spots_available > 0
+
+
+def test_difficulty_fail_fast_defers_to_trap_aware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With trap-aware ON the same band IS reachable (graded trap floors
+    run 1800-2900), so the cheap gate must NOT skip -- spots proceed to
+    fact extraction."""
+    pack = _build_open_only_pack(tmp_path)
+    calls: list[str] = []
+    real = batch_module.extract_facts
+
+    def _counting(*args: Any, **kwargs: Any) -> Any:
+        calls.append("x")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("pipeline.preflop.batch.extract_facts", _counting)
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        min_frequency=1.0,
+        max_frequency=1.0,
+        min_difficulty=1500,
+        trap_difficulty=True,  # graded trap floors overlap the band
+        dry_run=True,
+        random_seed=42,
+    )
+    # Opening spots can never BE traps, so they are all still rejected by
+    # the full difficulty filter -- but only AFTER real fact extraction.
+    assert len(calls) == result.worthy_spots_available
+    assert result.questions_written == 0
+    assert result.difficulty_filtered_out == result.worthy_spots_available
+
+
+def test_fatal_api_error_aborts_the_batch(tmp_path: Path) -> None:
+    """July 2026: an out-of-credits key made a batch grind through its
+    ENTIRE worthy pool (1,058 failures, ~90 minutes of equity sims) because
+    the per-spot catch-all treated a billing error like a one-off bad spot.
+    A billing/auth error fails every later call identically, so the batch
+    must abort after the first one; whatever succeeded still ships."""
+    pack = _build_open_only_pack(tmp_path)  # 2 worthy spots
+
+    def create(**kwargs: Any) -> SimpleNamespace:
+        raise RuntimeError(
+            "Error code: 400 - Your credit balance is too low to access "
+            "the Anthropic API."
+        )
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        client=client,
+        dry_run=False,
+        random_seed=0,
+    )
+    # Aborted after the FIRST failure instead of failing both spots.
+    assert len(result.failures) == 1
+    assert result.questions_written == 0
+
+
+def test_ordinary_spot_failure_still_does_not_abort(tmp_path: Path) -> None:
+    """The abort is ONLY for fatal API errors: a one-off per-spot failure
+    (malformed output and the retry also failing) keeps the batch going,
+    exactly as before."""
+    pack = _build_open_only_pack(tmp_path)  # 2 worthy spots
+    good = (
+        '{"option_1": "Fold", "option_2": "Raise 60%", "option_3": "", '
+        '"option_4": "", "correct_answer": "Raise 60%", '
+        '"answer_explanation": "Real prose."}'
+    )
+    # Spot 1: bad JSON + bad retry -> per-spot failure. Spot 2: good.
+    client = _mock_client(["not json", "still not json", good])
+    result = generate_preflop_batch(
+        pack=pack,
+        output_path=tmp_path / "out.csv",
+        total_questions=10,
+        client=client,
+        dry_run=False,
+        random_seed=0,
+    )
+    assert len(result.failures) == 1
+    assert result.questions_written == 1

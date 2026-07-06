@@ -662,3 +662,74 @@ def test_reverse_implied_odds_needs_a_villain() -> None:
     # Open spot (no villain range to be dominated by) -> off.
     assert reverse_implied_odds(_facts(hand_class="A4s", combo="As4s",
         archetype="open_for_value", villain_stats=None)) is False
+
+
+# --- reverse_implied_odds: re-raise path + all-in guard (July 2026) ----------
+_BVB_3BET_HISTORY = (
+    ParsedAction("UTG", PreflopActionType.FOLD),
+    ParsedAction("HJ", PreflopActionType.FOLD),
+    ParsedAction("CO", PreflopActionType.FOLD),
+    ParsedAction("BTN", PreflopActionType.FOLD),
+    ParsedAction("SB", PreflopActionType.RAISE, 60.0),
+    ParsedAction("BB", PreflopActionType.RAISE, 180.0),
+)
+
+
+def test_rio_fires_facing_3bet_up_to_30pct_when_folding() -> None:
+    """The KTo SB-vs-BB-3bet QC miss: a 3-bet range is dominator-heavy at
+    any realistic width, so the 20% tightness gate is relaxed to 30% when
+    hero faces a re-raise and the dominant action is a fold."""
+    f = _facts(actor="SB", history=_BVB_3BET_HISTORY, hand_class="KTo",
+               combo="KhTc", archetype="fold_dominated",
+               action_freqs={"Fold": 1.0, "Call": 0.0},
+               villain_stats=_villain(25.4))
+    assert reverse_implied_odds(f) is True
+
+
+def test_rio_reraise_path_requires_dominant_fold() -> None:
+    """The relaxed re-raise path is gated to fold-dominant spots so the tag
+    can never hand the LLM an RIO frame against a correct call/raise."""
+    f = _facts(actor="SB", history=_BVB_3BET_HISTORY, hand_class="KTo",
+               combo="KhTc", archetype="call_for_value",
+               action_freqs={"Fold": 0.2, "Call": 0.8},
+               villain_stats=_villain(25.4))
+    assert reverse_implied_odds(f) is False
+
+
+def test_rio_reraise_path_still_gates_absurdly_wide_ranges() -> None:
+    """Even facing a 3-bet, a range wider than 30% is not dominator-heavy
+    enough to call the fold an RIO lesson."""
+    f = _facts(actor="SB", history=_BVB_3BET_HISTORY, hand_class="KTo",
+               combo="KhTc", archetype="fold_dominated",
+               action_freqs={"Fold": 1.0, "Call": 0.0},
+               villain_stats=_villain(35.0))
+    assert reverse_implied_odds(f) is False
+
+
+def test_rio_single_raise_keeps_the_20pct_gate() -> None:
+    """The relaxation applies ONLY to re-raises: vs a single open, a 25%
+    range still means positive implied odds for a weak ace, tag off."""
+    open_history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.RAISE, 60.0),
+    )
+    f = _facts(actor="BB", history=open_history, hand_class="A4s",
+               combo="As4s", archetype="fold_pot_odds",
+               action_freqs={"Fold": 1.0, "Call": 0.0},
+               villain_stats=_villain(25.0))
+    assert reverse_implied_odds(f) is False
+
+
+def test_rio_never_fires_facing_an_all_in() -> None:
+    """Facing an all-in there is no postflop play left, so there are no
+    implied odds in EITHER direction -- that fold is pure pot odds. Guard
+    applies even vs a tight jam range that passes every other gate."""
+    jam_history = (
+        ParsedAction("UTG", PreflopActionType.FOLD),
+        ParsedAction("HJ", PreflopActionType.ALL_IN),
+    )
+    f = _facts(actor="BB", history=jam_history, hand_class="A4s",
+               combo="As4s", archetype="fold_pot_odds",
+               action_freqs={"Fold": 1.0, "Call": 0.0},
+               villain_stats=_villain(8.0))
+    assert reverse_implied_odds(f) is False

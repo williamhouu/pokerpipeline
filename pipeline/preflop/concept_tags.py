@@ -354,31 +354,66 @@ def dominated(facts: PreflopFacts) -> bool:
 # than a speculative one. Against wider ranges those same hands have POSITIVE
 # implied odds, so the tag must stay off there.
 _RIO_TIGHT_RANGE_MAX_PCT = 20.0
+# Facing a RE-RAISE (3-bet or later) the width proxy breaks down: a 3-bet
+# range is value-tilted toward exactly the hands that dominate a weak ace/king
+# no matter how wide it is (a 25% blind-vs-blind 3-bet range is still packed
+# with better Ax/Kx). So re-raise spots get a wider cutoff, sized to cover
+# real 3-bet ranges (BvB runs ~20-28%) while still excluding degenerate
+# super-wide lines. July 2026, from the KTo-SB-vs-BB-3bet QC miss.
+_RIO_RERAISE_RANGE_MAX_PCT = 30.0
+
+
+def _facing_all_in(facts: PreflopFacts) -> bool:
+    """True when the action hero faces (the latest aggression) is an all-in."""
+    for a in reversed(facts.spot.node.history_before):
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
+            return a.action_type is PreflopActionType.ALL_IN
+    return False
 
 
 def reverse_implied_odds(facts: PreflopFacts) -> bool:
-    """Dominated-pair-prone hand facing a TIGHT, value-heavy range.
+    """Dominated-pair-prone hand facing a dominator-heavy range.
 
     Fires for a weak ace (A2s-AJs, or a weak A-high offsuit) or a weak K-high
-    offsuit when villain's range is tight: these flop second-best top pairs
-    that pay off bigger hands -- the textbook reverse-implied-odds spot (e.g.
-    A4s vs a tight UTG open). The ace/king makes a top pair that is routinely
-    outkicked, so you win small and lose big.
+    offsuit when villain's range is dominator-heavy: these flop second-best
+    top pairs that pay off bigger hands -- the textbook reverse-implied-odds
+    spot. The ace/king makes a top pair that is routinely outkicked, so you
+    win small and lose big. Two qualifying range shapes:
+
+      * a TIGHT range (<= 20% of hands, e.g. A4s vs a tight UTG open) --
+        against a WIDE open the same hand is a fine speculative holding with
+        POSITIVE implied odds, so width gates the tag; and
+      * a RE-RAISE range (hero faces a 3-bet or later) up to 30% wide --
+        re-raise ranges are value-tilted toward dominators at any realistic
+        width (the KTo SB-vs-BB-3bet fold). Gated to spots whose dominant
+        action IS a fold so this wider path can never hand the LLM an RIO
+        frame against a correct call/raise (mirrors the skill layer's
+        fold-archetype gate; the ``dominant_is_fold`` tag sets precedent
+        for decision-aware tags).
+
+    Never fires facing an ALL-IN: with no postflop play left there are no
+    implied odds in either direction -- that fold is pure pot odds.
 
     Mutually exclusive with positive implied odds BY CONSTRUCTION: pocket
     pairs (set value) and suited connectors (nut straights/flushes) are
     neither weak-ace nor weak-K-offsuit hands, so they never fire here; and it
-    never fires on the ``call_for_implied_odds`` archetype. Requires a villain
-    to be dominated by, and requires the range to be tight -- against a WIDE
-    range a weak suited ace is a fine speculative hand with positive implied
-    odds, not reverse.
+    never fires on the ``call_for_implied_odds`` archetype.
     """
     if facts.archetype == "call_for_implied_odds":
         return False  # a hand can't be reverse- AND positive-implied-odds
+    if _facing_all_in(facts):
+        return False  # no postflop play left -> no reverse implied odds
     stats = facts.villain_stats
     width = getattr(stats, "pct_of_dealt_hands", None) if stats else None
-    if width is None or width > _RIO_TIGHT_RANGE_MAX_PCT:
-        return False  # no villain, or the range is too wide to dominate
+    if width is None:
+        return False  # no villain to be dominated by
+    facing_reraise = _raise_count(facts) >= 2  # noqa: PLR2004
+    if facing_reraise:
+        dominant_fold = facts.spot.dominant_action.startswith("Fold")
+        if width > _RIO_RERAISE_RANGE_MAX_PCT or not dominant_fold:
+            return False
+    elif width > _RIO_TIGHT_RANGE_MAX_PCT:
+        return False  # vs a single raise, wide range = positive implied odds
     high = _hand_class(facts)[0]
     weak_ace = suited_ace(facts) or (unconnected_offsuit(facts) and high == "A")
     weak_king = unconnected_offsuit(facts) and high == "K"

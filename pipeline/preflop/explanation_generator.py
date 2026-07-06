@@ -816,18 +816,20 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
                 for hand_class, weight in v.most_common_combos
             ],
         }
-        # Domination map: which of villain's MOST COMMON in-range classes have
-        # hero dominated, and which hero dominates. Names come ONLY from these
+        # Domination map: which of villain's in-range classes have hero
+        # dominated, and which hero dominates. Names come ONLY from these
         # weight-gated classes, so the prose can't invent a dominator villain
         # doesn't hold. Surfaced only when something fires.
-        # MUST use most_common_combos (combo-share ranked), NOT top_combos:
-        # top_combos sorts by raw weight, so on a wide range every 100%-weight
-        # junk class outranks a 99%-weight AKo -- QC 2026-07-03 caught AQo's
-        # domination fact reading "dominated by AA; you dominate A3s-A6s" with
-        # AKo (a true dominator) missing entirely, which then made the claim
-        # checker false-flag correct prose.
+        # MUST use in_range_classes (the FULL weight-gated range), never a
+        # top-N digest: any cap turns "dominated_by: []" into "none of the
+        # sampled classes dominate you" while reading as a fact about the
+        # whole range. QC 2026-07-04 caught A8o vs a BTN open showing ZERO
+        # dominators (the 5-class most_common digest happened to sample only
+        # baby aces), which made the claim checker false-flag the correct
+        # "you'll often be outkicked" prose. dominating_map caps per BUCKET
+        # for prose, so the lists stay short; empty now means genuinely empty.
         dom = dominating_map(
-            spot.hero_hand_class, [c for c, _ in v.most_common_combos]
+            spot.hero_hand_class, [c for c, _ in v.in_range_classes]
         )
         if dom["dominated_by"] or dom["you_dominate"]:
             out["domination_vs_villain_range"] = dom

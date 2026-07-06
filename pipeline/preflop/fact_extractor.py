@@ -45,7 +45,6 @@ from pipeline.preflop.pack import PreflopPack
 from pipeline.preflop.spot_sampler import PreflopSpot
 from pipeline.preflop_ranges import (
     HAND_COUNT,
-    canonical_169_hand_classes,
     combo_label,
     combo_str_to_hand_class,
     parse_range_file,
@@ -82,6 +81,34 @@ def _combos_in_class(hand_class: str) -> int:
     if len(hand_class) == 2:  # a pair, e.g. "AA"
         return 6
     return 4 if hand_class.endswith("s") else 12
+
+
+# Weight floor for VillainRangeStats.in_range_classes -- a class villain
+# holds at least this often is a "real" part of the range worth naming in
+# structural facts (the domination map). Slivers below it stay out so prose
+# never leans on a hand villain plays 1 time in 20.
+IN_RANGE_MIN_WEIGHT = 0.10
+
+_RANK_ORDER = {r: i for i, r in enumerate("23456789TJQKA", start=2)}
+
+
+def _class_strength_key(hand_class: str) -> tuple:
+    """Sort key putting stronger preflop classes FIRST (ascending sort).
+
+    Orders by high card, then kicker, then pair > suited > offsuit:
+    AA, AKs, AKo, AQs, ..., A2o, KK, KQs, ... A coarse preflop-strength
+    convention for TIE-BREAKING equal-weight classes -- not an equity claim.
+    July 2026: replaces the canonical_169_hand_classes() tie-break, which is
+    ALPHABETICAL (AA, A2s, A2o, ... KK last) despite comments calling it
+    premium-first -- that bias surfaced villain's "likely hands" as
+    A2o-A6o on wide ranges and starved the domination map of dominators.
+    """
+    hi = _RANK_ORDER.get(hand_class[0], 0)
+    if len(hand_class) == 2 and hand_class[0] == hand_class[1]:
+        return (-hi, -hi, 0)  # the pair leads its high-card group
+    lo = _RANK_ORDER.get(hand_class[1], 0) if len(hand_class) > 1 else 0
+    category = 1 if hand_class.endswith("s") else 2
+    return (-hi, -lo, category)
 
 
 @dataclass(frozen=True)
@@ -124,6 +151,16 @@ class VillainRangeStats:
         top_combos_coverage_pct: what % of the range ``top_combos_covering``
             actually covers, in [0, 100] -- shown so the digest reads as a
             summary, not the whole range.
+        in_range_classes: EVERY class villain holds with weight >=
+            IN_RANGE_MIN_WEIGHT, as ``(hand_class, weight)`` sorted by combo
+            share descending (strength tie-break). The input for structural
+            classification over the WHOLE range -- the domination map reads
+            this, NOT a top-N sample. July 2026: the domination map used to
+            read the 5-class ``most_common_combos`` digest, so
+            ``dominated_by: []`` meant "none of the 5 sampled classes" while
+            being presented as truth about the range (A8o vs a BTN open
+            showed zero dominators and the claim checker false-flagged
+            correct 'you'll often be outkicked' prose).
     """
 
     position: str
@@ -134,6 +171,7 @@ class VillainRangeStats:
     most_common_combos: tuple[tuple[str, float], ...] = ()
     top_combos_covering: tuple[str, ...] = ()
     top_combos_coverage_pct: float = 0.0
+    in_range_classes: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -410,40 +448,55 @@ def compute_villain_range_stats(
     pct = (weighted_combos / HAND_COUNT) * 100.0
 
     # Top hand classes by weight (not combos -- "AA 100%" reads cleaner
-    # than "AhAd 100%, AhAc 100%, ..."). Skip 0-weight entries. Ties
-    # broken by canonical Ryan-pack order so premium hands (AA, AKs,
-    # AKo, AQs, ...) surface first rather than 22 / 32s (alphabetical).
-    canonical_index = {c: i for i, c in enumerate(canonical_169_hand_classes())}
+    # than "AhAd 100%, AhAc 100%, ..."). Skip 0-weight entries. Ties broken
+    # STRONGEST-first via _class_strength_key (July 2026: this used to be
+    # canonical_169_hand_classes() order, which is alphabetical -- AA, A2s,
+    # A2o ... KK last -- despite the old comment claiming premium-first, so
+    # every full-weight tie on a wide range surfaced baby aces).
     nonzero = [(c, w) for c, w in hand_class_weights.items() if w > 0]
-    nonzero.sort(key=lambda x: (-x[1], canonical_index.get(x[0], 999)))
+    nonzero.sort(key=lambda x: (-x[1], _class_strength_key(x[0])))
     top = tuple(nonzero[:top_n])
 
     # "Most common combos": the hands villain is most LIKELY to be holding,
     # ranked by COMBO SHARE (weight x combo count) so a 12-combo offsuit hand
     # outranks a single 6-combo pair at the same weight. This is what coaches
     # mean by "what they show up with" -- distinct from `top` above, which
-    # sorts by weight alone and so degenerates to premium-/alpha-first when
-    # most of the range is full weight (e.g. "AA, A5s, A8s, A9s, ATs" on a
-    # wide open). Premium-first tie-break only matters between equal combo
-    # shares. Layer 6's data block reads this; `top` stays internal.
+    # sorts by weight alone and so degenerates to premium-first when most of
+    # the range is full weight. Strength tie-break only matters between equal
+    # combo shares. Layer 6's data block reads this; `top` stays internal.
     most_common = tuple(
         sorted(
             nonzero,
             key=lambda x: (
                 -(x[1] * _combos_in_class(x[0])),
-                canonical_index.get(x[0], 999),
+                _class_strength_key(x[0]),
             ),
         )[:top_n]
     )
 
+    # Full weight-gated range for STRUCTURAL classification (the domination
+    # map). No top-N cap -- a cap turns "dominated_by is empty" into "none
+    # of the sampled classes", which reads as a fact about the whole range.
+    # Combo-share order so buckets list what villain most often shows up
+    # with first; the map caps per BUCKET for prose.
+    in_range = tuple(
+        sorted(
+            ((c, w) for c, w in nonzero if w >= IN_RANGE_MIN_WEIGHT),
+            key=lambda x: (
+                -(x[1] * _combos_in_class(x[0])),
+                _class_strength_key(x[0]),
+            ),
+        )
+    )
+
     # Coverage-based digest: rank classes by COMBO share (weight x combos)
     # and take the heaviest until ~COVERAGE_TARGET of the range is covered,
-    # bounded by [COVERAGE_FLOOR, COVERAGE_CAP]. Premium-first ties (same
-    # canonical order as `top`). weighted_combos is the same combo total, so
-    # the running sum / weighted_combos is the true fraction of the range.
+    # bounded by [COVERAGE_FLOOR, COVERAGE_CAP]. Strongest-first ties (same
+    # key as `top`). weighted_combos is the same combo total, so the
+    # running sum / weighted_combos is the true fraction of the range.
     by_combo_share = sorted(
         ((c, w * _combos_in_class(c)) for c, w in nonzero),
-        key=lambda x: (-x[1], canonical_index.get(x[0], 999)),
+        key=lambda x: (-x[1], _class_strength_key(x[0])),
     )
     covering: list[str] = []
     acc = 0.0
@@ -474,6 +527,7 @@ def compute_villain_range_stats(
         most_common_combos=most_common,
         top_combos_covering=tuple(covering),
         top_combos_coverage_pct=coverage_pct,
+        in_range_classes=in_range,
     )
 
 

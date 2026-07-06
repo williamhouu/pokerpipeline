@@ -856,3 +856,61 @@ def test_top_value_combos_restricts_blockers_to_real_value() -> None:
     # An ace+king holder DOES block top value (AA + KK via the ace / king).
     blk = compute_blockers("AsKs", top)
     assert blk.get("AA", 0) > 0 and blk.get("KK", 0) > 0
+
+
+def test_equal_weight_ties_break_strongest_first_not_alphabetical(tmp_path):
+    """July 2026 regression: the tie-break used canonical_169_hand_classes(),
+    which is ALPHABETICAL (AA, A2s, A2o, ..., KK last), so a wide range's
+    "likely hands" surfaced as A2o-A6o. Equal-weight ties must lead with the
+    STRONGEST classes instead (AKo before A2o)."""
+    rng = {c: 1.0 for c in [
+        "A2o", "A3o", "A4o", "A5o", "A6o", "A7o", "A8o", "A9o",
+        "ATo", "AJo", "AQo", "AKo", "KQo", "KJo",
+    ]}
+    path = tmp_path / "wide.txt"
+    _write_full_range(path, rng)
+    villain = ParsedAction("BTN", PreflopActionType.RAISE, 60.0)
+    stats = compute_villain_range_stats(villain, path, top_n=5)
+    most_common = [c for c, _w in stats.most_common_combos]
+    # All 12-combo full-weight ties: strongest lead, baby aces do not.
+    assert most_common == ["AKo", "AQo", "AJo", "ATo", "A9o"]
+
+
+def test_in_range_classes_is_the_full_gated_range(tmp_path):
+    """`in_range_classes` carries EVERY class at weight >= 0.10 (not a top-N
+    digest) so structural facts computed from it are facts about the whole
+    range; sub-floor slivers stay out."""
+    rng = {"AA": 1.0, "AKo": 1.0, "A5s": 0.5, "KQo": 0.12, "76s": 0.05}
+    path = tmp_path / "mixed.txt"
+    _write_full_range(path, rng)
+    villain = ParsedAction("BTN", PreflopActionType.RAISE, 60.0)
+    stats = compute_villain_range_stats(villain, path, top_n=2)  # tiny top_n
+    classes = [c for c, _w in stats.in_range_classes]
+    assert set(classes) == {"AA", "AKo", "A5s", "KQo"}  # 76s sliver gated out
+    # Combo-share order: AKo (12) > AA (6) > A5s (0.5*4=2) > KQo (0.12*12=1.44).
+    assert classes == ["AKo", "AA", "A5s", "KQo"]
+    # ...and the top-N digests stay capped while in_range_classes does not.
+    assert len(stats.most_common_combos) == 2
+
+
+def test_domination_map_sees_dominators_a_top_n_digest_missed(tmp_path):
+    """THE A8o-vs-BTN-open QC bug (July 2026): the domination map used to
+    read the 5-class most_common digest, which on a wide range sampled only
+    baby aces -- so `dominated_by` was EMPTY while villain held A9o-AKo, and
+    the claim checker false-flagged correct "you'll often be outkicked"
+    prose. Computed from in_range_classes, the dominators are present."""
+    from pipeline.preflop.domination import dominating_map
+
+    rng = {c: 1.0 for c in [
+        "A2o", "A3o", "A4o", "A5o", "A6o", "A7o", "A9o",
+        "ATo", "AJo", "AQo", "AKo", "AA", "K9o", "QJs",
+    ]}
+    path = tmp_path / "btn_open.txt"
+    _write_full_range(path, rng)
+    villain = ParsedAction("BTN", PreflopActionType.RAISE, 60.0)
+    stats = compute_villain_range_stats(villain, path, top_n=5)
+    dom = dominating_map("A8o", [c for c, _w in stats.in_range_classes])
+    # Every better ace + AA dominates A8o; the bucket caps at 6 for prose.
+    assert dom["dominated_by"] == ["AKo", "AQo", "AJo", "ATo", "A9o", "AA"]
+    # Weaker aces hero dominates, heaviest first.
+    assert dom["you_dominate"][:3] == ["A7o", "A6o", "A5o"]

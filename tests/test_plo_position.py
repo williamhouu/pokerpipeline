@@ -32,21 +32,25 @@ def test_ip_oop_button_acts_last():
     assert ip_oop_positions("LJ", "BU") == ("BU", "LJ")
 
 
-def test_ip_oop_blind_vs_blind_sb_is_ip():
-    assert ip_oop_positions("SB", "BB") == ("SB", "BB")
-    assert ip_oop_positions("BB", "SB") == ("SB", "BB")
+def test_ip_oop_blind_vs_blind_bb_is_ip():
+    """Blind vs blind at a RING table: the SB acts first on every postflop
+    street, so the BB has position. (July 2026 bugfix -- an earlier version
+    asserted SB-is-IP, which is true only at a literal 2-player table.)"""
+    assert ip_oop_positions("SB", "BB") == ("BB", "SB")
+    assert ip_oop_positions("BB", "SB") == ("BB", "SB")
 
 
 def test_relative_position_with_villain():
     assert hero_relative_position(_facts("BU", villain_seat="LJ")) == "In Position"
     assert hero_relative_position(_facts("BB", villain_seat="LJ")) == "Out of Position"
-    # BvB: SB is in position even though it acts first preflop.
-    assert hero_relative_position(_facts("SB", villain_seat="BB")) == "In Position"
-    assert hero_relative_position(_facts("BB", villain_seat="SB")) == "Out of Position"
+    # BvB at a ring table: SB acts first postflop -> SB is OOP, BB is IP.
+    assert hero_relative_position(_facts("SB", villain_seat="BB")) == "Out of Position"
+    assert hero_relative_position(_facts("BB", villain_seat="SB")) == "In Position"
 
 
 def test_relative_position_on_open():
     assert hero_relative_position(_facts("BU", villain_seat=None)) == "In Position"
-    assert hero_relative_position(_facts("SB", villain_seat=None)) == "In Position"
+    # An SB first-in open still has the BB behind it, in position postflop.
+    assert hero_relative_position(_facts("SB", villain_seat=None)) == "Out of Position"
     assert hero_relative_position(_facts("LJ", villain_seat=None)) == "Out of Position"
     assert hero_relative_position(_facts("CO", villain_seat=None)) == "Out of Position"

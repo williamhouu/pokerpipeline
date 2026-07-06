@@ -75,7 +75,8 @@ def _pct(cell: str) -> float | None:
         return None
 
 
-def _rebuild_postflop(row, q, solve, *, answer_style, display_in_bb, equity_runouts):
+def _rebuild_postflop(row, q, solve, *, answer_style, display_in_bb,
+                      equity_runouts, trap_difficulty=False):
     """Rebuild a postflop leg's row from the solve, using the meta record's
     node_id + combo + sequence tags. Returns (rebuilt_row, options, correct)."""
     node = solve.nodes.get(q["node_id"])
@@ -86,7 +87,8 @@ def _rebuild_postflop(row, q, solve, *, answer_style, display_in_bb, equity_runo
     options, correct = build_options(spot, style=answer_style)
     rebuilt = build_postflop_row(
         facts, placeholder_explanation(facts, options, correct), solve,
-        compute_difficulty(facts), int(row["No"]), display_in_bb=display_in_bb,
+        compute_difficulty(facts, apply_trap_bump=trap_difficulty),
+        int(row["No"]), display_in_bb=display_in_bb,
         hand_id=q.get("hand_id", ""), sequence_index=q.get("sequence_index", ""),
         sequence_total=q.get("sequence_total", ""),
     )
@@ -142,6 +144,25 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
     answer_style = rs.get("answer_style", "auto")
     display_in_bb = bool(rs.get("display_in_bb", True))
     equity_runouts = int(rs.get("equity_runouts", DEFAULT_EQUITY_RUNOUTS))
+    # Mirror the batch's trap-aware difficulty flag (postflop legs only;
+    # preflop-entry legs use a frequency-only difficulty with no trap mode).
+    trap_difficulty = bool(rs.get("trap_difficulty", False))
+    razor_difficulty = bool(rs.get("razor_difficulty", False))
+    # Pack-backed preflop legs (July 2026): re-resolve the SAME pack source
+    # the batch used (deterministic) so those legs rebuild via the preflop
+    # pipeline instead of the entry ranges.
+    pack_source = None
+    if rs.get("preflop_leg_pack"):
+        from pipeline.postflop.preflop_leg_pack import (  # noqa: PLC0415
+            find_pack_leg_source,
+        )
+
+        _root = Path(__file__).resolve().parent.parent / "ranges"
+        pack_source = find_pack_leg_source(solve, _root)
+        if pack_source is None or pack_source.pack_id != rs["preflop_leg_pack"]:
+            print(f"  NOTE: batch used pack {rs['preflop_leg_pack']!r} but "
+                  f"re-resolution found {getattr(pack_source, 'pack_id', None)!r}; "
+                  "pack legs will EXACT-FAIL if the packs changed.")
 
     print("=" * 72)
     print(f"FULL-HAND BATCH AUDIT: {csv_path.name}")
@@ -158,7 +179,34 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
         print(f"--- #{no} [{kind}] {q.get('hero_combo')} "
               f"hand={str(q.get('hand_id'))[:28]} seq={q.get('sequence_index')}")
 
-        if is_preflop:
+        if is_preflop and q.get("preflop_leg_source") == "pack":
+            from pipeline.postflop.preflop_leg_pack import (  # noqa: PLC0415
+                build_pack_preflop_leg_row,
+            )
+
+            rebuilt = options = correct = None
+            if pack_source is not None:
+                rebuilt, _rec, _fail = build_pack_preflop_leg_row(
+                    pack_source, q.get("hero_position", ""),
+                    q.get("hero_combo", ""), solve,
+                    number=int(row["No"]), hand_id=q.get("hand_id", ""),
+                    sequence_index=q.get("sequence_index", ""),
+                    sequence_total=q.get("sequence_total", ""),
+                    use_placeholder=True, client=None, model="",
+                    temperature=0.0, max_tokens=0,
+                    answer_style=answer_style, display_in_bb=display_in_bb,
+                    equity_runouts=equity_runouts,
+                    trap_difficulty=trap_difficulty,
+                    razor_difficulty=razor_difficulty,
+                )
+                if _rec is not None:
+                    options, correct = _rec["options"], _rec["correct_answer"]
+            if rebuilt is None:
+                print("  EXACT-FAIL: pack leg could not be rebuilt (pack "
+                      "missing/changed or coherence gate flipped)")
+                exact_failures += 1
+                continue
+        elif is_preflop:
             rebuilt, options, correct = _rebuild_preflop(
                 row, q, solve, answer_style=answer_style, display_in_bb=display_in_bb
             )
@@ -166,6 +214,7 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
             rebuilt, options, correct = _rebuild_postflop(
                 row, q, solve, answer_style=answer_style,
                 display_in_bb=display_in_bb, equity_runouts=equity_runouts,
+                trap_difficulty=trap_difficulty,
             )
             if rebuilt is None:
                 print("  EXACT-FAIL: node_id not found in the reloaded solve "

@@ -91,6 +91,17 @@ def audit_batch(csv_path: Path) -> int:
     pack = get_pack(meta["pack_id"])
     nodes_by_id = {n.node_id: n for n in enumerate_nodes([pack])}
 
+    # Mirror the batch's trap-aware + razor's-edge difficulty flags (recorded
+    # in meta) or the rebuild false-flags Difficulty Rating drift on every
+    # re-rated row. Older metas without run_settings default to off,
+    # matching their generation.
+    trap_difficulty = bool(
+        meta.get("run_settings", {}).get("trap_difficulty", False)
+    )
+    razor_difficulty = bool(
+        meta.get("run_settings", {}).get("razor_difficulty", False)
+    )
+
     # Reverse-engineer the batch's display settings from the CSV itself.
     display_in_bb = rows[0]["POT"].endswith("BB")
     live_or_online = rows[0]["Live or Online"]
@@ -141,7 +152,12 @@ def audit_batch(csv_path: Path) -> int:
             facts,
             _placeholder_explanation(options, correct),
             pack=pack,
-            difficulty=compute_difficulty(facts, ev_gap_bb=ev_gap_for_difficulty),
+            difficulty=compute_difficulty(
+                facts,
+                ev_gap_bb=ev_gap_for_difficulty,
+                apply_trap_bump=trap_difficulty,
+                apply_razor_bump=razor_difficulty,
+            ),
             number=int(no),
             stakes_bb_dollars=stakes,
             live_or_online=live_or_online,

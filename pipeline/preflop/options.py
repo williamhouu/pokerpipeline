@@ -240,12 +240,23 @@ def _pick_gto_secondary(
 ) -> str | None:
     """Pick the ``B`` action for the 2-action GTO template.
 
-    Rule:
-      1. Among non-dominant canonical actions, pick the highest-frequency.
-      2. If multiple are tied at the highest frequency, prefer ``"Fold"``
-         (so a "Call 100% / Fold 0% / Raise 0%" spot picks Fold as the
-         most pedagogically-useful "wrong answer" alternative).
-      3. If no non-dominant actions exist (Pio's tree only has one action
+    Rule (July 2026 -- the secondary is the SECOND-BEST option, by EV
+    when the solver gives us EVs):
+      1. Among non-dominant canonical actions, pick the highest-frequency
+         (a real mix names the action the solver actually mixes with).
+      2. If multiple are tied at the highest frequency (the pure-spot
+         case: everything else at 0%), pick the HIGHEST-EV alternative --
+         the genuinely most-tempting mistake. This is what makes an
+         "Always Call" AQs-vs-3-bet spot pair with 4-bet (its real
+         second-best line, +EV) instead of Fold (0 EV). INVARIANT: when
+         per-action EVs exist, the tie-break is EV, full stop -- an
+         earlier version preferred Fold before consulting EV, which
+         quietly reduced the user's "top two options by EV" rule to
+         non-fold ties only; do not reintroduce an ordering ahead of it.
+      3. Only when the pack ships no per-action EVs (the EV-less Ryan
+         pack): prefer ``"Fold"``, else the least-aggressive action (the
+         old heuristics).
+      4. If no non-dominant actions exist (Pio's tree only has one action
          at this node -- shouldn't happen for spots passing the
          worthiness filter), return None and the caller falls back to
          the Basic style.
@@ -260,27 +271,31 @@ def _pick_gto_secondary(
     tied_at_max = [label for label, freq in candidates.items() if freq == max_freq]
     if len(tied_at_max) == 1:
         return tied_at_max[0]
-    if "Fold" in tied_at_max:
-        return "Fold"
-    # Multiple non-fold actions tied (typically all ~0% at a near-pure FOLD
-    # spot). Old code returned ``tied_at_max[0]`` (dict order), which surfaced
-    # All-in -- a nonsense "Always All-in" option facing a single raise 200bb
-    # deep. Pick the HIGHEST-EV alternative: the genuinely most-tempting
-    # mistake, and correct where "least aggressive" would be wrong (an SB
-    # fold-or-3-bet hand never calls, so its alternative should be the 3-bet,
-    # not Call). Fall back to least-aggressive only when the pack ships no
-    # per-action EVs (the EV-less Ryan pack).
     if pack is not None:
-        from pipeline.preflop.format_writer import action_evs_bb  # noqa: PLC0415
+        from pipeline.preflop.format_writer import (  # noqa: PLC0415
+            _drop_unreasonable_all_in,
+            action_evs_bb,
+        )
 
         try:
             evs = action_evs_bb(facts, pack)
         except (OSError, ValueError):
             evs = None
         if evs:
+            # Same filtered view as the action_ev_bb CSV cell: a deep-stack
+            # jam the solver never takes (freq ~0 AND clearly dominated) is
+            # noise, and picking it here would surface an "Always All-in"
+            # option the EV panel doesn't even show. A live/near-even jam
+            # survives the filter and CAN be the rightful secondary.
+            evs = _drop_unreasonable_all_in(evs, canonical)
             ranked = [lbl for lbl in tied_at_max if lbl in evs]
             if ranked:
                 return max(ranked, key=lambda lbl: evs[lbl])
+    # EV-less fallback (the Ryan pack): Fold is the most pedagogically
+    # useful "wrong answer"; failing that, the least-aggressive action
+    # (never surface a nonsense "Always All-in" alternative).
+    if "Fold" in tied_at_max:
+        return "Fold"
     return min(tied_at_max, key=_action_aggression)
 
 

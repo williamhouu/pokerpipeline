@@ -21,7 +21,6 @@ from pipeline.preflop.difficulty import (  # noqa: E402
     ARCHETYPE_BASE_EASE,
     BUMP_RULES,
     HAND_CLASS_EASE,
-    TRAP_DIFFICULTY_FLOOR,
     W_CONCEPT,
     W_EV,
     W_FREQ,
@@ -29,7 +28,14 @@ from pipeline.preflop.difficulty import (  # noqa: E402
     BumpRule,
     DifficultyResult,
     _is_counterintuitive_spot,
+    classify_band_reachability,
     compute_difficulty,
+    max_achievable_difficulty,
+)
+from pipeline.trap_grading import (  # noqa: E402
+    TRAP_FLOOR_MAX,
+    TRAP_FLOOR_MIN,
+    graded_trap_floor,
 )
 from pipeline.preflop.fact_extractor import (  # noqa: E402
     PreflopFacts,
@@ -622,24 +628,44 @@ def _trap_facts(
 
 def test_trap_fold_with_equity_floored_to_hard_when_on() -> None:
     """A PURE fold of a hand whose equity clears the price is a trap: with
-    trap-aware difficulty ON it is floored to the Hard band even though the
-    freq + EV axes both rate it easy. OFF leaves it easy (unchanged)."""
+    trap-aware difficulty ON it is floored to its GRADED floor (here a 15pt
+    equity-vs-price contradiction) even though the freq + EV axes both rate
+    it easy. OFF leaves it easy (unchanged)."""
     facts = _trap_facts(dominant_action="Fold", hero_equity=0.50, break_even=0.35)
     on = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=True)
     off = compute_difficulty(facts, ev_gap_bb=2.5, apply_trap_bump=False)
-    assert on.trap_bump_applied and on.score >= TRAP_DIFFICULTY_FLOOR
-    assert not off.trap_bump_applied and off.score < TRAP_DIFFICULTY_FLOOR
+    assert on.trap_bump_applied and on.score == graded_trap_floor(0.15)
+    assert on.score >= TRAP_FLOOR_MIN
+    assert not off.trap_bump_applied and off.score < TRAP_FLOOR_MIN
     assert on.score > off.score
 
 
 def test_trap_low_equity_continue_floored_when_on() -> None:
     """The other direction: a 3-bet/call of a hand whose equity is clearly
-    below the price is also a trap."""
+    below the price is also a trap (graded by its 15pt margin)."""
     facts = _trap_facts(
         dominant_action="Raise 3-bet", hero_equity=0.25, break_even=0.40
     )
     on = compute_difficulty(facts, ev_gap_bb=1.0, apply_trap_bump=True)
-    assert on.trap_bump_applied and on.score >= TRAP_DIFFICULTY_FLOOR
+    assert on.trap_bump_applied and on.score == graded_trap_floor(0.15)
+
+
+def test_trap_floor_grades_with_contradiction_size() -> None:
+    """The graded floor: a mild trap rates lower than a severe one, severe
+    saturates at TRAP_FLOOR_MAX, and every trap rates at least
+    TRAP_FLOOR_MIN. This is the July 2026 change from the flat 2400 pin."""
+    mild = _trap_facts(dominant_action="Fold", hero_equity=0.40, break_even=0.35)
+    mid = _trap_facts(dominant_action="Fold", hero_equity=0.50, break_even=0.35)
+    severe = _trap_facts(dominant_action="Fold", hero_equity=0.65, break_even=0.35)
+    scores = [
+        compute_difficulty(f, ev_gap_bb=2.5, apply_trap_bump=True).score
+        for f in (mild, mid, severe)
+    ]
+    assert scores[0] < scores[1] < scores[2]
+    assert scores[0] == TRAP_FLOOR_MIN + round(
+        (0.05 - 0.04) / (0.25 - 0.04) * (TRAP_FLOOR_MAX - TRAP_FLOOR_MIN)
+    )
+    assert scores[2] == TRAP_FLOOR_MAX  # 30pt margin saturates the grade
 
 
 def test_non_trap_agreement_not_floored() -> None:
@@ -683,3 +709,149 @@ def test_multiway_spot_is_never_a_trap() -> None:
     assert not _is_counterintuitive_spot(facts)
     on = compute_difficulty(facts, ev_gap_bb=1.0, apply_trap_bump=True)
     assert not on.trap_bump_applied
+
+
+# --- max_achievable_difficulty (the fail-fast / upfront-warning ceiling) ----
+def test_ceiling_pure_100pct_is_1125() -> None:
+    """At 100% frequency the near-pure EV credit forces the freq AND EV axes
+    to full easiness, so the hardest possible spot (concept ease at the 0.05
+    clip floor, hardest 0.40 hand class) scores 1125. This is WHY a
+    "difficulty 1500+ at 100% frequency" batch is structurally empty."""
+    assert max_achievable_difficulty(1.0) == 1125
+
+
+def test_ceiling_pure_100pct_with_trap_is_the_max_graded_floor() -> None:
+    """With trap-aware on, a pure trap spot rates max(natural, graded
+    floor); the graded floor tops out at TRAP_FLOOR_MAX, so that is the
+    ceiling."""
+    assert (
+        max_achievable_difficulty(1.0, trap_difficulty=True)
+        == TRAP_FLOOR_MAX
+    )
+
+
+def test_ceiling_monotonic_nonincreasing_in_frequency() -> None:
+    """Higher minimum frequency can only LOWER the hardest reachable score
+    (the frequency axis is monotonic and the near-pure credit only adds
+    easiness), so the window-level warning can use the window's minimum."""
+    freqs = [0.55, 0.65, 0.75, 0.85, 0.95, 0.96, 0.99, 1.0]
+    ceilings = [max_achievable_difficulty(f) for f in freqs]
+    assert all(a >= b for a, b in zip(ceilings, ceilings[1:]))
+
+
+def test_ceiling_is_true_upper_bound_of_compute_difficulty() -> None:
+    """INVARIANT (relied on by the batch driver's pre-equity fail-fast and
+    the admin's upfront warning): no spot at a given dominant frequency can
+    ever score ABOVE max_achievable_difficulty for that frequency. Sweeps
+    frequency x archetype x hand class x EV gap x trap flag, mirroring the
+    batch driver's near-pure EV-credit substitution exactly. If a retune of
+    the weights/tables breaks this, the fail-fast would silently drop
+    LEGITIMATE spots -- fix the ceiling alongside the retune."""
+    from pipeline.preflop.difficulty import (
+        NEAR_PURE_DOMINANT_FREQ,
+        NEAR_PURE_EV_CREDIT_BB,
+    )
+
+    freqs = [0.55, 0.65, 0.80, 0.90, 0.95, 0.96, 0.99, 1.0]
+    archetypes = [
+        "open_for_value", "5bet_as_bluff", "squeeze_as_bluff",
+        "unclassified", "something_not_in_table",
+    ]
+    hands = ["AA", "AKo", "73o", "76s", "T8o", "84s"]
+    ev_gaps: list[float | None] = [None, 0.0, 0.5, 3.0, 10.0]
+    for freq in freqs:
+        for trap in (False, True):
+            ceiling = max_achievable_difficulty(freq, trap_difficulty=trap)
+            for arch in archetypes:
+                for hand in hands:
+                    for gap in ev_gaps:
+                        # Mirror the batch driver: near-pure spots get the
+                        # full EV credit instead of their real (~0) gap.
+                        ev_for_diff = (
+                            NEAR_PURE_EV_CREDIT_BB
+                            if freq >= NEAR_PURE_DOMINANT_FREQ
+                            else gap
+                        )
+                        result = compute_difficulty(
+                            _facts(
+                                dominant_freq=freq,
+                                archetype=arch,
+                                hand_class=hand,
+                            ),
+                            ev_gap_bb=ev_for_diff,
+                            apply_trap_bump=trap,
+                        )
+                        assert result.score <= ceiling, (
+                            f"ceiling violated: freq={freq} arch={arch} "
+                            f"hand={hand} gap={gap} trap={trap}: "
+                            f"{result.score} > {ceiling}"
+                        )
+
+
+def test_ceiling_bounds_a_floored_trap_spot() -> None:
+    """A maximally-contradictory pure trap (30pt margin, saturating the
+    grade) lands exactly ON the trap-aware ceiling; a milder trap stays
+    below it but above the trap-off ceiling. Pins the ceilings from
+    below."""
+    severe = _trap_facts(dominant_action="Fold", hero_equity=0.65, break_even=0.35)
+    mild = _trap_facts(dominant_action="Fold", hero_equity=0.50, break_even=0.35)
+    on_severe = compute_difficulty(severe, ev_gap_bb=3.0, apply_trap_bump=True)
+    on_mild = compute_difficulty(mild, ev_gap_bb=3.0, apply_trap_bump=True)
+    assert on_severe.score == max_achievable_difficulty(1.0, trap_difficulty=True)
+    assert on_mild.score < on_severe.score
+    assert on_mild.score > max_achievable_difficulty(1.0)
+
+
+def test_band_reachability_hard_band_at_pure_freq_is_empty() -> None:
+    """The foot-gun that motivated the July 2026 fix: 1500+ at a 100%-only
+    window, trap-aware off. Zero candidates, guaranteed."""
+    assert (
+        classify_band_reachability(1500, 2750, 1.0, trap_difficulty=False)
+        == "empty"
+    )
+
+
+def test_band_reachability_trap_on_makes_hard_band_special_only() -> None:
+    """Same combo with trap-aware on: graded trap floors (1800-2900)
+    overlap the band, so the pool exists but is special-rated spots only."""
+    assert (
+        classify_band_reachability(1500, 2750, 1.0, trap_difficulty=True)
+        == "special_only"
+    )
+
+
+def test_band_reachability_medium_band_reaches_mild_traps() -> None:
+    """The gradation payoff: a Medium-ish band (1500-2100) at 100% now
+    reaches MILD traps (graded floors start at TRAP_FLOOR_MIN=1800), where
+    the old flat-2400 floor left it empty."""
+    assert (
+        classify_band_reachability(1500, 2100, 1.0, trap_difficulty=True)
+        == "special_only"
+    )
+
+
+def test_band_reachability_trap_on_but_band_above_grade_max_is_empty() -> None:
+    """Trap-aware ON does not help when the band sits entirely ABOVE the
+    graded range: floors top out at TRAP_FLOOR_MAX=2900, so a 2950+ band
+    misses both the natural cluster and every trap."""
+    assert (
+        classify_band_reachability(2950, 3200, 1.0, trap_difficulty=True)
+        == "empty"
+    )
+
+
+def test_band_reachability_ordinary_combos_are_reachable() -> None:
+    """Sane combos never warn: Easy at 100%, Hard at the default 65%
+    window, and the full Mixed band anywhere."""
+    assert (
+        classify_band_reachability(400, 1300, 1.0, trap_difficulty=False)
+        == "reachable"
+    )
+    assert (
+        classify_band_reachability(2100, 3200, 0.65, trap_difficulty=False)
+        == "reachable"
+    )
+    assert (
+        classify_band_reachability(400, 3200, 1.0, trap_difficulty=False)
+        == "reachable"
+    )

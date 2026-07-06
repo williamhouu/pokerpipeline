@@ -67,6 +67,12 @@ _POSTFLOP_EXTRA_COLUMNS: tuple[str, ...] = (
     "hand_id", "sequence_index", "sequence_total",
     "pot_odds", "hero_equity", "range_equity", "spr",
     "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+    # Full-hand play-throughs only (July 2026): the whole hand's difficulty
+    # = the MAX over its legs' Difficulty Ratings (the hand demands what its
+    # hardest decision demands; connective easy legs don't dilute it). Same
+    # value on every leg of a hand so the app can select play-throughs for a
+    # user's level with one filter. Blank on standalone rows.
+    "hand_difficulty",
 )
 POSTFLOP_CSV_COLUMNS: tuple[str, ...] = _SHARED_PREFIX + _POSTFLOP_EXTRA_COLUMNS
 
@@ -234,6 +240,9 @@ def build_postflop_row(
         "hand_id": hand_id,
         "sequence_index": str(sequence_index),
         "sequence_total": str(sequence_total),
+        # Stamped by the full-hand driver (max of the hand's legs); blank on
+        # standalone rows and until the driver assigns it.
+        "hand_difficulty": "",
         "Hand Stage": facts.street.capitalize(),
         "Context": build_context_line(solve, display_in_bb=display_in_bb),
         # App table-state tokens (User Seat / User Cards / Cards on Table /

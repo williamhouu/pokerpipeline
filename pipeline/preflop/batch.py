@@ -47,6 +47,7 @@ Design notes:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import logging
@@ -69,7 +70,10 @@ from pipeline.preflop.claim_checker import (
     claim_check_to_json,
 )
 from pipeline.preflop.difficulty import (
+    NEAR_PURE_DOMINANT_FREQ,
+    NEAR_PURE_EV_CREDIT_BB,
     compute_difficulty,
+    max_achievable_difficulty,
 )
 from pipeline.preflop.ev_engine import (
     compute_break_even_equity,
@@ -102,6 +106,11 @@ from pipeline.preflop.node_enumerator import (
 )
 from pipeline.preflop.options import build_options
 from pipeline.preflop.pack import PreflopPack
+from pipeline.preflop.batch_cross_check import cross_check_batch
+from pipeline.preflop.sanity_checker import (
+    check_solver_data_sanity,
+    consensus_issues,
+)
 from pipeline.preflop.question_extractor import (
     MAX_TOP_FREQUENCY,
     MIN_PRESENCE,
@@ -830,8 +839,31 @@ def _hero_premise_min_freq(
 # always carry the real frequencies + per-action EVs, and "Always X" is the
 # correct answer only for a literally-pure 100% action (else "Mostly X", with
 # "Always X" a neutral near-miss).
-_NEAR_PURE_DOMINANT_FREQ = 0.96
-_NEAR_PURE_EV_CREDIT_BB = 3.0  # = difficulty's full-credit EV ceiling
+# The constants live in pipeline.preflop.difficulty (July 2026) so that
+# max_achievable_difficulty -- the "can this band even be reached?" ceiling
+# the fail-fast gate and the admin's upfront warning rely on -- mirrors this
+# exact scoring path. INVARIANT: the difficulty computed in the loop below
+# must never exceed max_achievable_difficulty(spot.dominant_frequency, ...);
+# if you change how difficulty is fed here, change the ceiling to match.
+_NEAR_PURE_DOMINANT_FREQ = NEAR_PURE_DOMINANT_FREQ
+_NEAR_PURE_EV_CREDIT_BB = NEAR_PURE_EV_CREDIT_BB
+
+
+def _is_fatal_api_error(exc: Exception) -> bool:
+    """True for API errors that will fail EVERY subsequent call too.
+
+    Billing (out of credits) and authentication (bad/expired key) errors
+    are not per-spot problems: once one fires, every later LLM call in the
+    batch fails identically, so the per-spot catch-all's "record the
+    failure and move on" contract must not apply. Matched on the stable
+    parts of the SDK's error surface (HTTP status for auth, message text
+    for billing -- Anthropic returns billing failures as a 400 whose
+    message names the credit balance, so status alone can't identify it).
+    """
+    msg = str(exc).lower()
+    if "credit balance" in msg or "authentication" in msg:
+        return True
+    return getattr(exc, "status_code", None) in (401, 403)
 
 
 def _safe_claim_check(
@@ -868,6 +900,7 @@ def generate_preflop_batch(
     min_difficulty: int = DIFFICULTY_MIN,
     max_difficulty: int = DIFFICULTY_MAX,
     trap_difficulty: bool = False,
+    razor_difficulty: bool = False,
     diversify: bool = False,
     min_ev_gap_bb: float | None = None,
     min_villain_line_pct: float | None = 0.25,
@@ -887,6 +920,7 @@ def generate_preflop_batch(
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
     final_audit: bool = False,
+    run_sanity_audit: bool = False,
     dry_run: bool = False,
     client: object | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -1046,6 +1080,9 @@ def generate_preflop_batch(
     # opt-in trap_difficulty mode (0 when the mode is off). Lets the user see
     # how many of the evaluated spots the new method re-rated.
     trap_floored = 0
+    # Range-boundary spots re-rated by the opt-in razor_difficulty mode
+    # (a grid neighbor's dominant action differs at the same node).
+    razor_floored = 0
     # Spots skipped by the convergence guard (unconverged solver nodes --
     # AA folding preflop / premium-pair inversions). Cached per node so each
     # node is only checked once even though many hands share it.
@@ -1065,6 +1102,10 @@ def generate_preflop_batch(
     revise_fixed = 0
     revise_discarded = 0
     revise_unchanged = 0
+    # Rows the opt-in SANITY AUDIT flagged (an LLM allowed to use poker
+    # knowledge challenging the SOLVER DATA facts themselves; flag-only,
+    # hypotheses for human review -- see pipeline.preflop.sanity_checker).
+    sanity_flagged_rows = 0
     _node_villain_pct: dict[str, float | None] = {}
     node_index: dict[tuple[str, tuple], PreflopDecisionNode] = {
         (n.actor, n.history_before): n for n in nodes
@@ -1119,6 +1160,23 @@ def generate_preflop_batch(
             if premise is not None and premise < min_hero_premise_freq:
                 rare_premise_filtered_out += 1
                 continue
+        # --- difficulty fail-fast (cheap, pre-equity, pre-LLM) ------------
+        # The 4-axis score is bounded above by a pure function of the spot's
+        # dominant frequency alone. When that ceiling already misses the
+        # requested band, skip BEFORE the ~1.5s/spot equity sim in
+        # extract_facts. Without this, a structurally-empty combo (e.g.
+        # min_difficulty 1500 + a 100% frequency window, where no spot can
+        # score past ~1125) ground through HOURS of equity sims only to
+        # reject every spot. INVARIANT: max_achievable_difficulty must stay
+        # a true ceiling of the difficulty computed below (same
+        # trap_difficulty flag; guarded by tests/test_preflop_difficulty.py).
+        if max_achievable_difficulty(
+            spot.dominant_frequency,
+            trap_difficulty=trap_difficulty,
+            razor_difficulty=razor_difficulty,
+        ) < min_difficulty:
+            difficulty_filtered_out += 1
+            continue
         # --- facts + canonical difficulty (no API spend yet) -------------
         # compute_difficulty blends freq + EV gap + archetype/concept +
         # hand class (with EV-weight redistribution when the EV engine
@@ -1160,6 +1218,7 @@ def generate_preflop_batch(
                 facts,
                 ev_gap_bb=ev_gap_for_difficulty,
                 apply_trap_bump=trap_difficulty,
+                apply_razor_bump=razor_difficulty,
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(
@@ -1176,6 +1235,8 @@ def generate_preflop_batch(
             continue
         if difficulty.trap_bump_applied:
             trap_floored += 1
+        if difficulty.razor_bump_applied:
+            razor_floored += 1
         # --- difficulty-band + min-EV-gap filter -------------------------
         if not (min_difficulty <= difficulty.score <= max_difficulty):
             difficulty_filtered_out += 1
@@ -1333,11 +1394,49 @@ def generate_preflop_batch(
                 else run_preflop_soft_validators(explanation, facts)
             )
 
+            # --- sanity audit (opt-in, flag-only, may be WRONG) -----------
+            # The one LLM pass allowed to use its own poker knowledge, aimed
+            # at the SOLVER DATA facts (never the prose): "does anything
+            # here contradict basic poker?". Its flags are HYPOTHESES for a
+            # human reviewer (LLMs are confidently wrong about poker -- the
+            # project's founding premise), so they mark the row flagged but
+            # never gate, rewrite, or reject. Fails open.
+            # TWO-PASS AGREEMENT (July 2026, from v1 calibration where all
+            # 7 single-pass flags were false positives): a flag ships only
+            # when a SECOND independent pass challenges the same fact. The
+            # confirm call runs only when the first pass flags, so clean
+            # rows (the common case) stay one call.
+            sanity_issues: list[str] = []
+            if run_sanity_audit and not dry_run:
+                try:
+                    sanity_data = _trim_facts_for_prompt(facts)
+                    first_pass = check_solver_data_sanity(
+                        sanity_data, client, model=model,
+                    )
+                    kept = first_pass.issues
+                    if kept:
+                        second_pass = check_solver_data_sanity(
+                            sanity_data, client, model=model,
+                        )
+                        kept = consensus_issues(first_pass, second_pass)
+                    sanity_issues = [
+                        f"{i.fact} -- {i.problem}" for i in kept
+                    ]
+                except Exception as exc:  # noqa: BLE001 - never drop a row
+                    logger.warning(
+                        "batch: sanity audit failed for %s: %s",
+                        spot.node.node_id, exc,
+                    )
+                if sanity_issues:
+                    sanity_flagged_rows += 1
+
             # Append the parallel per-row lists together so they stay aligned.
             rows.append((facts, explanation, difficulty))
             claim_checks.append(claim_check_json)
             row_statuses.append(
-                "flagged" if (soft_warnings or remaining_issues) else None
+                "flagged"
+                if (soft_warnings or remaining_issues or sanity_issues)
+                else None
             )
             # Record the exact (deterministic) inputs that produced this row,
             # in the same order rows are written to the CSV.
@@ -1351,6 +1450,8 @@ def generate_preflop_batch(
                 record["validator_warnings"] = soft_warnings
             if claim_issues:
                 record["claim_check_issues"] = claim_issues
+            if sanity_issues:
+                record["sanity_check_issues"] = sanity_issues
             if revise_record is not None:
                 record["revise"] = revise_record
             prompt_records.append(record)
@@ -1370,6 +1471,17 @@ def generate_preflop_batch(
                 spot.hero_hand_class,
                 exc,
             )
+            # A billing / auth error fails EVERY subsequent call the same
+            # way, so grinding on just pays an equity sim per spot to
+            # collect identical failures (July 2026: an out-of-credits key
+            # burned ~90 minutes and 1,058 failures on one batch before
+            # returning). Abort; whatever succeeded so far still ships.
+            if _is_fatal_api_error(exc):
+                logger.error(
+                    "batch: ABORTING -- the API error is fatal for every "
+                    "remaining call (billing/auth): %s", exc,
+                )
+                break
 
     # 6. Write CSV if we produced anything. write_preflop_csv creates
     # parent dirs as needed.
@@ -1389,6 +1501,29 @@ def generate_preflop_batch(
             claim_checks=claim_checks,
         )
         final_out = out_path
+        # Deterministic post-batch cross-checks (July 2026): re-read the
+        # CSV AS WRITTEN and verify it against first-principles poker
+        # facts (position from seats, domination direction, bands, sums).
+        # Zero-LLM, zero false positives in calibration -- the machine
+        # replacement for the LLM sanity audit's fact categories. Findings
+        # attach to the meta question records and render in Review.
+        cross_check_problems = 0
+        try:
+            with open(out_path, newline="", encoding="utf-8-sig") as handle:
+                written_rows = list(csv.DictReader(handle))
+            findings = cross_check_batch(
+                written_rows, prompt_records,
+                min_difficulty=min_difficulty, max_difficulty=max_difficulty,
+            )
+            for idx, found in findings.items():
+                prompt_records[idx]["cross_check_issues"] = found
+                cross_check_problems += len(found)
+                logger.warning(
+                    "batch: cross-check row %s: %s",
+                    written_rows[idx].get("No", idx + 1), "; ".join(found),
+                )
+        except Exception as exc:  # noqa: BLE001 - checks must not kill a batch
+            logger.warning("batch: cross-check pass failed: %s", exc)
         # Sidecar metadata: which prompt produced these rows + the exact
         # per-spot inputs, in CSV row order. Powers output->prompt tagging
         # and the prompt inspector. Written for dry-runs too (the inputs
@@ -1416,6 +1551,7 @@ def generate_preflop_batch(
                 "min_difficulty": min_difficulty,
                 "max_difficulty": max_difficulty,
                 "trap_difficulty": trap_difficulty,
+                "razor_difficulty": razor_difficulty,
                 "diversify": diversify,
                 "min_ev_gap_bb": min_ev_gap_bb,
                 "min_villain_line_pct": min_villain_line_pct,
@@ -1423,6 +1559,7 @@ def generate_preflop_batch(
                 "equity_runouts": equity_runouts,
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
+                "run_sanity_audit": run_sanity_audit,
                 "final_audit": final_audit,
                 "display_in_bb": display_in_bb,
                 "stakes_bb_dollars": stakes_bb_dollars,
@@ -1437,6 +1574,7 @@ def generate_preflop_batch(
                 "nodes_after_filter": len(filtered_nodes),
                 "difficulty_filtered_out": difficulty_filtered_out,
                 "trap_floored": trap_floored,
+                "razor_floored": razor_floored,
                 "noise_filtered_out": noise_filtered_out,
                 "incoherent_mix_filtered_out": incoherent_mix_filtered_out,
                 "rare_line_filtered_out": rare_line_filtered_out,
@@ -1450,6 +1588,8 @@ def generate_preflop_batch(
                 "revise_fixed": revise_fixed,
                 "revise_discarded": revise_discarded,
                 "revise_unchanged": revise_unchanged,
+                "sanity_flagged_rows": sanity_flagged_rows,
+                "cross_check_problems": cross_check_problems,
             },
             failures=failures,
         )

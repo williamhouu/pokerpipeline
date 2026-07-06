@@ -317,6 +317,33 @@ subject-bound ladder slips inside the reachable bound ("CO folds to a
 5-bet" where only CO could make it) and equity-vs-named-hand claims
 (rule 15 is prompt-only).
 
+**July 2026 fact-correctness fixes (from user Review QC):**
+- **BvB position bug.** `pipeline/{preflop,plo}/position.py` + both skill
+  taggers claimed the blind-vs-blind SB "is the dealer and acts LAST
+  postflop" (true only at a 2-player table). At ring tables the BvB SB is
+  OOP and the BB is IP; the wrong value flowed into `Relative Position`,
+  the SOLVER DATA position line (and thus prose + the position soft
+  validator, which reads the same source), and the In/Out of Position
+  skills. Exception deleted in all 4 sites; every consumer routes through
+  the two position modules; tests pin the ring-table rule.
+- **Domination map read a 5-class sample.** `dominating_map` was fed the
+  capped `most_common_combos` digest, so `dominated_by: []` meant "none of
+  the 5 sampled classes" while reading as a fact about the whole range
+  (A8o vs a BTN open showed ZERO dominators; the Layer-7 checker then
+  false-flagged correct "often outkicked" prose). New
+  `VillainRangeStats.in_range_classes` = EVERY class at weight >= 0.10,
+  combo-share ordered; both call sites (data block + exploit notes) use it;
+  buckets still cap at 6 for prose. Also fixed the tie-break: the
+  "premium-first" canonical order was actually ALPHABETICAL (AA, A2s, A2o,
+  ... KK last), surfacing "likely hands: A2o-A6o" on wide ranges -- now
+  `_class_strength_key` (AKo, AQo, ... lead equal-weight ties).
+- **Reverse Implied Odds vs re-raises.** The RIO concept tag's 20%-width
+  gate was calibrated for facing an OPEN; a 3-bet range is dominator-heavy
+  at any realistic width (KTo SB-vs-BB-3bet at 25.4% missed the tag). Now:
+  facing a re-raise the cutoff is 30% AND the dominant action must be a
+  fold (so the tag can't push RIO framing against a correct call); facing
+  an ALL-IN never fires (no postflop play = no implied odds either way).
+
 ## Postflop pipeline (`pipeline/postflop/`, June 2026)
 
 A **separate, self-contained** flop/turn/river generator, kept apart from the
@@ -493,7 +520,9 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   **Trap-aware is an opt-in toggle (off by default, like preflop)**:
   `compute_difficulty(facts, apply_trap_bump=)` floors a counterintuitive
   heads-up facing-a-bet spot (solver folds despite equity ≥ price, or continues
-  below it) to `TRAP_DIFFICULTY_FLOOR` (2400). Admin Generate checkbox "🪤
+  below it) to a **GRADED floor 1800–2900** (July 2026, was a flat 2400) scaled
+  by the |equity − price| contradiction — shared leaf `pipeline/trap_grading.py`,
+  same map as preflop. Admin Generate checkbox "🪤
   Trap-aware difficulty" + a "How is postflop difficulty calculated?" popover;
   threaded batch→`run.py`→admin + CLI `--trap-difficulty`; `meta.counters.
   trap_floored` reports the re-rated count. New CSV diagnostics `easy_concept` /
@@ -597,6 +626,41 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   the deepest prior-street decision ancestor by node-id prefix — flop nodes are
   never down-sampled so a turn question always resolves; flop questions stay on
   the shared preflop ranges). RIGHT grid unchanged (current-street strategy).
+- **Pack-backed preflop legs for full-hand play-throughs (July 2026).**
+  `pipeline/postflop/preflop_leg_pack.py` — the ONE sanctioned
+  cross-pipeline seam (lazy preflop imports; nothing else in
+  `pipeline/postflop` may import `pipeline.preflop`). When a preflop range
+  pack provably matches the solve's preflop line (3 gates: geometry — same
+  table size/stack/open size within 0.26bb, derived from the flop pot;
+  line — the opener + defender nodes exist with all-folds-before; and
+  per-hand coherence — the pack's dominant action == the as-played
+  action), the preflop leg is built with the FULL preflop pipeline
+  (per-action EVs, GTO options under the EV-secondary rule, stat_notes,
+  `ranges` JSON, domination, skills, 4-axis difficulty + trap/razor,
+  soft validators) and adapted onto the postflop schema; otherwise the
+  entry-derived leg is the fallback (per-hand). Auto-selected
+  (IMPROVED-preferred, deterministic) from `ranges/` by
+  `run.generate_full_hand_batch_from_db(use_pack_preflop_legs=True)`;
+  verified live: v7 (8-max 200bb) matches `preflop_8max_200bb_IMPROVED`
+  at 3.0bb, v8 (9-max) correctly falls back. Counters
+  `preflop_leg_pack_used` / `preflop_leg_entry_fallback`; run_settings
+  `preflop_leg_pack`; `audit_full_hand_batch.py` rebuilds pack legs
+  (0/0 on the real v7 batch). Tests: `tests/test_full_hand_pack_legs.py`.
+- **Full-hand difficulty (July 2026).** Every leg keeps its own per-
+  question `Difficulty Rating` (the app's per-question scoring); a new
+  END-of-schema column **`hand_difficulty` = MAX over the hand's legs**
+  (same value on every leg; blank on standalone rows) is the hand-level
+  selector — a hand demands what its hardest decision demands, so a mean
+  would wash out a 2400 river bluff-catch behind three easy calls.
+  Computed in a pre-LLM pre-pass (facts cached and reused by generation,
+  no double equity sims) so the optional hand band filter
+  (`min/max_hand_difficulty`; admin full-hand mode radio Easy/Medium/
+  Hard/Mixed/Custom) costs no tokens; `counters.hands_difficulty_
+  filtered`. The full-hand admin mode also exposes 🔪 razor's-edge for
+  the pack-backed preflop leg. Postflop GTO options: a PURE 3+-verb spot
+  now spectrums the dominant verb vs the SECOND-BEST verb BY EV
+  (`options._best_ev_alternative_verb`, the same standing rule as
+  preflop; plain-labels fallback when the solve ships no EVs).
 - **NOT done (seamed extension points)**: a postflop **prompt library** (the
   Compare page uses two free-text boxes today); LLM prompt tuning against gold
   postflop examples; the harder-to-detect skills (`Facing a Check-Raise`, MDF,
@@ -787,17 +851,39 @@ three when unavailable. Full details in `pipeline/preflop/difficulty.py`
 and the Generate page's "How is Difficulty calculated?" popover (which
 reads the constants live).
 
-**Trap-aware difficulty (opt-in, June 2026).** The weighted sum is ~70%
+**Difficulty ceiling + fail-fast (July 2026).** The score is bounded
+above by a pure function of the dominant frequency alone:
+`difficulty.max_achievable_difficulty(min_frequency, trap_difficulty=)`
+(mirrors the batch's near-pure EV credit; INVARIANT guarded by
+`tests/test_preflop_difficulty.py`). A pure 100% spot can never rate
+above **1125** (measured on the 8-max packs: ~875), so "Medium/Hard band
++ 100% frequency" is structurally EMPTY unless trap-aware is on (traps
+grade 1800–2900 there). Two consumers: `generate_preflop_batch` skips
+out-of-reach spots BEFORE the ~1.5s/spot equity sim in `extract_facts`
+(a doomed 6k-spot scan used to grind ~2.8h; now instant, still counted
+in `difficulty_filtered_out`), and the admin Generate page shows an
+upfront error/warning when the band + frequency combo is unreachable
+(`difficulty.classify_band_reachability` — pure, browserlessly tested —
+including the trap-on case where the band misses the 1800–2900 range).
+
+**Trap-aware difficulty (opt-in June 2026; GRADED floor July 2026).** The
+weighted sum is ~70%
 frequency+EV, which BOTH say "easy" exactly when the solver is
 near-indifferent — so by default "hard" === close-mix spots, and a PURE
 (100%) spot can never exceed difficulty ~2000 (caps below the Hard floor
-2100). To make genuinely counterintuitive PURE spots rate Hard, the
-`trap_difficulty` batch flag (admin Generate checkbox "🪤 Trap-aware
+2100). To make genuinely counterintuitive PURE spots rate Medium-to-Hard,
+the `trap_difficulty` batch flag (admin Generate checkbox "🪤 Trap-aware
 difficulty" + its own info popover; `compute_difficulty(...,
-apply_trap_bump=)`) floors a **trap** spot to `TRAP_DIFFICULTY_FLOOR`
-(2400). A trap = the solver's dominant action CONTRADICTS the
+apply_trap_bump=)`) floors a **trap** spot to a **graded value 1800–2900**
+(`pipeline/trap_grading.py:graded_trap_floor`, shared with postflop; was a
+flat 2400) scaled by the RAKE-BLIND |equity − price| contradiction: the
+detection-threshold margin (4pts) grades 1800, saturation (25pts) grades
+2900, and the median 8-max trap (~16pts) grades ~2430 ≈ the old flat
+floor. Detection is unchanged: a trap = the solver's dominant action
+CONTRADICTS the
 equity-vs-price pot-odds baseline by a clear margin (`_TRAP_EQUITY_MARGIN`
-0.04): folds despite equity ≥ price, or calls/3-bets despite equity <
+0.04, + a rake cushion for folds): folds despite equity ≥ price, or
+calls/3-bets despite equity <
 price (`difficulty._is_counterintuitive_spot`). HEADS-UP facing-a-bet
 spots only (opening spots have no price → never traps; multiway is
 skipped — field-equity-vs-price is mis-specified and ~all such hits were
@@ -806,8 +892,72 @@ never the answer/options/prose/worthiness; OFF by default = unchanged
 behaviour; `meta.counters.trap_floored` reports how many were re-rated.
 Deliberately the same signal as `soft_validate_fold_as_equity_favorite`,
 so trap-FOLDs are also soft-flagged for review (guards against rating a
-broken solve like the Monker QQ-fold as "hard"). Recommended ON for Hard
-batches, off for Easy/Medium.
+broken solve like the Monker QQ-fold as "hard"). Recommended ON for
+Medium and Hard batches (mild traps now land in Medium), off for Easy.
+The three audit re-verifiers mirror the flag from `meta.run_settings`
+(July 2026) so trap-aware batches re-verify without false difficulty
+drift.
+
+**Razor's-edge difficulty (opt-in, July 2026).** The OTHER route (besides
+trap-aware) to Medium/Hard 100%-frequency questions: a pure hand sitting
+ON a range boundary — its grid NEIGHBOR does the opposite at the same
+node (ATo folds where AJo calls / the ATs twin raises / TT's adjacent
+pairs differ) — is floored to a GRADED value by how many neighbors oppose
+it (`pipeline/preflop/razor_edge.py`: 1 → 2000, 2 → 2300, 3+ "island" →
+2600). Detection is pure range-file math via `sample_spot` on the
+neighbor classes (presence-gated; raise SIZES don't count as opposite);
+`compute_difficulty(..., apply_razor_bump=)`, batch flag
+`razor_difficulty`, `meta.counters.razor_floored`, admin checkbox "🔪
+Razor's-edge difficulty" + popover next to trap-aware. Composes with the
+trap floor (higher wins). `max_achievable_difficulty` /
+`classify_band_reachability` know both modes (the "trap_only" verdict is
+now `"special_only"`); the audit re-verifier mirrors the flag from meta.
+
+**Sanity audit (opt-in Layer-7 pass, July 2026).** The ONE LLM pass
+allowed to use its own poker knowledge, pointed at the SOLVER DATA facts
+(never prose): `pipeline/preflop/sanity_checker.py`, batch flag
+`run_sanity_audit` (admin checkbox "🩺 Sanity audit" under the Layer-7
+section). Exists because every other check verifies internal consistency
+and therefore AGREES with a wrong deterministic fact (the BvB position
+bug + empty-domination bug shipped that way). Strictly flag-only
+(hypotheses for human review — LLMs are confidently wrong about poker,
+the project's founding premise), fails open, restricted by prompt to
+basic high-confidence facts (action order, domination direction, equity
+plausibility ±10pts, arithmetic, action-history consistency). Flags land
+in the meta question record (`sanity_check_issues`) + `counters.
+sanity_flagged_rows`, rendered on Review with a distinct 🩺 badge that
+warns the checker itself can be wrong. **v2 (July 5 2026): the first
+live calibration produced 7 flags, ALL false positives — one stated the
+BvB rule backwards.** v2 embeds the deterministic REFERENCE RULES (seat
+order, break-even arithmetic per seat, gapper counting, suited-twin
+equity) + each v1 misfire as a do-not-flag counter-example, and a flag
+ships only when **two independent passes challenge the same fact**
+(`consensus_issues`; the confirm call runs only on first-pass flags).
+Awaiting live re-calibration (API credits). Keep OFF for routine
+batches; the deterministic cross-check below covers its fact categories
+with zero false positives.
+
+**Deterministic batch cross-check (auto-run, July 2026).**
+`pipeline/preflop/batch_cross_check.py` re-reads every batch CSV AS
+WRITTEN at the end of `generate_preflop_batch` and verifies it against
+FIRST-PRINCIPLES facts — its own seat-order list (deliberately NOT
+imported from `pipeline.preflop.position`; independence is the point),
+position skills, BvB skill hygiene, domination-list direction + the
+empty-`dominated_by`-vs-likely-hands challenge, difficulty band
+membership, frequency sums, no-RIO-on-all-in, and hero-subject prose
+position claims. Zero LLM, zero false positives in calibration. Findings
+→ meta `cross_check_issues` + `counters.cross_check_problems`, rendered
+on Review as an always-visible 🔬 error badge (machine-verified, not an
+AI opinion). Re-check any OLD batch with
+`scripts/cross_check_preflop_batch.py <batch.csv>`.
+
+**Ground-truth test tier (July 2026).** `tests/test_ground_truth_poker.py`
+asserts poker facts from OUTSIDE the pipeline (ring-table position
+mechanics, domination direction, preflop equity landmarks like AA-vs-KK
+~81%, implied-odds logic) so an internally-consistent bug still fails CI.
+Rule stated in the file header: a failure there means the CODE is wrong —
+never adjust an assertion to match the code without independently
+confirming the poker fact.
 
 **PLO drops the EV axis (June 2026).** `pipeline/plo/difficulty.py` is
 3-axis — `easy = 0.57 * easy_freq + 0.29 * easy_concept + 0.14 *

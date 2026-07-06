@@ -115,6 +115,32 @@ def _live_verbs(spot: PostflopSpot) -> list[str]:
     return [v for v, f in _verb_frequencies(spot).items() if f >= _NEAR_BINARY_DROP_FREQ]
 
 
+def _best_ev_alternative_verb(
+    spot: PostflopSpot, dominant_verb: str
+) -> str | None:
+    """The highest-EV verb OTHER than the dominant one, from the spot's
+    per-action EVs (hand-specific when the solve carries combo EVs, else
+    the range-mean). A multi-size verb is ranked by its best size. None
+    when the solve ships no EVs -- the caller keeps its old fallback."""
+    from pipeline.postflop.spot_sampler import (  # noqa: PLC0415 - cycle guard
+        spot_action_evs_bb,
+    )
+
+    evs = spot_action_evs_bb(spot)
+    if not evs:
+        return None
+    verb_of = {a.label: a.verb for a in spot.node.actions}
+    best_verb: str | None = None
+    best_ev: float | None = None
+    for label, ev in evs.items():
+        verb = verb_of.get(label)
+        if verb is None or verb == dominant_verb:
+            continue
+        if best_ev is None or ev > best_ev:
+            best_verb, best_ev = verb, ev
+    return best_verb
+
+
 def _collapsed_spectrum_options(
     spot: PostflopSpot, verbs: list[str] | None = None
 ) -> tuple[list[str], str]:
@@ -233,6 +259,20 @@ def build_options(
             live = _live_verbs(spot)
             if len(live) == 2:  # noqa: PLR2004
                 return _collapsed_spectrum_options(spot, verbs=live)
+            if len(live) == 1:
+                # Pure / near-pure 3+-verb spot: every alternative sits at
+                # ~0% frequency, so frequency can't rank them. STANDING RULE
+                # (user, July 2026, mirrors preflop's EV-first secondary --
+                # see pipeline.preflop.options._pick_gto_secondary): the
+                # wrong-answer option is the SECOND-BEST action BY EV, the
+                # genuinely most tempting mistake. Do not order any other
+                # heuristic ahead of the EV ranking. Falls through to plain
+                # labels only when the solve ships no per-action EVs.
+                alt = _best_ev_alternative_verb(spot, live[0])
+                if alt is not None:
+                    return _collapsed_spectrum_options(
+                        spot, verbs=[live[0], alt]
+                    )
     return _plain_options(actions, labels, dominant)
 
 

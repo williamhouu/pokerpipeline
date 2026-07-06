@@ -11,8 +11,12 @@ from __future__ import annotations
 from pipeline.plo.fact_extractor import PloFacts
 
 # Postflop action order: SB acts first ... BU (button) acts last. A higher rank
-# = acts later postflop = in position. Blind-vs-blind is the exception: with
-# only SB + BB live, the SB is the dealer and acts LAST postflop, so SB is IP.
+# = acts later postflop = in position. NOTE there is deliberately NO
+# blind-vs-blind exception (July 2026 bugfix): at a ring table the BvB SB
+# still acts FIRST on every postflop street -- the BB has position. "The SB
+# is the dealer" is true only at a literal 2-player table (heads-up format),
+# which no pack is. Mirrors pipeline/preflop/position.py; tests pin the
+# ring-table rule.
 _POSTFLOP_RANK: dict[str, int] = {
     "SB": 0,
     "BB": 1,
@@ -26,11 +30,10 @@ _POSTFLOP_RANK: dict[str, int] = {
 def ip_oop_positions(hero_pos: str, villain_pos: str) -> tuple[str, str]:
     """Return ``(ip_position, oop_position)`` for a 2-way preflop spot.
 
-    BvB (only SB + BB): SB acts last postflop, so SB is IP. Otherwise the seat
-    with the higher postflop rank (acts later) is in position.
+    The seat with the higher postflop rank (acts later) is in position.
+    Blind-vs-blind follows the same rule: the BB acts after the SB on every
+    postflop street, so the BB is IP (no special case -- see module comment).
     """
-    if {hero_pos, villain_pos} == {"SB", "BB"}:
-        return ("SB", "BB")
     hero_rank = _POSTFLOP_RANK.get(hero_pos, -1)
     villain_rank = _POSTFLOP_RANK.get(villain_pos, -1)
     if hero_rank > villain_rank:
@@ -41,14 +44,14 @@ def ip_oop_positions(hero_pos: str, villain_pos: str) -> tuple[str, str]:
 def hero_relative_position(facts: PloFacts) -> str:
     """Hero's IP/OOP standing as ``"In Position"`` / ``"Out of Position"``.
 
-    With a villain: hero is IP iff it acts last postflop (the BvB-SB exception
-    included). On open spots (no villain) the opener is in position only when
-    nobody behind acts later -- true for the Button, and for the SB in a BvB
-    open (the SB is the dealer).
+    With a villain: hero is IP iff it acts last postflop. On open spots (no
+    villain) the opener is in position only when nobody behind acts later
+    postflop -- true only for the Button (an SB first-in open still has the
+    BB in position behind it).
     """
     hero = facts.spot.node.actor
     if facts.villain_stats is None:
-        return "In Position" if hero in ("BU", "SB") else "Out of Position"
+        return "In Position" if hero == "BU" else "Out of Position"
     ip_pos, _oop = ip_oop_positions(hero, facts.villain_stats.seat)
     return "In Position" if hero == ip_pos else "Out of Position"
 

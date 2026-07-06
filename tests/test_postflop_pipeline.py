@@ -1298,8 +1298,12 @@ def test_difficulty_bluff_catch_harder_than_value_bet() -> None:
 
 def test_trap_difficulty_floors_counterintuitive_fold() -> None:
     import dataclasses
+
+    from pipeline.trap_grading import TRAP_FLOOR_MAX, TRAP_FLOOR_MIN
+
     base = _facts_for("flop_ip_facing_bet", "KsJd")  # facing a bet (has a price)
     # Force a PURE fold whose equity clearly CLEARS the price -> a "trap".
+    # The 30pt equity-vs-price margin saturates the graded floor.
     trap = dataclasses.replace(
         base, dominant_verb="fold", dominant_action="Fold",
         dominant_frequency=1.0, hero_equity_vs_villain=0.60,
@@ -1307,8 +1311,29 @@ def test_trap_difficulty_floors_counterintuitive_fold() -> None:
     )
     off = compute_difficulty(trap, apply_trap_bump=False)
     on = compute_difficulty(trap, apply_trap_bump=True)
-    assert not off.trap_bump_applied and off.score < 2400  # noqa: PLR2004
-    assert on.trap_bump_applied and on.score >= 2400  # noqa: PLR2004
+    assert not off.trap_bump_applied and off.score < TRAP_FLOOR_MIN
+    assert on.trap_bump_applied and on.score == TRAP_FLOOR_MAX
+
+
+def test_trap_difficulty_grades_by_contradiction_size() -> None:
+    """Graded floor (July 2026): a mild postflop trap rates lower than a
+    severe one instead of both pinning to a flat 2400."""
+    import dataclasses
+
+    from pipeline.trap_grading import TRAP_FLOOR_MIN, graded_trap_floor
+
+    base = _facts_for("flop_ip_facing_bet", "KsJd")
+    def _trap(eq: float) -> object:
+        return dataclasses.replace(
+            base, dominant_verb="fold", dominant_action="Fold",
+            dominant_frequency=1.0, hero_equity_vs_villain=eq,
+            break_even_equity=0.30, n_players=2,
+        )
+    mild = compute_difficulty(_trap(0.36), apply_trap_bump=True)
+    severe = compute_difficulty(_trap(0.50), apply_trap_bump=True)
+    assert mild.trap_bump_applied and severe.trap_bump_applied
+    assert TRAP_FLOOR_MIN <= mild.score < severe.score
+    assert severe.score == graded_trap_floor(0.20)
 
 
 def test_trap_difficulty_skips_non_facing_bet() -> None:
@@ -1747,3 +1772,50 @@ def test_chat_context_column_postflop() -> None:
     assert ctx["recommended_action"] == correct
     assert ctx["villain"]["seat"] == facts.villain_position
     assert ctx["guardrails"]
+
+
+def test_options_gto_pure_spot_secondary_is_second_best_by_ev() -> None:
+    """STANDING RULE (July 2026, mirrors preflop): on a PURE 3-verb spot the
+    alternatives all sit at ~0%, so the spectrum pairs the dominant verb
+    with the SECOND-BEST verb BY EV -- the genuinely most tempting mistake
+    -- not a fixed fallback. No EVs -> old plain-labels fallback."""
+    from types import SimpleNamespace
+
+    from pipeline.postflop.options import build_options
+    from pipeline.postflop.solve import NodeAction
+
+    def _stub(evs_by_label):
+        acts = (
+            NodeAction(label="Fold", verb="fold", freq=0.0,
+                       ev_bb=evs_by_label.get("Fold")),
+            NodeAction(label="Call", verb="call", freq=1.0,
+                       ev_bb=evs_by_label.get("Call")),
+            NodeAction(label="Raise to 12bb", verb="raise", freq=0.0,
+                       to_bb=12.0, pot_fraction=1.0,
+                       ev_bb=evs_by_label.get("Raise to 12bb")),
+        )
+        return SimpleNamespace(
+            node=SimpleNamespace(actions=acts, node_id="x", combo_evs={}),
+            hero_combo="AsQs",
+            action_frequencies={"Fold": 0.0, "Call": 1.0, "Raise to 12bb": 0.0},
+            dominant_action="Call", dominant_frequency=1.0,
+        )
+
+    # Raising (+1.95) beats folding (0.00) -> pair Call with the raise.
+    spot = _stub({"Call": 2.87, "Fold": 0.0, "Raise to 12bb": 1.95})
+    assert build_options(spot, style="gto") == (
+        ["Always Call", "Mostly Call", "Mostly Raise to 12bb",
+         "Always Raise to 12bb"],
+        "Always Call",
+    )
+    # EV ranking is symmetric: when raising is -EV, Fold is second-best.
+    spot = _stub({"Call": 1.10, "Fold": 0.0, "Raise to 12bb": -0.55})
+    assert build_options(spot, style="gto") == (
+        ["Always Fold", "Mostly Fold", "Mostly Call", "Always Call"],
+        "Always Call",
+    )
+    # No EVs at all -> the old plain-labels fallback.
+    spot = _stub({})
+    assert build_options(spot, style="gto")[0] == [
+        "Fold", "Call", "Raise to 12bb",
+    ]

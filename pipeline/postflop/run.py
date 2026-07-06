@@ -326,6 +326,10 @@ def generate_full_hand_batch_from_db(
     system_prompt: str | None = None,
     preflop_system_prompt: str | None = None,
     trap_difficulty: bool = False,
+    razor_difficulty: bool = False,
+    use_pack_preflop_legs: bool = True,
+    min_hand_difficulty: int | None = None,
+    max_hand_difficulty: int | None = None,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
@@ -367,6 +371,15 @@ def generate_full_hand_batch_from_db(
         else load_preflop_entry_system_prompt()
     )
 
+    # Pack-backed preflop legs (July 2026): auto-select the closest preflop
+    # range pack from the repo's ranges/ so the preflop leg carries the full
+    # math (EVs, ranges, stat_notes, 4-axis difficulty). Fallback logic and
+    # the coherence gate live in pipeline.postflop.preflop_leg_pack.
+    ranges_root = (
+        Path(__file__).resolve().parents[2] / "ranges"
+        if use_pack_preflop_legs else None
+    )
+
     return generate_full_hand_batch(
         solve=solve,
         output_path=output_path,
@@ -389,6 +402,10 @@ def generate_full_hand_batch_from_db(
         system_prompt=prompt,
         preflop_system_prompt=pre_prompt,
         trap_difficulty=trap_difficulty,
+        razor_difficulty=razor_difficulty,
+        preflop_leg_pack_root=ranges_root,
+        min_hand_difficulty=min_hand_difficulty,
+        max_hand_difficulty=max_hand_difficulty,
         run_claim_checker=run_claim_checker,
         claim_checker_prompt=claim_checker_prompt,
         revise_pass=revise_pass,

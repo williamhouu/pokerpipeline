@@ -637,3 +637,72 @@ def test_non_bb_no_raise_still_calls() -> None:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- GTO secondary: EV precedence on pure spots (July 2026) -------------------
+def test_gto_pick_secondary_uses_ev_on_pure_spot(monkeypatch) -> None:
+    """THE AQs-vs-3-bet Review catch: at a pure spot every alternative ties
+    at 0%, and the secondary must be the SECOND-BEST action by solver EV
+    (4-bet at +1.95bb), not Fold (0bb). The old ordering preferred Fold
+    before consulting EV, so 'top two options by EV' silently applied only
+    to non-fold ties."""
+    import pipeline.preflop.format_writer as fw
+
+    facts = _facts_with_strategy({"Call": 1.0, "Fold": 0.0, "Raise 60%": 0.0})
+    monkeypatch.setattr(
+        fw, "action_evs_bb",
+        lambda _facts, _pack: {"Call": 2.87, "Fold": 0.0, "Raise": 1.95},
+    )
+    options, correct = build_options_gto(facts, pack=object())
+    assert options == [
+        "Always Call",
+        "Mostly Call",
+        "Mostly Raise",
+        "Always Raise",
+    ]
+    assert correct == "Always Call"
+
+
+def test_gto_pick_secondary_ev_can_still_pick_fold(monkeypatch) -> None:
+    """EV precedence is symmetric: when folding really is the second-best
+    EV (raising is -EV), the secondary stays Fold."""
+    import pipeline.preflop.format_writer as fw
+
+    facts = _facts_with_strategy({"Call": 1.0, "Fold": 0.0, "Raise 60%": 0.0})
+    monkeypatch.setattr(
+        fw, "action_evs_bb",
+        lambda _facts, _pack: {"Call": 1.10, "Fold": 0.0, "Raise": -0.55},
+    )
+    options, correct = build_options_gto(facts, pack=object())
+    assert options == [
+        "Always Fold",
+        "Mostly Fold",
+        "Mostly Call",
+        "Always Call",
+    ]
+    assert correct == "Always Call"
+
+
+def test_gto_pick_secondary_never_picks_a_hidden_all_in(monkeypatch) -> None:
+    """The EV ranking uses the SAME unreasonable-all-in filter as the
+    action_ev_bb CSV cell: a deep-stack jam the solver never takes (0%
+    and clearly dominated) can't become the secondary, even when its EV
+    tops the other alternatives -- otherwise the options would show an
+    'Always All-in' the EV panel hides."""
+    import pipeline.preflop.format_writer as fw
+
+    facts = _facts_with_strategy(
+        {"Raise 60%": 1.0, "Call": 0.0, "Fold": 0.0, "AllIn": 0.0}
+    )
+    monkeypatch.setattr(
+        fw, "action_evs_bb",
+        lambda _facts, _pack: {
+            "Raise": 4.0, "All-in": 1.0, "Call": 0.2, "Fold": 0.0,
+        },
+    )
+    options, correct = build_options_gto(facts, pack=object())
+    # All-in (freq 0, 3bb below best) is filtered; Call (+0.2) wins the
+    # remaining ranking.
+    assert correct == "Always Raise"
+    assert "Mostly Call" in options
+    assert not any("All-in" in o for o in options)

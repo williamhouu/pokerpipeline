@@ -105,6 +105,9 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:
     answer_style = rs.get("answer_style", "auto")
     display_in_bb = bool(rs.get("display_in_bb", True))
     equity_runouts = int(rs.get("equity_runouts", DEFAULT_EQUITY_RUNOUTS))
+    # Mirror the batch's trap-aware difficulty flag or the rebuild
+    # false-flags Difficulty Rating on every trap row of a trap-aware batch.
+    trap_difficulty = bool(rs.get("trap_difficulty", False))
 
     print("=" * 72)
     print(f"POSTFLOP BATCH AUDIT: {csv_path.name}")
@@ -130,7 +133,8 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:
         options, correct = build_options(spot, style=answer_style)
         rebuilt = build_postflop_row(
             facts, placeholder_explanation(facts, options, correct),
-            solve, compute_difficulty(facts), int(no), display_in_bb=display_in_bb,
+            solve, compute_difficulty(facts, apply_trap_bump=trap_difficulty),
+            int(no), display_in_bb=display_in_bb,
         )
 
         # 1. EXACT column diffs.

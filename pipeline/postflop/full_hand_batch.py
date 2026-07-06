@@ -54,6 +54,12 @@ from pipeline.postflop.format_writer import build_postflop_row, write_postflop_c
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
 from pipeline.postflop.play_through import assemble_hands
+from pipeline.postflop.preflop_leg_pack import (
+    _build_pack_facts,
+    _facts_difficulty,
+    build_pack_preflop_leg_row,
+    find_pack_leg_source,
+)
 from pipeline.postflop.preflop_entry import (
     build_preflop_entry_options,
     build_preflop_entry_row,
@@ -77,6 +83,7 @@ ProgressCallback = Any
 _LEG_COUNTER_KEYS = (
     "soft_flagged", "claim_flagged", "revise_flagged", "revise_fixed",
     "revise_discarded", "revise_unchanged",
+    "preflop_leg_pack_used", "preflop_leg_entry_fallback",
 )
 
 
@@ -90,7 +97,7 @@ def _postflop_leg_row(
     use_placeholder, client, model, temperature, max_tokens, answer_style,
     display_in_bb, equity_runouts, trap_difficulty, system_prompt, usage_cb,
     run_claim_checker=False, claim_checker_prompt=None, revise_pass=False,
-    final_audit=False,
+    final_audit=False, facts=None,
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, int]]:
     """Build one postflop-leg row. Returns (row, meta_record, failure, counters).
 
@@ -99,7 +106,8 @@ def _postflop_leg_row(
     :func:`pipeline.postflop.layer7.run_layer7_audit`, so a play-through leg gets
     identical QA. ``counters`` is the per-leg delta the batch aggregates."""
     counters = _zero_counters()
-    facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
+    if facts is None:  # the pre-pass may have already paid the equity sim
+        facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
     options, correct = build_options(spot, style=answer_style)
     difficulty = compute_difficulty(facts, apply_trap_bump=trap_difficulty)
     try:
@@ -191,7 +199,7 @@ def _postflop_leg_row(
     return row, record, None, counters
 
 
-def _preflop_leg_row(
+def _preflop_leg_row_entry(
     entry_facts, *, number, hand_id, sequence_index, sequence_total,
     use_placeholder, client, model, temperature, max_tokens, answer_style,
     display_in_bb, preflop_system_prompt, usage_cb, as_played=False,
@@ -272,6 +280,10 @@ def generate_full_hand_batch(
     system_prompt: str | None = None,
     preflop_system_prompt: str | None = None,
     trap_difficulty: bool = False,
+    razor_difficulty: bool = False,
+    preflop_leg_pack_root: Path | str | None = None,
+    min_hand_difficulty: int | None = None,
+    max_hand_difficulty: int | None = None,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
@@ -308,6 +320,69 @@ def generate_full_hand_batch(
         include_preflop=include_preflop, include_villain=include_villain,
     )
 
+    # --- pack-backed preflop legs (July 2026) -----------------------------
+    # When a preflop range pack provably matches this solve's preflop line
+    # (same table size / stack / open size), the preflop leg is built with
+    # the FULL preflop pipeline (EVs, ranges, stat_notes, 4-axis difficulty)
+    # instead of the entry-derived approximation. Per-hand coherence gate
+    # inside the builder; entry-derived leg is the fallback.
+    pack_source = None
+    if include_preflop and preflop_leg_pack_root is not None:
+        pack_source = find_pack_leg_source(solve, preflop_leg_pack_root)
+
+    # --- hand-difficulty pre-pass (July 2026) ------------------------------
+    # hand_difficulty = MAX over the legs' Difficulty Ratings: the hand
+    # demands what its hardest decision demands (a 2400 river bluff-catch
+    # behind three easy calls is a hard HAND; a mean would wash it out to
+    # "easy"). Computed BEFORE any LLM call so the optional band filter
+    # costs no tokens; the facts cache hands each postflop leg's equity sim
+    # to the generation loop so nothing is computed twice.
+    facts_cache: dict[tuple[str, str], Any] = {}
+    pack_facts_cache: dict[tuple[str, str], Any] = {}
+    hand_difficulties: dict[str, int] = {}
+    for hand in hands:
+        leg_scores: list[int] = []
+        for leg in hand.legs:
+            if leg.kind == "preflop_entry":
+                score = None
+                if pack_source is not None:
+                    built = _build_pack_facts(
+                        pack_source, leg.entry_facts.hero_position,
+                        leg.entry_facts.hero_combo, solve,
+                        equity_runouts=equity_runouts,
+                    )
+                    if built is not None:
+                        pf, pd = _facts_difficulty(
+                            built, trap_difficulty=trap_difficulty,
+                            razor_difficulty=razor_difficulty,
+                        )
+                        pack_facts_cache[
+                            (leg.entry_facts.hero_position,
+                             leg.entry_facts.hero_combo)
+                        ] = (pf, pd)
+                        score = pd.score
+                if score is None:
+                    score = leg.entry_facts.difficulty
+            else:
+                key = (leg.spot.node.node_id, leg.spot.hero_combo)
+                if key not in facts_cache:
+                    facts_cache[key] = extract_facts(
+                        leg.spot, solve, equity_runouts=equity_runouts,
+                    )
+                score = compute_difficulty(
+                    facts_cache[key], apply_trap_bump=trap_difficulty,
+                ).score
+            leg_scores.append(score)
+        hand_difficulties[hand.hand_id] = max(leg_scores) if leg_scores else 0
+
+    hands_difficulty_filtered = 0
+    if min_hand_difficulty is not None or max_hand_difficulty is not None:
+        lo = min_hand_difficulty if min_hand_difficulty is not None else 0
+        hi = max_hand_difficulty if max_hand_difficulty is not None else 10_000
+        kept = [h for h in hands if lo <= hand_difficulties[h.hand_id] <= hi]
+        hands_difficulty_filtered = len(hands) - len(kept)
+        hands = kept
+
     in_tokens = out_tokens = 0
 
     def _usage(usage: object) -> None:
@@ -333,18 +408,49 @@ def generate_full_hand_batch(
                 )
             number = len(rows) + 1
             if leg.kind == "preflop_entry":
-                row, record, failure, counters = _preflop_leg_row(
-                    leg.entry_facts, number=number, hand_id=hand.hand_id,
-                    sequence_index=i, sequence_total=hand.total,
-                    use_placeholder=use_placeholder, client=client, model=model,
-                    temperature=temperature, max_tokens=max_tokens,
-                    answer_style=answer_style, display_in_bb=display_in_bb,
-                    preflop_system_prompt=preflop_system_prompt, usage_cb=_usage,
-                    as_played=True,  # the play-through entry = what this hand did
+                row = record = failure = None
+                counters = _zero_counters()
+                prebuilt = (
+                    pack_facts_cache.get(
+                        (leg.entry_facts.hero_position, leg.entry_facts.hero_combo)
+                    )
+                    if pack_source is not None else None
                 )
+                if prebuilt is not None:
+                    row, record, failure = build_pack_preflop_leg_row(
+                        pack_source, leg.entry_facts.hero_position,
+                        leg.entry_facts.hero_combo, solve,
+                        number=number, hand_id=hand.hand_id,
+                        sequence_index=i, sequence_total=hand.total,
+                        use_placeholder=use_placeholder, client=client,
+                        model=model, temperature=temperature,
+                        max_tokens=max_tokens, answer_style=answer_style,
+                        display_in_bb=display_in_bb,
+                        equity_runouts=equity_runouts,
+                        trap_difficulty=trap_difficulty,
+                        razor_difficulty=razor_difficulty,
+                        usage_cb=_usage, prebuilt=prebuilt,
+                    )
+                if row is not None or failure is not None:
+                    agg["preflop_leg_pack_used"] += 1 if row is not None else 0
+                else:
+                    agg["preflop_leg_entry_fallback"] += 1
+                    row, record, failure, counters = _preflop_leg_row_entry(
+                        leg.entry_facts, number=number, hand_id=hand.hand_id,
+                        sequence_index=i, sequence_total=hand.total,
+                        use_placeholder=use_placeholder, client=client, model=model,
+                        temperature=temperature, max_tokens=max_tokens,
+                        answer_style=answer_style, display_in_bb=display_in_bb,
+                        preflop_system_prompt=preflop_system_prompt, usage_cb=_usage,
+                        as_played=True,  # the play-through entry = what this hand did
+                    )
             else:
                 row, record, failure, counters = _postflop_leg_row(
-                    leg.spot, solve, number=number, hand_id=hand.hand_id,
+                    leg.spot, solve,
+                    facts=facts_cache.get(
+                        (leg.spot.node.node_id, leg.spot.hero_combo)
+                    ),
+                    number=number, hand_id=hand.hand_id,
                     sequence_index=i, sequence_total=hand.total,
                     use_placeholder=use_placeholder, client=client, model=model,
                     temperature=temperature, max_tokens=max_tokens,
@@ -364,10 +470,14 @@ def generate_full_hand_batch(
             records.append(record)  # type: ignore[arg-type]
             leg_records.append(number)
         if leg_records:
+            hd = hand_difficulties.get(hand.hand_id, 0)
+            for n in leg_records:
+                rows[n - 1]["hand_difficulty"] = str(hd)
             hand_index.append({
                 "hand_id": hand.hand_id, "hero": hand.hero,
                 "hero_combo": hand.hero_combo, "frame": hand.frame,
                 "row_numbers": leg_records, "legs": hand.total,
+                "hand_difficulty": hd,
             })
 
     output_path = Path(output_path)
@@ -391,6 +501,10 @@ def generate_full_hand_batch(
                 "min_ev_gap_bb": min_ev_gap_bb, "quality_gate": quality_gate,
                 "min_premise_freq": min_premise_freq, "equity_runouts": equity_runouts,
                 "trap_difficulty": trap_difficulty,
+                "razor_difficulty": razor_difficulty,
+                "preflop_leg_pack": pack_source.pack_id if pack_source else None,
+                "min_hand_difficulty": min_hand_difficulty,
+                "max_hand_difficulty": max_hand_difficulty,
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
                 "final_audit": final_audit and revise_pass,
@@ -399,7 +513,10 @@ def generate_full_hand_batch(
                 "worthy_spots_available": len(worthy),
                 "low_quality_nodes_skipped": low_quality,
                 "premise_filtered_nodes": premise_skipped,
-                "hands_assembled": len(hands),
+                "hands_assembled": len(hands) + hands_difficulty_filtered,
+                "hands_difficulty_filtered": hands_difficulty_filtered,
+                "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
+                "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
                 "hands_written": len(hand_index),
                 "questions_written": len(rows),
                 # Layer-7 + soft-validator tallies (postflop legs only; 0 unless
@@ -491,7 +608,7 @@ def generate_preflop_entry_batch(
             progress_callback(
                 f"Preflop {facts.hero_position} {facts.hand_class}", len(rows), total_questions,
             )
-        row, record, failure, _counters = _preflop_leg_row(
+        row, record, failure, _counters = _preflop_leg_row_entry(
             facts, number=number, hand_id="", sequence_index="", sequence_total="",
             use_placeholder=use_placeholder, client=client, model=model,
             temperature=temperature, max_tokens=max_tokens, answer_style=answer_style,

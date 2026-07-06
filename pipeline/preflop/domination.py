@@ -13,11 +13,15 @@ pair where your cards are still live. AhalfX vs a bigger ace is dominated; A9
 vs QQ is "behind" (the ace is live), not dominated -- the classifier keeps that
 distinction because it is exactly the lesson.
 
-Hand selection is left to the caller: pass villain's already-weight-gated
-heaviest classes (``VillainRangeStats.top_combos``), so the lists only ever
-name hands villain actually holds with meaningful frequency. That is the
-"barrier" -- the prose names hands from a vetted in-range list and never quotes
-a raw percentage (exact combo counts live in the math panel instead).
+Hand selection is left to the caller: pass villain's FULL weight-gated class
+list (``VillainRangeStats.in_range_classes``, combo-share ordered), so the
+lists only ever name hands villain actually holds with meaningful frequency
+AND an empty bucket genuinely means "nothing in the range" (July 2026 -- a
+top-N digest here silently dropped real dominators, making ``dominated_by``
+read empty for A8o vs a whole BTN opening range). The per-bucket cap below
+keeps the prose lists short; heaviest classes fill them first. That is the
+"barrier" -- the prose names hands from a vetted in-range list and never
+quotes a raw percentage (exact combo counts live in the math panel instead).
 """
 from __future__ import annotations
 

@@ -1168,6 +1168,49 @@ def _render_generate_page_postflop() -> None:
     )
     answer_style = ANSWER_STYLE_FROM_RADIO_LABEL[style_label]
 
+    # Full-hand only (July 2026): the hand-level difficulty band + the
+    # razor's-edge toggle for the PACK-BACKED preflop leg, and a note that
+    # the preflop leg auto-upgrades when a preflop pack matches the solve.
+    fh_razor_difficulty = False
+    fh_band = None
+    if is_full:
+        st.caption(
+            "🃏 The preflop leg is built from the closest-matching preflop "
+            "range pack automatically (same table size, stack and open "
+            "size), giving it real EVs, ranges and the math panel. When no "
+            "pack matches, it falls back to the entry-derived question."
+        )
+        fh_razor_difficulty = st.checkbox(
+            "🔪 Razor's-edge difficulty on the preflop leg",
+            value=False,
+            key="fullhand_razor_difficulty",
+            help="Applies the preflop razor's-edge rating (range-boundary "
+            "hands rate 2000-2600) to pack-backed preflop legs. Same rule "
+            "as the preflop Generate page; see its ℹ️ for details.",
+        )
+        fh_preset = st.radio(
+            "Hand difficulty (the hand's HARDEST decision)",
+            options=["Mixed", "Easy", "Medium", "Hard", "Custom"],
+            index=0,
+            horizontal=True,
+            key="fullhand_difficulty_preset",
+            help="Filters PLAY-THROUGHS by hand_difficulty = the max of the "
+            "legs' ratings (a hand demands what its hardest decision "
+            "demands; easy connective legs don't dilute it). Every leg "
+            "also keeps its own per-question rating for the app.",
+        )
+        _fh_bands = {
+            "Easy": (400, 1300), "Medium": (1300, 2100),
+            "Hard": (2100, 3200), "Mixed": None, "Custom": (400, 3200),
+        }
+        fh_band = _fh_bands[fh_preset]
+        if fh_preset == "Custom":
+            fh_band = st.slider(
+                "Hand difficulty band", min_value=400, max_value=3200,
+                value=(400, 3200), step=50,
+                key="fullhand_difficulty_slider",
+            )
+
     # Trap-aware difficulty + the difficulty/skills explainers apply to POSTFLOP
     # legs (spots + full-hand). Preflop-entry uses a frequency-only difficulty,
     # so they don't apply there.
@@ -1176,18 +1219,24 @@ def _render_generate_page_postflop() -> None:
             "🪤 Trap-aware difficulty",
             value=False,
             key="postflop_trap_difficulty",
-            help="Floor counterintuitive PURE spots to Hard (2400+). A 'trap' is "
-            "where the solver's action contradicts the equity-vs-price baseline "
-            "(folds a hand whose equity clears the price, or continues one clearly "
-            "below it). Score only -- never changes the answer/options/prose. Off by "
-            "default; recommended for Hard batches. Heads-up facing-a-bet spots only.",
+            help="Floor counterintuitive PURE spots to a GRADED Medium-to-Hard "
+            "rating (1800 to 2900, scaled by how far equity sits on the wrong "
+            "side of the price). A 'trap' is where the solver's action "
+            "contradicts the equity-vs-price baseline (folds a hand whose "
+            "equity clears the price, or continues one clearly below it). "
+            "Score only -- never changes the answer/options/prose. Off by "
+            "default; recommended for Medium/Hard batches. Heads-up "
+            "facing-a-bet spots only.",
         )
         with st.popover("ℹ️ How is postflop difficulty calculated?"):
             from pipeline.postflop.difficulty import (  # noqa: PLC0415
-                TRAP_DIFFICULTY_FLOOR,
                 W_CONCEPT,
                 W_FREQ,
                 W_HAND,
+            )
+            from pipeline.trap_grading import (  # noqa: PLC0415
+                TRAP_FLOOR_MAX,
+                TRAP_FLOOR_MIN,
             )
 
             st.markdown(
@@ -1204,8 +1253,10 @@ def _render_generate_page_postflop() -> None:
                 "gap by construction, so it adds no signal (it's kept only as the "
                 "`easy_ev` diagnostic column).\n\n"
                 f"**🪤 Trap-aware (opt-in):** floors a counterintuitive pure spot to "
-                f"{TRAP_DIFFICULTY_FLOOR} so a deceptive but clear-cut spot rates "
-                "Hard. Otherwise a pure spot can't exceed ~Medium."
+                f"a GRADED {TRAP_FLOOR_MIN}-{TRAP_FLOOR_MAX} rating (scaled by how "
+                "far equity sits on the wrong side of the price), so a deceptive "
+                "but clear-cut spot rates Medium-to-Hard. Otherwise a pure spot "
+                "can't exceed ~Medium."
             )
 
         _render_postflop_skills_explainer()
@@ -1492,6 +1543,9 @@ def _render_generate_page_postflop() -> None:
                     max_frequency=freq_hi / 100.0,
                     min_ev_gap_bb=min_ev_gap,
                     trap_difficulty=trap_difficulty,
+                    razor_difficulty=fh_razor_difficulty,
+                    min_hand_difficulty=(fh_band[0] if fh_band else None),
+                    max_hand_difficulty=(fh_band[1] if fh_band else None),
                     run_claim_checker=pf_run_claim_checker,
                     claim_checker_prompt=pf_claim_checker_prompt,
                     revise_pass=pf_revise_pass,
@@ -2040,14 +2094,35 @@ def _render_generate_page_preflop() -> None:
         key="preflop_trap_difficulty",
         help=(
             "OFF = the original 4-axis rating (Hard = close-mix spots only). "
-            "ON = ALSO rate \"trap\" spots Hard even when the answer is "
-            "pure/clear-cut (a hand the solver folds 100% despite enough "
-            "equity to call). This is what makes a \"Hard + 100% frequency\" "
+            "ON = ALSO rate \"trap\" spots Medium-to-Hard even when the answer "
+            "is pure/clear-cut (a hand the solver folds 100% despite enough "
+            "equity to call), GRADED 1800-2900 by how contradictory the pot "
+            "odds look. This is what makes a \"Medium/Hard + 100% frequency\" "
             "batch return questions. Read the ℹ️ below before using."
         ),
     )
     with st.popover("ℹ️  What is Trap-aware difficulty? (read before using)"):
         _render_trap_difficulty_explainer()
+
+    # Razor's-edge difficulty (opt-in, July 2026). A second kind of
+    # pure-but-hard spot: the hand sits ON a range boundary (its grid
+    # neighbor does the opposite at the same node), so the skill tested is
+    # knowing exactly where the cutoff is. Deterministic; score-only.
+    razor_difficulty = st.checkbox(
+        "🔪 Razor's-edge difficulty — rate range-BOUNDARY hands Medium/Hard (NEW)",
+        value=False,
+        key="preflop_razor_difficulty",
+        help=(
+            "OFF = boundary position has no effect on the rating. ON = a "
+            "hand whose grid NEIGHBOR does the opposite at the same spot "
+            "(ATo always folds where AJo always calls; A5s 3-bets where "
+            "A4s folds) is rated 2000-2600, graded by how many neighbors "
+            "oppose it. Works at any frequency and is the other way to get "
+            "Medium/Hard questions from 100% spots. Read the ℹ️ below."
+        ),
+    )
+    with st.popover("ℹ️  What is Razor's-edge difficulty?"):
+        _render_razor_difficulty_explainer()
 
     # Situation diversification. The worthy pool is walked in order until N
     # rows are collected, so a fill-to-N batch (especially Hard trap-aware)
@@ -2203,6 +2278,108 @@ def _render_generate_page_preflop() -> None:
         "Presets move the difficulty band; the worthiness window + EV-gap "
         "are separate gates you set in Advanced filters above."
     )
+
+    # Structural-emptiness warning (July 2026). The difficulty rating is
+    # bounded above by a pure function of the dominant frequency, so a band
+    # whose floor exceeds that ceiling matches ZERO spots no matter the pack.
+    # The classic foot-gun this catches: "1500+ difficulty at 100% frequency"
+    # (pure spots cap near 1125, measured ~875) used to grind through HOURS
+    # of equity sims before reporting an empty batch. The decision logic is
+    # classify_band_reachability (pure, browserlessly tested in
+    # tests/test_preflop_difficulty.py); this block only renders its verdict.
+    from pipeline.preflop.difficulty import (  # noqa: PLC0415
+        classify_band_reachability,
+        max_achievable_difficulty,
+    )
+    from pipeline.trap_grading import (  # noqa: PLC0415
+        TRAP_FLOOR_MAX,
+        TRAP_FLOOR_MIN,
+    )
+    from pipeline.preflop.razor_edge import (  # noqa: PLC0415
+        RAZOR_FLOOR_BY_COUNT,
+        RAZOR_FLOOR_MAX,
+    )
+    _razor_min = min(RAZOR_FLOOR_BY_COUNT.values())
+    _reach = classify_band_reachability(
+        band_low, band_high, freq_low / 100.0,
+        trap_difficulty=bool(trap_difficulty),
+        razor_difficulty=bool(razor_difficulty),
+    )
+    _natural_ceiling = max_achievable_difficulty(freq_low / 100.0)
+    if _reach == "empty":
+        _fix_bits = []
+        if not trap_difficulty and (
+            band_low <= TRAP_FLOOR_MAX and band_high >= TRAP_FLOOR_MIN
+        ):
+            _fix_bits.append(
+                f"**🪤 Trap-aware** (traps rate {TRAP_FLOOR_MIN}-{TRAP_FLOOR_MAX})"
+            )
+        if not razor_difficulty and (
+            band_low <= RAZOR_FLOOR_MAX and band_high >= _razor_min
+        ):
+            _fix_bits.append(
+                f"**🔪 Razor's-edge** (boundary hands rate "
+                f"{_razor_min}-{RAZOR_FLOOR_MAX})"
+            )
+        if _fix_bits:
+            _fix_hint = (
+                " Turning on " + " or ".join(_fix_bits) + " would fix this."
+            )
+        elif trap_difficulty or razor_difficulty:
+            _fix_hint = (
+                " The special difficulty modes you enabled rate spots "
+                f"between {min(TRAP_FLOOR_MIN, _razor_min)} and "
+                f"{max(TRAP_FLOOR_MAX, RAZOR_FLOOR_MAX)}, entirely outside "
+                "your band. Widen the band to overlap that range."
+            )
+        else:
+            _fix_hint = (
+                " Lower the difficulty band floor or lower the minimum "
+                "worthiness frequency."
+            )
+        st.error(
+            f"🚫 **This combination can produce 0 questions, guaranteed.** "
+            f"With a minimum worthiness frequency of **{freq_low}%**, the "
+            f"highest difficulty rating any spot can score is about "
+            f"**{_natural_ceiling}**, but your band starts at "
+            f"**{band_low}**. High-frequency (clear-cut) spots always rate "
+            f"easy on the frequency and EV axes, so they can never reach "
+            f"the Medium or Hard bands on their own.{_fix_hint}"
+        )
+    elif _reach == "special_only":
+        _modes = []
+        if trap_difficulty:
+            _modes.append(
+                f"counterintuitive traps (rated {TRAP_FLOOR_MIN}-"
+                f"{TRAP_FLOOR_MAX} by pot-odds contradiction)"
+            )
+        if razor_difficulty:
+            _modes.append(
+                f"range-boundary hands (rated {_razor_min}-{RAZOR_FLOOR_MAX} "
+                f"by opposing neighbors)"
+            )
+        st.warning(
+            f"⚠️ **Special-rated spots only.** At a minimum worthiness "
+            f"frequency of **{freq_low}%**, regular spots top out around "
+            f"**{_natural_ceiling}** difficulty, below your band. Only "
+            + " and ".join(_modes)
+            + " qualify, a smaller pool than usual, so expect a slower "
+            "fill and turn on 🎲 Diversify."
+        )
+    elif freq_low >= 100 and band_low > 875 and not (  # noqa: PLR2004
+        trap_difficulty or razor_difficulty
+    ):
+        # The theoretical ceiling (1125) needs a worst-case archetype AND
+        # hand class at once; measured on the 8-max packs, real 100%-pure
+        # spots top out near 875. Warn on the gap the math can't rule out.
+        st.warning(
+            f"⚠️ **Very few candidates likely.** At a 100%-only frequency "
+            f"window, measured difficulty on the 8-max packs tops out near "
+            f"**875** (theoretical ceiling {_natural_ceiling}). A band "
+            f"starting at {band_low} will match few or no spots. For "
+            f"Medium/Hard questions at 100% frequency, turn on 🪤 "
+            f"Trap-aware or 🔪 Razor's-edge difficulty."
+        )
 
     st.divider()
 
@@ -2520,6 +2697,26 @@ def _render_generate_page_preflop() -> None:
                 st.caption("Saved.")
         claim_checker_prompt = st.session_state[ck_key]
 
+    # Sanity audit (opt-in, July 2026): the ONE LLM pass allowed to use its
+    # own poker knowledge, pointed at the SOLVER DATA facts (never prose).
+    # Flag-only; independent of the Layer 7 prose modes above.
+    run_sanity_audit = st.checkbox(
+        "🩺 Sanity audit — AI checks the solver FACTS against basic poker (NEW, flag only)",
+        value=False,
+        key="preflop_run_sanity_audit",
+        help=(
+            "One extra AI call per question that reads ONLY the solver-data "
+            "facts (positions, equity, pot odds, domination lists, action "
+            "history) and flags anything that contradicts basic poker. It "
+            "never touches the prose or blocks a question; flags appear in "
+            "Review as hypotheses for YOU to judge. This is the check that "
+            "would have caught the blind-vs-blind position bug and the "
+            "empty domination list. Read the ℹ️ below."
+        ),
+    )
+    with st.popover("ℹ️  What is the Sanity audit? (and why it can be wrong)"):
+        _render_sanity_audit_explainer()
+
     # --- Fast test mode: fewer equity run-outs (default OFF) ----------------
     # ON = 200 run-outs (≈2x faster, for iterating); OFF = 400 (most accurate,
     # for the real questions you'll ship). Defaults OFF (accurate) per the
@@ -2598,6 +2795,7 @@ def _render_generate_page_preflop() -> None:
             min_difficulty=int(band_low),
             max_difficulty=int(band_high),
             trap_difficulty=bool(trap_difficulty),
+            razor_difficulty=bool(razor_difficulty),
             diversify=bool(diversify),
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
             min_villain_line_pct=(
@@ -2622,6 +2820,7 @@ def _render_generate_page_preflop() -> None:
             claim_checker_prompt=claim_checker_prompt,
             revise_pass=revise_pass,
             final_audit=final_audit,
+            run_sanity_audit=bool(run_sanity_audit),
             equity_runouts=equity_runouts,
         )
 
@@ -2639,6 +2838,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     min_difficulty: int,
     max_difficulty: int,
     trap_difficulty: bool,
+    razor_difficulty: bool,
     diversify: bool,
     min_ev_gap_bb: float | None,
     min_villain_line_pct: float | None,
@@ -2659,6 +2859,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
     final_audit: bool = False,
+    run_sanity_audit: bool = False,
     equity_runouts: int = 400,
 ) -> None:
     """Kick off a preflop batch on a background thread and rerun.
@@ -2723,6 +2924,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             min_difficulty=min_difficulty,
             max_difficulty=max_difficulty,
             trap_difficulty=trap_difficulty,
+            razor_difficulty=razor_difficulty,
             diversify=diversify,
             min_ev_gap_bb=min_ev_gap_bb,
             min_villain_line_pct=min_villain_line_pct,
@@ -2741,6 +2943,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             claim_checker_prompt=claim_checker_prompt,
             revise_pass=revise_pass,
             final_audit=final_audit,
+            run_sanity_audit=run_sanity_audit,
             equity_runouts=equity_runouts,
         )
     except RuntimeError as exc:
@@ -2754,13 +2957,117 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     st.rerun()
 
 
+def _render_razor_difficulty_explainer() -> None:
+    """Popover content for the "Razor's-edge difficulty" toggle.
+
+    Reads the graded floors live from pipeline.preflop.razor_edge so the
+    numbers shown are always the ones the algorithm uses.
+    """
+    from pipeline.preflop.razor_edge import (  # noqa: PLC0415
+        RAZOR_FLOOR_BY_COUNT,
+        RAZOR_FLOOR_MAX,
+    )
+
+    _one = RAZOR_FLOOR_BY_COUNT.get(1)
+    _two = RAZOR_FLOOR_BY_COUNT.get(2)
+    st.markdown(
+        f"""
+### 🔪 Razor's-edge difficulty
+
+**The problem it fixes.** A hand the solver plays 100% one way is rated
+Easy by the normal formula, because the ACTION is clear-cut. But some of
+those hands are exactly what studying is for: the hand sits **right on the
+edge of the range**, and the skill being tested is knowing where the
+cutoff is. "ATo always folds to this 3-bet while AJo always calls" is
+trivial for the solver and genuinely hard for a person.
+
+**How it works (deterministic, no LLM, never touches the answer).** For
+each spot, it looks up the hand's GRID NEIGHBORS at the same decision:
+one kicker up and down (ATo → AJo / A9o), the suited-offsuit twin
+(ATo → ATs), and for pockets the adjacent pairs (TT → JJ / 99). If a
+neighbor that actually reaches this spot takes a DIFFERENT action
+(fold vs call vs raise; two raise sizes don't count), the hand is a
+boundary hand and its difficulty is floored:
+
+- **1 opposing neighbor → {_one}** (a plain cutoff hand, upper-Medium)
+- **2 opposing neighbors → {_two}** (boxed in from two directions, Hard)
+- **3+ opposing neighbors → {RAZOR_FLOOR_MAX}** (an "island" doing what
+  none of its neighbors do, usually a blocker story, deep-Hard)
+
+**Impact on the questions you get**
+- ON + a Medium or Hard band → "where exactly is the line?" questions,
+  including pure 100% spots (the other route besides 🪤 Trap-aware, which
+  catches pot-odds contradictions instead; a spot that is both keeps the
+  higher rating).
+- It changes **difficulty scores only** — never the answer, options,
+  prose, or which spots are worthy.
+- Expect boundary hands to be a meaningful slice of any range (edges are
+  everywhere), so the pool is larger than the trap pool.
+"""
+    )
+
+
+def _render_sanity_audit_explainer() -> None:
+    """Popover content for the "Sanity audit" toggle."""
+    st.markdown(
+        """
+### 🩺 Sanity audit
+
+**What it is.** One extra AI call per question that reads ONLY the
+solver-data facts (positions, equity, pot odds, domination lists, action
+history) — never the explanation prose — and asks: *does anything here
+contradict basic poker?* Example catches it is designed for: a
+blind-vs-blind spot labeled "in position" for the small blind, or an
+empty "hands that dominate you" list when the villain's likely hands
+obviously include better aces. Both of those were real bugs that every
+other check missed.
+
+**Why every other check misses this kind of bug.** All the other
+validators verify CONSISTENCY: the prose against the data block, the CSV
+against a deterministic rebuild. When a deterministic FACT is itself
+wrong, every layer faithfully agrees with it. This audit is the one
+place an AI is allowed to bring OUTSIDE poker knowledge, which is the
+check a human reviewer's eyes normally perform.
+
+**Why it is flag-only — and why its flags can be WRONG.** This whole
+pipeline exists because AIs are confidently wrong about poker. So this
+checker's opinions are treated as **hypotheses for you to judge**, never
+as gates: it cannot rewrite anything, reject a question, or change a
+score. It is prompted to flag only high-confidence basics (action order,
+domination direction, arithmetic, implausible equity) and to stay silent
+on anything strategic. A flag means "a human should look", not "this is
+wrong". (Calibration honesty: the first version's flags on a clean batch
+were ALL false positives, so v2 embeds the exact reference rules and
+those misfires as do-not-flag examples, and a flag now ships only when
+**two independent passes challenge the same fact**.)
+
+**The deterministic sibling that never cries wolf.** The fact categories
+this audit fumbles most (position from seats, domination direction,
+difficulty bands, frequency sums) are ALSO verified by a zero-AI
+cross-check that runs automatically on every batch and shows a 🔬 badge
+in Review. Trust the 🔬 findings outright; treat 🩺 flags as pointers.
+
+**Where flags show up.** The question is marked *flagged* and the notes
+appear under it on the Review page, alongside any claim-checker notes.
+
+**Cost.** One extra API call per question (a second confirm call only on
+the rows the first pass flags).
+"""
+    )
+
+
 def _render_trap_difficulty_explainer() -> None:
     """Popover content for the "Trap-aware difficulty" toggle.
 
-    Reads ``TRAP_DIFFICULTY_FLOOR`` live from the difficulty module so the
-    number shown is always the one the algorithm uses.
+    Reads the graded-floor constants live from ``pipeline.trap_grading`` so
+    the numbers shown are always the ones the algorithm uses.
     """
-    from pipeline.preflop.difficulty import TRAP_DIFFICULTY_FLOOR  # noqa: PLC0415
+    from pipeline.trap_grading import (  # noqa: PLC0415
+        TRAP_FLOOR_MAX,
+        TRAP_FLOOR_MIN,
+        TRAP_MARGIN_AT_MAX,
+        TRAP_MARGIN_AT_MIN,
+    )
 
     st.markdown(
         f"""
@@ -2770,10 +3077,11 @@ def _render_trap_difficulty_explainer() -> None:
 solver's top action is a *close mix* (e.g. 60/40) — i.e. when it barely
 matters what you pick. Two side effects fall out of that: every Hard question
 ends up a near-coinflip with **~no EV difference**, and a **pure** spot
-("Always fold", 100%) can *never* be rated Hard (a pure action looks "easy" by
-that measure). So a "Hard **and** 100% frequency" batch returns **nothing**.
+("Always fold", 100%) can *never* be rated above ~Easy (a pure action looks
+"easy" by that measure). So a "Medium/Hard **and** 100% frequency" batch
+returns **nothing**.
 
-**What this adds.** A *second kind* of Hard question — a **trap**: a spot where
+**What this adds.** A *second kind* of hard question — a **trap**: a spot where
 the solver's clear answer is the **opposite** of what the hand looks like it
 should do. Example: you hold enough equity to call the price, but the solver
 folds 100% (domination / reverse implied odds). The answer is clear-cut and the
@@ -2784,15 +3092,22 @@ not for the solver.
 spot facing a bet, it compares the solver's main action to a simple **pot-odds
 baseline** ("would a player call, based on equity vs. the price?"). When they
 **disagree by a clear margin** — fold despite enough equity, or call/3-bet
-despite too little — the spot is a trap and its difficulty is **floored to
-{TRAP_DIFFICULTY_FLOOR}** (solidly Hard), no matter how pure the action is.
+despite too little — the spot is a trap and its difficulty is **floored to a
+GRADED value between {TRAP_FLOOR_MIN} and {TRAP_FLOOR_MAX}**, scaled by HOW FAR
+equity sits on the wrong side of the price: a mild contradiction
+({TRAP_MARGIN_AT_MIN:.0%} of equity) rates {TRAP_FLOOR_MIN} (upper-Medium), an
+extreme one ({TRAP_MARGIN_AT_MAX:.0%}+) rates {TRAP_FLOOR_MAX} (deep-Hard).
+The typical trap on the 8-max packs (~16 points of contradiction) rates ~2430.
 Opening spots (no price to call) are never traps. Non-trap spots score exactly
-as before.
+as before. (Graded July 2026; the old version pinned every trap to a flat
+2400.)
 
 **Impact on the questions you get**
-- ON + the **Hard** band → counterintuitive questions with a **single clear
-  correct answer and a real EV gap**, *including* pure "Always X" spots. This is
-  what makes "Hard at 100%" actually produce questions.
+- ON + the **Hard** band → strongly counterintuitive questions with a **single
+  clear correct answer and a real EV gap**, *including* pure "Always X" spots.
+- ON + the **Medium** band → also picks up *mildly* counterintuitive traps
+  (small equity-vs-price contradictions). This is what makes "Medium/Hard at
+  100%" actually produce questions.
 - It changes **difficulty scores only** — never the answer, options, prose, or
   which spots are "worthy".
 - **Safety net:** a trap that's a *fold-with-equity* is also auto-flagged for
@@ -2800,11 +3115,12 @@ as before.
   QQ artifact), so a bad solve can't silently ship as a "hard" question.
 
 **Old vs. new — which to use**
-- **Old (off):** good general default. Hard = genuinely close decisions.
-- **New (on):** use when you specifically want *hard, counterintuitive* questions
-  (the "trap" study category) — or when a Hard batch keeps coming back as
-  all-mixes. **Recommended ON for Hard batches; leave OFF for Easy/Medium**
-  (those bands exclude the floored traps anyway, so it has little effect there).
+- **Off:** good general default. Hard = genuinely close decisions.
+- **On:** use when you specifically want *counterintuitive* questions (the
+  "trap" study category) — or when a Medium/Hard batch keeps coming back as
+  all-mixes. **Recommended ON for Medium and Hard batches; leave OFF for
+  Easy** (the Easy band sits below every graded floor, so it has no effect
+  there).
 """
     )
 
@@ -4379,6 +4695,10 @@ def render_review_page() -> None:
                     [str(w) for w in (_qmeta.get("claim_check_issues") or [])]
                     if _qmeta else []
                 )
+                _sanity = (
+                    [str(w) for w in (_qmeta.get("sanity_check_issues") or [])]
+                    if _qmeta else []
+                )
                 if _vstatus == "needs_review":
                     st.warning("⚠️ **Marked needs-review.**")
                 if _soft:
@@ -4393,12 +4713,37 @@ def render_review_page() -> None:
                         "check)** — review these:\n\n"
                         + "\n".join(f"- {w}" for w in _claims)
                     )
+                if _sanity:
+                    st.warning(
+                        "🩺 **AI sanity audit challenged the SOLVER FACTS "
+                        "themselves** (it uses its own poker knowledge and "
+                        "CAN be wrong — treat as hypotheses, verify against "
+                        "the data panels below):\n\n"
+                        + "\n".join(f"- {w}" for w in _sanity)
+                    )
                 # Bare fallback only when nothing else explains the flag. A revise
                 # batch's discarded/unchanged rows are explained by the auto-fix
                 # panel below, so don't double up with a generic badge.
                 _has_revise = bool(_qmeta and _qmeta.get("revise"))
-                if _vstatus == "flagged" and not _soft and not _claims and not _has_revise:
+                if (_vstatus == "flagged" and not _soft and not _claims
+                        and not _sanity and not _has_revise):
                     st.warning("🟠 **Flagged.**")
+            # Deterministic post-batch cross-check findings (July 2026):
+            # first-principles fact checks (position from seats, domination
+            # direction, bands, sums). Rendered OUTSIDE the flagged-status
+            # gate because these are machine-verified problems, not
+            # hypotheses -- they must always be visible.
+            _xchecks = (
+                [str(w) for w in (_qmeta.get("cross_check_issues") or [])]
+                if _qmeta else []
+            )
+            if _xchecks:
+                st.error(
+                    "🔬 **Deterministic cross-check found factual problems "
+                    "in this row** (machine-verified from first principles, "
+                    "not an AI opinion):\n\n"
+                    + "\n".join(f"- {w}" for w in _xchecks)
+                )
             # Audit & auto-fix lifecycle (revise_pass batches): how this question's
             # final shipped version was produced, plus any distinct 4th-call flags.
             _render_revise_panel(_qmeta)
@@ -5808,13 +6153,24 @@ def _render_action_ev_bars(row: dict[str, str]) -> None:
             f'background:{color};border-radius:2px;"></div></div>'
         )
     gap = best - worst
-    tail = (
-        "The bars are nearly equal, so the actions are about the same EV — "
-        "that's why the solver mixes."
-        if gap < 0.10  # noqa: PLR2004
-        else f"The gap between best and worst is about {gap:.2f} bb — what "
-        "picking the wrong action costs."
-    )
+    # "why the solver mixes" only fits a MIXED spot; a pure 100% action
+    # with a tiny gap (a bottom-of-range open) needs different wording.
+    is_pure = "100%" in (row.get("action_frequencies") or "")
+    if gap < 0.10 and is_pure:  # noqa: PLR2004
+        tail = (
+            "The bars are nearly equal — the wrong action costs little "
+            "here, but the solver still always takes the marked one."
+        )
+    elif gap < 0.10:  # noqa: PLR2004
+        tail = (
+            "The bars are nearly equal, so the actions are about the same "
+            "EV — that's why the solver mixes."
+        )
+    else:
+        tail = (
+            f"The gap between best and worst is about {gap:.2f} bb — what "
+            "picking the wrong action costs."
+        )
     html.append(
         '<div style="font-size:0.75em;color:#888;margin-top:3px;">'
         f"Center line = break-even (0 bb). {tail}</div>"
@@ -5829,14 +6185,19 @@ def _render_stat_panel(row: dict[str, str]) -> None:
     equity, range advantage, blockers, what you're up against), read from
     the row's ``stat_notes`` cell. The phrases are written in Python by
     :mod:`pipeline.preflop.stat_notes` -- never the LLM -- so they can't
-    misframe the numbers. No-ops when the cell is empty: open/first-in
-    spots (no villain to price against), PLO, postflop, or batches
-    generated before the column existed.
+    misframe the numbers. Open/first-in spots have no villain to price
+    against so their ``stat_notes`` is empty BY DESIGN -- but they still
+    carry per-action solver EVs, and the EV chart is real math, so the
+    panel renders whenever EITHER exists (July 2026; the old
+    stat_notes-only gate silently hid the panel on every open spot).
+    No-ops only when there is nothing at all to show: PLO, postflop, or
+    batches generated before the columns existed.
     """
     from pipeline.preflop.stat_notes import parse_stat_notes  # noqa: PLC0415
 
     notes = parse_stat_notes(row.get("stat_notes", ""))
-    if not notes:
+    has_action_evs = bool((row.get("action_ev_bb") or "").strip())
+    if not notes and not has_action_evs:
         return
     with st.expander("📊 Show the math"):
         _render_equity_bar(row)

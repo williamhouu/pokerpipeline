@@ -139,14 +139,17 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     ),
     "Blind vs. Blind Play": lambda c: "bvb_spot" in c.tags,
     "Pot Odds": lambda c: c.archetype in _CALL or c.archetype in _FOLD,
+    # BvB: at a ring table the SB acts FIRST postflop, so the BB is the seat
+    # in position (July 2026 bugfix -- was backwards; "SB is the dealer" is
+    # true only at a 2-player table). Mirrors pipeline.plo.position.
     "In Position Play": lambda c: (
         (c.hero_position in _LATE and c.n_prior_raises >= 1)
-        or (c.hero_position == "SB" and "bvb_spot" in c.tags and c.n_prior_raises >= 1)
+        or (c.hero_position == "BB" and "bvb_spot" in c.tags and c.n_prior_raises >= 1)
     ),
     "Out of Position Play": lambda c: (
         bool(c.tags & _BLIND_TAGS)
         and c.n_prior_raises >= 1
-        and not (c.hero_position == "SB" and "bvb_spot" in c.tags)
+        and not (c.hero_position == "BB" and "bvb_spot" in c.tags)
     ),
     "Multiway Pot Strategy": lambda c: "multiway_pot" in c.tags,
 

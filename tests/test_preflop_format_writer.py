@@ -596,14 +596,15 @@ def test_ip_oop_positions_blind_vs_button() -> None:
     assert _ip_oop_positions("BB", "UTG") == ("UTG", "BB")
 
 
-def test_ip_oop_positions_bvb_heads_up() -> None:
-    """BvB heads-up: SB is the dealer and acts LAST postflop -> SB is IP,
-    BB is OOP. This is the standard HU exception to the postflop-order
-    rule."""
+def test_ip_oop_positions_bvb_bb_is_ip() -> None:
+    """Blind vs blind at a RING table: the SB acts FIRST on every postflop
+    street, so the BB has position. (July 2026 bugfix -- an earlier version
+    asserted an 'SB is the dealer' exception, which holds only at a literal
+    2-player table; every pack is a 6/8/9-max ring table.)"""
     from pipeline.preflop.position import ip_oop_positions as _ip_oop_positions
 
-    assert _ip_oop_positions("SB", "BB") == ("SB", "BB")
-    assert _ip_oop_positions("BB", "SB") == ("SB", "BB")
+    assert _ip_oop_positions("SB", "BB") == ("BB", "SB")
+    assert _ip_oop_positions("BB", "SB") == ("BB", "SB")
 
 
 def test_ip_oop_positions_two_non_blind_seats() -> None:

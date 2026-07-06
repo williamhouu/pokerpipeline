@@ -676,6 +676,7 @@ def build_preflop_entry_row(
         "hand_id": hand_id,
         "sequence_index": str(sequence_index),
         "sequence_total": str(sequence_total),
+        "hand_difficulty": "",  # stamped by the full-hand driver
         "Hand Stage": "Preflop",
         "Context": build_context_line(f.solve, display_in_bb=display_in_bb),
         "User Seat": table["user_seat"],
