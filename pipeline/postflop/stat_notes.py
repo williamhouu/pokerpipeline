@@ -50,58 +50,90 @@ def _villain_poss(facts: PostflopFacts) -> str:
     return f"{pos}'s" if pos else "their"
 
 
-def _pot_odds_note(be: float) -> StatNote:
-    # State the price only; whether THIS hand should call is context the answer
-    # explanation owns (implied odds can justify a sub-threshold call). No em
-    # dashes -- the team bans them in copy.
+def _pot_odds_note(
+    be: float,
+    pot_bb: float | None = None,
+    call_bb: float | None = None,
+    fmt=None,
+) -> StatNote:
+    # The subtext is the WRITTEN-OUT equation with each number labeled (team,
+    # July 2026, "Format B"): "call 4bb ÷ (pot 15bb + call 4bb) = 21%".
+    # Amounts are EXACT (never the 0.5bb display grid) so the arithmetic
+    # always reproduces the printed percentage. Whether THIS hand should call
+    # is context the answer explanation owns (implied odds can justify a
+    # sub-threshold call). No em dashes -- the team bans them in copy.
     pct = _pct(be)
-    return StatNote("pot_odds", "Pot odds", pct, f"Your pot odds here are {pct}.")
+    if pot_bb is not None and call_bb is not None and fmt is not None:
+        note = (
+            f"call {fmt(call_bb)} ÷ (pot {fmt(pot_bb)} + "
+            f"call {fmt(call_bb)}) = {pct}."
+        )
+    else:
+        note = f"Your pot odds here are {pct}."
+    return StatNote("pot_odds", "Pot odds", pct, note)
 
 
-def _hero_equity_note(eq: float, range_eq: float, villain: str) -> StatNote:
+def _hero_equity_note(
+    eq: float, range_eq: float, villain: str, hand_label: str = ""
+) -> StatNote:
     pct = _pct(eq)
+    # E1 (team, July 2026): name the specific cards so the number reads as a
+    # fact about THIS holding.
+    subject = f"Your hand, {hand_label}," if hand_label else "Your hand"
     if eq - range_eq >= HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand has about {pct} equity against {villain} range, a bit "
+            f"{subject} has about {pct} equity against {villain} range, a bit "
             f"stronger than your average hand here (your range is around "
             f"{_pct(range_eq)})."
         )
     elif eq - range_eq <= -HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand has about {pct} equity against {villain} range, a bit "
+            f"{subject} has about {pct} equity against {villain} range, a bit "
             f"weaker than your average hand here (your range is around "
             f"{_pct(range_eq)})."
         )
     else:
         note = (
-            f"Your hand has about {pct} equity against {villain} range, about "
+            f"{subject} has about {pct} equity against {villain} range, about "
             f"average for your range here ({_pct(range_eq)})."
         )
     return StatNote("hero_equity", "Your equity", pct, note)
 
 
-def _currently_ahead_note(ahead: float, facing_bet: bool, villain: str) -> StatNote:
+def _currently_ahead_note(
+    ahead: float, facing_bet: bool, villain: str, tied: float = 0.0
+) -> StatNote:
     # Whose hands hero beats RIGHT NOW (showdown equity, not draw equity). On a
     # facing-bet node the comparison set is the betting range -- mirror the data
     # block's wording so the panel and the SOLVER DATA never disagree.
     pct = _pct(ahead)
     whom = f"the hands {villain} betting" if facing_bet else f"{villain} range"
     note = f"Right now your hand beats about {pct} of {whom} at showdown."
+    if tied >= 0.05:  # noqa: PLR2004 -- mirrors the data block's tie threshold
+        note += (
+            f" You also tie (chop the pot) with about {_pct(tied)} more, and "
+            "a chop only gets your money back, it does not win the pot."
+        )
     return StatNote("currently_ahead", "Currently ahead of", pct, note)
 
 
 def _blockers_note(facts: PostflopFacts, villain: str) -> StatNote | None:
-    # Only when hero's cards meaningfully remove villain's value OR bluffs (the
-    # resolved verdict, never the LLM). Direction follows facts.blocker_effect.
-    if facts.blocker_effect == "value" and facts.blocked_value_pct >= _BLOCKER_MIN_PCT:
-        pct = f"{facts.blocked_value_pct:.0f}%"
+    # ALIGNMENT INVARIANT (team, July 2026): this row fires on EXACTLY the
+    # condition that puts the BLOCKERS line in the LLM's SOLVER DATA block
+    # (facts.blocker_effect resolved non-neutral) -- so whenever the prose is
+    # allowed to mention blockers, the panel shows the numbers behind it, and
+    # a reviewer never has to take a blocker claim on faith. (The old gate
+    # compared the FRACTION blocked_value_pct to 5.0, a percent, so this row
+    # never rendered at all -- a dead row since birth.)
+    if facts.blocker_effect == "value":
+        pct = f"{facts.blocked_value_pct:.0%}"
         note = (
             f"Your cards remove about {pct} of the value hands from {villain} "
             "range, so they hold fewer of the hands that beat you."
         )
         return StatNote("blockers", "Blockers", pct, note)
-    if facts.blocker_effect == "bluffs" and facts.blocked_bluff_pct >= _BLOCKER_MIN_PCT:
-        pct = f"{facts.blocked_bluff_pct:.0f}%"
+    if facts.blocker_effect == "bluffs":
+        pct = f"{facts.blocked_bluff_pct:.0%}"
         note = (
             f"Your cards remove about {pct} of the bluffs from {villain} range, "
             "so there are fewer hands you beat that they would bet."
@@ -110,33 +142,86 @@ def _blockers_note(facts: PostflopFacts, villain: str) -> StatNote | None:
     return None
 
 
-def _spr_note(spr: float) -> StatNote:
-    return StatNote(
-        "spr", "SPR", f"{spr:.1f}",
-        f"The stack-to-pot ratio here is about {spr:.1f}.",
-    )
+def _spr_note(
+    spr: float,
+    stack_bb: float | None = None,
+    pot_bb: float | None = None,
+    fmt=None,
+) -> StatNote:
+    # The subtext is the WRITTEN-OUT equation, like pot odds (team, July
+    # 2026): "stack 121bb ÷ pot 6.7bb = 18.1". The amounts are the SAME
+    # numbers node.spr divides (effective stack / pot including any bet
+    # faced), exact and never display-grid-rounded, so the arithmetic always
+    # reproduces the printed ratio.
+    if stack_bb is not None and pot_bb is not None and pot_bb > 0 and fmt is not None:
+        note = (
+            f"stack {fmt(stack_bb)} ÷ pot {fmt(pot_bb)} = {spr:.1f}. The "
+            "stack number is whichever player has less money left, because "
+            "that is the most either of you can still put in."
+        )
+    else:  # fakes / missing geometry
+        note = f"The stack-to-pot ratio here is about {spr:.1f}."
+    return StatNote("spr", "SPR", f"{spr:.1f}", note)
 
 
-def build_stat_notes(facts: PostflopFacts) -> list[StatNote]:
+def build_stat_notes(
+    facts: PostflopFacts,
+    *,
+    display_in_bb: bool = True,
+    bb_in_dollars: float | None = None,
+) -> list[StatNote]:
     """The "Show the math" rows for one postflop spot, in display order.
 
     Only includes a row when its underlying fact exists, so the app's panel
     hides any row it has no data for (same contract as the preflop builder).
+    ``display_in_bb`` / ``bb_in_dollars`` pick the unit for the pot-odds
+    equation's amounts so the panel matches the Question prose's unit.
     """
+    from pipeline.action_history import format_card  # noqa: PLC0415
+    from pipeline.bb_display import exact_amount_str  # noqa: PLC0415
+
+    def _amt(x: float) -> str:
+        return exact_amount_str(
+            x, display_in_bb=display_in_bb, bb_in_dollars=bb_in_dollars
+        )
+
+    # The specific cards, e.g. "K<spade>J<spade>" (duck-typed so test fakes
+    # without a spot simply omit the name).
+    combo = str(getattr(getattr(facts, "spot", None), "hero_combo", "") or "")
+    hand_label = (
+        format_card(combo[:2]) + format_card(combo[2:]) if len(combo) == 4 else ""  # noqa: PLR2004
+    )
     notes: list[StatNote] = []
     villain = _villain_poss(facts)
     facing_bet = facts.break_even_equity is not None
     if facing_bet:
-        notes.append(_pot_odds_note(facts.break_even_equity))  # type: ignore[arg-type]
+        notes.append(_pot_odds_note(
+            facts.break_even_equity,  # type: ignore[arg-type]
+            facts.pot_bb,
+            facts.to_call_bb,
+            _amt,
+        ))
     notes.append(
-        _hero_equity_note(facts.hero_equity_vs_villain, facts.hero_range_equity, villain)
+        _hero_equity_note(
+            facts.hero_equity_vs_villain, facts.hero_range_equity, villain,
+            hand_label,
+        )
     )
     if facts.currently_ahead_pct > 0:
-        notes.append(_currently_ahead_note(facts.currently_ahead_pct, facing_bet, villain))
+        notes.append(_currently_ahead_note(
+            facts.currently_ahead_pct, facing_bet, villain,
+            getattr(facts, "currently_tied_pct", 0.0) or 0.0,
+        ))
     blockers_note = _blockers_note(facts, villain)
     if blockers_note is not None:
         notes.append(blockers_note)
-    notes.append(_spr_note(facts.spr))
+    _node = getattr(getattr(facts, "spot", None), "node", None)
+    notes.append(_spr_note(
+        facts.spr,
+        getattr(_node, "effective_stack_bb", None),
+        facts.pot_bb,
+        _amt,
+    ))
     return notes
 
 

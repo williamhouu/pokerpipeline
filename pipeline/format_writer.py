@@ -333,7 +333,7 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         "Question": question,
         # The team's fixed Question Type label, NO trailing period (June 2026 --
         # the period was dropped per team feedback; keep all four writers in sync).
-        "Question Type": "Hand Scenario Question",
+        "Question Type": "Hand scenario question",  # sentence case, no period (July 2026)
         "Hand Stage": meta.street.capitalize(),
         "option 1": _LLM_TBD,
         "option 2": _LLM_TBD,

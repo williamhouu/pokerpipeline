@@ -76,7 +76,7 @@ from pipeline.preflop.difficulty import (
     max_achievable_difficulty,
 )
 from pipeline.preflop.ev_engine import (
-    compute_break_even_equity,
+    compute_price_geometry,
     compute_ev_gap_bb,
 )
 from pipeline.preflop.explanation_generator import (
@@ -1186,12 +1186,16 @@ def generate_preflop_batch(
         try:
             facts: object = extract_facts(
                 spot, pack, equity_runouts=equity_runouts)
-            # Enrich with the pot-odds break-even equity (needs the pack's
-            # chip geometry) so Layer 6 can cite it instead of computing
-            # pot odds itself. None on spots with no bet to call.
+            # Enrich with the pot-odds price (needs the pack's chip geometry)
+            # so Layer 6 can cite it instead of computing pot odds itself,
+            # and the math panel can print the written-out equation from the
+            # SAME numbers. All None on spots with no bet to call.
+            _pot, _call, _be = compute_price_geometry(facts, pack)
             facts = replace(
                 facts,
-                break_even_equity=compute_break_even_equity(facts, pack),
+                break_even_equity=_be,
+                price_pot_bb=_pot,
+                price_call_bb=_call,
                 rake_pct=pack.rake_pct or 0.0,  # trap-detector equity cushion
             )
             # Prefer the solver's OWN per-action EVs (accurate on multiway

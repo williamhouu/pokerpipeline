@@ -180,6 +180,15 @@ def _build_legs(
         legs.append(HandLeg(kind="preflop_entry", street="preflop", node_id="",
                             entry_facts=entry))
     for n in nodes:
+        # FORCED-MOVE GUARD (July 2026): a node offering fewer than two
+        # actions is not a decision -- solve trees truncate deep lines to
+        # check-only, and emitting such a leg ships a one-option "question"
+        # (and pays an LLM call to explain a forced move). Skip it: the next
+        # leg's Question prose narrates the whole line, so the play-through
+        # reads continuously. The hand's SEED decision always survives (the
+        # worthiness window requires a mixed strategy = 2+ actions).
+        if len(n.actions) < 2:
+            continue
         legs.append(HandLeg(kind="postflop", street=n.street, node_id=n.node_id,
                             spot=sample_spot(n, combo)))
     return legs

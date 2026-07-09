@@ -131,6 +131,23 @@ def _equity_for_call(facts: PreflopFacts) -> float | None:
     return facts.hero_equity_vs_villain
 
 
+def compute_price_geometry(
+    facts: PreflopFacts,
+    pack: PreflopPack,
+) -> tuple[float | None, float | None, float | None]:
+    """``(pot_bb, call_bb, break_even)`` at hero's decision point, or Nones.
+
+    ONE computation for all three so the break-even number and the amounts
+    shown in the math panel's written-out equation can never disagree.
+    All-None when hero faces no bet to call (no price exists).
+    """
+    pot_bb, call_cost_bb = _pot_and_call_cost_bb(facts, pack)
+    total = pot_bb + call_cost_bb
+    if call_cost_bb <= 0 or total <= 0:
+        return None, None, None
+    return pot_bb, call_cost_bb, call_cost_bb / total
+
+
 def compute_break_even_equity(
     facts: PreflopFacts,
     pack: PreflopPack,
@@ -144,11 +161,7 @@ def compute_break_even_equity(
     Returns ``None`` when hero faces no bet to call (call_cost is 0 -- e.g.
     hero is the aggressor or can check), since there's no price to meet.
     """
-    pot_bb, call_cost_bb = _pot_and_call_cost_bb(facts, pack)
-    total = pot_bb + call_cost_bb
-    if call_cost_bb <= 0 or total <= 0:
-        return None
-    return call_cost_bb / total
+    return compute_price_geometry(facts, pack)[2]
 
 
 def compute_ev_gap_bb(

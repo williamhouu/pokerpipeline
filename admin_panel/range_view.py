@@ -169,6 +169,94 @@ def grid_html(
     return (_TIP_CSS + table) if any_tips else table
 
 
+def gw_cells(
+    segments_by_hand: dict[str, list[tuple]],
+) -> dict[str, tuple[float, list[tuple]]]:
+    """GTO-Wizard encoding from reach-weighted segments.
+
+    Input: ``{hand: [(reach_weighted_freq, colour, label?), ...]}`` -- the
+    same segments :func:`grid_html` takes, where a hand's segment fractions
+    sum to its presence in the range. Output: ``{hand: (bar_height,
+    [(width_frac, colour, label?), ...])}`` -- bar HEIGHT = the hand's total
+    presence here, WIDTH split = the action mix WHEN HELD (normalised to sum
+    to 1). Hands with no presence are dropped. This is exactly renderable
+    from the CSV ``ranges`` column too: height = ``range[hand]``, widths =
+    ``strategy[hand][action] / range[hand]``.
+    """
+    out: dict[str, tuple[float, list[tuple]]] = {}
+    for hand, segs in segments_by_hand.items():
+        total = sum(s[0] for s in segs)
+        if total <= 0:
+            continue
+        widths = [(s[0] / total, *s[1:]) for s in segs]
+        out[hand] = (min(1.0, total), widths)
+    return out
+
+
+def grid_html_gw(cells: dict[str, tuple[float, list[tuple]]]) -> str:
+    """Render a 13x13 grid in the GTO-Wizard style (see :func:`gw_cells`).
+
+    Each cell draws a bottom-anchored bar whose HEIGHT is the hand's presence
+    in the range and whose WIDTH is split by the action mix when held, each
+    band ``(width_fraction, css_colour)`` or ``(width, colour, label)``.
+    Labelled bands make the cell tappable with a tooltip listing each action's
+    when-held frequency plus the hand's presence. Pure (no Streamlit).
+    """
+    any_tips = False
+    rows: list[str] = []
+    for i in range(13):
+        tds: list[str] = []
+        for j in range(13):
+            hand = hand_at(i, j)
+            height, segs = cells.get(hand, (0.0, []))
+            height = max(0.0, min(1.0, height))
+            bars = "".join(
+                f'<div style="width:{max(0.0, min(1.0, s[0])) * 100:.1f}%;'
+                f'background:{s[1]};"></div>'
+                for s in segs
+            )
+            bar_box = (
+                '<div style="position:absolute;left:0;right:0;bottom:0;'
+                f'height:{height * 100:.1f}%;display:flex;">{bars}</div>'
+                if height > 0 and bars else ""
+            )
+            labelled = [s for s in segs if len(s) >= 3 and s[2]]  # noqa: PLR2004
+            tip = ""
+            td_attrs = ""
+            if labelled:
+                any_tips = True
+                vert = "rgtip-dn" if i < 7 else "rgtip-up"  # noqa: PLR2004
+                horiz = "rgtip-l" if j < 2 else ("rgtip-r" if j > 10 else "rgtip-c")  # noqa: PLR2004
+                lines = "<br>".join(
+                    f'<span class="rgsw" style="background:{s[1]};"></span>'
+                    f"{s[2]} {_tip_pct(s[0])}"
+                    for s in labelled
+                )
+                tip = (
+                    f'<div class="rgtip {vert} {horiz}">'
+                    f"<b>{hand}</b> · here {_tip_pct(height)}<br>{lines}</div>"
+                )
+                td_attrs = ' class="rgc" tabindex="0"'
+            tds.append(
+                f"<td{td_attrs} "
+                'style="border:1px solid #0006;height:32px;padding:0;'
+                "position:relative;text-align:center;vertical-align:middle;"
+                'background:#222831;">'
+                f"{bar_box}"
+                '<span style="position:relative;z-index:1;color:#fff;'
+                'font:600 11px monospace;text-shadow:0 0 2px #000,0 0 3px #000;">'
+                f"{hand}</span>{tip}</td>"
+            )
+        rows.append("<tr>" + "".join(tds) + "</tr>")
+    table = (
+        '<table class="rgt" '
+        'style="border-collapse:collapse;width:100%;table-layout:fixed;">'
+        + "".join(rows)
+        + "</table>"
+    )
+    return (_TIP_CSS + table) if any_tips else table
+
+
 def cell_css(value: float) -> str:
     """CSS for one range-grid cell: green intensity scales with the cell's
     frequency (a percentage in [0, 100]).
@@ -195,7 +283,9 @@ __all__ = [
     "cell_css",
     "combos",
     "grid_html",
+    "grid_html_gw",
     "grid_matrix",
+    "gw_cells",
     "hand_at",
     "node_id_from_solver_reference",
     "range_pct",

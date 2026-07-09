@@ -147,6 +147,45 @@ def _worthy_seeds(solve, *, lo=0.50, hi=0.99):
     return seeds
 
 
+def test_forced_single_action_legs_are_skipped(tmp_path) -> None:
+    """FORCED-MOVE GUARD (July 2026, seen live on a real v8 batch): a node
+    offering only ONE action (deep lines truncate to check-only in real
+    solve trees) must not become a question leg -- a one-option "question"
+    has nothing to decide, and it costs a real LLM call. The next leg's
+    prose narrates the forced action, so the play-through stays continuous.
+    """
+    import dataclasses
+
+    from pipeline.postflop.play_through import _build_legs
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    node = next(
+        n for n in solve.nodes.values()
+        if n.actor == "BB" and n.strategy and len(n.actions) >= 2
+    )
+    combo = next(iter(node.strategy))
+    forced = dataclasses.replace(
+        node, node_id=node.node_id + ":forced", actions=(node.actions[0],),
+    )
+    legs = _build_legs(
+        solve, "BB", combo, [node, forced], include_preflop=False,
+    )
+    assert [leg.node_id for leg in legs] == [node.node_id]
+
+    # Batch-level invariant: EVERY emitted full-hand question offers a real
+    # choice (option 2 non-empty) -- forced moves never reach the CSV.
+    out = tmp_path / "fh_forced.csv"
+    generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=3, dry_run=True,
+    )
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    assert rows
+    for r in rows:
+        assert r["option 2"].strip(), (
+            f"one-option question shipped: #{r['No']} ({r['Hand Stage']})"
+        )
+
+
 def test_assemble_one_connected_hero_hand() -> None:
     solve = btn_vs_bb_full_hand_2cJs7s()
     hands = assemble_hands(solve, seeds=_worthy_seeds(solve), heroes=("BB",))
@@ -329,7 +368,9 @@ def test_full_hand_batch_groups_and_orders(tmp_path: Path) -> None:
     for legs in groups.values():
         seqs = sorted(int(r["sequence_index"]) for r in legs)
         assert seqs == list(range(1, len(legs) + 1))  # contiguous 1..N
-        assert all(int(r["sequence_total"]) == len(legs) for r in legs)
+        # sequence_total was dropped from the full-hand CSV (July 2026): the
+        # app derives the leg count from the hand_id group size.
+        assert all("sequence_total" not in r for r in legs)
         # First leg is the preflop entry.
         first = min(legs, key=lambda r: int(r["sequence_index"]))
         assert first["Hand Stage"] == "Preflop"

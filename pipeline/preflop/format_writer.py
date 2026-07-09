@@ -225,9 +225,12 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
     parts -- mathematically fair (no single column absorbs all the
     rounding error) and the standard fix for this class of bug.
 
-    Empty strategy -> empty string. All-zero strategy (hand doesn't
-    reach the node) -> empty string too, since 0% × N doesn't sum to
-    100 and showing "Fold: 0%, Call: 0%" is misleading.
+    Actions the solver essentially never takes (< 0.5%) are dropped
+    before rounding (team, July 2026) -- "All-in: 0%" rows are display
+    noise; the postflop column applies the same trim. Empty strategy ->
+    empty string. All-zero strategy (hand doesn't reach the node) ->
+    empty string too, since 0% × N doesn't sum to 100 and showing
+    "Fold: 0%, Call: 0%" is misleading.
     """
     if not strategy:
         return ""
@@ -235,6 +238,12 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
     if total <= 0:
         # All-zero strategy. Nothing to render -- the column is
         # best-effort and a "0%" row carries no information.
+        return ""
+    # Drop never-taken actions (< 0.5%) before rounding -- "All-in: 0%"
+    # rows are noise (July 2026; matches the postflop column's trim). The
+    # remaining entries are renormalised by the rounding to sum to 100.
+    strategy = {lbl: f for lbl, f in strategy.items() if f >= 0.005}  # noqa: PLR2004
+    if not strategy:
         return ""
     by_freq_desc = sorted(strategy.items(), key=lambda kv: -kv[1])
     # Largest-remainder rounding.
@@ -363,6 +372,17 @@ def _format_action_evs(
     if not evs:
         return ""
     evs = _drop_unreasonable_all_in(evs, strategy)
+    # EV DISPLAY NORMALIZATION (team, July 2026): different solve sources
+    # measure EV from different zero points (monker packs from the hand
+    # START, so a BB fold shows -1.00; Ryan-style packs from the decision,
+    # so Fold shows 0.00; vendor .dbs from prior investment). Normalize the
+    # DISPLAYED numbers so Fold always reads 0: every EV becomes "vs
+    # folding", one convention everywhere. The differences between actions
+    # (the decision signal) are unchanged by a constant shift; internal
+    # math (difficulty, worthiness) never reads this column.
+    fold_ev = evs.get("Fold")
+    if fold_ev is not None:
+        evs = {label: ev - fold_ev for label, ev in evs.items()}
     ordered = sorted(evs.keys(), key=lambda label: -strategy.get(label, 0.0))
     return ", ".join(f"{label}: {evs[label]:+.2f}" for label in ordered)
 
@@ -1033,7 +1053,7 @@ def build_preflop_row(
             display_in_bb=display_in_bb,
         ),
         "Question": question_text,
-        "Question Type": "Hand Scenario Question",  # no trailing period (June 2026)
+        "Question Type": "Hand scenario question",  # sentence case, no period (July 2026)
         "Hand Stage": "Preflop",
         "option 1": explanation.option_1,
         "option 2": explanation.option_2,
@@ -1107,7 +1127,11 @@ def build_preflop_row(
         # flat duplicate columns (pot_odds / hero_equity / range_equity /
         # blocker_combos / top_villain_combos) were dropped June 2026 -- their
         # values already live inside this JSON. Blank on opens (no villain).
-        "stat_notes": stat_notes_to_json(build_stat_notes(facts)),
+        "stat_notes": stat_notes_to_json(build_stat_notes(
+            facts,
+            display_in_bb=display_in_bb,
+            bb_in_dollars=stakes_bb_dollars,
+        )),
         # Layer-7 claim-checker output (opt-in); "" when the checker didn't run.
         "claim_check": claim_check,
         # Deterministic exploitative adjustments (vs nit/station/maniac).

@@ -150,6 +150,25 @@ def test_review_pages_have_no_racy_nav_buttons() -> None:
                     )
 
 
+def test_ranges_conditional_toggle_lives_outside_the_form() -> None:
+    """Structural guard for the RERUN INVARIANT (July 2026): a widget inside
+    an st.form only takes effect on the NEXT submit click, so the ranges
+    panel's Conditional-view toggle (a pure viewer control) must render
+    OUTSIDE the review card's form -- inside it, the toggle flipped visually
+    but the grids never re-rendered ("the toggle doesn't work")."""
+    import inspect
+
+    card_src = inspect.getsource(admin_app._render_postflop_question_card)
+    assert "st.toggle" not in card_src, (
+        "reactive viewer widget inside the review card's st.form -- it will "
+        "appear dead until a submit click (RERUN INVARIANT)"
+    )
+    assert "_render_postflop_ranges_panel(" in card_src
+    panel_src = inspect.getsource(admin_app._render_postflop_ranges_panel)
+    assert "st.toggle" in panel_src
+    assert "st.form(" not in panel_src
+
+
 def test_read_csv_cache_respects_mtime(tmp_path) -> None:
     """THE true root cause of the recurring 'my edit vanished' bug: the CSV
     read cache took `_mtime`, and st.cache_data EXCLUDES underscore-prefixed

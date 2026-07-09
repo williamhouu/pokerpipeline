@@ -141,4 +141,11 @@ def dominating_map(
         "dominated_by": dominated_by[:_MAX_PER_BUCKET],
         "you_dominate": you_dominate[:_MAX_PER_BUCKET],
         "coinflips": coinflips[:_MAX_PER_BUCKET],
+        # Uncapped bucket sizes (July 2026): the prose lists cap at
+        # _MAX_PER_BUCKET, so consumers can say "AA, KK, ... and N more"
+        # instead of silently truncating. Additive keys -- every existing
+        # consumer reads the three list keys by name.
+        "dominated_by_total": len(dominated_by),
+        "you_dominate_total": len(you_dominate),
+        "coinflips_total": len(coinflips),
     }

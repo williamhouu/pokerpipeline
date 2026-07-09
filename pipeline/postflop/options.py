@@ -86,18 +86,40 @@ def _plain_options(
     return options, dominant
 
 
+def _spectrum_label(action: NodeAction) -> str:
+    """The wording one action gets on the Always/Mostly spectrum.
+
+    TEAM RULE (July 2026): GTO spectrum options NEVER carry a bet size --
+    "Bet 53%" reads as "Bet", "Raise to 8.5bb" as "Raise" (matching the
+    preflop pipeline, whose GTO labels have always been canonicalised
+    size-free). The LLM still receives the real size in its SOLVER DATA
+    block and the Question prose still names sizes; only the option wording
+    drops them. "All-in" stays verbatim (it IS the action, not a size).
+    Plain-label styles (basic / future sizing questions) keep their sizes.
+    """
+    if action.verb in ("bet", "raise") and action.label != "All-in":
+        return action.verb.capitalize()
+    return action.label
+
+
 def _spectrum_options(
-    spot: PostflopSpot, labels: list[str], dominant: str
+    spot: PostflopSpot, actions: list[NodeAction], dominant: str
 ) -> tuple[list[str], str]:
     """The Always/Mostly 4-rung spectrum for a 2-action spot. ``correct`` is
     ``"Always {dom}"`` only when the dominant action is literally pure, else
-    ``"Mostly {dom}"`` (June 2026 rule)."""
-    less, more = labels[0], labels[1]
+    ``"Mostly {dom}"`` (June 2026 rule). Option wording is size-free (see
+    :func:`_spectrum_label`); ``dominant`` is the dominant action's RAW label.
+    """
+    less_a, more_a = actions[0], actions[1]
+    less, more = _spectrum_label(less_a), _spectrum_label(more_a)
+    if less == more:  # defensive: two same-verb actions -> keep raw labels
+        less, more = less_a.label, more_a.label
+    dom = less if dominant == less_a.label else more
     options = [f"Always {less}", f"Mostly {less}", f"Mostly {more}", f"Always {more}"]
     prefix = "Always" if spot.dominant_frequency >= PURE_THRESHOLD else "Mostly"
-    correct = f"{prefix} {dominant}"
+    correct = f"{prefix} {dom}"
     if correct not in options:  # defensive: dominant must be one of the two
-        correct = f"Mostly {dominant}" if f"Mostly {dominant}" in options else options[0]
+        correct = f"Mostly {dom}" if f"Mostly {dom}" in options else options[0]
     return options, correct
 
 
@@ -162,10 +184,11 @@ def _collapsed_spectrum_options(
     passive_v, aggr_v = sorted(chosen, key=lambda v: _VERB_RANK.get(v, 9))[:2]
 
     def _family(verb: str) -> str:
-        # A single action keeps its own label; a multi-size verb collapses to
-        # the capitalised verb ("Bet" / "Raise").
+        # A multi-size verb collapses to the capitalised verb ("Bet" /
+        # "Raise"); a single action uses its size-free spectrum label (team
+        # rule, July 2026 -- "Bet 53%" reads as "Bet"; "All-in" stays).
         acts = by_verb[verb]
-        return acts[0].label if len(acts) == 1 else verb.capitalize()
+        return _spectrum_label(acts[0]) if len(acts) == 1 else verb.capitalize()
 
     passive, aggr = _family(passive_v), _family(aggr_v)
     options = [f"Always {passive}", f"Mostly {passive}", f"Mostly {aggr}", f"Always {aggr}"]
@@ -242,7 +265,7 @@ def build_options(
     # (the LLM still gets the real size in its data block).
     if resolved == "gto":
         if len(actions) == 2:  # noqa: PLR2004
-            return _spectrum_options(spot, labels, dominant)
+            return _spectrum_options(spot, actions, dominant)
         n_verbs = len({a.verb for a in actions})
         # Multi-size collapse (Check vs Bet) is EXPLICIT-gto only; "auto" keeps
         # plain size labels on multi-size spots (its long-standing behaviour),

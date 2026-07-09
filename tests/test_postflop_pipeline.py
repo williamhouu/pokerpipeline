@@ -289,10 +289,34 @@ def test_options_multi_action_plain_labels() -> None:
 
 
 def test_options_binary_gto_is_always_mostly_spectrum() -> None:
-    # GTO style gives the 4-rung spectrum for a 2-action spot.
+    # GTO style gives the 4-rung spectrum for a 2-action spot. TEAM RULE
+    # (July 2026): spectrum options are size-free ("Mostly Bet", never
+    # "Mostly Bet 33%") -- matching the preflop pipeline's canonical labels.
     opts, correct = build_options(_spot("flop_oop_lead", "7h6h"), style="gto")
-    assert opts == ["Always Check", "Mostly Check", "Mostly Bet 33%", "Always Bet 33%"]
+    assert opts == ["Always Check", "Mostly Check", "Mostly Bet", "Always Bet"]
     assert correct == "Mostly Check" and correct in opts
+
+
+def test_gto_spectrum_options_never_carry_a_bet_size() -> None:
+    """TEAM RULE (July 2026): an Always/Mostly option never names a bet size.
+
+    Sweep EVERY node of the fixture solve under style="gto": any option with
+    an Always/Mostly prefix must contain no digits (no "53%", no "8.5bb").
+    Plain-label fallbacks (3+ live verbs) and basic style keep their sizes.
+    """
+    solve = btn_vs_bb_srp_2cJs7s()
+    checked = 0
+    for node in solve.nodes.values():
+        for spot in enumerate_spots(node):
+            opts, correct = build_options(spot, style="gto")
+            assert correct in opts
+            for opt in opts:
+                if opt.startswith(("Always ", "Mostly ")):
+                    assert not any(ch.isdigit() for ch in opt), (
+                        f"sized spectrum option {opt!r} at {spot.node.node_id}"
+                    )
+                    checked += 1
+    assert checked > 0  # the sweep actually exercised spectrum spots
 
 
 def test_options_styles_basic_gto_auto() -> None:
@@ -371,11 +395,11 @@ def test_options_gto_near_binary_collapse() -> None:
         ["Always Fold", "Mostly Fold", "Mostly Call", "Always Call"], "Mostly Fold"
     )
     # Fold 3 / Call 50 / Raise 47 -> Fold (least aggressive) is the sliver, dropped
-    # -> Call-vs-Raise (proves the pick is by frequency, not aggression order). A
-    # single-size raise keeps its own label ("Raise to 12bb"), per the collapse rule.
+    # -> Call-vs-Raise (proves the pick is by frequency, not aggression order). The
+    # raise option is size-free ("Raise", not "Raise to 12bb") -- team rule July 2026.
     cr = _stub({"Fold": 0.03, "Call": 0.50, "Raise to 12bb": 0.47}, "Call", 0.50)
     assert build_options(cr, style="gto") == (
-        ["Always Call", "Mostly Call", "Mostly Raise to 12bb", "Always Raise to 12bb"],
+        ["Always Call", "Mostly Call", "Mostly Raise", "Always Raise"],
         "Mostly Call",
     )
     # Genuinely 3-way (all >= 5%) -> NO collapse, plain labels (full labels kept).
@@ -772,6 +796,41 @@ def test_round_to_half_bb_grid() -> None:
     assert round_to_half_bb(0.0) == 0.0
 
 
+def test_exact_amount_str_never_snaps_to_the_display_grid() -> None:
+    """The math panel's equation amounts are EXACT (a self-consistent
+    equation beats a pretty one, team July 2026): 2.14bb stays 2.14bb."""
+    from pipeline.bb_display import exact_amount_str  # noqa: PLC0415
+
+    assert exact_amount_str(2.14) == "2.14bb"
+    assert exact_amount_str(9.5) == "9.5bb"
+    assert exact_amount_str(2.0) == "2bb"
+    assert exact_amount_str(3.0, display_in_bb=False, bb_in_dollars=2.0) == "$6"
+    assert exact_amount_str(3.75, display_in_bb=False, bb_in_dollars=2.0) == "$7.50"
+    # No dollar rate -> falls back to bb even when dollars were requested.
+    assert exact_amount_str(3.0, display_in_bb=False, bb_in_dollars=None) == "3bb"
+
+
+def test_postflop_stat_notes_equation_and_hand_name() -> None:
+    """Format B pot-odds equation + E1 hand naming on the postflop panel,
+    driven by a REAL fixture spot so the numbers come from the node."""
+    from pipeline.postflop.stat_notes import build_stat_notes  # noqa: PLC0415
+
+    spot = _spot("flop_ip_facing_bet", "Ah5h")
+    facts = extract_facts(spot, SOLVE, equity_runouts=40)
+    notes = {n.key: n for n in build_stat_notes(facts)}
+    po = notes["pot_odds"]
+    assert po.note.startswith("call ") and "÷ (pot " in po.note
+    assert po.note.endswith(f"= {po.value}.")
+    # The equation reproduces its own percentage from the printed numbers.
+    import re as _re
+
+    nums = [float(x) for x in _re.findall(r"([\d.]+)bb", po.note)]
+    call, pot = nums[0], nums[1]
+    assert f"{call / (pot + call):.0%}" == po.value
+    eq = notes["hero_equity"]
+    assert eq.note.startswith("Your hand, A") and "5" in eq.note.split(",")[1]
+
+
 # --- app table-state tokens (the Runout chip/seat/board renderer) -----------
 def test_app_table_cbet_spot_tokens_bb() -> None:
     # BTN to act after BB checks (c-bet decision). Hero has not acted this
@@ -1051,7 +1110,7 @@ def test_currently_ahead_beats_air_loses_to_pairs() -> None:
         "JcTd": 1.0,  # jack-high -> AHEAD
         "KhQc": 1.0,  # pair of kings -> hero is BEHIND
     }
-    ahead, behind = compute_currently_ahead(hero, villain, board)
+    ahead, behind, tied = compute_currently_ahead(hero, villain, board)
     assert ahead == pytest.approx(2 / 3)  # beats the two unpaired hands
     assert behind == pytest.approx(1 / 3)  # behind the pair of kings
 
@@ -1061,13 +1120,13 @@ def test_currently_ahead_excludes_blocked_and_is_exact() -> None:
     hero = ["2d", "2c"]
     # A combo sharing the 2d (hero) or 3s (board) is not a real villain holding.
     villain = {"2dAh": 1.0, "3sQh": 1.0, "AcQc": 1.0}
-    ahead, behind = compute_currently_ahead(hero, villain, board)
+    ahead, behind, tied = compute_currently_ahead(hero, villain, board)
     # Only AcQc is live (ace-high) -> hero ahead of 100% of the live range.
     assert ahead == 1.0 and behind == 0.0
     # Exact + deterministic (no runouts): identical on every call.
-    assert compute_currently_ahead(hero, villain, board) == (ahead, behind)
+    assert compute_currently_ahead(hero, villain, board) == (ahead, behind, tied)
     # Empty / all-blocked range -> (0, 0), never a divide-by-zero.
-    assert compute_currently_ahead(hero, {"2d2h": 1.0}, board) == (0.0, 0.0)
+    assert compute_currently_ahead(hero, {"2d2h": 1.0}, board) == (0.0, 0.0, 0.0)
 
 
 def test_currently_ahead_in_facts_and_data_block() -> None:
@@ -1578,6 +1637,33 @@ def test_soft_blocker_direction_flags_reversal() -> None:
     assert not soft_validate_blocker_direction(good, facts)
 
 
+def test_soft_raw_percent_size_flags_bare_percent_command() -> None:
+    """TEAM RULE (July 2026): sizes read in natural language, never as a raw
+    solver label echo ("You should bet 53%"). Flag-only; "53% of the pot"
+    and natural phrasings pass."""
+    from pipeline.postflop.validators import soft_validate_raw_percent_size
+
+    facts = _facts_for()
+    opts, correct = build_options(facts.spot)
+
+    def _expl(prose: str) -> GeneratedExplanation:
+        return GeneratedExplanation(*(opts + ["", "", "", ""])[:4], correct, prose)
+
+    assert soft_validate_raw_percent_size(
+        _expl("You should bet 53% here. The hand is strong."), facts,
+    )
+    assert soft_validate_raw_percent_size(
+        _expl("The best play is raising 120% to pressure their range."), facts,
+    )
+    for clean in (
+        "You should bet about half the pot (4bb) here.",
+        "Betting 53% of the pot gets value from worse.",
+        "You have 53% equity, so a small third-pot bet is best.",
+        "The best play is to check.",
+    ):
+        assert not soft_validate_raw_percent_size(_expl(clean), facts), clean
+
+
 # --- #2: curation filters (hand-strength + decision-type) --------------------
 def test_spot_strength_bucket_and_decision_type() -> None:
     from pipeline.postflop.facts import preflop_aggressor
@@ -1801,11 +1887,11 @@ def test_options_gto_pure_spot_secondary_is_second_best_by_ev() -> None:
             dominant_action="Call", dominant_frequency=1.0,
         )
 
-    # Raising (+1.95) beats folding (0.00) -> pair Call with the raise.
+    # Raising (+1.95) beats folding (0.00) -> pair Call with the raise. The
+    # spectrum option is size-free ("Raise") -- team rule July 2026.
     spot = _stub({"Call": 2.87, "Fold": 0.0, "Raise to 12bb": 1.95})
     assert build_options(spot, style="gto") == (
-        ["Always Call", "Mostly Call", "Mostly Raise to 12bb",
-         "Always Raise to 12bb"],
+        ["Always Call", "Mostly Call", "Mostly Raise", "Always Raise"],
         "Always Call",
     )
     # EV ranking is symmetric: when raising is -EV, Fold is second-best.
@@ -1819,3 +1905,83 @@ def test_options_gto_pure_spot_secondary_is_second_best_by_ev() -> None:
     assert build_options(spot, style="gto")[0] == [
         "Fold", "Call", "Raise to 12bb",
     ]
+
+
+def test_action_ev_display_drops_unreasonable_all_in() -> None:
+    """Deep-stack display rule (team, July 2026, ported from preflop): a jam
+    the solver never takes (<2% freq) that is clearly dominated (1bb+ below
+    best) is dropped from the action_ev_bb display -- it is noise and it
+    squashes the EV chart's scale. A LIVE or near-even jam always stays."""
+    from pipeline.postflop.format_writer import _format_action_evs
+
+    evs = {"Check": 1.18, "Bet 33%": 1.18, "Bet 67%": 1.16,
+           "Bet 120%": 0.76, "All-in": -2.93}
+    freqs = {"Check": 0.62, "Bet 33%": 0.25, "Bet 67%": 0.09,
+             "Bet 120%": 0.04, "All-in": 0.0}
+    out = _format_action_evs(evs, freqs)
+    assert "All-in" not in out
+    assert "Check: +1.18" in out and "Bet 120%: +0.76" in out
+    # The solver actually jams sometimes -> keep it.
+    assert "All-in" in _format_action_evs(evs, dict(freqs, **{"All-in": 0.10}))
+    # Near-even jam (short-stack rivers) -> keep it.
+    assert "All-in" in _format_action_evs(
+        dict(evs, **{"All-in": 0.60}), freqs
+    )
+    # No all-in at the node -> untouched.
+    no_jam = {k: v for k, v in evs.items() if k != "All-in"}
+    assert _format_action_evs(no_jam, freqs).count(":") == 4
+
+
+def test_spr_note_writes_out_the_equation() -> None:
+    """SPR subtext = the labeled equation from the SAME numbers node.spr
+    divides (team, July 2026, like pot odds): stack / pot reproduces the
+    printed ratio exactly."""
+    from pipeline.postflop.stat_notes import build_stat_notes
+
+    spot = _spot("flop_ip_facing_bet", "Ah5h")
+    facts = extract_facts(spot, SOLVE, equity_runouts=40)
+    note = next(n for n in build_stat_notes(facts) if n.key == "spr")
+    assert note.note.startswith("stack ") and "÷ pot " in note.note
+    assert f"= {facts.spr:.1f}." in note.note
+    import re as _re
+
+    stack, pot = (float(x) for x in _re.findall(r"([\d.]+)bb", note.note)[:2])
+    assert f"{stack / pot:.1f}" == f"{facts.spr:.1f}"
+
+
+def test_currently_tied_chop_share_and_tie_clause() -> None:
+    """The chop fact (team, July 2026): ahead+behind+tied sum to 1; a
+    chop-heavy spot surfaces the tie share in the data block line and the
+    math panel, so "drawing dead" prose can't survive on a chopping hand."""
+    from pipeline.postflop.explanation_generator import _tie_clause
+    from pipeline.postflop.facts import compute_currently_ahead
+    from pipeline.postflop.stat_notes import _currently_ahead_note
+    from types import SimpleNamespace
+
+    # Hero plays the board pair vs identical holdings -> pure chop.
+    board = ["Ah", "Kd", "Kc", "7s", "7d"]
+    ahead, behind, tied = compute_currently_ahead(
+        ["2c", "3c"], {"2h3h": 1.0}, board,
+    )
+    assert (ahead, behind, tied) == (0.0, 0.0, 1.0)
+    # Data-block clause fires at/above 5%, silent below.
+    assert "chops the pot" in _tie_clause(SimpleNamespace(currently_tied_pct=0.4))
+    assert _tie_clause(SimpleNamespace(currently_tied_pct=0.03)) == ""
+    # Panel note names the chop share and what a chop is.
+    note = _currently_ahead_note(0.0, True, "BTN's", tied=0.47)
+    assert "tie (chop the pot) with about 47%" in note.note
+    assert "does not win the pot" in note.note
+    assert "chop" not in _currently_ahead_note(0.5, True, "BTN's", tied=0.01).note
+
+
+def test_action_ev_display_normalizes_fold_to_zero() -> None:
+    """EV DISPLAY NORMALIZATION (team, July 2026): sources measure EV from
+    different zero points (monker: BB fold = -1.00 from hand start). The
+    displayed column always shifts so Fold reads 0; gaps are unchanged."""
+    from pipeline.postflop.format_writer import _format_action_evs
+
+    evs = {"Fold": -5.72, "Call": -9.88}
+    freqs = {"Fold": 0.93, "Call": 0.07}
+    assert _format_action_evs(evs, freqs) == "Fold: +0.00, Call: -4.16"
+    # No fold at the node -> untouched.
+    assert _format_action_evs({"Check": 1.18}, {"Check": 1.0}) == "Check: +1.18"

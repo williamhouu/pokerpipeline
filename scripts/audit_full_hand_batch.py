@@ -7,13 +7,18 @@ links them with ``hand_id`` / ``sequence_index``. This script reloads the source
 ``.db`` (from the batch ``.meta.json`` provenance, line-closed so deep nodes
 resolve), rebuilds EACH leg from its meta record, and diffs against the CSV.
 
-* EXACT (byte-for-byte): the sequence tags (``hand_id`` / ``sequence_index`` /
-  ``sequence_total``), the Question prose, the table-state columns, Context,
+* EXACT (byte-for-byte): the sequence tags (``hand_id`` / ``sequence_index``;
+  ``sequence_total`` was dropped from the CSV July 2026), the Question prose,
+  the table-state columns, Context,
   options + correct answer, action_frequencies / action_ev_bb, neutral_credit,
-  archetype, board_texture, solver_reference, SPR, pot_odds, and the non-equity
-  concept tags. Preflop legs are fully deterministic (no Monte-Carlo equity).
-* TOLERANCED: postflop-leg hero/range equity, the equity-bucket concept tags,
-  and the difficulty score (seeded, usually exact; diffed with a tolerance).
+  archetype, board_texture, solver_reference, and the non-equity concept
+  tags. Preflop legs are fully deterministic (no Monte-Carlo equity).
+* TOLERANCED: the equity-bucket concept tags and the difficulty score
+  (seeded, usually exact; diffed with a tolerance).
+
+Full-hand CSVs use the TRIMMED schema (July 2026): the pot_odds / hero_equity
+/ range_equity / spr / easy_* diagnostic columns are not written, so they are
+not audited here (their values still live inside the kept ``stat_notes``).
 
 The LLM prose + claim_check / validation_status columns are non-deterministic
 and skipped. Usage::
@@ -51,12 +56,12 @@ from pipeline.postflop.spot_sampler import sample_spot  # noqa: E402
 
 # Pure-deterministic columns that must match exactly for BOTH leg types.
 EXACT_COLS = (
-    "hand_id", "sequence_index", "sequence_total",
+    "hand_id", "sequence_index",
     "Hand Stage", "Context", "User Seat", "User Cards", "Cards on Table",
     "Table Size", "Default Stack", "Seats", "POT", "Question", "Question Type",
     "Relative Position", "Position Matchup", "Cash/Tourney", "Live or Online",
     "action_frequencies", "action_ev_bb", "solver_reference", "archetype",
-    "board_texture", "pot_odds", "spr", "neutral_credit", "Notes", "ranges",
+    "board_texture", "neutral_credit", "Notes", "ranges",
     # Shared-schema classification columns (deterministic; no MC equity).
     "Preflop Pot Type", "Pot Participant", "Stack Depth",
 )
@@ -253,13 +258,9 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
             tolerance_notes += 1
             print(f"  tolerance: equity-bucket tags flipped: {sorted(soft_diff)}")
 
-        # 4. Equity / difficulty within tolerance (postflop only).
-        if not is_preflop:
-            for col, tol in (("hero_equity", 4.0), ("range_equity", 4.0)):
-                a, b = _pct(row.get(col, "")), _pct(rebuilt.get(col, ""))
-                if a is not None and b is not None and abs(a - b) > tol:
-                    tolerance_notes += 1
-                    print(f"  tolerance: {col} csv {a:.0f}% vs re-estimate {b:.0f}%")
+        # 4. Difficulty within tolerance. (The hero/range equity columns are
+        # not in the trimmed full-hand schema, so there is nothing to diff;
+        # the equity-bucket concept tags above still catch equity drift.)
         try:
             ddrift = abs(int(row["Difficulty Rating"]) - int(rebuilt["Difficulty Rating"]))
             if ddrift > 200:  # noqa: PLR2004

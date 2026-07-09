@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from pipeline.postflop.format_writer import POSTFLOP_CSV_COLUMNS
@@ -208,8 +209,8 @@ def _build_pack_facts(
     from dataclasses import replace  # noqa: PLC0415
 
     from pipeline.preflop.ev_engine import (  # noqa: PLC0415
-        compute_break_even_equity,
         compute_ev_gap_bb,
+        compute_price_geometry,
     )
     from pipeline.preflop.spot_sampler import sample_spot  # noqa: PLC0415
     from pipeline.preflop.batch import (  # noqa: PLC0415
@@ -231,9 +232,12 @@ def _build_pack_facts(
     if not spot.dominant_action.startswith(as_played):
         return None  # coherence gate: pack disagrees with the as-played line
     facts = extract_facts(spot, source.pack, equity_runouts=equity_runouts)
+    _pot, _call, _be = compute_price_geometry(facts, source.pack)
     facts = replace(
         facts,
-        break_even_equity=compute_break_even_equity(facts, source.pack),
+        break_even_equity=_be,
+        price_pot_bb=_pot,
+        price_call_bb=_call,
         rake_pct=source.pack.rake_pct or 0.0,
     )
     ev_gap = ev_gap_from_action_evs(facts, source.pack)
@@ -283,10 +287,16 @@ def build_pack_preflop_leg_row(
     equity_runouts: int,
     trap_difficulty: bool = False,
     razor_difficulty: bool = False,
+    system_prompt: str | None = None,
     usage_cb=None,
     prebuilt=None,
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None, dict[str, Any] | None]:
     """Build the pack-backed preflop leg row (POSTFLOP schema).
+
+    ``system_prompt`` overrides the PREFLOP system prompt for the
+    explanation call (this leg is written by the preflop pipeline's
+    generator, not the postflop or preflop-entry one). None = the active
+    preflop prompt (override file or built-in default).
 
     Returns ``(row, meta_record, failure)``. ``(None, None, None)`` means
     "pack not applicable for this hand" (coherence gate) and the caller
@@ -325,6 +335,21 @@ def build_pack_preflop_leg_row(
     options, correct = build_options(
         facts, style=answer_style, pack=source.pack,
     )
+    # USAGE-CALLBACK ARITY INVARIANT: the POSTFLOP batch's counter takes ONE
+    # usage OBJECT (`_usage(response.usage)`), but the PREFLOP generator
+    # reports `(model, in_t, out_t, cache_c, cache_r)` -- five positionals.
+    # This cross-pipeline seam MUST adapt between the two conventions, or the
+    # first real (non-dry-run) pack leg dies with a TypeError that no dry-run
+    # test can see (the June-2026 revise-pass bug was this same class).
+    # `in_t`/`out_t` are read off response.usage, so the adapter hands over
+    # exactly the numbers the postflop counter would have read itself.
+    pre_usage_cb = None
+    if usage_cb is not None:
+        def pre_usage_cb(
+            _model: str, in_t: int, out_t: int, _cache_c: int, _cache_r: int
+        ) -> None:
+            usage_cb(SimpleNamespace(input_tokens=in_t, output_tokens=out_t))
+
     try:
         if use_placeholder:
             explanation = _placeholder_explanation(options, correct)
@@ -332,7 +357,8 @@ def build_pack_preflop_leg_row(
             explanation = generate_preflop_answer_explanation(
                 facts, options, correct, client=client, model=model,
                 temperature=temperature, max_tokens=max_tokens,
-                usage_callback=usage_cb,
+                system_prompt=system_prompt,
+                usage_callback=pre_usage_cb,
             )
     except ExplanationValidationError as exc:
         return None, None, {

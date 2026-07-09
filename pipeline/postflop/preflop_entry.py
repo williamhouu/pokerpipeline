@@ -687,7 +687,7 @@ def build_preflop_entry_row(
         "Seats": table["seats"],
         "POT": table["pot"],
         "Question": format_preflop_entry_question(f, display_in_bb=display_in_bb),
-        "Question Type": "Hand Scenario Question",
+        "Question Type": "Hand scenario question",  # sentence case, no period (July 2026)
         "option 1": opts[0],
         "option 2": opts[1],
         "option 3": opts[2],

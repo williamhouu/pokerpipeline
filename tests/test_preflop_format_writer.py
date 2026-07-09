@@ -1191,15 +1191,17 @@ def test_format_action_evs_orders_by_freq_with_signed_bb() -> None:
     evs = {"Fold": -1.0, "Call": 0.146, "All-in": 0.528}
     strategy = {"All-in": 0.6, "Call": 0.3, "Fold": 0.1}  # a real mix
     out = _format_action_evs(evs, strategy)
-    assert out.startswith("All-in: +0.53")  # highest frequency first
-    assert "Call: +0.15" in out and "Fold: -1.00" in out
+    # Display is normalized so Fold reads 0 (July 2026): every EV is
+    # "vs folding", whatever zero point the source used.
+    assert out.startswith("All-in: +1.53")  # highest frequency first
+    assert "Call: +1.15" in out and "Fold: +0.00" in out
     # None (pack has no EVs) and an empty dict both render blank.
     assert _format_action_evs(None, strategy) == ""
     assert _format_action_evs({}, strategy) == ""
     # A near-pure spot still shows the real per-action EVs (no snap-to-pure
     # blanking anymore -- the EVs are the truth, June 2026).
     pure = _format_action_evs(evs, {"All-in": 1.0, "Call": 0.0, "Fold": 0.0})
-    assert pure.startswith("All-in: +0.53")
+    assert pure.startswith("All-in: +1.53")
 
 
 def test_unreasonable_deep_all_in_is_hidden_from_ev_panel() -> None:
@@ -1220,7 +1222,7 @@ def test_unreasonable_deep_all_in_is_hidden_from_ev_panel() -> None:
         {"Fold": -1.0, "Call": 0.1, "All-in": 0.2},
         {"All-in": 0.4, "Fold": 0.4, "Call": 0.2},
     )
-    assert "All-in: +0.20" in kept
+    assert "All-in: +1.20" in kept  # fold-normalized (+0.2 - -1.0)
 
     # A 0%-frequency jam that is NOT clearly dominated (near-even, e.g. a
     # borderline short-stack spot) is also kept -- the domination guard.
@@ -1304,3 +1306,32 @@ def test_exploit_blocker_clause_names_most_blocked_first() -> None:
     # Top-3 by count (ties alphabetical): QJo(5), AJo(3), JTo(3).
     assert "QJo" in detail and "AJo" in detail
     assert "J9s" not in detail and "JTs" not in detail  # 1-combo junk not named
+
+
+def test_preflop_action_ev_display_drops_unreasonable_all_in() -> None:
+    """The original deep-stack all-in display rule (June 30 2026), previously
+    untested: never-played + clearly-dominated jams leave the EV display;
+    live or near-even jams stay."""
+    from pipeline.preflop.format_writer import _drop_unreasonable_all_in
+
+    evs = {"Call": 0.15, "Fold": 0.0, "All-in": -12.4}
+    strategy = {"Call": 0.8, "Fold": 0.2, "All-in": 0.0}
+    assert "All-in" not in _drop_unreasonable_all_in(evs, strategy)
+    assert "All-in" in _drop_unreasonable_all_in(
+        evs, dict(strategy, **{"All-in": 0.05})
+    )
+    assert "All-in" in _drop_unreasonable_all_in(
+        dict(evs, **{"All-in": -0.4}), strategy
+    )
+
+
+def test_preflop_action_ev_display_normalizes_fold_to_zero() -> None:
+    """Monker-style from-hand-start EVs (BB fold = -1.00) display as
+    vs-folding EVs (Fold = 0), matching the Ryan-pack convention."""
+    from pipeline.preflop.format_writer import _format_action_evs
+
+    out = _format_action_evs(
+        {"Call": -0.88, "Fold": -1.00, "3-bet": -0.92},
+        {"Call": 1.0, "Fold": 0.0, "3-bet": 0.0},
+    )
+    assert out == "Call: +0.12, Fold: +0.00, 3-bet: +0.08"

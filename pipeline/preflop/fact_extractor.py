@@ -236,6 +236,13 @@ class PreflopFacts:
     # range. Empty dict if no villain or no blockers computed.
     blockers: dict[str, int] = field(default_factory=dict)
 
+    # The DENOMINATOR for the blockers fact: how many positive-weight combos
+    # villain's top-value slice (top_value_combos, the strongest ~35%) holds
+    # BEFORE hero's card removal. Lets the math panel say "you remove 9 of
+    # their 66 strongest combos (about 14%)" instead of a scale-less count.
+    # 0 when blockers weren't computed.
+    top_value_combo_count: int = 0
+
     # Strategic archetype label (e.g. "3bet_for_value", "squeeze_as_bluff",
     # "open_for_value", "fold_dominated"). Empty string if not classified.
     # See classify_archetype() in this module for the full list.
@@ -247,6 +254,13 @@ class PreflopFacts:
     # Populated by the batch for call/fold spots (needs the pack's chip
     # geometry); None when hero faces no bet to call or it isn't computable.
     break_even_equity: float | None = None
+
+    # The pot and call amounts BEHIND break_even_equity (same single
+    # computation, ev_engine.compute_price_geometry, so the equation the
+    # math panel prints can never disagree with the percentage). EXACT bb
+    # amounts, not display-rounded. None whenever break_even_equity is None.
+    price_pot_bb: float | None = None
+    price_call_bb: float | None = None
 
     # Pack rake as a fraction of pot (e.g. 0.10). Set by the batch from
     # ``pack.rake_pct``; used only as an extra equity cushion in the trap-aware
@@ -651,10 +665,11 @@ def extract_facts(
         # Restrict to villain's TOP VALUE (~top 35% by strength) so the
         # blockers fact -- and the blocks_villain_top_value tag + the prose
         # citing it -- only count blocking hands that actually matter, not the
-        # bottom of the range (22 clipping A2s).
-        blockers = compute_blockers(
-            spot.hero_card_combo, top_value_combos(villain_combos)
-        )
+        # bottom of the range (22 clipping A2s). The slice's combo count is
+        # kept as the DENOMINATOR so the panel can state the share removed.
+        top_value = top_value_combos(villain_combos)
+        blockers = compute_blockers(spot.hero_card_combo, top_value)
+        top_value_count = sum(1 for w in top_value.values() if w > 0)
         # Multi-way field equity. When 2+ opponents are still in the pot (all-in
         # OR not), hero's heads-up-vs-the-raiser number (hero_eq) overstates the
         # truth -- hero must beat the WHOLE field. Compute equity vs every
@@ -685,6 +700,7 @@ def extract_facts(
             hero_equity_runouts_used=equity_runouts,
             hero_range_equity_vs_villain=hero_range_eq,
             blockers=blockers,
+            top_value_combo_count=top_value_count,
             archetype=archetype,
             villain_played_classes=villain_played_classes,
         )

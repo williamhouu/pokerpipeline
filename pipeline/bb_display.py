@@ -35,4 +35,25 @@ def round_to_half_bb(amount_bb: float) -> float:
     return round(amount_bb / HALF_BB) * HALF_BB
 
 
-__all__ = ["HALF_BB", "round_to_half_bb"]
+def exact_amount_str(
+    amount_bb: float,
+    *,
+    display_in_bb: bool = True,
+    bb_in_dollars: float | None = None,
+) -> str:
+    """An EXACT amount string for the math panel's written-out equations.
+
+    Deliberately NOT snapped to the 0.5bb display grid: an equation whose
+    printed inputs don't reproduce its printed result destroys trust in the
+    panel, so these amounts stay exact (to the cent / 0.01bb) even where the
+    Question prose shows the rounded 2bb/4.5bb form (team decision, July
+    2026). ``"2bb"`` / ``"9.5bb"`` / ``"2.33bb"``; dollars when the batch
+    displays dollars: ``"$6"`` / ``"$7.50"``.
+    """
+    if display_in_bb or not bb_in_dollars:
+        return f"{round(amount_bb, 2):g}bb"
+    v = round(amount_bb * bb_in_dollars, 2)
+    return f"${int(v)}" if v == int(v) else f"${v:.2f}"
+
+
+__all__ = ["HALF_BB", "exact_amount_str", "round_to_half_bb"]

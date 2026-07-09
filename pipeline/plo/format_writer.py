@@ -221,7 +221,7 @@ def build_plo_row(
             live_or_online=live_or_online,
         ),
         "Question": question_text,
-        "Question Type": "Hand Scenario Question",  # no trailing period (June 2026)
+        "Question Type": "Hand scenario question",  # sentence case, no period (July 2026)
         "Hand Stage": "Preflop",
         "option 1": opts[0],
         "option 2": opts[1],

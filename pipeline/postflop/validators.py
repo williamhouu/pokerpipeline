@@ -364,6 +364,36 @@ def soft_validate_blocker_direction(
     return []
 
 
+# A bare percent-command like "bet 53%" (the solver's raw action label) with
+# no "of the pot" anchor. "bet 53% of the pot" reads fine and is not flagged.
+_RAW_PERCENT_SIZE_RE = re.compile(
+    r"\b(?:bet|bets|betting|raise|raises|raising)\s+\d{1,3}\s*%(?!\s*of\b)",
+    re.IGNORECASE,
+)
+
+
+def soft_validate_raw_percent_size(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,
+) -> list[str]:
+    """Flag prose that echoes a raw solver size label ("You should bet 53%").
+
+    TEAM RULE (July 2026): sizes read in natural poker language ("bet about
+    half the pot (4bb)"), never as a bare percent command -- especially now
+    that the GTO answer options are size-free. Flag-only (a reviewer decides);
+    "53% of the pot" is acceptable wording and not flagged.
+    """
+    text = generated.answer_explanation or ""
+    m = _RAW_PERCENT_SIZE_RE.search(text)
+    if m:
+        return [
+            f"prose echoes a raw solver size label ({m.group(0)!r}). Sizes "
+            "should read in natural language with the real amount, e.g. "
+            "\"bet about half the pot (4bb)\"."
+        ]
+    return []
+
+
 def run_postflop_soft_validators(
     generated: GeneratedExplanation,
     facts: PostflopFacts,
@@ -374,6 +404,7 @@ def run_postflop_soft_validators(
         soft_validate_verdict_vs_answer,
         soft_validate_equity_vs_data,
         soft_validate_blocker_direction,
+        soft_validate_raw_percent_size,
     ):
         warnings.extend(check(generated, facts))
     return warnings
@@ -385,6 +416,7 @@ __all__ = [
     "run_postflop_soft_validators",
     "soft_validate_blocker_direction",
     "soft_validate_equity_vs_data",
+    "soft_validate_raw_percent_size",
     "soft_validate_verdict_vs_answer",
     "validate_banned_phrases",
     "validate_card_suit_consistency",

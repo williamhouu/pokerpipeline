@@ -40,7 +40,7 @@ from pipeline.postflop.batch import (
     _street_strategies,
 )
 from pipeline.postflop.claim_checker import POSTFLOP_CHECKER_SYSTEM_PROMPT
-from pipeline.postflop.difficulty import compute_difficulty
+from pipeline.postflop.difficulty import compute_difficulty, easy_freq_axis
 from pipeline.postflop.explanation_generator import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
@@ -50,7 +50,11 @@ from pipeline.postflop.explanation_generator import (
     placeholder_explanation,
 )
 from pipeline.postflop.facts import DEFAULT_EQUITY_RUNOUTS, extract_facts
-from pipeline.postflop.format_writer import build_postflop_row, write_postflop_csv
+from pipeline.postflop.format_writer import (
+    FULL_HAND_CSV_COLUMNS,
+    build_postflop_row,
+    write_postflop_csv,
+)
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
 from pipeline.postflop.play_through import assemble_hands
@@ -255,6 +259,24 @@ def _write_meta(meta_path: Path, meta: dict[str, Any]) -> None:
     meta_path.write_text(json.dumps(meta, indent=2, default=str))
 
 
+# Band-scan ordering kicks in only when the requested band floor is above the
+# scale's hard floor (i.e. the user actually wants harder-than-baseline hands).
+_HARD_FLOOR_FOR_SORT = 500
+
+
+def _min_postflop_freq_ease(hand) -> tuple[float, str]:
+    """Sort key for the band scan: the hand's LOWEST postflop-leg frequency
+    ease (0 = coin-flip = the only legs that can rate very hard; 1 = pure).
+    Hands with no postflop leg sort last; hand_id breaks ties for determinism.
+    """
+    eases = [
+        easy_freq_axis(leg.spot.dominant_frequency)
+        for leg in hand.legs
+        if leg.kind == "postflop" and leg.spot is not None
+    ]
+    return (min(eases) if eases else 1.0, hand.hand_id)
+
+
 # --- full-hand (play-through) batch -----------------------------------------
 def generate_full_hand_batch(
     *,
@@ -279,6 +301,7 @@ def generate_full_hand_batch(
     equity_runouts: int = DEFAULT_EQUITY_RUNOUTS,
     system_prompt: str | None = None,
     preflop_system_prompt: str | None = None,
+    preflop_pack_system_prompt: str | None = None,
     trap_difficulty: bool = False,
     razor_difficulty: bool = False,
     preflop_leg_pack_root: Path | str | None = None,
@@ -291,9 +314,18 @@ def generate_full_hand_batch(
     progress_callback: ProgressCallback = None,
     write_meta: bool = True,
     provenance: dict[str, Any] | None = None,
+    prompt_names: dict[str, str] | None = None,
 ) -> PostflopBatchResult:
     """Generate up to ``total_hands`` play-through hands (each = several linked
     questions sharing a ``hand_id``).
+
+    Three prompts write the legs' explanations: ``system_prompt`` (postflop
+    legs), ``preflop_pack_system_prompt`` (the pack-backed preflop leg,
+    written by the PREFLOP pipeline's generator; None = its active prompt),
+    and ``preflop_system_prompt`` (the entry-derived preflop fallback leg).
+    ``prompt_names`` is an optional display-name map (e.g. ``{"postflop":
+    ..., "preflop_pack": ...}``) recorded verbatim in run_settings so a
+    batch always says WHICH named prompts wrote it.
 
     Worthy spots seed the hands (so each has an interesting decision); each hand
     is the hero's full decision line plus the preflop entry. ``include_villain``
@@ -315,8 +347,15 @@ def generate_full_hand_batch(
         min_ev_gap_bb=min_ev_gap_bb, quality_gate=quality_gate,
         min_premise_freq=min_premise_freq,
     )
+    # BAND-SCAN INVARIANT (July 2026): ``total_hands`` caps the KEPT hands,
+    # never the scanned ones. The old flow assembled exactly total_hands and
+    # THEN band-filtered, so "1 Hard hand" assembled one arbitrary hand and
+    # usually deleted it -- a silent empty batch. With a band set, assemble a
+    # larger candidate pool and scan until enough in-band hands are found.
+    band_set = min_hand_difficulty is not None or max_hand_difficulty is not None
+    scan_cap = max(60, total_hands * 20) if band_set else total_hands
     hands = assemble_hands(
-        solve, seeds=worthy, heroes=tuple(heroes) or (), max_hands=total_hands,
+        solve, seeds=worthy, heroes=tuple(heroes) or (), max_hands=scan_cap,
         include_preflop=include_preflop, include_villain=include_villain,
     )
 
@@ -340,7 +379,10 @@ def generate_full_hand_batch(
     facts_cache: dict[tuple[str, str], Any] = {}
     pack_facts_cache: dict[tuple[str, str], Any] = {}
     hand_difficulties: dict[str, int] = {}
-    for hand in hands:
+
+    def _score_hand(hand) -> int:
+        """hand_difficulty = MAX over the hand's legs (facts cached for the
+        generation loop, so nothing is computed twice)."""
         leg_scores: list[int] = []
         for leg in hand.legs:
             if leg.kind == "preflop_entry":
@@ -373,15 +415,53 @@ def generate_full_hand_batch(
                     facts_cache[key], apply_trap_bump=trap_difficulty,
                 ).score
             leg_scores.append(score)
-        hand_difficulties[hand.hand_id] = max(leg_scores) if leg_scores else 0
+        return max(leg_scores) if leg_scores else 0
 
     hands_difficulty_filtered = 0
-    if min_hand_difficulty is not None or max_hand_difficulty is not None:
+    hands_scanned = len(hands)
+    hand_difficulty_observed_max: int | None = None
+    band_scan_capped = False
+    if band_set:
         lo = min_hand_difficulty if min_hand_difficulty is not None else 0
         hi = max_hand_difficulty if max_hand_difficulty is not None else 10_000
-        kept = [h for h in hands if lo <= hand_difficulties[h.hand_id] <= hi]
-        hands_difficulty_filtered = len(hands) - len(kept)
+        candidates = list(hands)
+        if not trap_difficulty and lo > _HARD_FLOOR_FOR_SORT:
+            # Scan order heuristic: a leg's difficulty is bounded by its
+            # dominant frequency alone (concept/hand ease have hard floors),
+            # so hands whose postflop legs sit closest to a coin-flip are the
+            # only ones that can reach a high band. Score those first so the
+            # scan finds in-band hands fast. ORDER only -- never excludes a
+            # hand. Skipped with trap-aware on (the trap floor can lift a
+            # pure leg far past its frequency ceiling).
+            candidates.sort(key=_min_postflop_freq_ease)
+        kept: list[Any] = []
+        scanned = 0
+        for hand in candidates:
+            if len(kept) >= total_hands:
+                break
+            scanned += 1
+            score = _score_hand(hand)
+            hand_difficulties[hand.hand_id] = score
+            hand_difficulty_observed_max = (
+                score if hand_difficulty_observed_max is None
+                else max(hand_difficulty_observed_max, score)
+            )
+            if lo <= score <= hi:
+                kept.append(hand)
+        hands_scanned = scanned
+        hands_difficulty_filtered = scanned - len(kept)
+        band_scan_capped = (
+            len(kept) < total_hands and len(candidates) >= scan_cap
+        )
         hands = kept
+    else:
+        for hand in hands:
+            score = _score_hand(hand)
+            hand_difficulties[hand.hand_id] = score
+            hand_difficulty_observed_max = (
+                score if hand_difficulty_observed_max is None
+                else max(hand_difficulty_observed_max, score)
+            )
 
     in_tokens = out_tokens = 0
 
@@ -429,6 +509,7 @@ def generate_full_hand_batch(
                         equity_runouts=equity_runouts,
                         trap_difficulty=trap_difficulty,
                         razor_difficulty=razor_difficulty,
+                        system_prompt=preflop_pack_system_prompt,
                         usage_cb=_usage, prebuilt=prebuilt,
                     )
                 if row is not None or failure is not None:
@@ -481,7 +562,9 @@ def generate_full_hand_batch(
             })
 
     output_path = Path(output_path)
-    write_postflop_csv(output_path, rows)
+    # Full-hand batches emit the TRIMMED schema (no pot_odds..easy_hand
+    # diagnostics; hand_difficulty kept) -- see FULL_HAND_CSV_COLUMNS.
+    write_postflop_csv(output_path, rows, columns=FULL_HAND_CSV_COLUMNS)
 
     meta_path: Path | None = None
     if write_meta:
@@ -503,6 +586,7 @@ def generate_full_hand_batch(
                 "trap_difficulty": trap_difficulty,
                 "razor_difficulty": razor_difficulty,
                 "preflop_leg_pack": pack_source.pack_id if pack_source else None,
+                "prompt_names": prompt_names or {},
                 "min_hand_difficulty": min_hand_difficulty,
                 "max_hand_difficulty": max_hand_difficulty,
                 "run_claim_checker": run_claim_checker,
@@ -513,8 +597,14 @@ def generate_full_hand_batch(
                 "worthy_spots_available": len(worthy),
                 "low_quality_nodes_skipped": low_quality,
                 "premise_filtered_nodes": premise_skipped,
-                "hands_assembled": len(hands) + hands_difficulty_filtered,
+                "hands_assembled": hands_scanned,
                 "hands_difficulty_filtered": hands_difficulty_filtered,
+                # Band-scan diagnostics (July 2026): the hardest hand seen in
+                # the scan, and whether the scan pool ran out before the
+                # requested count was reached -- the Review page reads these
+                # to explain an empty/short band-filtered batch.
+                "hand_difficulty_observed_max": hand_difficulty_observed_max,
+                "band_scan_capped": band_scan_capped,
                 "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
                 "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
                 "hands_written": len(hand_index),

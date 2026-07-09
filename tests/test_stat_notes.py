@@ -32,11 +32,14 @@ def _facts(**kw: object) -> object:
     return SimpleNamespace(**base)
 
 
-def _villain(covering=(), coverage_pct=0.0, pct_of_dealt_hands=0.0) -> object:
+def _villain(
+    covering=(), coverage_pct=0.0, pct_of_dealt_hands=0.0, in_range=()
+) -> object:
     return SimpleNamespace(
         top_combos_covering=tuple(covering),
         top_combos_coverage_pct=coverage_pct,
         pct_of_dealt_hands=pct_of_dealt_hands,
+        in_range_classes=tuple(in_range),
     )
 
 
@@ -207,20 +210,51 @@ def test_blockers_present_and_absent() -> None:
     assert _note(_facts(blockers={"AA": 0}), "blockers") is None  # zero -> skip
 
 
-# --- what you're up against -------------------------------------------------
-def test_villain_range_width_buckets() -> None:
-    # Calibrated to preflop reality: an 8% UTG open is tight, ~20% (CO) is
-    # fairly wide, 30%+ (BTN / blind battles / defense) is wide.
-    tight = _note(_facts(villain_stats=_villain(("AA", "KK"), 80.0, 8.0)), "villain_range")
-    assert tight is not None and "a tight range" in tight.note
-    moderate = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 20.0)), "villain_range")
-    assert moderate is not None and "a fairly wide range" in moderate.note
-    wide = _note(_facts(villain_stats=_villain(("AA", "KK"), 60.0, 40.0)), "villain_range")
-    assert wide is not None and "a wide range" in wide.note
+# --- domination row (July 2026, replaces "what you're up against") ----------
+def _dom_facts(hand: str, in_range: tuple) -> object:
+    return _facts(
+        villain_stats=_villain(pct_of_dealt_hands=19.0, in_range=in_range),
+        spot=SimpleNamespace(hero_hand_class=hand),
+    )
 
 
-def test_villain_range_absent_when_no_covering() -> None:
-    assert _note(_facts(villain_stats=_villain()), "villain_range") is None
+def test_domination_row_names_both_directions() -> None:
+    """KJs vs a range holding KQs (dominates you), KTs (you dominate), and
+    non-interacting hands: both buckets named, from the FULL in-range list."""
+    facts = _dom_facts(
+        "KJs",
+        (("KQs", 0.9), ("KTs", 0.6), ("77", 0.5), ("A5s", 0.4)),
+    )
+    note = _note(facts, "domination")
+    assert note is not None
+    assert "the hands that dominate your KJs: KQs" in note.note
+    assert "Hands your KJs dominates: KTs" in note.note
+    assert note.value == "1 over, 1 under"
+
+
+def test_domination_row_one_sided_variants() -> None:
+    # Nothing dominates AA; it dominates the lower pairs + Ax it shares an ace with.
+    top = _note(_dom_facts("AA", (("KK", 1.0), ("AKs", 0.8))), "domination")
+    assert top is not None
+    assert top.note.startswith("Nothing in their range dominates your AA.")
+    # A weak ace vs a strong range: dominated, dominates nothing.
+    weak = _note(_dom_facts("A8o", (("AKs", 1.0), ("AQo", 0.9))), "domination")
+    assert weak is not None
+    assert weak.note.endswith("You dominate nothing they hold.")
+    assert weak.value == "2 over you"
+
+
+def test_domination_row_absent_when_no_interaction_or_no_hand() -> None:
+    # No structural interaction at all -> no row.
+    assert _note(_dom_facts("KJs", (("77", 1.0), ("A5s", 0.5))), "domination") is None
+    # No hero hand label (fake without a spot) -> no row.
+    assert _note(
+        _facts(villain_stats=_villain(in_range=(("KQs", 1.0),))), "domination"
+    ) is None
+    # The old "You're up against" width row is gone.
+    assert _note(
+        _facts(villain_stats=_villain(("AA", "KK"), 80.0, 8.0)), "villain_range"
+    ) is None
 
 
 # --- assembly + serialization -----------------------------------------------
@@ -229,10 +263,15 @@ def test_notes_use_no_em_or_en_dashes() -> None:
     # (covers em dash, en dash, and the "--" ASCII stand-in).
     facts = _facts(
         break_even_equity=0.41,
+        price_pot_bb=7.5, price_call_bb=3.0,
         hero_equity_vs_villain=0.40,
         hero_range_equity_vs_villain=0.32,
         blockers={"AA": 3, "AKo": 3},
-        villain_stats=_villain(("AA", "KK", "AKs"), 70.0, 3.5),
+        villain_stats=_villain(
+            ("AA", "KK", "AKs"), 70.0, 3.5,
+            in_range=(("AKs", 1.0), ("QJs", 0.5)),
+        ),
+        spot=SimpleNamespace(hero_hand_class="AQs", node=None),
     )
     notes = sn.build_stat_notes(facts)
     assert len(notes) == 4
@@ -259,12 +298,17 @@ def test_full_spot_order_and_round_trip() -> None:
         hero_range_equity_vs_villain=0.44,
         ev_gap_bb=0.8,
         blockers={"AA": 2},
-        villain_stats=_villain(("AA", "KK", "AKs"), 70.0, 4.2),
+        villain_stats=_villain(
+            ("AA", "KK", "AKs"), 70.0, 4.2,
+            in_range=(("AKs", 1.0), ("QJs", 0.5)),
+        ),
+        spot=SimpleNamespace(hero_hand_class="AQs", node=None),
     )
     notes = sn.build_stat_notes(facts)
-    # 'ev_gap' is intentionally absent (removed June 2026).
+    # 'ev_gap' is intentionally absent (removed June 2026); 'domination'
+    # replaced 'villain_range' (July 2026).
     assert [n.key for n in notes] == [
-        "pot_odds", "hero_equity", "blockers", "villain_range"
+        "pot_odds", "hero_equity", "blockers", "domination"
     ]
     blob = sn.stat_notes_to_json(notes)
     parsed = sn.parse_stat_notes(blob)
@@ -278,3 +322,111 @@ def test_serialization_empty_and_malformed() -> None:
     assert sn.parse_stat_notes("   ") == []
     assert sn.parse_stat_notes("{not json") == []
     assert sn.parse_stat_notes('{"a":1}') == []  # not a list
+
+
+# --- written-out pot-odds equation + hand-named equity (July 2026) -----------
+def test_pot_odds_note_writes_out_the_equation() -> None:
+    """Format B (team, July 2026): the subtext is the labeled equation from
+    the SAME numbers as the percentage, with exact (non-0.5bb-grid) amounts."""
+    facts = _facts(
+        break_even_equity=0.4,
+        price_pot_bb=4.5, price_call_bb=3.0,
+        villain_stats=_villain(pct_of_dealt_hands=8.0),
+    )
+    note = _note(facts, "pot_odds")
+    assert note is not None and note.value == "40%"
+    assert note.note == "call 3bb ÷ (pot 4.5bb + call 3bb) = 40%."
+
+
+def test_pot_odds_note_dollar_display() -> None:
+    """A dollar-display batch prints the equation in dollars ($1/$2: bb=2)."""
+    facts = _facts(
+        break_even_equity=0.4,
+        price_pot_bb=4.5, price_call_bb=3.0,
+        villain_stats=_villain(pct_of_dealt_hands=8.0),
+    )
+    notes = sn.build_stat_notes(facts, display_in_bb=False, bb_in_dollars=2.0)
+    note = next(n for n in notes if n.key == "pot_odds")
+    assert note.note == "call $6 ÷ (pot $9 + call $6) = 40%."
+
+
+def test_pot_odds_note_falls_back_without_amounts() -> None:
+    """Old batches / fakes without the price geometry keep the plain phrase."""
+    facts = _facts(
+        break_even_equity=0.4,
+        villain_stats=_villain(pct_of_dealt_hands=8.0),
+    )
+    note = _note(facts, "pot_odds")
+    assert note is not None
+    assert note.note == "Your pot odds here are 40%."
+
+
+def test_equity_note_names_the_hand() -> None:
+    """E1 (team, July 2026): the equity subtext names the specific hand."""
+    facts = _facts(
+        hero_equity_vs_villain=0.36,
+        hero_range_equity_vs_villain=0.35,
+        villain_stats=_villain(pct_of_dealt_hands=8.0),
+        spot=SimpleNamespace(hero_hand_class="KJs"),
+    )
+    note = _note(facts, "hero_equity")
+    assert note is not None
+    assert note.note.startswith("Your hand, KJs, has about 36% equity")
+
+
+def test_multiway_equity_note_names_the_hand() -> None:
+    facts = _facts(
+        hero_equity_vs_field=0.38,
+        per_opponent_equity={"BTN": 0.42, "HJ": 0.55},
+        showdown_opponents=("BTN", "HJ"),
+        spot=SimpleNamespace(hero_hand_class="TT", node=None),
+    )
+    note = _note(facts, "hero_equity")
+    assert note is not None
+    assert note.note.startswith("Your hand is TT. You're up against 2 players")
+
+
+def test_blockers_note_names_the_top_value_scope() -> None:
+    """WORDING INVARIANT (team, July 2026): the blocker count only covers
+    villain's strongest ~35% (fact_extractor.top_value_combos), so the copy
+    must say so -- "from their range" alone reads as the whole range and
+    makes correct output look wrong (the KTs confusion). Without the
+    denominator (old batches), NO impact claim is made."""
+    facts = _facts(
+        blockers={"AKo": 3, "KK": 3, "AKs": 1, "KJs": 1, "KQs": 1},
+        villain_stats=_villain(pct_of_dealt_hands=19.0),
+    )
+    note = _note(facts, "blockers")
+    assert note is not None and note.value == "9 combos"
+    assert "the strongest part of" in note.note
+    assert "less likely" not in note.note and "less often" not in note.note
+
+
+def test_blockers_note_impact_copy_is_graded_by_share() -> None:
+    """WORDING INVARIANT (team, July 2026): the tail claim matches the share
+    removed. A 1% dent must not read as "they're less likely to hold the big
+    hands that beat you" (which also wrongly assumed the blocked hands beat
+    hero). Negligible < 3% <= small < 10% <= meaningful."""
+    def _n(blockers, denom):
+        return _note(_facts(
+            blockers=blockers, top_value_combo_count=denom,
+            villain_stats=_villain(pct_of_dealt_hands=19.0),
+        ), "blockers")
+
+    # 2/220 ~ 1% -> negligible; says so, claims no effect.
+    tiny = _n({"A4s": 2}, 220)
+    assert tiny is not None
+    assert "2 of the 220 strongest combos" in tiny.note
+    assert "negligible" in tiny.note and "not a real factor" in tiny.note
+    # 1/220 < 1% -> "under 1%", never "about 0%".
+    sub = _n({"A4s": 1}, 220)
+    assert sub is not None and "under 1%" in sub.note and "about 0%" not in sub.note
+    # 9/220 ~ 4% -> small tier.
+    small = _n({"AKo": 3, "KK": 3, "AKs": 3}, 220)
+    assert small is not None and "small but real share" in small.note
+    # 9/66 ~ 14% -> meaningful tier.
+    big = _n({"AKo": 3, "KK": 3, "AKs": 1, "KJs": 1, "KQs": 1}, 66)
+    assert big is not None
+    assert "9 of the 66 strongest combos" in big.note
+    assert "about 14%" in big.note and "meaningful cut" in big.note
+    assert "AKo:3" in big.note

@@ -661,6 +661,27 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   now spectrums the dominant verb vs the SECOND-BEST verb BY EV
   (`options._best_ev_alternative_verb`, the same standing rule as
   preflop; plain-labels fallback when the solve ships no EVs).
+- **Full-hand prompt picker + trimmed CSV + pack provenance (July 2026).**
+  (1) The full-hand Generate mode has TWO per-batch prompt pickers (postflop
+  library entry for the flop/turn/river legs; preflop library entry for the
+  pack-backed preflop leg; the entry-FALLBACK leg keeps the preflop-entry
+  prompt), threaded `system_prompt` / `preflop_pack_system_prompt` through
+  `run.generate_full_hand_batch_from_db` → `generate_full_hand_batch` →
+  `build_pack_preflop_leg_row(system_prompt=)`; the chosen NAMES are
+  recorded in `meta.run_settings.prompt_names`. (2) Full-hand batches write
+  the TRIMMED `FULL_HAND_CSV_COLUMNS` schema (`format_writer.py`): the
+  trailing `pot_odds`/`hero_equity`/`range_equity`/`spr`/`easy_*`
+  diagnostics are dropped (values still inside the kept `stat_notes`; the
+  admin equity bar and exploit-notes recompute both fall back to it),
+  `hand_id`/`sequence_index`/`sequence_total`/`hand_difficulty` kept;
+  standalone postflop batches keep the full schema;
+  `audit_full_hand_batch.py` updated (0/0 on a real v7 dry-run). (3) Review
+  provenance captions: the grouped full-hand preflop-leg card says
+  "Preflop leg from range pack: X" (or the entry-ranges fallback) via the
+  pure `admin_panel/review.py:preflop_leg_provenance` (join on hand_id +
+  street), and every standalone preflop Review card captions "Pack: X" via
+  `batch_pack_id`. Tests: `tests/test_full_hand_pack_legs.py` +
+  `tests/test_pack_provenance.py`.
 - **NOT done (seamed extension points)**: a postflop **prompt library** (the
   Compare page uses two free-text boxes today); LLM prompt tuning against gold
   postflop examples; the harder-to-detect skills (`Facing a Check-Raise`, MDF,
@@ -1007,13 +1028,13 @@ the single `composite` word; `solver_reference` is a descriptive cache-style pat
 `Stack Depth` / `Preflop Pot Type` / `Pot Participant` are prose buckets. The current
 `format_writer.py` predates this sample and does not yet fully match it.
 
-**`Question Type` (June 2026):** a fixed label `Hand Scenario Question` with **NO
-trailing period**, emitted identically by all four writers (preflop, postflop,
-PLO, shared). Was `Hand Scenario Question.` (with period) on three writers and
-`Postflop Decision` on the postflop writer; unified + de-periodised per team
-feedback. (The `docs/output_format_examples.xlsx` sample shows sentence-case
-`Hand scenario question`; the code uses title-case per the team's direct ask —
-flag if they want the sheet's casing instead.)
+**`Question Type` (July 2026):** a fixed label `Hand scenario question`
+(sentence case, matching the `docs/output_format_examples.xlsx` sample) with
+**NO trailing period**, emitted identically by all five writer sites (shared,
+preflop, postflop, preflop-entry, PLO). History: was `Hand Scenario Question.`
+(period) on three writers and `Postflop Decision` on the postflop writer;
+unified + de-periodised June 2026 (title case per the team's ask at the time),
+then switched to sentence case July 2026 per the team.
 
 **bb amounts render on a 0.5bb display grid** (`2bb` / `4.5bb`, never `2.14bb`)
 via `pipeline/bb_display.py` — display-only; the dollar path and all strategic

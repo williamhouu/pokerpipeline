@@ -130,6 +130,10 @@ class PostflopFacts:
     # SHOWDOWN equity, not draw equity. See compute_currently_ahead.
     currently_ahead_pct: float
     currently_behind_pct: float
+    # The CHOP share (July 2026): reach-weighted fraction of villain's range
+    # hero TIES at showdown right now. Large on shared straights / board-plays;
+    # equity from chops is pot-splitting, not winning chances.
+    currently_tied_pct: float
     villain_range_combos: int  # live villain combos (not blocked by board/hero)
     hero_blocks_combos: int  # villain combos hero removes by card sharing
     spr: float
@@ -284,10 +288,12 @@ def compute_currently_ahead(
 ) -> tuple[float, float]:
     """How much of villain's range hero's made hand BEATS at showdown right now.
 
-    Returns ``(ahead_pct, behind_pct)`` -- the reach-weighted fraction of
-    villain's (board- and hero-unblocked) range that hero strictly beats / loses
-    to on the CURRENT board (no future cards). Ties count as neither, so
-    ``ahead + behind`` can be < 1.
+    Returns ``(ahead_pct, behind_pct, tied_pct)`` -- the reach-weighted
+    fractions of villain's (board- and hero-unblocked) range that hero strictly
+    beats / loses to / TIES on the CURRENT board (no future cards). The three
+    sum to 1 (the tie share is the CHOP share -- shared straights, board plays,
+    identical hands -- team July 2026: "drawing dead" prose on a 48%-equity
+    chop-heavy river). Empty range -> (0, 0, 0).
 
     The "where does my equity come from" fact (the brief's #1 failure mode --
     the LLM mis-attributing a made hand's equity to draws). A small pair that is
@@ -318,8 +324,8 @@ def compute_currently_ahead(
             behind += weight
         # equal ranks (chop) -> neither ahead nor behind
     if total <= 0:
-        return 0.0, 0.0
-    return ahead / total, behind / total
+        return 0.0, 0.0, 0.0
+    return ahead / total, behind / total, (total - ahead - behind) / total
 
 
 def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
@@ -445,7 +451,7 @@ def extract_facts(
     )
 
     # --- currently ahead / behind (exact showdown equity composition) ---
-    currently_ahead, currently_behind = compute_currently_ahead(
+    currently_ahead, currently_behind, currently_tied = compute_currently_ahead(
         hero_cards, dict(node.villain_range), board
     )
 
@@ -495,6 +501,7 @@ def extract_facts(
         hero_equity_vs_villain=hero_equity,
         currently_ahead_pct=currently_ahead,
         currently_behind_pct=currently_behind,
+        currently_tied_pct=currently_tied,
         villain_range_combos=live,
         hero_blocks_combos=blocked,
         spr=node.spr,

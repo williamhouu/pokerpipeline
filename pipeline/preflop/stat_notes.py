@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 
+from pipeline.preflop.domination import dominating_map
 from pipeline.preflop.fact_extractor import PreflopFacts
 
 # --- framing thresholds (v1 -- tune against reviewer feedback) --------------
@@ -98,34 +99,57 @@ def format_top_villain_combos(stats: object) -> str:
 
 
 # --- the panel rows ---------------------------------------------------------
-def _pot_odds_note(be: float) -> StatNote:
-    # Just state the pot odds. Whether THIS hand should call is context the
-    # answer explanation owns -- implied odds can make a sub-threshold call
-    # correct -- so the panel never frames it as "equity needed to call".
-    # No em dashes in any note: the team bans them in copy. (the team, 6/26.)
+def _pot_odds_note(
+    be: float,
+    pot_bb: float | None = None,
+    call_bb: float | None = None,
+    fmt=None,
+) -> StatNote:
+    # The subtext is the WRITTEN-OUT equation with each number labeled (team,
+    # July 2026, "Format B"): "call 2bb ÷ (pot 7.5bb + call 2bb) = 21%".
+    # Amounts are EXACT (never the 0.5bb display grid) so the arithmetic
+    # always reproduces the printed percentage. Whether THIS hand should call
+    # is context the answer explanation owns -- implied odds can make a
+    # sub-threshold call correct -- so the panel never frames it as "equity
+    # needed to call". No em dashes in any note (team copy rule).
     pct = _pct(be)
-    return StatNote("pot_odds", "Pot odds", pct, f"Your pot odds here are {pct}.")
+    if pot_bb is not None and call_bb is not None and fmt is not None:
+        note = (
+            f"call {fmt(call_bb)} ÷ (pot {fmt(pot_bb)} + "
+            f"call {fmt(call_bb)}) = {pct}."
+        )
+    else:  # older batches / fakes without the price geometry
+        note = f"Your pot odds here are {pct}."
+    return StatNote("pot_odds", "Pot odds", pct, note)
 
 
-def _hero_equity_note(eq: float, range_eq: float | None, villain: str = "their") -> StatNote:
+def _hero_equity_note(
+    eq: float,
+    range_eq: float | None,
+    villain: str = "their",
+    hand_label: str = "",
+) -> StatNote:
     pct = _pct(eq)
+    # E1 (team, July 2026): name the specific hand so the number reads as a
+    # fact about THIS holding ("Your hand, KJs, has about 36% equity...").
+    subject = f"Your hand, {hand_label}," if hand_label else "Your hand"
     if range_eq is None:
-        note = f"Your hand has about {pct} equity against {villain} range."
+        note = f"{subject} has about {pct} equity against {villain} range."
     elif eq - range_eq >= HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand has about {pct} equity against {villain} range, a bit "
+            f"{subject} has about {pct} equity against {villain} range, a bit "
             f"stronger than your average hand here (your range is around "
             f"{_pct(range_eq)})."
         )
     elif eq - range_eq <= -HAND_VS_RANGE_BAND:
         note = (
-            f"Your hand has about {pct} equity against {villain} range, a bit "
+            f"{subject} has about {pct} equity against {villain} range, a bit "
             f"weaker than your average hand here (your range is around "
             f"{_pct(range_eq)})."
         )
     else:
         note = (
-            f"Your hand has about {pct} equity against {villain} range, about "
+            f"{subject} has about {pct} equity against {villain} range, about "
             f"average for your range here ({_pct(range_eq)})."
         )
     return StatNote("hero_equity", "Your equity", pct, note)
@@ -136,6 +160,7 @@ def _hero_field_equity_note(
     per_opponent: dict[str, float],
     opponents: tuple[str, ...],
     is_all_in: bool,
+    hand_label: str = "",
 ) -> StatNote:
     """Multi-way equity row: spell out equity vs WHOM and how it breaks down --
     your equity against each player alone, then against the whole field.
@@ -153,9 +178,10 @@ def _hero_field_equity_note(
     breakdown = ", ".join(
         f"{pos} {_pct(per_opponent.get(pos, 0.0))}" for pos in opponents
     )
+    hand_bit = f"Your hand is {hand_label}. " if hand_label else ""
     head = (
-        f"You're up against {n} players in this pot ({seats}). Against each "
-        f"one alone your equity is {breakdown}."
+        f"{hand_bit}You're up against {n} players in this pot ({seats}). "
+        f"Against each one alone your equity is {breakdown}."
     )
     if is_all_in:
         tail = (
@@ -174,50 +200,145 @@ def _hero_field_equity_note(
     return StatNote("hero_equity", "Your equity (multi-way)", pct, head + tail)
 
 
-def _blockers_note(blockers: dict[str, int], villain: str = "their") -> StatNote | None:
+# Blocker-impact framing thresholds: the SHARE of villain's top-value slice
+# hero removes picks the copy (the number determines the framing -- a lookup,
+# never a judgement). Under ~3% is a rounding error; 10%+ genuinely reshapes
+# what villain gets dealt. Tune against reviewer feedback like the other
+# thresholds in this module.
+_BLOCKER_NEGLIGIBLE_SHARE = 0.03
+_BLOCKER_SIGNIFICANT_SHARE = 0.10
+
+
+def _blockers_note(
+    blockers: dict[str, int],
+    villain: str = "their",
+    top_value_total: int = 0,
+) -> StatNote | None:
     total = sum(n for n in blockers.values() if n > 0)
     if total <= 0:
         return None
     # Show every blocked class with its combo count -- the per-combo detail
     # is the point. format_blockers sorts most-blocked first.
+    #
+    # WORDING INVARIANTS (both bugs shipped, both team-reported July 2026):
+    #   * SCOPE: the count comes from fact_extractor.top_value_combos
+    #     (villain's strongest ~35% ONLY -- blocking 22 or A2s is noise), so
+    #     the copy MUST scope itself to the "strongest" combos. "From their
+    #     range" alone reads as the whole range ("KTs is in their chart at
+    #     100%, why isn't it listed?").
+    #   * IMPACT: the tail claim must match the share removed. A fixed "so
+    #     they're less likely to hold the big hands that beat you" overstated
+    #     a 1% dent (and assumed the blocked hands beat hero, which the data
+    #     does not say). The share picks the framing; no share -> no claim.
     breakdown = format_blockers(blockers)
-    note = (
-        f"Your cards remove {total} combos from {villain} range ({breakdown}), "
-        "so they're a little less likely to hold those."
-    )
+    if top_value_total > 0:
+        share = total / top_value_total
+        pct = "under 1%" if share < 0.01 else f"about {share:.0%}"  # noqa: PLR2004
+        head = (
+            f"Your cards remove {total} of the {top_value_total} strongest "
+            f"combos in {villain} range, {pct} ({breakdown})."
+        )
+        if share < _BLOCKER_NEGLIGIBLE_SHARE:
+            tail = (
+                " That is a negligible dent, so blockers are not a real "
+                "factor in this spot."
+            )
+        elif share < _BLOCKER_SIGNIFICANT_SHARE:
+            tail = (
+                " That trims a small but real share of their strongest hands."
+            )
+        else:
+            tail = (
+                " That is a meaningful cut: they hold their strongest hands "
+                "noticeably less often than the chart alone suggests."
+            )
+        note = head + tail
+    else:  # older batches / fakes without the denominator: no impact claim
+        note = (
+            f"Your cards remove {total} combos from the strongest part of "
+            f"{villain} range ({breakdown})."
+        )
     return StatNote("blockers", "Blockers", f"{total} combos", note)
 
 
-def _villain_range_note(stats: object) -> StatNote | None:
-    covering = getattr(stats, "top_combos_covering", ())
-    if not covering:
+def _more(names: list[str], total: int) -> str:
+    """A class list with an honest '+N more' when the source list was capped."""
+    extra = total - len(names)
+    return ", ".join(names) + (f" and {extra} more" if extra > 0 else "")
+
+
+def _domination_note(
+    hand_label: str,
+    dominated_by: list[str],
+    you_dominate: list[str],
+    villain: str = "their",
+    dominated_by_total: int = 0,
+    you_dominate_total: int = 0,
+) -> StatNote | None:
+    """The Domination row (July 2026 -- replaces the "what you're up against"
+    width note, which duplicated the range chart above the panel).
+
+    Which hands in the most-recent raiser's range have YOUR hand dominated
+    (shared card with a better kicker, or a pair that has you crushed), and
+    which hands you dominate. Structural facts from
+    :mod:`pipeline.preflop.domination` fed villain's FULL weight-gated class
+    list -- never equity, never the LLM. Both buckets empty -> no row.
+    Multiway: measured against the most-recent raiser only and NAMED (same
+    convention as every other row in the panel).
+    """
+    if not dominated_by and not you_dominate:
         return None
-    width = getattr(stats, "pct_of_dealt_hands", 0.0)
-    hands = ", ".join(covering)
-    if width < RANGE_WIDTH_TIGHT:
-        shape = "tight"
-    elif width < RANGE_WIDTH_MODERATE:
-        shape = "fairly wide"
+    n_over = max(dominated_by_total, len(dominated_by))
+    n_under = max(you_dominate_total, len(you_dominate))
+    over = _more(dominated_by, n_over)
+    under = _more(you_dominate, n_under)
+    hand = f"your {hand_label}" if hand_label else "your hand"
+    if dominated_by and you_dominate:
+        value = f"{n_over} over, {n_under} under"
+        note = (
+            f"In {villain} range, the hands that dominate {hand}: {over}. "
+            f"Hands {hand} dominates: {under}."
+        )
+    elif dominated_by:
+        value = f"{n_over} over you"
+        note = (
+            f"In {villain} range, the hands that dominate {hand}: {over}. "
+            "You dominate nothing they hold."
+        )
     else:
-        shape = "wide"
-    # Name the seat we're up against (the most-recent raiser) so a multiway
-    # spot makes clear WHICH opponent this range belongs to.
-    pos = getattr(stats, "position", "") or ""
-    poss = _villain_poss(stats)
-    label = f"You're up against {pos}" if pos else "You're up against"
-    note = (
-        f"Most of {poss} range is these hands, a {shape} range "
-        f"({width:.1f}% of all hands)."
-    )
-    return StatNote("villain_range", label, hands, note)
+        value = f"you over {n_under}"
+        note = (
+            f"Nothing in {villain} range dominates {hand}. "
+            f"Hands {hand} dominates: {under}."
+        )
+    return StatNote("domination", "Domination", value, note)
 
 
-def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
+def build_stat_notes(
+    facts: PreflopFacts,
+    *,
+    display_in_bb: bool = True,
+    bb_in_dollars: float | None = None,
+) -> list[StatNote]:
     """The "Show the math" rows for one spot, in display order.
 
     Only includes a row when its underlying fact exists -- open/first-in
     spots (no villain) yield an empty list, and the panel hides itself.
+    ``display_in_bb`` / ``bb_in_dollars`` pick the unit for the pot-odds
+    equation's amounts so the panel matches the Question prose's unit.
     """
+    from pipeline.bb_display import exact_amount_str  # noqa: PLC0415
+
+    def _amt(x: float) -> str:
+        return exact_amount_str(
+            x, display_in_bb=display_in_bb, bb_in_dollars=bb_in_dollars
+        )
+
+    # The specific hand, e.g. "KJs" (duck-typed so test fakes without a spot
+    # simply omit the name).
+    hand_label = str(
+        getattr(getattr(facts, "spot", None), "hero_hand_class", "") or ""
+    )
     notes: list[StatNote] = []
     # Possessive name for the opponent (the most-recent raiser) so multiway
     # spots make clear which seat the numbers are measured against.
@@ -228,7 +349,12 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     # it "pot odds" in the panel reads as a calling price that doesn't exist —
     # QC 2026-07-01 caught "Pot odds = 40%" on an A2s first-in open.
     if facts.break_even_equity is not None and facts.villain_stats is not None:
-        notes.append(_pot_odds_note(facts.break_even_equity))
+        notes.append(_pot_odds_note(
+            facts.break_even_equity,
+            getattr(facts, "price_pot_bb", None),
+            getattr(facts, "price_call_bb", None),
+            _amt,
+        ))
     # Multi-way all-in: show the FIELD equity (beat everyone) as the headline,
     # since the heads-up number overstates hero's real chance. Otherwise the
     # standard heads-up equity row.
@@ -250,6 +376,7 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
                 facts.per_opponent_equity,
                 facts.showdown_opponents,
                 is_all_in,
+                hand_label,
             )
         )
     elif facts.hero_equity_vs_villain is not None:
@@ -258,6 +385,7 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
                 facts.hero_equity_vs_villain,
                 facts.hero_range_equity_vs_villain,
                 villain,
+                hand_label,
             )
         )
     # NOTE: the standalone range-vs-range "Range advantage" row was dropped
@@ -272,13 +400,27 @@ def build_stat_notes(facts: PreflopFacts) -> list[StatNote]:
     # per-action EV column action_ev_bb, charted on the Review page, is the EV
     # signal now; the gap is still computed internally for difficulty + the
     # worthiness gate.)
-    blockers_note = _blockers_note(facts.blockers, villain)
+    blockers_note = _blockers_note(
+        facts.blockers, villain,
+        getattr(facts, "top_value_combo_count", 0) or 0,
+    )
     if blockers_note is not None:
         notes.append(blockers_note)
-    if facts.villain_stats is not None:
-        villain_note = _villain_range_note(facts.villain_stats)
-        if villain_note is not None:
-            notes.append(villain_note)
+    # Domination row (July 2026): replaces the old "You're up against" width
+    # note, which duplicated the range chart rendered above the panel. Fed
+    # villain's FULL weight-gated class list (in_range_classes -- the July-5
+    # fix; a top-N digest here silently drops real dominators).
+    if facts.villain_stats is not None and hand_label:
+        in_range = getattr(facts.villain_stats, "in_range_classes", ()) or ()
+        villain_classes = [c for c, _w in in_range]
+        if villain_classes:
+            dm = dominating_map(hand_label, villain_classes)
+            dom_note = _domination_note(
+                hand_label, dm["dominated_by"], dm["you_dominate"], villain,
+                dm.get("dominated_by_total", 0), dm.get("you_dominate_total", 0),
+            )
+            if dom_note is not None:
+                notes.append(dom_note)
     return notes
 
 

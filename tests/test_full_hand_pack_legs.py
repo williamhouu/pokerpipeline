@@ -185,7 +185,8 @@ def test_coherence_gate_falls_back_to_entry_leg(tmp_path, monkeypatch) -> None:
 
 def test_hand_difficulty_band_filter(tmp_path, monkeypatch) -> None:
     """The band filter drops whole hands by hand_difficulty BEFORE any
-    generation; an impossible band writes zero hands."""
+    generation; an impossible band writes zero hands and records the
+    band-scan diagnostics the Review page reads to explain the empty CSV."""
     pack = _matching_pack(tmp_path)
     result, meta = _run_batch(
         tmp_path, monkeypatch, pack,
@@ -194,6 +195,53 @@ def test_hand_difficulty_band_filter(tmp_path, monkeypatch) -> None:
     assert result.questions_written == 0
     c = meta["counters"]
     assert c["hands_difficulty_filtered"] == c["hands_assembled"] > 0
+    # Diagnostics (July 2026): the hardest hand seen must be recorded (and,
+    # being below the impossible band, must be under its floor).
+    assert isinstance(c["hand_difficulty_observed_max"], int)
+    assert c["hand_difficulty_observed_max"] < 3200  # noqa: PLR2004
+
+
+def test_band_scan_looks_past_the_requested_count(tmp_path, monkeypatch) -> None:
+    """BAND-SCAN INVARIANT (July 2026, seen live): total_hands caps the KEPT
+    hands, never the scanned ones. The old flow assembled exactly N hands
+    and then band-filtered, so "1 Hard hand" assembled one arbitrary hand
+    and usually deleted it -- a silent empty batch. Requesting 1 hand with a
+    band that only a NON-FIRST hand satisfies must still find it."""
+    import csv as _csv
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+
+    # Unfiltered reference run: every hand + its difficulty, in kept order.
+    out_all = tmp_path / "all.csv"
+    generate_full_hand_batch(
+        solve=solve, output_path=out_all, total_hands=50, dry_run=True,
+        answer_style="gto", equity_runouts=20, include_villain=True,
+    )
+    meta_all = json.loads(
+        out_all.with_suffix(".meta.json").read_text(encoding="utf-8")
+    )
+    hands = meta_all["hands"]
+    if len({h["hand_difficulty"] for h in hands}) < 2:  # pragma: no cover
+        import pytest as _pytest
+
+        _pytest.skip("fixture hands all rate identically; cannot exercise")
+    first = hands[0]["hand_difficulty"]
+    target = next(
+        h["hand_difficulty"] for h in hands if h["hand_difficulty"] != first
+    )
+
+    # Request ONE hand in a band only the non-first hand(s) satisfy.
+    out = tmp_path / "banded.csv"
+    result = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=1, dry_run=True,
+        answer_style="gto", equity_runouts=20, include_villain=True,
+        min_hand_difficulty=target, max_hand_difficulty=target,
+    )
+    assert result.questions_written > 0, "band scan failed to look past hand #1"
+    rows = list(_csv.DictReader(out.open(encoding="utf-8-sig")))
+    assert {r["hand_difficulty"] for r in rows} == {str(target)}
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert meta["counters"]["hands_written"] == 1
 
 
 def test_no_pack_root_keeps_entry_legs(tmp_path, monkeypatch) -> None:
@@ -204,3 +252,164 @@ def test_no_pack_root_keeps_entry_legs(tmp_path, monkeypatch) -> None:
     c = meta["counters"]
     assert c["preflop_leg_pack_used"] == 0
     assert meta["run_settings"]["preflop_leg_pack"] is None
+
+
+# --- trimmed full-hand CSV schema (July 2026) --------------------------------
+def test_full_hand_csv_uses_trimmed_schema(tmp_path, monkeypatch) -> None:
+    """The full-hand CSV drops the pot_odds..easy_hand diagnostic columns
+    (their values still live inside stat_notes) and KEEPS the sequence tags
+    + hand_difficulty. Standalone postflop batches keep the full schema."""
+    import csv as _csv
+
+    from pipeline.postflop.format_writer import (
+        _FULL_HAND_DROPPED_COLUMNS,
+        FULL_HAND_CSV_COLUMNS,
+        POSTFLOP_CSV_COLUMNS,
+    )
+
+    assert _FULL_HAND_DROPPED_COLUMNS == frozenset({
+        "pot_odds", "hero_equity", "range_equity", "spr",
+        "easy_freq", "easy_ev", "easy_concept", "easy_hand",
+        # July 2026 (team): the app groups on hand_id + orders by
+        # sequence_index; a leg count is just the group size.
+        "sequence_total",
+    })
+    assert set(POSTFLOP_CSV_COLUMNS) - set(FULL_HAND_CSV_COLUMNS) == set(
+        _FULL_HAND_DROPPED_COLUMNS
+    )
+    # The trailing columns read: ...sequence tags, then the hand selector.
+    assert FULL_HAND_CSV_COLUMNS[-3:] == (
+        "hand_id", "sequence_index", "hand_difficulty",
+    )
+
+    pack = _matching_pack(tmp_path)
+    result, _meta = _run_batch(tmp_path, monkeypatch, pack)
+    assert result.questions_written > 0
+    with (tmp_path / "out.csv").open(encoding="utf-8-sig", newline="") as fh:
+        header = next(_csv.reader(fh))
+    assert header == list(FULL_HAND_CSV_COLUMNS)
+
+
+# --- prompt threading (July 2026) --------------------------------------------
+def test_batch_threads_pack_prompt_to_leg_builder(tmp_path, monkeypatch) -> None:
+    """generate_full_hand_batch forwards preflop_pack_system_prompt to every
+    pack-leg build (the admin picker's value reaches the leg builder)."""
+    pack = _matching_pack(tmp_path)
+    seen: list = []
+    real = fhb.build_pack_preflop_leg_row
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs.get("system_prompt"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fhb, "build_pack_preflop_leg_row", _spy)
+    _result, meta = _run_batch(
+        tmp_path, monkeypatch, pack,
+        preflop_pack_system_prompt="PACK-PROMPT-X",
+    )
+    assert meta["counters"]["preflop_leg_pack_used"] > 0
+    assert seen and all(sp == "PACK-PROMPT-X" for sp in seen)
+
+
+def test_pack_leg_forwards_system_prompt_to_generator(tmp_path, monkeypatch) -> None:
+    """build_pack_preflop_leg_row passes its system_prompt override into the
+    PREFLOP explanation generator (not the postflop or preflop-entry one)."""
+    import pipeline.preflop.explanation_generator as pre_gen
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.postflop.preflop_leg_pack import build_pack_preflop_leg_row
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    pack = _matching_pack(tmp_path)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+    # A coherent (position, combo) pair, taken from a dry-run batch's meta.
+    _result, meta = _run_batch(tmp_path, monkeypatch, pack)
+    q = next(
+        q for q in meta["questions"] if q.get("preflop_leg_source") == "pack"
+    )
+
+    captured: dict = {}
+
+    def _fake_gen(facts, options, correct, **kwargs):
+        captured["system_prompt"] = kwargs.get("system_prompt")
+        padded = list(options) + ["", "", "", ""]
+        return GeneratedExplanation(
+            option_1=padded[0], option_2=padded[1], option_3=padded[2],
+            option_4=padded[3], correct_answer=correct,
+            answer_explanation="Test prose.",
+        )
+
+    monkeypatch.setattr(
+        pre_gen, "generate_preflop_answer_explanation", _fake_gen
+    )
+    row, record, failure = build_pack_preflop_leg_row(
+        src, q["hero_position"], q["hero_combo"], solve,
+        number=1, hand_id="h1", sequence_index=1, sequence_total=2,
+        use_placeholder=False, client=object(), model="test-model",
+        temperature=0.2, max_tokens=100, answer_style="gto",
+        display_in_bb=True, equity_runouts=20,
+        system_prompt="CUSTOM PREFLOP PROMPT",
+    )
+    assert failure is None and row is not None and record is not None
+    assert captured["system_prompt"] == "CUSTOM PREFLOP PROMPT"
+
+
+def test_pack_leg_usage_callback_arity_is_adapted(tmp_path, monkeypatch) -> None:
+    """REGRESSION (July 2026): the postflop batch's usage counter takes ONE
+    usage object, but the PREFLOP generator reports five positionals
+    (model, in, out, cache_c, cache_r) -- the pack-leg seam must adapt, or
+    the FIRST real-API full-hand run dies with a TypeError no dry-run can
+    see (the June-2026 usage_callback bug class). This test drives the REAL
+    preflop generator through a mock CLIENT -- mocking the generator itself
+    would bypass the callback arity entirely (which is how it was missed).
+    """
+    from types import SimpleNamespace
+
+    from pipeline.postflop.preflop_leg_pack import build_pack_preflop_leg_row
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    pack = _matching_pack(tmp_path)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+    _result, meta = _run_batch(tmp_path, monkeypatch, pack)
+    q = next(
+        q for q in meta["questions"] if q.get("preflop_leg_source") == "pack"
+    )
+
+    def _create(**_kwargs):
+        return SimpleNamespace(
+            content=[SimpleNamespace(
+                text='{"answer_explanation": "This is a standard play."}'
+            )],
+            usage=SimpleNamespace(input_tokens=111, output_tokens=22),
+        )
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=_create))
+
+    totals = {"in": 0, "out": 0}
+
+    def _usage(usage) -> None:  # the postflop batch's ONE-object convention
+        totals["in"] += int(getattr(usage, "input_tokens", 0) or 0)
+        totals["out"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    row, record, failure = build_pack_preflop_leg_row(
+        src, q["hero_position"], q["hero_combo"], solve,
+        number=1, hand_id="h1", sequence_index=1, sequence_total=2,
+        use_placeholder=False, client=client, model="test-model",
+        temperature=0.0, max_tokens=64, answer_style="gto",
+        display_in_bb=True, equity_runouts=20, usage_cb=_usage,
+    )
+    assert failure is None and row is not None and record is not None
+    assert totals == {"in": 111, "out": 22}
+
+
+def test_prompt_names_recorded_in_run_settings(tmp_path, monkeypatch) -> None:
+    """The admin's chosen prompt NAMES land in meta run_settings so a batch
+    always says which named prompts wrote it."""
+    names = {"postflop": "My postflop prompt", "preflop_pack": "My preflop prompt"}
+    _result, meta = _run_batch(tmp_path, monkeypatch, None, prompt_names=names)
+    assert meta["run_settings"]["prompt_names"] == names
+    # Omitted -> recorded as an empty map (not missing), so consumers can
+    # rely on the key existing on new batches.
+    _result2, meta2 = _run_batch(tmp_path, monkeypatch, None)
+    assert meta2["run_settings"]["prompt_names"] == {}

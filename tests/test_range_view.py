@@ -132,3 +132,47 @@ def test_grid_html_tooltip_pct_formatting() -> None:
     html = range_view.grid_html({"AA": [(0.845, "#c2492f", "Raise"), (0.005, "#5b8fb0", "Fold")]})
     assert "Raise 84%" in html or "Raise 85%" in html
     assert "Fold 0.5%" in html
+
+
+# --- GTO-Wizard style (height = presence, width = mix-when-held; July 2026) --
+def test_gw_cells_height_is_presence_and_widths_are_conditional() -> None:
+    """The GW encoding the app will use from the CSV ranges column: bar
+    height = the hand's total presence (sum of reach-weighted segments),
+    width split = each action's share WHEN HELD (normalised to 1)."""
+    import pytest
+
+    cells = range_view.gw_cells(
+        {"22": [(0.15, "#a"), (0.05, "#b")],   # 20% presence, 75/25 mix
+         "54s": [(0.0, "#a")],                  # zero presence -> dropped
+         "AA": [(1.4, "#a")]}                   # over 1 -> height clamps
+    )
+    height, widths = cells["22"]
+    assert height == pytest.approx(0.20)
+    assert [round(w, 3) for w, _c in widths] == [0.75, 0.25]
+    assert "54s" not in cells
+    assert cells["AA"][0] == 1.0
+
+
+def test_grid_html_gw_renders_bottom_anchored_bar() -> None:
+    """The cell's bar box is bottom-anchored at the presence height; the
+    inner bands split the WIDTH by the conditional mix."""
+    html = range_view.grid_html_gw({"22": (0.2, [(0.75, "#abc123"), (0.25, "#def456")])})
+    assert html.count("<td") == 169
+    assert "bottom:0;height:20.0%" in html
+    assert "width:75.0%;background:#abc123" in html
+    assert "width:25.0%;background:#def456" in html
+
+
+def test_grid_html_gw_tooltip_shows_presence_and_mix() -> None:
+    html = range_view.grid_html_gw(
+        {"AA": (0.5, [(0.8, "#c2492f", "Bet"), (0.2, "#5b8fb0", "Check")])}
+    )
+    assert "here 50%" in html
+    assert "Bet 80%" in html and "Check 20%" in html
+    assert 'tabindex="0"' in html
+
+
+def test_grid_html_gw_empty_cells_have_no_bar() -> None:
+    html = range_view.grid_html_gw({})
+    assert html.count("<td") == 169
+    assert "bottom:0;height:" not in html

@@ -416,6 +416,101 @@ def meta_question_for(
     return None
 
 
+def preflop_leg_provenance(
+    meta: dict[str, object] | None, *, hand_id: str
+) -> str | None:
+    """Small provenance caption for a full-hand PREFLOP leg: which source
+    built it (a matched range pack, or the solve's entry ranges).
+
+    Joins the meta ``questions`` on ``(hand_id, street == "preflop")`` -- a
+    hand has at most one preflop leg, so the pair is unique. Returns None
+    when it can't be determined (no meta, blank hand_id, no preflop record),
+    which renders as no caption -- graceful for older batches. Pure function
+    (no Streamlit) so it is testable without a browser.
+    """
+    if not isinstance(meta, dict) or not str(hand_id).strip():
+        return None
+    questions = meta.get("questions")
+    if not isinstance(questions, list):
+        return None
+    for q in questions:
+        if (
+            isinstance(q, dict)
+            and str(q.get("hand_id", "")) == str(hand_id)
+            and q.get("street") == "preflop"
+        ):
+            if q.get("preflop_leg_source") == "pack":
+                pack = str(q.get("pack_id") or "").strip()
+                if pack:
+                    return f"Preflop leg from range pack: {pack}"
+                return "Preflop leg from a range pack"
+            return (
+                "Preflop leg from the solve's entry ranges "
+                "(no matching range pack)"
+            )
+    return None
+
+
+def batch_pack_id(meta: dict[str, object] | None) -> str | None:
+    """The range pack a standalone PREFLOP batch was generated from, or None.
+
+    Reads the top-level ``pack_id`` the preflop batch meta records (one pack
+    per batch). Returns None for blank / missing (older batches, postflop
+    batches), which renders as no caption. Pure function for browserless
+    tests.
+    """
+    if not isinstance(meta, dict):
+        return None
+    pack = str(meta.get("pack_id") or "").strip()
+    return pack or None
+
+
+def empty_batch_diagnosis(meta: dict[str, object] | None) -> str | None:
+    """Plain-English reason a batch CSV came out EMPTY, or None if unknown.
+
+    A silent 0-question batch reads as a mystery failure ("Job done", empty
+    CSV); the meta counters usually record exactly which gate ate everything.
+    Pure function (no Streamlit) so it is testable without a browser.
+    """
+    if not isinstance(meta, dict):
+        return None
+    counters = meta.get("counters")
+    rs = meta.get("run_settings")
+    if not isinstance(counters, dict) or not isinstance(rs, dict):
+        return None
+    if meta.get("mode") != "full_hand":
+        return None
+    if int(counters.get("questions_written", 0) or 0) > 0:
+        return None
+
+    assembled = int(counters.get("hands_assembled", 0) or 0)
+    filtered = int(counters.get("hands_difficulty_filtered", 0) or 0)
+    lo = rs.get("min_hand_difficulty")
+    hi = rs.get("max_hand_difficulty")
+
+    if assembled == 0:
+        return (
+            "No hands could be assembled: no worthy decision inside the "
+            "frequency window seeded a play-through. Widen the worthiness "
+            "window (Advanced filters) or check the heroes/streets selection."
+        )
+    if filtered >= assembled and (lo is not None or hi is not None):
+        band = f"{lo if lo is not None else 400}-{hi if hi is not None else 3200}"
+        observed = counters.get("hand_difficulty_observed_max")
+        observed_bit = (
+            f" The hardest hand scanned rated **{observed}**."
+            if isinstance(observed, int) else ""
+        )
+        return (
+            f"The hand-difficulty band ({band}) filtered out every hand: "
+            f"{assembled} scanned, none landed in the band.{observed_bit} "
+            "Try a wider band, or enable 🪤 trap-aware (and 🔪 razor's-edge) "
+            "difficulty -- deceptive pure decisions then rate 1800+, which "
+            "is where most genuinely hard hands live."
+        )
+    return None
+
+
 def revise_summary_line(meta: dict[str, object] | None) -> str | None:
     """One-line summary of the 4-call audit & auto-fix pass, or ``None`` when
     the batch did not use it (``revise_pass`` off).
@@ -574,6 +669,9 @@ __all__ = [
     "approved_rows_to_csv",
     "assembled_prompt",
     "batch_meta_path",
+    "batch_pack_id",
+    "empty_batch_diagnosis",
+    "preflop_leg_provenance",
     "clear_all_approved",
     "collect_approved_rows",
     "collect_approved_sources",

@@ -116,9 +116,31 @@ actually hold a draw (a DRAWS line is present). A hand that is behind most of \
 villain's range but holds a real draw gets its equity from improving. If a hand \
 is ahead now yet the answer is to fold or check, frame it as a realization or \
 reverse-implied-odds problem (you cannot profitably continue), not as having low \
-equity.
+equity. When the CURRENTLY AHEAD line shows a chop share (TIES), treat it honestly: equity that comes from chopping is pot-splitting, not chances to win. A hand that mostly chops and otherwise loses is NOT "drawing dead", it is "mostly chopping"; never describe chop-heavy equity as winning chances.
+11. Bet-size wording: never echo a raw solver size label as the instruction \
+("You should bet 53%" is wrong). State the action so it matches the correct \
+option's wording, and express any size in natural poker language with the real \
+amount where given: "bet about half the pot (4bb)", "a small third-pot bet", \
+"an overbet". Rough map: ~33% = about a third of the pot, ~50-60% = about half \
+the pot, ~66-80% = about two-thirds pot, ~100% = a pot-sized bet, 110%+ = an \
+overbet.
 Return only the explanation text, no preamble, no headings.
 """
+
+
+# Chop share worth surfacing on the CURRENTLY AHEAD line (and in the math
+# panel). Below this, ties are rounding noise; above it, the LLM must not
+# call the hand's equity "winning chances" (team, July 2026: a 48%-equity
+# river that was almost all chops read as "drawing dead").
+_TIE_SIGNIFICANT = 0.05
+
+
+def _tie_clause(f: PostflopFacts) -> str:
+    """', and TIES (chops) with N%' when the chop share is significant."""
+    tied = getattr(f, "currently_tied_pct", 0.0) or 0.0
+    if tied < _TIE_SIGNIFICANT:
+        return ""
+    return f", and TIES (chops the pot) with {tied * 100:.0f}%,"
 
 
 # Admin-editable override for the postflop system prompt. The Prompt page saves
@@ -206,7 +228,7 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
         # Python). A made hand AHEAD of much of villain's range has SHOWDOWN
         # equity (it beats their weaker/air hands now) -- NOT draw equity. The
         # LLM must use this and not mis-attribute a made hand's equity to draws.
-        f"CURRENTLY AHEAD: your hand beats {f.currently_ahead_pct * 100:.0f}% of "
+        f"CURRENTLY AHEAD: your hand beats {f.currently_ahead_pct * 100:.0f}%{_tie_clause(f)} of "
         f"{ahead_ref} at showdown right now (behind "
         f"{f.currently_behind_pct * 100:.0f}%)",
         # Node-level "who is ahead on this board" verdicts, resolved in Python
