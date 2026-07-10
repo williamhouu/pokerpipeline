@@ -31,14 +31,23 @@ How a hand is assembled
 
 Determinism: seeds are processed in a fixed (depth, node id, combo) order and
 ``hand_id`` is a content hash, so the same solve yields byte-identical hands
-(the batch's byte-identical-CSV guarantee depends on it).
+(the batch's byte-identical-CSV guarantee depends on it). ``variety_seed``
+(July 2026) keeps that guarantee PER SEED while fixing the "every batch is
+the same pocket fours" repetition: the alphabetical tie-break puts digit
+combos (4d4c...) at the front of every batch, so small repeated batches
+re-served the same few hands. A seeded shuffle WITHIN each depth group
+re-orders the candidates (same seed = same batch; the batch meta records
+the seed); the cross-depth deepest-first order is the dedup invariant and
+is never disturbed.
 """
 
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 from dataclasses import dataclass
+from itertools import groupby
 
 from pipeline.postflop.preflop_entry import (
     PreflopEntryFacts,
@@ -54,16 +63,22 @@ _STREET_ORDER = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
 class HandLeg:
     """One question in a play-through, in order.
 
-    Exactly one of ``spot`` (a postflop decision) or ``entry_facts`` (the
-    preflop entry) is set, indicated by ``kind``. ``street`` and ``node_id``
-    (empty for the preflop leg) are convenience copies for the batch / meta.
+    Three kinds: ``postflop`` (``spot`` set), ``preflop_entry`` (``entry_facts``
+    set; the SRP open-or-defend entry), and ``preflop_line`` (``step_index``
+    set; one decision of a MULTI-RAISE preflop line, e.g. the open / the 3-bet
+    / the call in a 3-bet pot -- built exclusively from a matching preflop
+    range pack by the batch driver, because the postflop solve's entry weights
+    cannot express a raise-or-call-or-fold decision). ``street`` and
+    ``node_id`` (synthetic for preflop legs) are convenience copies.
     """
 
-    kind: str  # "preflop_entry" | "postflop"
+    kind: str  # "preflop_entry" | "preflop_line" | "postflop"
     street: str
     node_id: str
     spot: PostflopSpot | None = None
     entry_facts: PreflopEntryFacts | None = None
+    # Index into solve.preflop_summary for kind="preflop_line".
+    step_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +116,30 @@ def _depth(node: PostflopNode) -> tuple[int, int]:
     """Sort/seed depth: (board length, history length). Deeper = later street /
     more action, so a river facing-bet node outranks the flop root."""
     return (len(node.board), len(node.history))
+
+
+def _variety_order(ordered_seeds: list, variety_seed: int | None) -> list:
+    """Re-order depth-sorted seeds for batch-to-batch variety.
+
+    ``None`` = the legacy fixed order (byte-identical batches). With a seed,
+    shuffle WITHIN each depth group only. INVARIANT: the cross-depth
+    deepest-first order must hold -- the duplicate-hand suppression in
+    :func:`assemble_hands` relies on a combo's LONGEST line being processed
+    before its shorter prefixes; a global shuffle would keep truncated hands
+    and drop the full play-throughs. Within one depth that ordering carries
+    no meaning (it was an alphabetical tie-break, which is exactly what made
+    every small batch open with the same digit-first combos), so a seeded
+    permutation there is safe and deterministic per seed.
+    """
+    if variety_seed is None:
+        return ordered_seeds
+    rng = random.Random(variety_seed)
+    out: list = []
+    for _, group in groupby(ordered_seeds, key=lambda s: _depth(s.node)):
+        bucket = list(group)
+        rng.shuffle(bucket)
+        out.extend(bucket)
+    return out
 
 
 def _solve_tag(solve: PostflopSolve) -> str:
@@ -172,10 +211,27 @@ def _build_legs(
     solve: PostflopSolve, hero: str, combo: str, nodes: list[PostflopNode],
     *, include_preflop: bool,
 ) -> list[HandLeg]:
-    """The ordered legs for one hero+combo: optional preflop entry, then each
-    postflop decision node."""
+    """The ordered legs for one hero+combo: optional preflop leg(s), then each
+    postflop decision node.
+
+    SRP: one ``preflop_entry`` leg from the solve's entry weights. MULTI-RAISE
+    (3-bet pot): one ``preflop_line`` leg per summary step the hero acted on
+    (the opener gets TWO: the open and the call of the 3-bet) -- placeholders
+    the batch driver fills from a matching preflop pack; the entry weights are
+    NOT used (they can't express a raise-or-call-or-fold decision)."""
     legs: list[HandLeg] = []
-    if include_preflop and combo in solve.preflop_entry_ranges.get(hero, {}):
+    n_raises = sum(
+        1 for st in solve.preflop_summary
+        if st.verb in ("open", "raise", "3-bet", "4-bet", "5-bet")
+    )
+    if include_preflop and n_raises > 1:
+        for i, step in enumerate(solve.preflop_summary):
+            if step.position == hero:
+                legs.append(HandLeg(
+                    kind="preflop_line", street="preflop",
+                    node_id=f"preflop_step:{i}", step_index=i,
+                ))
+    elif include_preflop and combo in solve.preflop_entry_ranges.get(hero, {}):
         entry = build_preflop_entry_facts(solve, hero, combo)
         legs.append(HandLeg(kind="preflop_entry", street="preflop", node_id="",
                             entry_facts=entry))
@@ -202,6 +258,7 @@ def assemble_hands(
     max_hands: int | None = None,
     include_preflop: bool = True,
     include_villain: bool = False,
+    variety_seed: int | None = None,
 ) -> list[PlayThroughHand]:
     """Assemble play-through hands from ``solve``, seeded by worthy ``seeds``.
 
@@ -218,15 +275,20 @@ def assemble_hands(
         include_villain: also emit the villain's coherent line on the same
             runout as a separate hand (the "flip the frame" path; architected,
             off by default).
+        variety_seed: ``None`` = the legacy fixed order (identical hands every
+            batch); an int = a per-seed deterministic shuffle within each depth
+            group, so different seeds pick different hands (see
+            :func:`_variety_order`).
 
     Returns:
-        A deterministic list of :class:`PlayThroughHand`.
+        A deterministic (per ``variety_seed``) list of :class:`PlayThroughHand`.
     """
     seats = tuple(heroes) or tuple(solve.positions)
     ordered_seeds = sorted(
         (s for s in seeds if s.node.actor in seats),
         key=lambda s: (-_depth(s.node)[0], -_depth(s.node)[1], s.node.node_id, s.hero_combo),
     )
+    ordered_seeds = _variety_order(ordered_seeds, variety_seed)
 
     # consumed holds every (node_id, combo) already absorbed into a built hand.
     # A seed is SKIPPED when ANY node on its line is already consumed -- not just

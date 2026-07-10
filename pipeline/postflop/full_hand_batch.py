@@ -49,7 +49,11 @@ from pipeline.postflop.explanation_generator import (
     generate_postflop_explanation,
     placeholder_explanation,
 )
-from pipeline.postflop.facts import DEFAULT_EQUITY_RUNOUTS, extract_facts
+from pipeline.postflop.facts import (
+    DEFAULT_EQUITY_RUNOUTS,
+    extract_facts,
+    preflop_raise_count,
+)
 from pipeline.postflop.format_writer import (
     FULL_HAND_CSV_COLUMNS,
     build_postflop_row,
@@ -88,7 +92,38 @@ _LEG_COUNTER_KEYS = (
     "soft_flagged", "claim_flagged", "revise_flagged", "revise_fixed",
     "revise_discarded", "revise_unchanged",
     "preflop_leg_pack_used", "preflop_leg_entry_fallback",
+    # Multi-raise (3-bet pot) preflop legs that could not be built: no
+    # matching pack, or the pack's strategy for the hand contradicts the
+    # as-played line. The leg is DROPPED (never faked from entry weights);
+    # the hand's postflop legs still narrate the full preflop line.
+    "preflop_line_legs_dropped",
 )
+
+
+def _require_single_raised_pot(solve: PostflopSolve, mode_label: str) -> None:
+    """SRP-ONLY GATE for STANDALONE preflop-entry mode (July 2026).
+
+    The entry framing is a continue-or-fold binary read off the solve's
+    entry weights. In a 3-bet pot the weights are 3-bet / call-vs-3bet
+    frequencies whose complement is a call+fold MIX, so no honest binary
+    question exists -- fail fast with a plain message. (Full-hand mode
+    supports 3-bet pots via pack-backed line legs, which ask each real
+    decision from a matching preflop range pack; standalone preflop
+    questions belong to the preflop range-pack pipeline.) The admin UI
+    mirrors this gate upfront; THIS check is the source of truth.
+    """
+    n_raises = preflop_raise_count(solve)
+    if n_raises != 1:
+        line = ", ".join(
+            f"{st.position} {st.verb}" + (f" {st.to_bb:g}bb" if st.to_bb else "")
+            for st in solve.preflop_summary
+        )
+        raise ValueError(
+            f"{mode_label} supports single-raised-pot solves only. This "
+            f"solve's preflop line is '{line}' ({n_raises} raises). Use "
+            "full-hand mode (pack-backed preflop legs) or standalone "
+            "postflop questions for it instead."
+        )
 
 
 def _zero_counters() -> dict[str, int]:
@@ -307,6 +342,7 @@ def generate_full_hand_batch(
     preflop_leg_pack_root: Path | str | None = None,
     min_hand_difficulty: int | None = None,
     max_hand_difficulty: int | None = None,
+    variety_seed: int | None = None,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
@@ -357,6 +393,7 @@ def generate_full_hand_batch(
     hands = assemble_hands(
         solve, seeds=worthy, heroes=tuple(heroes) or (), max_hands=scan_cap,
         include_preflop=include_preflop, include_villain=include_villain,
+        variety_seed=variety_seed,
     )
 
     # --- pack-backed preflop legs (July 2026) -----------------------------
@@ -378,7 +415,51 @@ def generate_full_hand_batch(
     # to the generation loop so nothing is computed twice.
     facts_cache: dict[tuple[str, str], Any] = {}
     pack_facts_cache: dict[tuple[str, str], Any] = {}
+    line_facts_cache: dict[tuple[int, str], Any] = {}
     hand_difficulties: dict[str, int] = {}
+
+    # --- multi-raise preflop line legs (3-bet pots, July 2026) -------------
+    # A preflop_line leg is built EXCLUSIVELY from the matched pack: the
+    # solve's entry weights cannot express a raise-or-call-or-fold decision,
+    # so there is no honest entry fallback. Validate every such leg UP FRONT
+    # (build + cache its pack facts); a leg with no matching pack or a
+    # coherence failure is DROPPED here, so sequence numbering stays
+    # contiguous and the difficulty pre-pass / generation loop only ever see
+    # buildable legs. The hand itself survives (its postflop legs narrate
+    # the full preflop line in their Question prose).
+    preflop_line_legs_dropped = 0
+    if any(leg.kind == "preflop_line" for h in hands for leg in h.legs):
+        from dataclasses import replace as _dc_replace  # noqa: PLC0415
+
+        filtered_hands = []
+        for hand in hands:
+            kept_legs = []
+            for leg in hand.legs:
+                if leg.kind != "preflop_line":
+                    kept_legs.append(leg)
+                    continue
+                built = None
+                if pack_source is not None:
+                    key = (leg.step_index, hand.hero_combo)
+                    if key not in line_facts_cache:
+                        b = _build_pack_facts(
+                            pack_source, hand.hero, hand.hero_combo, solve,
+                            equity_runouts=equity_runouts,
+                            step_index=leg.step_index,
+                        )
+                        line_facts_cache[key] = (
+                            None if b is None else _facts_difficulty(
+                                b, trap_difficulty=trap_difficulty,
+                                razor_difficulty=razor_difficulty,
+                            )
+                        )
+                    built = line_facts_cache[key]
+                if built is None:
+                    preflop_line_legs_dropped += 1
+                    continue
+                kept_legs.append(leg)
+            filtered_hands.append(_dc_replace(hand, legs=tuple(kept_legs)))
+        hands = filtered_hands
 
     def _score_hand(hand) -> int:
         """hand_difficulty = MAX over the hand's legs (facts cached for the
@@ -405,6 +486,11 @@ def generate_full_hand_batch(
                         score = pd.score
                 if score is None:
                     score = leg.entry_facts.difficulty
+            elif leg.kind == "preflop_line":
+                # Validated + cached by the up-front filter above; a leg
+                # whose facts failed was already dropped from the hand.
+                _pf, pd = line_facts_cache[(leg.step_index, hand.hero_combo)]
+                score = pd.score
             else:
                 key = (leg.spot.node.node_id, leg.spot.hero_combo)
                 if key not in facts_cache:
@@ -487,7 +573,29 @@ def generate_full_hand_batch(
                     f"Hand {hand.hand_id[:22]} leg {i}/{hand.total}", done, total_legs,
                 )
             number = len(rows) + 1
-            if leg.kind == "preflop_entry":
+            if leg.kind == "preflop_line":
+                # Multi-raise line leg: always pack-built (the up-front
+                # filter guarantees the prebuilt facts exist for it).
+                counters = _zero_counters()
+                row, record, failure = build_pack_preflop_leg_row(
+                    pack_source, hand.hero, hand.hero_combo, solve,
+                    number=number, hand_id=hand.hand_id,
+                    sequence_index=i, sequence_total=hand.total,
+                    use_placeholder=use_placeholder, client=client,
+                    model=model, temperature=temperature,
+                    max_tokens=max_tokens, answer_style=answer_style,
+                    display_in_bb=display_in_bb,
+                    equity_runouts=equity_runouts,
+                    trap_difficulty=trap_difficulty,
+                    razor_difficulty=razor_difficulty,
+                    system_prompt=preflop_pack_system_prompt,
+                    usage_cb=_usage,
+                    prebuilt=line_facts_cache[(leg.step_index, hand.hero_combo)],
+                    step_index=leg.step_index,
+                )
+                if row is not None:
+                    agg["preflop_leg_pack_used"] += 1
+            elif leg.kind == "preflop_entry":
                 row = record = failure = None
                 counters = _zero_counters()
                 prebuilt = (
@@ -589,6 +697,10 @@ def generate_full_hand_batch(
                 "prompt_names": prompt_names or {},
                 "min_hand_difficulty": min_hand_difficulty,
                 "max_hand_difficulty": max_hand_difficulty,
+                # The hand-selection shuffle seed (None = legacy fixed order).
+                # Recorded so any batch is reproducible: same solve + same
+                # settings + this seed = the same hands.
+                "variety_seed": variety_seed,
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
                 "final_audit": final_audit and revise_pass,
@@ -607,6 +719,7 @@ def generate_full_hand_batch(
                 "band_scan_capped": band_scan_capped,
                 "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
                 "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
+                "preflop_line_legs_dropped": preflop_line_legs_dropped,
                 "hands_written": len(hand_index),
                 "questions_written": len(rows),
                 # Layer-7 + soft-validator tallies (postflop legs only; 0 unless
@@ -668,6 +781,7 @@ def generate_preflop_entry_batch(
     standalone preflop questions (use the preflop range-pack pipeline) -- this
     is the postflop solve's own entry decision.
     """
+    _require_single_raised_pot(solve, "Preflop-entry mode")
     use_placeholder = dry_run or client is None
     all_facts = enumerate_preflop_entry_facts(solve, heroes=tuple(heroes) or ())
     in_window = [

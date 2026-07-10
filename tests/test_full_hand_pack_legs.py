@@ -413,3 +413,226 @@ def test_prompt_names_recorded_in_run_settings(tmp_path, monkeypatch) -> None:
     # rely on the key existing on new batches.
     _result2, meta2 = _run_batch(tmp_path, monkeypatch, None)
     assert meta2["run_settings"]["prompt_names"] == {}
+
+
+# --- 3-bet-pot line legs (July 2026) ------------------------------------------
+def _threebet_pack(
+    tmp_path: Path, *, threebet_freq: float = 0.8, call_freq: float = 0.1,
+    pack_id: str = "fixture_6max_100bb_3bp",
+) -> PreflopPack:
+    """The SRP fixture pack EXTENDED with the 3-bet line: BB's sized 3-bet is
+    dominant (default), and BTN's facing-the-3-bet node mostly calls."""
+    pack = _matching_pack(
+        tmp_path, call_freq=call_freq, threebet_freq=threebet_freq,
+        pack_id=pack_id,
+    )
+    classes = canonical_169_hand_classes()
+    line3 = f"{_LINE}_SB_Fold_BB_182%"
+    _write(pack.root_path / "BTN" / f"{line3}_BTN_Call.txt",
+           {c: 0.8 for c in classes})
+    _write(pack.root_path / "BTN" / f"{line3}_BTN_Fold.txt",
+           {c: 0.2 for c in classes})
+    return pack
+
+
+def _as_three_bet_pot(solve, *, threebet_to: float):
+    """The fixture solve with a 3-bet-pot preflop line (BB is the 3-bettor).
+    The open matches the fixture pack's 2.5bb; ``threebet_to`` must match
+    the pack's resolved 3-bet size for the geometry gate to pass."""
+    from dataclasses import replace
+
+    from pipeline.postflop.solve import PreflopStep
+
+    return replace(solve, preflop_summary=(
+        PreflopStep("BTN", "open", to_bb=2.5),
+        PreflopStep("BB", "3-bet", to_bb=threebet_to),
+        PreflopStep("BTN", "call"),
+    ))
+
+
+def _pack_threebet_size_bb(pack) -> float:
+    """The pack's resolved (bb) 3-bet size on the fixture line, discovered
+    rather than hardcoded so the test tracks the grammar's size table."""
+    from pipeline.preflop.action_history import resolve_preflop_history
+    from pipeline.preflop.grammars.types import PreflopActionType
+    from pipeline.preflop.node_enumerator import enumerate_nodes
+
+    for node in enumerate_nodes([pack]):
+        acted = [a for a in node.history_before
+                 if a.action_type is not PreflopActionType.FOLD]
+        if node.actor == "BTN" and len(acted) == 2:  # facing the 3-bet
+            sizes = [s for s in
+                     resolve_preflop_history(node.history_before, pack).sizes_bb
+                     if s is not None]
+            return float(sizes[-1])
+    raise AssertionError("fixture pack lacks the facing-3-bet node")
+
+
+def test_matcher_resolves_the_three_bet_line(tmp_path: Path) -> None:
+    """A pack carrying the whole line matches with one node per decision;
+    a wrong 3-bet size or a pack without the line does not."""
+    pack = _threebet_pack(tmp_path)
+    size = _pack_threebet_size_bb(pack)
+    solve = _as_three_bet_pot(btn_vs_bb_full_hand_2cJs7s(), threebet_to=size)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+    assert [(s.position, s.as_played_prefix) for s in src.steps] == [
+        ("BTN", "Raise"), ("BB", "Raise"), ("BTN", "Call"),
+    ]
+    assert src.steps[1].size_bb == size
+    assert len(src.steps_for("BTN")) == 2 and len(src.steps_for("BB")) == 1
+    # Wrong 3-bet size -> geometry gate refuses.
+    wrong = _as_three_bet_pot(btn_vs_bb_full_hand_2cJs7s(), threebet_to=size + 2)
+    assert find_pack_leg_source(wrong, tmp_path, packs=[pack]) is None
+    # A pack WITHOUT the facing-3-bet node (the plain SRP fixture) never
+    # matches a 3-bet-pot line.
+    srp_only = _matching_pack(tmp_path, pack_id="fixture_srp_only")
+    assert find_pack_leg_source(solve, tmp_path, packs=[srp_only]) is None
+
+
+def test_full_hand_three_bet_pot_builds_line_legs(tmp_path, monkeypatch) -> None:
+    """A 3-bet-pot full-hand batch: the opener (BTN) gets TWO preflop legs
+    (the open + the call of the 3-bet), the 3-bettor (BB) one, sequence
+    numbering contiguous, all from the pack."""
+    pack = _threebet_pack(tmp_path)
+    size = _pack_threebet_size_bb(pack)
+    solve = _as_three_bet_pot(btn_vs_bb_full_hand_2cJs7s(), threebet_to=size)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+    monkeypatch.setattr(fhb, "find_pack_leg_source", lambda *a, **k: src)
+
+    out = tmp_path / "out.csv"
+    result = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=4, dry_run=True,
+        answer_style="gto", equity_runouts=20, preflop_leg_pack_root=tmp_path,
+    )
+    assert result.questions_written > 0
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    by_hand: dict[str, list[dict]] = {}
+    for q in meta["questions"]:
+        by_hand.setdefault(q["hand_id"], []).append(q)
+    saw_btn = saw_bb = False
+    for _hand_id, qs in by_hand.items():
+        pre = [q for q in qs if q["street"] == "preflop"]
+        hero = qs[0]["hero_position"]
+        assert all(q.get("preflop_leg_source") == "pack" for q in pre)
+        if hero == "BTN" and pre:
+            saw_btn = True
+            assert [q["preflop_step_index"] for q in pre] == [0, 2]
+            assert [q["sequence_index"] for q in pre] == [1, 2]
+        elif hero == "BB" and pre:
+            saw_bb = True
+            assert [q["preflop_step_index"] for q in pre] == [1]
+        # Sequence indices are contiguous across the whole hand.
+        assert [q["sequence_index"] for q in qs] == list(range(1, len(qs) + 1))
+    assert saw_btn and saw_bb
+    assert meta["counters"]["preflop_line_legs_dropped"] == 0
+    assert meta["counters"]["preflop_leg_pack_used"] >= 3
+
+
+def test_three_bet_pot_drops_incoherent_or_packless_legs(tmp_path, monkeypatch) -> None:
+    """No honest fallback exists for a multi-raise preflop leg: a hand whose
+    pack strategy contradicts the as-played line drops the leg; with no
+    matching pack at all every line leg is dropped (hands stay postflop-only)."""
+    # Pack where the BB mostly CALLS (3-bet freq 0.1) -> the BB 3-bettor's
+    # leg fails coherence and is dropped; BTN's two legs survive.
+    pack = _threebet_pack(
+        tmp_path, threebet_freq=0.1, call_freq=0.7, pack_id="fixture_3bp_calls",
+    )
+    size = _pack_threebet_size_bb(pack)
+    solve = _as_three_bet_pot(btn_vs_bb_full_hand_2cJs7s(), threebet_to=size)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+    monkeypatch.setattr(fhb, "find_pack_leg_source", lambda *a, **k: src)
+    out = tmp_path / "out.csv"
+    generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=4, dry_run=True,
+        equity_runouts=20, preflop_leg_pack_root=tmp_path,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    bb_pre = [q for q in meta["questions"]
+              if q["street"] == "preflop" and q["hero_position"] == "BB"]
+    assert bb_pre == []  # coherence-dropped, never faked
+    assert meta["counters"]["preflop_line_legs_dropped"] >= 1
+
+    # No pack at all -> every preflop line leg dropped; hands still generate.
+    monkeypatch.setattr(fhb, "find_pack_leg_source", lambda *a, **k: None)
+    out2 = tmp_path / "out2.csv"
+    result = generate_full_hand_batch(
+        solve=solve, output_path=out2, total_hands=2, dry_run=True,
+        equity_runouts=20, preflop_leg_pack_root=tmp_path,
+    )
+    assert result.questions_written > 0
+    meta2 = json.loads(out2.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert all(q["street"] != "preflop" for q in meta2["questions"])
+    assert meta2["counters"]["preflop_line_legs_dropped"] >= 1
+
+
+def test_preflop_entry_refuses_a_three_bet_pot_solve(tmp_path: Path) -> None:
+    """STANDALONE preflop-entry mode stays SRP-only: its continue-or-fold
+    framing cannot express a raise-or-call-or-fold decision."""
+    from pipeline.postflop.full_hand_batch import generate_preflop_entry_batch
+
+    solve = _as_three_bet_pot(btn_vs_bb_full_hand_2cJs7s(), threebet_to=11.0)
+    with pytest.raises(ValueError, match="single-raised-pot"):
+        generate_preflop_entry_batch(
+            solve=solve, output_path=tmp_path / "out.csv", total_questions=1,
+            dry_run=True,
+        )
+
+
+# --- variety seed (July 2026): fresh hands per batch --------------------------
+def test_variety_order_shuffles_within_depth_only() -> None:
+    """INVARIANT: cross-depth deepest-first order must survive the shuffle
+    (the dedup keeps a combo's LONGEST line only because it is processed
+    first); within one depth the order is free, and that freedom is what
+    stops every batch opening with the same digit-first combos."""
+    from types import SimpleNamespace
+
+    from pipeline.postflop.play_through import _variety_order
+
+    def spot(board_len: int, hist_len: int, combo: str):
+        node = SimpleNamespace(board=["x"] * board_len, history=["a"] * hist_len)
+        return SimpleNamespace(node=node, hero_combo=combo)
+
+    deep = [spot(5, 4, c) for c in ("4d4c", "5c4c", "AhKh", "QsQd", "7c6c")]
+    shallow = [spot(3, 0, c) for c in ("2d2c", "JhTh")]
+    seeds = deep + shallow  # already deepest-first, as assemble_hands sorts
+
+    # None = the legacy fixed order, untouched.
+    assert _variety_order(seeds, None) == seeds
+    # Same seed = same order (a batch is reproducible from its meta).
+    once = _variety_order(seeds, 42)
+    assert _variety_order(seeds, 42) == once
+    # Depth groups never interleave: all 5 deep seeds still precede both
+    # shallow seeds, whatever the permutation inside each group.
+    combos = lambda spots: {s.hero_combo for s in spots}  # noqa: E731
+    assert combos(once[:5]) == combos(deep) and combos(once[5:]) == combos(shallow)
+    # Different seeds produce different picks at the front (this is the fix:
+    # the first N seeds decide the batch). 5! orderings make a collision
+    # across 5 seeds astronomically unlikely; assert at least two differ.
+    fronts = {tuple(s.hero_combo for s in _variety_order(seeds, k)[:3]) for k in range(5)}
+    assert len(fronts) > 1
+
+
+def test_variety_seed_changes_the_assembled_hands(tmp_path: Path) -> None:
+    """End to end on the fixture: same seed = same hands; the seed lands in
+    meta run_settings so the batch says how it was drawn."""
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    out = tmp_path / "seeded.csv"
+    result = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=2, dry_run=True,
+        equity_runouts=20, variety_seed=7,
+    )
+    assert result.questions_written > 0
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert meta["run_settings"]["variety_seed"] == 7
+    # Reproducible: the same seed assembles the same hands.
+    out2 = tmp_path / "seeded2.csv"
+    generate_full_hand_batch(
+        solve=solve, output_path=out2, total_hands=2, dry_run=True,
+        equity_runouts=20, variety_seed=7,
+    )
+    meta2 = json.loads(out2.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    hands = [q["hero_combo"] for q in meta["questions"]]
+    assert [q["hero_combo"] for q in meta2["questions"]] == hands

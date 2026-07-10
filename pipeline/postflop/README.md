@@ -98,6 +98,42 @@ equity, and converting chips→bb. First real questions generated from
 The CLI loads it via `--solve <path>.db`; `--diversify` rounds-robin across
 decision types (see the calibration note below).
 
+**Structure report (July 2026).** `structure_report.py` walks a `.db`'s
+node strings (node+action columns only, sub-second) and reports the REAL
+action menus per street x actor x situation, plus auto-derived
+plain-English limitations ("after a river check, BTN can never bet",
+"the only raise facing a turn bet is all-in", "turn bets come in one
+size only"). Cached in a `<name>.structure.json` sidecar next to the
+solve (keyed by size+mtime+version); the admin picker's solve preview
+renders it in the "Betting options at each street" expander, computing
+inline on a first-ever selection. These are properties of the tree the
+vendor solved, surfaced so you know what a batch can and cannot ask.
+
+**3-bet-pot solves (July 2026).** The adapter parses the `preflop_line`
+metadata ("BTN open 3bb, BB 3bet 17bb, BTN call") into the preflop summary,
+so a 3-bet-pot `.db` renders the true line everywhere downstream (prose,
+`Preflop Pot Type` = "Three bet pot", the aggressor — and with it C-bet vs
+Facing-a-C-Bet classification, skills, and the seat-token stack walk).
+Files without the key (the older exports) are all SRP and keep the legacy
+open+call summary. Chips-per-bb prefers the file's own `pot`/`pot_bb` +
+`eff_stack`/`eff_stack_bb` pairs (exact for any pot type) over the
+SRP-only `btn_open` identity.
+
+**Full-hand mode supports 3-bet pots via pack LINE legs (July 2026).**
+`preflop_leg_pack.find_pack_leg_source` matches the solve's WHOLE preflop
+line to a range pack, one node per decision (`PackLineStep`): SRP = open +
+defend; 3-bet pot = the open, the 3-bet, and the call — so the opener gets
+TWO preflop questions and the 3-bettor one, each built by the full preflop
+pipeline. Geometry gates every raise size on the line (the v7 3-bet pots
+match `preflop_8max_200bb_IMPROVED` exactly at 3bb/17bb). On a multi-raise
+solve there is NO entry-derived fallback (the solve's entry weights cannot
+express a raise-or-call-or-fold decision): a hand whose pack strategy
+contradicts the as-played line DROPS that preflop leg
+(`counters.preflop_line_legs_dropped`) and its postflop legs still narrate
+the full line. **Standalone preflop-entry mode stays SRP-only** (its
+continue-or-fold framing has the same limitation); the driver and admin UI
+fail fast with a plain message.
+
 > **Worthiness = the frequency window; the EV-gap filter is OPTIONAL (off by
 > default — mirrors preflop).** Real solves mix heavily, so the
 > genuinely-interesting decisions (c-bet? lead? which size?) have **near-zero

@@ -158,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
         help="with --revise, re-run the claim checker on the rewrite (4th call, "
              "flag only)",
     )
+    parser.add_argument(
+        "--variety-seed", type=int, default=None, metavar="N",
+        help="full-hands mode: shuffle which hands are picked (same seed = same "
+             "hands; omit for the legacy fixed order, which serves the SAME "
+             "hands every batch). The admin panel passes a fresh seed per run",
+    )
     args = parser.parse_args(argv)
 
     cap = args.max_nodes_per_street if args.max_nodes_per_street > 0 else None
@@ -172,6 +178,21 @@ def main(argv: list[str] | None = None) -> int:
         args.solve, streets=streets, max_nodes_per_street=cap,
         include_ancestors=full_hand,
     )
+    # Provenance for a vendor-solve batch: what audit_postflop_batch.py needs
+    # to REBUILD every row (db path + sampling) and to reproduce the display
+    # framing exactly (stakes / venue). Without it a CLI batch re-verifies
+    # with default framing and false-fails the Context columns. Mirrors the
+    # dict pipeline/postflop/run.py records for admin batches.
+    provenance = None
+    if args.solve.endswith(".db"):
+        provenance = {
+            "db_path": str(Path(args.solve).resolve()),
+            "streets": list(streets),
+            "max_nodes_per_street": cap,
+            "stakes": solve.stakes,
+            "live_or_online": solve.live_or_online,
+            "bb_in_dollars": solve.bb_in_dollars,
+        }
     client = None
     if not args.dry_run:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -196,10 +217,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.model:
             common["model"] = args.model
+        if provenance is not None:
+            common["provenance"] = provenance
         if args.mode == "full-hands":
             res = generate_full_hand_batch(
                 total_hands=args.num, include_villain=args.include_villain,
                 include_preflop=not args.no_preflop_leg,
+                # Pack-backed preflop legs from the repo's ranges/ -- the same
+                # root the admin driver (run.py) uses. Without it the legs
+                # degrade to entry-derived (SRP) or drop (3-bet pots).
+                preflop_leg_pack_root=(
+                    Path(__file__).resolve().parent.parent / "ranges"
+                ),
+                variety_seed=args.variety_seed,
                 min_ev_gap_bb=args.min_ev_gap,
                 quality_gate=not args.no_quality_gate,
                 min_premise_freq=(args.min_premise_freq if args.min_premise_freq > 0 else None),
@@ -237,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.min_ev_gap is not None:
         kwargs["min_ev_gap_bb"] = args.min_ev_gap
+    if provenance is not None:
+        kwargs["provenance"] = provenance
     result = generate_postflop_batch(
         solve=solve,
         output_path=args.out,

@@ -56,6 +56,45 @@ _FREQ_EPS_BYTES = 0
 _REACH_EPS = 1e-4
 _CARD_RE = re.compile(r"^[2-9TJQKA][cdhs]$")
 
+# ``preflop_line`` metadata verb -> the IR's PreflopStep verb.
+_PREFLOP_LINE_VERBS = {
+    "open": "open", "raise": "raise", "call": "call", "fold": "fold",
+    "check": "check", "limp": "call",
+    "3bet": "3-bet", "3-bet": "3-bet",
+    "4bet": "4-bet", "4-bet": "4-bet",
+    "5bet": "5-bet", "5-bet": "5-bet",
+}
+# The IR verbs that put in a raise (mirrors facts._RAISE_VERBS, which counts
+# them on a built solve; here we count on the parsed steps pre-build).
+_RAISE_STEP_VERBS = ("open", "raise", "3-bet", "4-bet", "5-bet")
+_SIZE_BB_RE = re.compile(r"([\d.]+)\s*bb", re.I)
+
+
+def _parse_preflop_line(line: str) -> tuple[PreflopStep, ...] | None:
+    """The ``preflop_line`` metadata as :class:`PreflopStep`\\ s, or None.
+
+    The July-2026 exports state the exact preflop line, e.g.
+    ``"BTN open 3bb, BB 3bet 17bb, BTN call"`` -> open / 3-bet / call steps.
+    This is what makes a 3-BET POT solve render correctly (prose, pot-type
+    column, aggressor, seat-token stack walk); the legacy files without the
+    key are all SRP and fall back to the hardcoded open+call summary.
+    Returns None when the line is absent or any step is unparseable (never
+    guess a preflop line).
+    """
+    steps: list[PreflopStep] = []
+    for part in (p.strip() for p in line.split(",") if p.strip()):
+        tokens = part.split()
+        if len(tokens) < 2:
+            return None
+        position, verb_token = tokens[0], tokens[1].lower()
+        verb = _PREFLOP_LINE_VERBS.get(verb_token)
+        if verb is None:
+            return None
+        m = _SIZE_BB_RE.search(part[len(position):])
+        to_bb = float(m.group(1)) if m and verb in ("open", "raise", "3-bet", "4-bet", "5-bet") else None
+        steps.append(PreflopStep(position, verb, to_bb=to_bb))
+    return tuple(steps) if steps else None
+
 
 @dataclass(frozen=True)
 class _DBAction:
@@ -65,6 +104,35 @@ class _DBAction:
     freq: list[int]  # 1326 bytes, 0-255
     ev_oop: tuple[float, ...]  # 1326 float32, chips
     ev_ip: tuple[float, ...]
+
+
+def _resolve_preflop_summary(
+    meta: dict, *, ip: str, oop: str, open_bb: float, source: str = "",
+) -> tuple[PreflopStep, ...]:
+    """The solve's preflop summary from its metadata.
+
+    The exact ``preflop_line`` when the file states it (3-bet pots NEED
+    this: prose, the pot-type column, the aggressor, and the seat-token
+    stack walk all derive from the summary). INVARIANT: a PRESENT but
+    unparseable ``preflop_line`` must refuse loudly, never fall back -- the
+    fallback says "open + call", and every SRP-only gate downstream trusts
+    the summary, so silently guessing on a 3-bet-pot file would ship a
+    wrong preflop story on every question. Only files WITHOUT the key (the
+    legacy exports, all SRP) use the hardcoded open+call summary.
+    """
+    line = str(meta.get("preflop_line", "") or "")
+    if line:
+        parsed = _parse_preflop_line(line)
+        if parsed is None:
+            raise ValueError(
+                f"unparseable preflop_line metadata {line!r} in {source or 'solve'};"
+                " refusing to guess the preflop line"
+            )
+        return parsed
+    return (
+        PreflopStep(ip, "open", to_bb=round(open_bb, 2)),
+        PreflopStep(oop, "call"),
+    )
 
 
 def _split_cards(s: str) -> list[str]:
@@ -211,8 +279,19 @@ class SqliteDbAdapter:
 
     # -- geometry from metadata ------------------------------------------
     def _bb_chips(self, s: _Solve) -> float:
-        """Chips per big blind. Derived from the verified pot identity, with a
-        metadata cross-check (open size + eff-stack must agree on 100 chips/bb)."""
+        """Chips per big blind.
+
+        Preferred: the exact chips/bb ratio the file itself states (the
+        July-2026 exports carry ``pot``/``pot_bb`` and ``eff_stack``/
+        ``eff_stack_bb`` pairs). Legacy fallback: the SRP open-size identity
+        ``eff_stack = (stack - open) bb`` from ``btn_open`` (v8) -- SRP-ONLY,
+        a 3-bet pot's eff_stack subtracts the 3-bet, not the open, so any
+        multi-raise file MUST ship the bb-pair keys -- else 100."""
+        for chips_key, bb_key in (("pot", "pot_bb"), ("eff_stack", "eff_stack_bb")):
+            chips = _safe_float(s.meta.get(chips_key))
+            in_bb = _safe_float(s.meta.get(bb_key))
+            if chips and in_bb:
+                return round(chips / in_bb)
         eff = float(s.meta["eff_stack"])
         stack_bb = float(s.meta["stack_bb"])
         m = re.search(r"([\d.]+)\s*bb", s.meta.get("btn_open", ""))
@@ -322,6 +401,11 @@ class SqliteDbAdapter:
             if node is not None:
                 nodes[node_id] = node
 
+        preflop_summary = _resolve_preflop_summary(
+            s.meta, ip=self.ip, oop=self.oop, open_bb=open_bb,
+            source=self.db_path,
+        )
+
         spot = s.meta.get("spot", "")
         return PostflopSolve(
             solve_id=f"{spot}_{''.join(flop)}",
@@ -329,10 +413,7 @@ class SqliteDbAdapter:
             effective_stack_bb=float(s.meta.get("stack_bb", 100)),
             starting_pot_bb=start_pot / bb,
             flop=flop,  # type: ignore[arg-type]
-            preflop_summary=(
-                PreflopStep(self.ip, "open", to_bb=round(open_bb, 2)),
-                PreflopStep(self.oop, "call"),
-            ),
+            preflop_summary=preflop_summary,
             nodes=nodes,
             game_format=self.game_format,
             bb_in_dollars=self.bb_in_dollars,
@@ -616,6 +697,30 @@ def _safe_float(v: object) -> float | None:
         return None
 
 
+def _pot_type_label(meta: dict[str, str]) -> str:
+    """The pot-type display label ("SRP" / "3-bet pot" / "4-bet pot"), from the
+    ``preflop_line`` metadata, falling back to the spot name. "" when unknown.
+
+    Shown in the picker label so two solves of the SAME flop at different pot
+    types (e.g. the Kd7s3s SRP and 3-bet pot) stay distinguishable."""
+    line = meta.get("preflop_line", "")
+    if line:
+        parsed = _parse_preflop_line(line)
+        if parsed:
+            raises = sum(
+                1 for st in parsed
+                if st.verb in ("open", "raise", "3-bet", "4-bet", "5-bet")
+            )
+            return {0: "limped", 1: "SRP", 2: "3-bet pot", 3: "4-bet pot"}.get(
+                raises, f"{raises}-raise pot"
+            )
+    spot = meta.get("spot", "")
+    for token, label in (("4BP", "4-bet pot"), ("3BP", "3-bet pot"), ("SRP", "SRP")):
+        if token in spot:
+            return label
+    return ""
+
+
 def _first_position(text: str) -> str | None:
     """The leading position token of ``text`` (e.g. a range filename / spot).
 
@@ -674,6 +779,8 @@ class DbSolveSummary:
     game_format: str = "cash"
     rake: str = ""
     ante: str = ""  # raw metadata value, e.g. "0" / "12.5%" / "1bb"
+    # Pot-type label ("SRP" / "3-bet pot" / ...), "" when the file doesn't say.
+    pot_type: str = ""
     customer: str = ""
     solve_date: str = ""
     label: str = ""  # compact one-liner for the picker
@@ -719,7 +826,10 @@ def summarize_db(db_path: str) -> DbSolveSummary:
     rake_short = rake.split(" cap")[0].strip() if rake and rake.lower() != "none" else ""
     ante = (meta.get("ante", "") or "").strip()
     has_ante = ante.lower() not in ("", "0", "0%", "none", "-")
+    pot_type = _pot_type_label(meta)
     bits = [f"{ip} vs {oop}"]
+    if pot_type:
+        bits.append(pot_type)
     if ts:
         bits.append(f"{ts}-max")
     if stack:
@@ -744,6 +854,7 @@ def summarize_db(db_path: str) -> DbSolveSummary:
         game_format=fmt,
         rake=rake,
         ante=ante,
+        pot_type=pot_type,
         customer=meta.get("customer_id", ""),
         solve_date=meta.get("solve_date", ""),
         label=" · ".join(bits),

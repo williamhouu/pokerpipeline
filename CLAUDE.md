@@ -626,15 +626,21 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   the deepest prior-street decision ancestor by node-id prefix — flop nodes are
   never down-sampled so a turn question always resolves; flop questions stay on
   the shared preflop ranges). RIGHT grid unchanged (current-street strategy).
-- **Pack-backed preflop legs for full-hand play-throughs (July 2026).**
-  `pipeline/postflop/preflop_leg_pack.py` — the ONE sanctioned
-  cross-pipeline seam (lazy preflop imports; nothing else in
-  `pipeline/postflop` may import `pipeline.preflop`). When a preflop range
-  pack provably matches the solve's preflop line (3 gates: geometry — same
-  table size/stack/open size within 0.26bb, derived from the flop pot;
-  line — the opener + defender nodes exist with all-folds-before; and
-  per-hand coherence — the pack's dominant action == the as-played
-  action), the preflop leg is built with the FULL preflop pipeline
+- **Pack-backed preflop legs for full-hand play-throughs (July 2026;
+  3-BET POTS July 9).** `pipeline/postflop/preflop_leg_pack.py` — the ONE
+  sanctioned cross-pipeline seam (lazy preflop imports; nothing else in
+  `pipeline/postflop` may import `pipeline.preflop`). The matcher resolves
+  the solve's WHOLE preflop line to pack nodes, one per decision
+  (`PackLineStep`): SRP = open + defend; 3-bet pot = open, 3-bet, call —
+  the opener gets TWO preflop legs, each asked at its real node (3 gates:
+  geometry — same table size/stack + EVERY raise size on the line within
+  0.26bb; line — a pack node exists for every decision with
+  all-others-fold; and per-hand coherence — the pack's dominant action ==
+  the as-played action at that step). Multi-raise legs have NO
+  entry-derived fallback (entry weights can't express raise-or-call-or-
+  fold): coherence failures DROP the leg (`counters.preflop_line_legs_
+  dropped`); standalone preflop-entry mode stays SRP-only. Each pack leg
+  is built with the FULL preflop pipeline
   (per-action EVs, GTO options under the EV-secondary rule, stat_notes,
   `ranges` JSON, domination, skills, 4-axis difficulty + trap/razor,
   soft validators) and adapted onto the postflop schema; otherwise the

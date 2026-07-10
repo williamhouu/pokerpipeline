@@ -16,12 +16,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pytest  # noqa: E402
+
 from pipeline.postflop.adapters.sqlite_db import (  # noqa: E402
+    SqliteDbAdapter,
     _first_position,
+    _parse_preflop_line,
+    _pot_type_label,
+    _resolve_preflop_summary,
     derive_scenario,
     discover_db_solves,
     summarize_db,
 )
+from pipeline.postflop.solve import PreflopStep  # noqa: E402
 from pipeline.postflop.spot_selection import (  # noqa: E402
     combo_class,
     diversify_spots,
@@ -140,6 +147,102 @@ def test_discover_db_solves_scans_recursively(tmp_path: Path) -> None:
     assert len(found) == 2
     assert all(s.ok for s in found)
     assert discover_db_solves(str(tmp_path / "does_not_exist")) == []
+
+
+# --- preflop_line parsing + pot type (the 3-bet-pot solves, July 2026) -------
+_3BP_META = {
+    "spot": "BTN_vs_BB_3BP_8max_noante_200bb",
+    "game_format": "8max NLHE",
+    "flop": "Kd7s3s",
+    "pot": "3450",
+    "pot_bb": "34.5",
+    "eff_stack": "18300",
+    "eff_stack_bb": "183",
+    "stack_bb": "200",
+    "ante": "0",
+    "rake": "8% cap 2bb",
+    "preflop_line": "BTN open 3bb, BB 3bet 17bb, BTN call",
+    "ip_range": "BTN_call_vs_BB_3bet_200bb",
+    "oop_range": "BB_3bet_raise17_vs_BTN_open_200bb",
+}
+
+
+def test_parse_preflop_line_three_bet_pot() -> None:
+    steps = _parse_preflop_line("BTN open 3bb, BB 3bet 17bb, BTN call")
+    assert steps == (
+        PreflopStep("BTN", "open", to_bb=3.0),
+        PreflopStep("BB", "3-bet", to_bb=17.0),
+        PreflopStep("BTN", "call", to_bb=None),
+    )
+
+
+def test_parse_preflop_line_srp_and_edge_cases() -> None:
+    assert _parse_preflop_line("BTN open 3bb, BB call") == (
+        PreflopStep("BTN", "open", to_bb=3.0),
+        PreflopStep("BB", "call", to_bb=None),
+    )
+    # Never guess: absent / unparseable lines return None (legacy fallback).
+    assert _parse_preflop_line("") is None
+    assert _parse_preflop_line("gibberish") is None
+    assert _parse_preflop_line("BTN teleports 3bb") is None
+
+
+def test_pot_type_label_from_line_and_spot() -> None:
+    assert _pot_type_label(_3BP_META) == "3-bet pot"
+    assert _pot_type_label(_V8_META) == "SRP"  # falls back to the spot name
+    assert _pot_type_label({"spot": "mystery"}) == ""
+
+
+def test_summarize_db_shows_pot_type(tmp_path: Path) -> None:
+    # The Kd7s3s SRP and 3-bet-pot solves must stay distinguishable in the
+    # picker one-liner.
+    db = tmp_path / "3bp.db"
+    _make_meta_db(db, _3BP_META)
+    s = summarize_db(str(db))
+    assert s.ok
+    assert s.pot_type == "3-bet pot"
+    assert "3-bet pot" in s.label
+
+
+def test_resolve_preflop_summary_never_guesses() -> None:
+    """INVARIANT: a present-but-unparseable preflop_line refuses loudly.
+
+    The open+call fallback is only for files WITHOUT the key (all legacy
+    SRPs); silently falling back on a 3-bet-pot file would slip past every
+    SRP-only gate downstream and ship a wrong preflop story."""
+    # Stated line -> parsed exactly.
+    steps = _resolve_preflop_summary(_3BP_META, ip="BTN", oop="BB", open_bb=3.0)
+    assert [s.verb for s in steps] == ["open", "3-bet", "call"]
+    # Absent key -> the legacy open+call summary.
+    steps = _resolve_preflop_summary({}, ip="BTN", oop="BB", open_bb=3.0)
+    assert steps == (
+        PreflopStep("BTN", "open", to_bb=3.0),
+        PreflopStep("BB", "call", to_bb=None),
+    )
+    # Present but unparseable -> hard refusal, never a guess.
+    with pytest.raises(ValueError, match="refusing to guess"):
+        _resolve_preflop_summary(
+            {"preflop_line": "BTN teleports 3bb"}, ip="BTN", oop="BB", open_bb=3.0
+        )
+
+
+class _MetaOnly:
+    """Duck-typed stand-in for the adapter's ``_Solve`` (only ``.meta``)."""
+
+    def __init__(self, meta: dict[str, str]):
+        self.meta = meta
+
+
+def test_bb_chips_prefers_stated_bb_pairs() -> None:
+    adapter = SqliteDbAdapter("unused.db")
+    # July-2026 exports state pot/pot_bb: exact, works for any pot type.
+    assert adapter._bb_chips(_MetaOnly(_3BP_META)) == 100
+    # Legacy v8 identity (btn_open + eff_stack) still works without the pairs.
+    assert adapter._bb_chips(_MetaOnly({
+        "eff_stack": "9697", "stack_bb": "100", "btn_open": "~3.03bb (81% pot)",
+    })) == 100
+    # Nothing usable -> the 100-chip default.
+    assert adapter._bb_chips(_MetaOnly({"eff_stack": "19700", "stack_bb": "200"})) == 100
 
 
 # --- spot selection ----------------------------------------------------------

@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -870,6 +871,61 @@ def render_generate_page() -> None:
 _POSTFLOP_SOLVES_DIR = Path(__file__).resolve().parent.parent / "solves" / "postflop"
 
 
+def _render_postflop_structure_panel(db_path: str) -> None:
+    """The selected solve's betting options at each street + limitation notes.
+
+    Reads the cached sidecar report; on a first-ever selection it computes
+    the report inline (sub-second) behind a spinner and caches it, so every
+    later render is instant.
+    """
+    from pipeline.postflop.structure_report import (  # noqa: PLC0415
+        compute_and_cache_structure_report,
+        load_structure_report,
+    )
+
+    report = load_structure_report(db_path)
+    if report is None:
+        try:
+            with st.spinner("Scanning this solve's betting tree (one-time)..."):
+                report = compute_and_cache_structure_report(db_path)
+        except Exception as exc:  # noqa: BLE001 - a bad file must not kill the page
+            st.caption(f"Couldn't scan the betting tree: {exc}")
+            return
+
+    limitations = report.get("limitations", [])
+    header = "🌳 Betting options at each street"
+    if limitations:
+        header += f" ({len(limitations)} limitation{'s' if len(limitations) != 1 else ''})"
+    with st.expander(header):
+        if limitations:
+            st.warning(
+                "**What this tree cannot ask** (properties of the solved "
+                "tree, not errors):\n" + "\n".join(f"- {n}" for n in limitations)
+            )
+        for street in ("flop", "turn", "river"):
+            rows = report.get("streets", {}).get(street)
+            if not rows:
+                continue
+            st.markdown(f"**{street.capitalize()}**")
+            for r in rows:
+                menu_bits = [
+                    f"{m['nodes']:,}x: {' / '.join(m['options'])}" for m in r["menus"]
+                ]
+                if r.get("other_menus_nodes"):
+                    menu_bits.append(f"{r['other_menus_nodes']:,}x: other")
+                st.markdown(
+                    f"- **{r['actor']} {r['context']}** "
+                    f"({r['nodes']:,} node{'s' if r['nodes'] != 1 else ''})  \n"
+                    + "  \n".join(f"&nbsp;&nbsp;&nbsp;{b}" for b in menu_bits)
+                )
+        st.caption(
+            "Bets are % of the pot before the wager; raises are a multiple "
+            "of the bet faced. Counts are decision nodes in the tree. "
+            "Cached next to the solve file; rescans automatically if the "
+            "file changes."
+        )
+
+
 def _render_generate_page_postflop() -> None:
     """Solve-centric postflop Generate.
 
@@ -946,24 +1002,41 @@ def _render_generate_page_postflop() -> None:
         cols[1].metric("Stack", f"{solve.stack_bb:g}bb" if solve.stack_bb else "—")
         cols[2].metric("Matchup", f"{solve.ip_position} vs {solve.oop_position}")
         cols[3].metric("Flop", solve.flop_pretty)
-        # Structure row -- the knobs that DIFFER across solves (game type, rake,
-        # ante). Surfaced explicitly because down the line many solves will mix
-        # structures and the framing must be unambiguous when you pick one.
-        s = st.columns(3)
-        s[0].metric("Game", "Tournament" if solve.game_format == "tournament" else "Cash")
-        s[1].metric("Rake", solve.rake_pretty)
-        s[2].metric("Ante", solve.ante_pretty)
+        # Structure row -- the knobs that DIFFER across solves (pot type, game
+        # type, rake, ante). Surfaced explicitly because down the line many
+        # solves will mix structures and the framing must be unambiguous when
+        # you pick one.
+        s = st.columns(4)
+        s[0].metric("Pot type", solve.pot_type or "—")
+        s[1].metric("Game", "Tournament" if solve.game_format == "tournament" else "Cash")
+        s[2].metric("Rake", solve.rake_pretty)
+        s[3].metric("Ante", solve.ante_pretty)
         meta_bits = [solve.spot] if solve.spot else []
         if solve.solve_date:
             meta_bits.append(f"solved {solve.solve_date}")
         if meta_bits:
             st.caption(" · ".join(meta_bits))
 
+    # 3a. Street-by-street betting structure + tree limitations. Computed
+    # from a full node walk (sub-second on node+action columns only) and
+    # cached in a JSON sidecar next to the .db, so only the first selection
+    # of a file pays the scan. The limitations are properties of the TREE
+    # the vendor solved (e.g. no river check-then-bet branch), surfaced
+    # here so you know what a batch from this solve can and cannot ask.
+    _render_postflop_structure_panel(picked)
+
     st.divider()
 
     # 3b. Question MODE -- independent spots (today), full-hand play-throughs, or
     # standalone preflop-entry questions. The mode steers which run.py driver the
     # GENERATE button calls + a couple of mode-only controls below.
+    # Standalone preflop-entry is SRP-ONLY (its continue-or-fold framing can't
+    # express a 3-bet pot's raise-or-call-or-fold decisions); the driver
+    # hard-fails on it too, this just surfaces the constraint BEFORE a run is
+    # queued. Full-hand mode SUPPORTS 3-bet pots via pack-backed line legs
+    # (July 2026): each real preflop decision (the open, the 3-bet, the call)
+    # is asked from a matching preflop range pack.
+    srp_only_blocked = bool(solve.pot_type) and solve.pot_type != "SRP"
     pf_mode_label = st.radio(
         "Question mode",
         options=[
@@ -990,6 +1063,23 @@ def _render_generate_page_postflop() -> None:
         else "preflop" if pf_mode_label.startswith("Preflop")
         else "spots"
     )
+    if srp_only_blocked and pf_mode == "preflop":
+        st.error(
+            f"This solve is a **{solve.pot_type}**. Preflop-entry mode only "
+            "supports single-raised pots (its continue-or-fold framing cannot "
+            "express a 3-bet pot's decisions). Pick **Independent spots** or "
+            "**Full hands** for this solve."
+        )
+        st.stop()
+    if srp_only_blocked and pf_mode == "full_hand":
+        st.info(
+            f"This solve is a **{solve.pot_type}**: the preflop legs (the "
+            "open, the 3-bet, the call) are asked from the matching preflop "
+            "range pack. A hand whose pack strategy contradicts the as-played "
+            "line drops its preflop leg (see `preflop_line_legs_dropped` in "
+            "the batch meta); its postflop questions still narrate the full "
+            "preflop line."
+        )
     pf_include_villain = False
     if pf_mode == "full_hand":
         pf_include_villain = st.checkbox(
@@ -1043,14 +1133,20 @@ def _render_generate_page_postflop() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
+        # PER-MODE keys, deliberately NOT shared: with one key, switching to
+        # full-hand mode would inherit the spots-mode count from
+        # session_state (the `value=` default only applies on first render),
+        # so "Number of HANDS" would silently start at 20. Separate keys give
+        # full-hand its own default of 1 hand and let each mode remember its
+        # own last-used count.
         if is_full:
             total = st.number_input(
                 "Number of HANDS",
                 min_value=1,
                 max_value=2000,
-                value=10,
+                value=1,
                 step=1,
-                key="postflop_total",
+                key="postflop_total_hands",
                 help="Each HAND becomes SEVERAL linked questions (a preflop entry "
                 "plus one per street the hero acts on), so the CSV row count is "
                 "much higher than the hand count — see the estimate below.",
@@ -1062,7 +1158,7 @@ def _render_generate_page_postflop() -> None:
                 max_value=5000,
                 value=20,
                 step=5,
-                key="postflop_total",
+                key="postflop_total_questions",
             )
     with col2:
         hero_help = (
@@ -1087,8 +1183,8 @@ def _render_generate_page_postflop() -> None:
             f"🃏 **Full-hand mode counts HANDS, not questions.** One hand is a "
             f"preflop → river play-through: a preflop-entry question plus the "
             f"hero's decision on each street, all linked by `hand_id` and played "
-            f"in order. **{n} hands ≈ {n * 4}–{n * 6} questions** in the CSV "
-            f"(depends how deep each line runs)."
+            f"in order. **{n} hand{'s' if n != 1 else ''} ≈ {n * 4}–{n * 6} "
+            f"questions** in the CSV (depends how deep each line runs)."
             + ("  Villain-frame is on, so expect roughly double — each tree also "
                "yields the villain's line." if pf_include_villain else "")
         )
@@ -1690,6 +1786,12 @@ def _render_generate_page_postflop() -> None:
                     razor_difficulty=fh_razor_difficulty,
                     min_hand_difficulty=(fh_band[0] if fh_band else None),
                     max_hand_difficulty=(fh_band[1] if fh_band else None),
+                    # Fresh hands every click: without a seed the assembler's
+                    # fixed ordering re-serves the SAME hands each batch (the
+                    # "always pocket fours" complaint). A random per-click
+                    # seed shuffles the selection; it lands in the batch's
+                    # meta run_settings, so any batch stays reproducible.
+                    variety_seed=random.randrange(2**31),
                     run_claim_checker=pf_run_claim_checker,
                     claim_checker_prompt=pf_claim_checker_prompt,
                     revise_pass=pf_revise_pass,

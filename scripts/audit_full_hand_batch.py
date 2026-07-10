@@ -203,6 +203,10 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
                     equity_runouts=equity_runouts,
                     trap_difficulty=trap_difficulty,
                     razor_difficulty=razor_difficulty,
+                    # Which decision of a multi-step line (a 3-bet pot's
+                    # opener has TWO legs); absent on older SRP batches ->
+                    # None = the hero's unique step.
+                    step_index=q.get("preflop_step_index"),
                 )
                 if _rec is not None:
                     options, correct = _rec["options"], _rec["correct_answer"]
