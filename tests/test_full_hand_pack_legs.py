@@ -278,9 +278,11 @@ def test_full_hand_csv_uses_trimmed_schema(tmp_path, monkeypatch) -> None:
         _FULL_HAND_DROPPED_COLUMNS
     )
     # The trailing columns read: ...sequence tags, then the hand selector.
+    # (animation_script sits in the shared prefix, like chat_context.)
     assert FULL_HAND_CSV_COLUMNS[-3:] == (
         "hand_id", "sequence_index", "hand_difficulty",
     )
+    assert "animation_script" in FULL_HAND_CSV_COLUMNS
 
     pack = _matching_pack(tmp_path)
     result, _meta = _run_batch(tmp_path, monkeypatch, pack)
@@ -636,3 +638,160 @@ def test_variety_seed_changes_the_assembled_hands(tmp_path: Path) -> None:
     meta2 = json.loads(out2.with_suffix(".meta.json").read_text(encoding="utf-8"))
     hands = [q["hero_combo"] for q in meta["questions"]]
     assert [q["hero_combo"] for q in meta2["questions"]] == hands
+
+
+# --- whole-hand atomicity + QA wave (July 2026) --------------------------------
+def test_failed_leg_drops_the_whole_hand(tmp_path, monkeypatch) -> None:
+    """A play-through with a missing street is a broken story: any leg
+    failure discards the WHOLE hand, numbering stays contiguous, and the
+    drop is counted."""
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    real = fhb._postflop_leg_row
+    failed_hands: set = set()
+
+    def flaky(spot, solve_, **kwargs):
+        row, record, failure, counters = real(spot, solve_, **kwargs)
+        # Fail exactly one hand: the first hand's first postflop leg.
+        if not failed_hands or kwargs["hand_id"] in failed_hands:
+            failed_hands.add(kwargs["hand_id"])
+            return None, None, {
+                "node_id": spot.node.node_id, "hero_combo": spot.hero_combo,
+                "hand_id": kwargs["hand_id"], "error_message": "boom",
+            }, counters
+        return row, record, failure, counters
+
+    monkeypatch.setattr(fhb, "_postflop_leg_row", flaky)
+    out = tmp_path / "out.csv"
+    result = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=2, dry_run=True,
+        equity_runouts=20,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert meta["counters"]["hands_dropped_failed_leg"] == 1
+    assert len(result.failures) >= 1
+    # No row from the failed hand survives, and numbering is contiguous.
+    written_hands = {q["hand_id"] for q in meta["questions"]}
+    assert failed_hands.isdisjoint(written_hands)
+    import csv as _csv
+
+    rows = list(_csv.DictReader(open(out, encoding="utf-8-sig")))
+    assert [int(r["No"]) for r in rows] == list(range(1, len(rows) + 1))
+
+
+def test_cross_check_runs_and_counts(tmp_path) -> None:
+    """The deterministic cross-check re-reads every written row; a clean
+    dry-run batch reports zero problems, and a doctored row is caught."""
+    from pipeline.postflop.preflop_leg_pack import run_full_hand_cross_check
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    out = tmp_path / "out.csv"
+    generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=2, dry_run=True,
+        equity_runouts=20,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert meta["counters"]["cross_check_problems"] == 0
+    # Doctored: BTN vs BB flagged as Out of Position must be caught.
+    bad_row = {
+        "Position Matchup": "BTN_vs_BB", "Relative Position": "Out of Position",
+        "Difficulty Rating": "1000",
+    }
+    found = run_full_hand_cross_check([bad_row], [{}])
+    assert found and any("Relative Position" in i for i in found[0])
+
+
+def test_pack_leg_layer7_flag_and_revise(tmp_path, monkeypatch) -> None:
+    """The pack preflop legs run the PREFLOP checker/reviser: flag-only
+    records issues; revise ships the rewrite and records the lifecycle."""
+    from types import SimpleNamespace
+
+    import pipeline.preflop.batch as preflop_batch
+    import pipeline.preflop.reviser as preflop_reviser
+    from pipeline.postflop.preflop_leg_pack import build_pack_preflop_leg_row
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    pack = _matching_pack(tmp_path)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+
+    fake_issue = SimpleNamespace(claim="the pot is 9bb", problem="it is 5.5bb")
+    monkeypatch.setattr(
+        preflop_batch, "_safe_claim_check",
+        lambda *a, **k: SimpleNamespace(issues=[fake_issue]),
+    )
+
+    def fake_generate(facts, options, correct, **kwargs):
+        from pipeline.explanation_generator import GeneratedExplanation
+
+        return GeneratedExplanation(
+            option_1=options[0], option_2=options[1],
+            option_3=options[2] if len(options) > 2 else "",
+            option_4=options[3] if len(options) > 3 else "",
+            correct_answer=correct, answer_explanation="Original prose.",
+        )
+
+    import pipeline.preflop.explanation_generator as preflop_gen
+
+    monkeypatch.setattr(
+        preflop_gen, "generate_preflop_answer_explanation", fake_generate,
+    )
+
+    common = dict(
+        number=1, hand_id="h1", sequence_index=1, sequence_total=3,
+        use_placeholder=False, client=object(), model="test-model",
+        temperature=0.0, max_tokens=64, answer_style="gto",
+        display_in_bb=True, equity_runouts=20,
+    )
+    # Flag only: issues recorded, row flagged, prose untouched.
+    row, record, failure = build_pack_preflop_leg_row(
+        src, "BB", "7h6h", solve, run_claim_checker=True, **common,
+    )
+    assert failure is None and row is not None
+    assert record["claim_check_issues"] == ["the pot is 9bb -- it is 5.5bb"]
+    assert row["validation_status"] == "flagged"
+
+    # Revise: the rewrite ships and the lifecycle is recorded.
+    def fake_revise(explanation, facts, *, issues, **kwargs):
+        from dataclasses import replace as _r
+
+        return SimpleNamespace(
+            changed=True,
+            explanation=_r(explanation, answer_explanation="Fixed prose."),
+            rejected_reason="",
+        )
+
+    monkeypatch.setattr(preflop_reviser, "revise_explanation", fake_revise)
+    row2, record2, _ = build_pack_preflop_leg_row(
+        src, "BB", "7h6h", solve, revise_pass=True, **common,
+    )
+    assert record2["revise"]["status"] == "fixed"
+    assert "Fixed prose." in row2["Answer Explanation"]
+
+
+def test_balanced_hand_mix_round_robins_buckets() -> None:
+    """The mix visits (hero, depth, strength) buckets round-robin,
+    deterministically, and honours the limit."""
+    from types import SimpleNamespace
+
+    from pipeline.postflop.play_through import balanced_hand_mix
+
+    def hand(hero, street, combo):
+        node = SimpleNamespace(board=("Ks", "7d", "2c"), actor=hero)
+        spot = SimpleNamespace(
+            node=node, hero_combo=combo,
+            hero_cards=[combo[:2], combo[2:]],  # the real spot's property
+        )
+        leg = SimpleNamespace(street=street, spot=spot)
+        return SimpleNamespace(hero=hero, legs=[leg], hero_combo=combo)
+
+    # 4 BTN-river hands then 2 BB-flop hands: an unmixed take-3 would be
+    # all BTN river; the mix must include a BB hand.
+    hands = [hand("BTN", "river", c) for c in ("AdAc", "QdQc", "JdJc", "TdTc")]
+    hands += [hand("BB", "flop", c) for c in ("7h6h", "8h7h")]
+    mixed = balanced_hand_mix(hands, 3)
+    assert len(mixed) == 3
+    assert any(h.hero == "BB" for h in mixed)
+    assert balanced_hand_mix(hands, 3) == mixed  # deterministic
+    assert balanced_hand_mix(hands, 99) == hands[:99] or len(
+        balanced_hand_mix(hands, 99)
+    ) == len(hands)

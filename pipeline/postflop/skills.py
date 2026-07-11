@@ -95,9 +95,17 @@ def _reverse_implied_odds(f: PostflopFacts) -> bool:
 
     Excluded when the spot is a clean drawing call (``call_drawing`` = Implied
     Odds, the opposite concept), so the two stay disjoint -- mirroring the
-    preflop tagger's fold-gating of its RIO skill."""
+    preflop tagger's fold-gating of its RIO skill. Also excluded when the
+    wager hero faces is an ALL-IN: with no further betting possible there
+    are no implied odds in either direction (the July-2026 preflop rule,
+    ported after the full-hand cross-check flagged a weak flush facing a
+    river jam tagged RIO). The batch cross-check enforces the same rule,
+    so tagger and verifier must stay in lockstep."""
     if f.archetype == "call_drawing":
         return False
+    history = f.spot.node.history
+    if history and history[-1].all_in:
+        return False  # facing an all-in: no future betting either way
     if "flush_draw_weak" in f.draws:
         return True
     return (

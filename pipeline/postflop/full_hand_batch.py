@@ -17,9 +17,13 @@ strategic fact is deterministic and the explanation is the placeholder.
 Deterministic ordering + a content-hash ``hand_id`` keep the CSV byte-identical.
 
 The opt-in Layer-7 audit/revise runs on the full-hand POSTFLOP legs via the
-shared :func:`pipeline.postflop.layer7.run_layer7_audit` (so a leg gets the same
-QA as a standalone spot); the preflop-entry leg is skipped (the checker prompt is
-postflop-specific). Re-verify a finished batch with
+shared :func:`pipeline.postflop.layer7.run_layer7_audit` AND on the PACK-built
+preflop legs via the PREFLOP pipeline's checker/reviser (July 2026) -- so every
+leg of a hand gets audit-depth QA. Only the SRP entry-derived fallback leg is
+skipped (its binary framing carries no SOLVER DATA block for a checker to
+audit). A deterministic cross-check (:mod:`pipeline.preflop.batch_cross_check`,
+reached through the sanctioned pack-leg seam) re-reads every written row at the
+end of the batch. Re-verify a finished batch with
 ``scripts/audit_full_hand_batch.py``.
 """
 
@@ -61,12 +65,13 @@ from pipeline.postflop.format_writer import (
 )
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
-from pipeline.postflop.play_through import assemble_hands
+from pipeline.postflop.play_through import assemble_hands, balanced_hand_mix
 from pipeline.postflop.preflop_leg_pack import (
     _build_pack_facts,
     _facts_difficulty,
     build_pack_preflop_leg_row,
     find_pack_leg_source,
+    run_full_hand_cross_check,
 )
 from pipeline.postflop.preflop_entry import (
     build_preflop_entry_options,
@@ -128,6 +133,22 @@ def _require_single_raised_pot(solve: PostflopSolve, mode_label: str) -> None:
 
 def _zero_counters() -> dict[str, int]:
     return dict.fromkeys(_LEG_COUNTER_KEYS, 0)
+
+
+def _pack_leg_counter_delta(record: dict[str, Any]) -> dict[str, int]:
+    # The pack-leg builder reports its Layer-7 lifecycle inside the meta
+    # record (mirroring the preflop batch); this maps it onto the postflop
+    # batch counter keys so claim_flagged_rows / revise_* count every leg.
+    d = _zero_counters()
+    if record.get("validator_warnings"):
+        d["soft_flagged"] = 1
+    if record.get("claim_check_issues"):
+        d["claim_flagged"] = 1
+    status = (record.get("revise") or {}).get("status")
+    if status in ("fixed", "discarded", "unchanged"):
+        d["revise_flagged"] = 1
+        d[f"revise_{status}"] = 1
+    return d
 
 
 # --- per-leg row builders ---------------------------------------------------
@@ -343,6 +364,7 @@ def generate_full_hand_batch(
     min_hand_difficulty: int | None = None,
     max_hand_difficulty: int | None = None,
     variety_seed: int | None = None,
+    diversify_hands: bool = False,
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
@@ -389,12 +411,27 @@ def generate_full_hand_batch(
     # usually deleted it -- a silent empty batch. With a band set, assemble a
     # larger candidate pool and scan until enough in-band hands are found.
     band_set = min_hand_difficulty is not None or max_hand_difficulty is not None
-    scan_cap = max(60, total_hands * 20) if band_set else total_hands
+    if band_set:
+        scan_cap = max(60, total_hands * 20)
+    elif diversify_hands:
+        # Balanced mix needs an oversized pool to round-robin across
+        # (hero, depth, strength) buckets. Cheap: no facts are computed
+        # until AFTER the mix trims back to total_hands.
+        # 20x (like the band scan) on purpose: the deepest-first ordering
+        # front-loads one actor's longest lines, so a shallow pool can
+        # miss the other seat's hands entirely.
+        scan_cap = max(60, total_hands * 20)
+    else:
+        scan_cap = total_hands
     hands = assemble_hands(
         solve, seeds=worthy, heroes=tuple(heroes) or (), max_hands=scan_cap,
         include_preflop=include_preflop, include_villain=include_villain,
         variety_seed=variety_seed,
     )
+    if diversify_hands and not band_set:
+        # With a difficulty band the scan-order heuristic governs instead
+        # (the band itself is the selector); mixing there would fight it.
+        hands = balanced_hand_mix(hands, total_hands)
 
     # --- pack-backed preflop legs (July 2026) -----------------------------
     # When a preflop range pack provably matches this solve's preflop line
@@ -564,15 +601,25 @@ def generate_full_hand_batch(
 
     total_legs = sum(h.total for h in hands)
     done = 0
+    hands_dropped_failed_leg = 0
     for hand in hands:
-        leg_records: list[int] = []
+        # WHOLE-HAND ATOMICITY (July 2026): a play-through with a missing
+        # street is a broken story (the app would show a hand starting at
+        # question 2 of 4), so legs are buffered per hand and committed only
+        # when EVERY leg generated. Any leg failure discards the whole
+        # hand's buffered rows (the failure record is kept for the meta);
+        # because commits are atomic, the shipped question numbers stay
+        # contiguous with no renumbering.
+        hand_rows: list[dict[str, str]] = []
+        hand_recs: list[dict[str, Any]] = []
+        hand_failed = False
         for i, leg in enumerate(hand.legs, start=1):
             done += 1
             if progress_callback is not None:
                 progress_callback(
                     f"Hand {hand.hand_id[:22]} leg {i}/{hand.total}", done, total_legs,
                 )
-            number = len(rows) + 1
+            number = len(rows) + len(hand_rows) + 1
             if leg.kind == "preflop_line":
                 # Multi-raise line leg: always pack-built (the up-front
                 # filter guarantees the prebuilt facts exist for it).
@@ -592,9 +639,13 @@ def generate_full_hand_batch(
                     usage_cb=_usage,
                     prebuilt=line_facts_cache[(leg.step_index, hand.hero_combo)],
                     step_index=leg.step_index,
+                    run_claim_checker=run_claim_checker,
+                    revise_pass=revise_pass,
+                    final_audit=final_audit and revise_pass,
                 )
                 if row is not None:
                     agg["preflop_leg_pack_used"] += 1
+                    counters = _pack_leg_counter_delta(record)
             elif leg.kind == "preflop_entry":
                 row = record = failure = None
                 counters = _zero_counters()
@@ -619,9 +670,14 @@ def generate_full_hand_batch(
                         razor_difficulty=razor_difficulty,
                         system_prompt=preflop_pack_system_prompt,
                         usage_cb=_usage, prebuilt=prebuilt,
+                        run_claim_checker=run_claim_checker,
+                        revise_pass=revise_pass,
+                        final_audit=final_audit and revise_pass,
                     )
                 if row is not None or failure is not None:
                     agg["preflop_leg_pack_used"] += 1 if row is not None else 0
+                    if row is not None:
+                        counters = _pack_leg_counter_delta(record)
                 else:
                     agg["preflop_leg_entry_fallback"] += 1
                     row, record, failure, counters = _preflop_leg_row_entry(
@@ -654,20 +710,38 @@ def generate_full_hand_batch(
                 agg[k] += counters[k]
             if failure is not None:
                 failures.append(failure)
-                continue
-            rows.append(row)  # type: ignore[arg-type]
-            records.append(record)  # type: ignore[arg-type]
-            leg_records.append(number)
-        if leg_records:
+                hand_failed = True
+                break  # whole-hand drop: see the atomicity note above
+            hand_rows.append(row)  # type: ignore[arg-type]
+            hand_recs.append(record)  # type: ignore[arg-type]
+        if hand_failed:
+            hands_dropped_failed_leg += 1
+            continue
+        if hand_rows:
             hd = hand_difficulties.get(hand.hand_id, 0)
-            for n in leg_records:
-                rows[n - 1]["hand_difficulty"] = str(hd)
+            start = len(rows)
+            for r in hand_rows:
+                r["hand_difficulty"] = str(hd)
+            rows.extend(hand_rows)
+            records.extend(hand_recs)
+            leg_numbers = list(range(start + 1, start + len(hand_rows) + 1))
             hand_index.append({
                 "hand_id": hand.hand_id, "hero": hand.hero,
                 "hero_combo": hand.hero_combo, "frame": hand.frame,
-                "row_numbers": leg_records, "legs": hand.total,
+                "row_numbers": leg_numbers, "legs": hand.total,
                 "hand_difficulty": hd,
             })
+
+    # Deterministic cross-check (July 2026, ported from preflop): re-read
+    # every row AS WRITTEN and verify first-principles facts (positions,
+    # skills, domination direction, frequency sums, difficulty bands).
+    # Zero LLM, zero false positives in calibration; findings land on the
+    # question records so Review shows them as machine-verified errors.
+    cross_check_map = run_full_hand_cross_check(rows, records) if rows else {}
+    cross_check_problems = 0
+    for idx, cc_issues in cross_check_map.items():
+        records[idx]["cross_check_issues"] = cc_issues
+        cross_check_problems += len(cc_issues)
 
     output_path = Path(output_path)
     # Full-hand batches emit the TRIMMED schema (no pot_odds..easy_hand
@@ -701,6 +775,7 @@ def generate_full_hand_batch(
                 # Recorded so any batch is reproducible: same solve + same
                 # settings + this seed = the same hands.
                 "variety_seed": variety_seed,
+                "diversify_hands": diversify_hands,
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
                 "final_audit": final_audit and revise_pass,
@@ -720,6 +795,8 @@ def generate_full_hand_batch(
                 "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
                 "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
                 "preflop_line_legs_dropped": preflop_line_legs_dropped,
+                "hands_dropped_failed_leg": hands_dropped_failed_leg,
+                "cross_check_problems": cross_check_problems,
                 "hands_written": len(hand_index),
                 "questions_written": len(rows),
                 # Layer-7 + soft-validator tallies (postflop legs only; 0 unless

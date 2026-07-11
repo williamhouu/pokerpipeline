@@ -142,6 +142,44 @@ def _variety_order(ordered_seeds: list, variety_seed: int | None) -> list:
     return out
 
 
+def balanced_hand_mix(hands: list, limit: int) -> list:
+    """Round-robin ``hands`` across (hero seat, final street, hero-hand
+    strength bucket) and keep the first ``limit``.
+
+    The variety seed shuffles uniformly, so a SMALL batch can still come out
+    clustered (three BTN river hands, all air). Bucketing by who plays the
+    hand, how deep it runs, and how strong the hero's hand class is spreads
+    a batch across genuinely different stories. Deterministic: buckets are
+    visited in first-appearance order of the (already seeded-shuffled)
+    input, and within a bucket the input order is preserved -- same input =
+    same mix. Cheap by design (hand-class lookup only, no equity sims), so
+    it can run over a several-times-oversized candidate pool BEFORE any
+    facts are computed."""
+    from pipeline.postflop.spot_selection import (  # noqa: PLC0415 - cycle guard
+        spot_strength_bucket,
+    )
+
+    if limit <= 0 or len(hands) <= limit:
+        return list(hands[:limit] if limit > 0 else [])
+    buckets: dict[tuple, list] = {}
+    for hand in hands:
+        deepest = hand.legs[-1]  # legs end with the deepest postflop decision
+        strength = (
+            spot_strength_bucket(deepest.spot) if deepest.spot is not None else ""
+        )
+        key = (hand.hero, deepest.street, strength)
+        buckets.setdefault(key, []).append(hand)
+    out: list = []
+    queues = list(buckets.values())
+    while len(out) < limit and queues:
+        queues = [q for q in queues if q]
+        for q in queues:
+            if len(out) >= limit:
+                break
+            out.append(q.pop(0))
+    return out
+
+
 def _solve_tag(solve: PostflopSolve) -> str:
     """A short, filesystem-safe tag for the hand_id prefix (cosmetic; the hash
     carries uniqueness)."""

@@ -1497,10 +1497,16 @@ def test_reverse_implied_odds_classifier() -> None:
 
     from pipeline.postflop.skills import _reverse_implied_odds
 
-    def f(made: str, draws=(), archetype: str = "bluff_catch", tags=("facing_bet_spot",)):
+    def f(made: str, draws=(), archetype: str = "bluff_catch", tags=("facing_bet_spot",),
+          facing_all_in: bool = False):
+        history = (
+            [SimpleNamespace(all_in=True)] if facing_all_in
+            else [SimpleNamespace(all_in=False)]
+        )
         return SimpleNamespace(
             made_hand=made, draws=tuple(draws), archetype=archetype,
             concept_tags=list(tags),
+            spot=SimpleNamespace(node=SimpleNamespace(history=history)),
         )
 
     # A dominated made hand FACING A BET (pays off the better hand) -> RIO.
@@ -1518,6 +1524,13 @@ def test_reverse_implied_odds_classifier() -> None:
     # Disjoint from Implied Odds: a clean drawing call never fires RIO.
     assert not _reverse_implied_odds(
         f("ace_high", ["flush_draw_weak"], archetype="call_drawing")
+    )
+    # Facing an ALL-IN: no future betting, no implied odds either way (the
+    # preflop rule, ported July 2026 after the full-hand cross-check caught
+    # a weak flush facing a river jam tagged RIO). Both branches gated.
+    assert not _reverse_implied_odds(f("flush_weak", facing_all_in=True))
+    assert not _reverse_implied_odds(
+        f("ace_high", ["flush_draw_weak"], tags=(), facing_all_in=True)
     )
 
 

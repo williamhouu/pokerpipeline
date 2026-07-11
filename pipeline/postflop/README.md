@@ -109,6 +109,23 @@ renders it in the "Betting options at each street" expander, computing
 inline on a first-ever selection. These are properties of the tree the
 vendor solved, surfaced so you know what a batch can and cannot ask.
 
+**`animation_script` column (July 2026).** Every postflop / full-hand row
+carries a JSON event timeline (blinds, per-seat folds, raises/calls, street
+deals; pot + stacks after every event; ends at the question's `decision`)
+built by `animation_script.py` from the same resolved amounts as the prose,
+so the app animates hands without parsing text. Appended last in both
+schemas; audited byte-exact by the re-verifiers.
+
+**Full-hand QA wave (July 2026).** Whole-hand atomicity (a failed leg
+drops the WHOLE hand; `counters.hands_dropped_failed_leg`); Layer-7
+audit/revise on the PACK preflop legs via the preflop checker/reviser;
+the deterministic cross-check over every full-hand batch
+(`preflop_leg_pack.run_full_hand_cross_check`; findings on the question
+records + the postflop Review card); balanced hand mix
+(`diversify_hands` / `--diversify-hands`: round-robin an oversized pool
+across hero seat, line depth, and hand strength). The postflop RIO skill
+excludes facing-an-all-in spots (the cross-check's first live catch).
+
 **3-bet-pot solves (July 2026).** The adapter parses the `preflop_line`
 metadata ("BTN open 3bb, BB 3bet 17bb, BTN call") into the preflop summary,
 so a 3-bet-pot `.db` renders the true line everywhere downstream (prose,

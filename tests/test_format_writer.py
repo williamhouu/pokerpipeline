@@ -76,15 +76,20 @@ def test_column_structure():
              (June 2026.)
       * 50 = +neutral_credit (the "close enough" answers that earn partial
              credit, inserted right after Correct Answer). (June 2026.)
-      * 51 = +chat_context (per-question AI-chatbot context blob, last column).
+      * 51 = +chat_context (per-question AI-chatbot context blob).
              (June 2026.)
+      * 52 = +animation_script (July 2026: the app's animation timeline,
+             last column -- ordered events the app plays to animate the
+             hand up to the question's decision).
     """
-    assert len(CSV_COLUMNS) == 51
+    assert len(CSV_COLUMNS) == 52
     assert CSV_COLUMNS[CSV_COLUMNS.index("Correct Answer") + 1] == "neutral_credit"
-    assert CSV_COLUMNS[-1] == "chat_context"
-    assert CSV_COLUMNS[-2] == "action_ev_bb"
-    assert CSV_COLUMNS[-3] == "exploit_notes"
-    assert CSV_COLUMNS[-4] == "claim_check"
+    # animation_script closes the schema (July 2026); chat_context before it.
+    assert CSV_COLUMNS[-1] == "animation_script"
+    assert CSV_COLUMNS[-2] == "chat_context"
+    assert CSV_COLUMNS[-3] == "action_ev_bb"
+    assert CSV_COLUMNS[-4] == "exploit_notes"
+    assert CSV_COLUMNS[-5] == "claim_check"
     assert "hand_class" not in CSV_COLUMNS
     assert "difficulty_bumps" not in CSV_COLUMNS
     assert CSV_COLUMNS[0] == "No"
@@ -109,18 +114,19 @@ def test_column_structure():
         "archetype", "board_texture", "solver_reference", "validation_status"]
     # The four difficulty diagnostic axes, followed by the six decision-math
     # columns that now close out the row (June 2026).
-    assert CSV_COLUMNS[-14:-10] == [
+    assert CSV_COLUMNS[-15:-11] == [
         "easy_freq", "easy_ev", "easy_concept", "easy_hand"]
-    assert CSV_COLUMNS[-10:-4] == [
+    assert CSV_COLUMNS[-11:-5] == [
         "pot_odds", "hero_equity", "range_equity", "blocker_combos",
         "top_villain_combos", "stat_notes"]
-    assert CSV_COLUMNS[-4:] == [
-        "claim_check", "exploit_notes", "action_ev_bb", "chat_context"]
+    assert CSV_COLUMNS[-5:] == [
+        "claim_check", "exploit_notes", "action_ev_bb", "chat_context",
+        "animation_script"]
     # Header casing fixes (unchanged from the 35-column era).
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 51
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 52
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""

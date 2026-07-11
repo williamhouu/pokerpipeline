@@ -159,6 +159,12 @@ def main(argv: list[str] | None = None) -> int:
              "flag only)",
     )
     parser.add_argument(
+        "--diversify-hands", action="store_true",
+        help="full-hands mode: round-robin the batch across hero seat, line "
+             "depth, and hand strength (assembles an oversized pool first); "
+             "ignored with a difficulty band",
+    )
+    parser.add_argument(
         "--variety-seed", type=int, default=None, metavar="N",
         help="full-hands mode: shuffle which hands are picked (same seed = same "
              "hands; omit for the legacy fixed order, which serves the SAME "
@@ -230,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
                     Path(__file__).resolve().parent.parent / "ranges"
                 ),
                 variety_seed=args.variety_seed,
+                diversify_hands=args.diversify_hands,
                 min_ev_gap_bb=args.min_ev_gap,
                 quality_gate=not args.no_quality_gate,
                 min_premise_freq=(args.min_premise_freq if args.min_premise_freq > 0 else None),

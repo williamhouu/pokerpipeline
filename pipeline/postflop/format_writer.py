@@ -23,6 +23,7 @@ from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line, format_question
+from pipeline.postflop.animation_script import build_postflop_animation_script
 from pipeline.postflop.app_table_format import build_postflop_app_table_columns
 from pipeline.postflop.difficulty import PostflopDifficulty
 from pipeline.postflop.exploit import (
@@ -380,6 +381,8 @@ def build_postflop_row(
             facts, explanation, solve, difficulty,
             display_in_bb=display_in_bb, neutral=neutral_list,
         ),
+        # The app's animation timeline; see the schema note above.
+        "animation_script": build_postflop_animation_script(node, solve),
         # "" = the Layer-7 claim checker did not run for this row. The batch
         # overwrites this with the checker's JSON when the opt-in pass runs.
         "claim_check": "",

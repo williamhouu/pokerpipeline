@@ -58,6 +58,8 @@ EXACT_COLS = (
     "board_texture", "pot_odds", "spr", "neutral_credit", "Notes", "ranges",
     # Shared-schema classification columns (deterministic; no MC equity).
     "Preflop Pot Type", "Pot Participant", "Stack Depth",
+    # The app's animation timeline (July 2026) -- fully deterministic.
+    "animation_script",
 )
 # Concept tags driven by the MC equity / sampled range-equity estimates --
 # diffed with tolerance, not exactness. Everything else in concept_tags is exact.

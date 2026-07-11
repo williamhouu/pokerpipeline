@@ -1081,7 +1081,21 @@ def _render_generate_page_postflop() -> None:
             "preflop line."
         )
     pf_include_villain = False
+    pf_diversify_hands = False
     if pf_mode == "full_hand":
+        pf_diversify_hands = st.checkbox(
+            "🎨 Balanced hand mix",
+            value=True,
+            key="postflop_diversify_hands",
+            help=(
+                "Round-robins the batch across hero seat, line depth, and "
+                "hand strength so a small batch isn't clustered (e.g. three "
+                "Button river hands, all air). Assembles an oversized "
+                "candidate pool first, so it composes with the per-batch "
+                "shuffle. Ignored when a difficulty band is set (the band "
+                "is the selector there)."
+            ),
+        )
         pf_include_villain = st.checkbox(
             "Also ask the villain's decisions (flip the frame)",
             value=False,
@@ -1792,6 +1806,7 @@ def _render_generate_page_postflop() -> None:
                     # seed shuffles the selection; it lands in the batch's
                     # meta run_settings, so any batch stays reproducible.
                     variety_seed=random.randrange(2**31),
+                    diversify_hands=pf_diversify_hands,
                     run_claim_checker=pf_run_claim_checker,
                     claim_checker_prompt=pf_claim_checker_prompt,
                     revise_pass=pf_revise_pass,
@@ -7436,6 +7451,17 @@ def _render_postflop_question_card(
             row_strs = {c: _cell(row, c) for c in df.columns}
             _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
             _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
+            # Deterministic post-batch cross-check findings (July 2026,
+            # ported to full-hand batches): first-principles fact checks
+            # (position from seats, skills hygiene, frequency sums, bands).
+            # Always visible: machine-verified problems, not AI opinions.
+            _cc = [str(w) for w in (_qrec.get("cross_check_issues") or [])] if _qrec else []
+            if _cc:
+                st.error(
+                    "🔬 **Deterministic cross-check found problems** "
+                    "(machine-verified, not an AI opinion):\n\n"
+                    + "\n".join(f"- {w}" for w in _cc)
+                )
             # The preflop leg of a play-through is written by a different (preflop)
             # prompt than the postflop legs -- say so where the reviewer is looking.
             _is_preflop_leg = _cell(row, "Hand Stage").lower() == "preflop"

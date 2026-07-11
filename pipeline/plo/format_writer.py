@@ -31,6 +31,7 @@ from pipeline.plo.action_history import (
     display_seat,
     format_plo_action_history,
     format_plo_context,
+    resolve_pot_limit,
 )
 from pipeline.plo.app_table_format import build_plo_app_table_columns
 from pipeline.plo.difficulty import PloDifficultyResult
@@ -111,6 +112,45 @@ def _position_matchup(facts: PloFacts) -> str:
 
 def _solver_reference(facts: PloFacts, pack_label: str) -> str:
     return f"{pack_label}/{facts.spot.node.actor}/{facts.spot.node.node_id}"
+
+
+def _plo_animation_script(
+    facts: PloFacts, *, stack_bb: float, stakes_bb_dollars: float,
+    game_format: str,
+) -> str:
+    """The app's animation timeline for a PLO preflop question.
+
+    The node's ``history_before`` lists every prior action including folds;
+    sizes come from the same pot-limit resolution the Question prose uses
+    (:func:`resolve_pot_limit`), so the two can never disagree. Seats are
+    mapped to the player-facing names (LJ -> UTG, BU -> BTN) to match the
+    Seats column."""
+    from pipeline.animation import AnimationTable, walk_explicit_preflop  # noqa: PLC0415
+
+    node = facts.spot.node
+    resolved, _pot = resolve_pot_limit(node.history_before, stack_bb=stack_bb)
+    actions: list[tuple[str, str, float | None, bool]] = []
+    for ra in resolved:
+        seat = display_seat(ra.seat)
+        if ra.verb == "fold":
+            actions.append((seat, "fold", None, False))
+        elif ra.verb == "call":
+            actions.append((seat, "call", None, False))
+        elif ra.verb == "all-in":
+            actions.append((seat, "raise", ra.to_bb, True))
+        else:  # open / 3-bet / 4-bet / 5-bet / raise, with a raise-to size
+            actions.append((seat, "raise", ra.to_bb, False))
+    table = AnimationTable(
+        table_size=6,  # the registered PLO packs are 6-max
+        starting_stack_bb=float(stack_bb),
+        bb_in_dollars=(
+            float(stakes_bb_dollars) if game_format != "tournament" else None
+        ),
+    )
+    walk_explicit_preflop(
+        table, actions, decision_seat=display_seat(node.actor),
+    )
+    return table.render(display_seat(node.actor))
 
 
 def _plo_chat_context(
@@ -270,6 +310,10 @@ def build_plo_row(
         "action_ev_bb": "",  # per-action EV column not wired for PLO yet
         # Per-question chatbot context (all deterministic facts as one JSON blob),
         # reusing PLO's rich generation block for the PLO-specific facts.
+        "animation_script": _plo_animation_script(
+            facts, stack_bb=stack_bb, stakes_bb_dollars=stakes_bb_dollars,
+            game_format=game_format,
+        ),
         "chat_context": _plo_chat_context(
             facts,
             options=options,

@@ -667,6 +667,24 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   now spectrums the dominant verb vs the SECOND-BEST verb BY EV
   (`options._best_ev_alternative_verb`, the same standing rule as
   preflop; plain-labels fallback when the solve ships no EVs).
+- **Full-hand QA wave (July 10 2026).** (1) WHOLE-HAND ATOMICITY: legs
+  buffer per hand and commit only when every leg generates; any leg
+  failure drops the whole hand (`counters.hands_dropped_failed_leg`) so
+  the app never sees a play-through missing a street, and numbering
+  stays contiguous. (2) Layer-7 now covers the PACK preflop legs via the
+  PREFLOP checker/reviser (same flags; lifecycle in the question record;
+  entry-fallback legs still skipped -- no SOLVER DATA block to audit).
+  (3) The deterministic cross-check runs on every full-hand batch
+  (`run_full_hand_cross_check` in the preflop_leg_pack seam; postflop
+  records' string solver_data normalized; findings -> per-record
+  `cross_check_issues` + `counters.cross_check_problems` + an
+  always-visible badge on the postflop Review card). Its first live
+  catch: postflop RIO tagged on a facing-all-in spot -> the skill now
+  excludes all-ins like preflop. (4) Balanced hand mix
+  (`diversify_hands`, admin default ON, CLI `--diversify-hands`):
+  round-robins a 20x candidate pool across (hero, depth, strength)
+  buckets before any facts are computed; skipped when a difficulty band
+  is set. Admin Layer-7 default is Audit & auto-fix (was already).
 - **Full-hand prompt picker + trimmed CSV + pack provenance (July 2026).**
   (1) The full-hand Generate mode has TWO per-batch prompt pickers (postflop
   library entry for the flop/turn/river legs; preflop library entry for the
@@ -775,6 +793,33 @@ skills, difficulty), and a **`guardrails`** line baked in ("answer only from
 this data; never invent numbers; for a hypothetical hand, say it's outside this
 spot's data"). The app's chatbot system prompt should ALSO enforce that rule.
 Last column in every writer.
+
+**`animation_script` (July 2026) -- the app's animation column (ALL FOUR
+writers: postflop, full-hand, standalone preflop, PLO).** One self-contained JSON timeline per row: ordered events
+(blind posts, ONE event PER fold -- order matters, the SB folds AFTER the
+open -- raises/calls with amounts, explicit `deal` events per street),
+each chip event carrying the pot and the actor's stack AFTER it, ending at
+a `decision` event where the question pauses. Amounts are exact bb numerics
++ dollar twins on cash; header carries table_size/seats/hero_seat/blinds/
+starting stack; `version` field for evolvability. Built by
+`pipeline/postflop/animation_script.py` (pure; preflop folds/blinds
+SYNTHESIZED from the seat order, since the prose deliberately skips them)
+from the SAME resolved amounts as the prose/seat tokens, so animation and
+question text can never disagree -- the structured replacement for
+regex-parsing prose (the old gto-formatter failure mode). No showdown by
+design: the play-through ends at the last decision and the villain holds a
+RANGE, not a hand (a sampled showdown would inject outcome bias). Emitted
+by the postflop writer, the preflop-entry rows, and the pack preflop legs
+(step-aware: the 3-bet-pot opener's second leg animates through the
+3-bet); appended LAST in `POSTFLOP_CSV_COLUMNS` + `FULL_HAND_CSV_COLUMNS`;
+audited byte-exact by the postflop re-verifiers AND the preflop batch
+re-verifier. The chip-walk lives in the shared leaf `pipeline/animation.py`
+(like chat_context's builder); the preflop + PLO writers map their pack
+histories (folds EXPLICIT, sizes from the same resolution as the prose --
+`resolve_preflop_history` / PLO `resolve_pot_limit`, Monker seats mapped to
+display names) onto it. Shared `CSV_COLUMNS` is now 52 columns
+(animation_script last, after chat_context); PREFLOP/PLO schemas inherit
+it automatically.
 
 **`neutral_credit` (June 2026).** A deterministic partial-credit column
 inserted **right after `Correct Answer`** in all four writers (shared

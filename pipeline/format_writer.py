@@ -156,6 +156,11 @@ CSV_COLUMNS = [
     # guardrails line. One schema across preflop / postflop / PLO. See
     # pipeline/chat_context.py.
     "chat_context",
+    # The app's animation timeline (July 2026): ordered events (blind posts,
+    # per-seat folds, raises/calls, street deals) up to the question's
+    # decision, pot + stacks after every event. Shared builder:
+    # pipeline/animation.py; each writer adapts its own history shape.
+    "animation_script",
 ]
 
 # Preflop pot type -- prose form for the CSV (matches the sample's wording).
@@ -397,6 +402,7 @@ def build_row(spot_data: SpotData, difficulty_score: int, number: int, *,
         "exploit_notes": "",  # postflop rows: exploit tags are preflop-only for now
         "action_ev_bb": "",  # postflop rows: per-action EVs await postflop solves
         "chat_context": "",  # legacy shared-writer postflop path: not populated here
+        "animation_script": "",  # ditto: populated by the live writers only
     }
 
 

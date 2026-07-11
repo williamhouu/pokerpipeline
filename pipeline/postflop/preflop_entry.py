@@ -45,6 +45,7 @@ from pipeline.explanation_generator import (
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line
 from pipeline.postflop.format_writer import _PREFLOP_POT_TYPE, _stack_depth_bucket
+from pipeline.postflop.animation_script import build_preflop_animation_script
 from pipeline.postflop.solve import PostflopSolve
 from pipeline.postflop.stat_notes import StatNote, stat_notes_to_json
 from pipeline.preflop_ranges import combo_str_to_hand_class
@@ -750,6 +751,11 @@ def build_preflop_entry_row(
         "validation_status": validation_status,
         "chat_context": chat,
         "claim_check": "",
+        # The app's animation timeline: blinds + folds up to hero's preflop
+        # decision (see pipeline/postflop/animation_script.py).
+        "animation_script": build_preflop_animation_script(
+            facts.solve, facts.hero_position,
+        ),
     }
 
 
