@@ -54,7 +54,7 @@ class AnimationTable:
         self.pot = 0.0
         self.events: list[dict[str, Any]] = []
 
-    def _money(self, event: dict, **bb_fields: float) -> None:
+    def money(self, event: dict, **bb_fields: float) -> None:
         for name, bb in bb_fields.items():
             event[name] = _r2(bb)
             if self.dollars is not None:
@@ -79,7 +79,7 @@ class AnimationTable:
         self.committed[seat] = to_bb
         self.stacks[seat] -= added
         event = self.emit(type_, seat=seat)
-        self._money(event, amount_bb=added, to_bb=to_bb,
+        self.money(event, amount_bb=added, to_bb=to_bb,
                     pot_bb=self.pot, stack_bb=self.stacks[seat])
         if all_in:
             event["all_in"] = True
@@ -90,7 +90,7 @@ class AnimationTable:
         self.committed[seat] += need
         self.stacks[seat] -= need
         event = self.emit("call", seat=seat)
-        self._money(event, amount_bb=need, pot_bb=self.pot,
+        self.money(event, amount_bb=need, pot_bb=self.pot,
                     stack_bb=self.stacks[seat])
         if all_in:
             event["all_in"] = True

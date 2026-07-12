@@ -127,6 +127,14 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
         print(f"  NOTE: meta.mode is {meta.get('mode')!r}, not 'full_hand'. "
               "Use scripts/audit_postflop_batch.py for an independent-spots batch.")
     questions = meta.get("questions", [])
+    # Each hand's final sequence_index (the leg carrying the showdown).
+    final_seq: dict[str, int] = {}
+    for q in questions:
+        hid = q.get("hand_id", "")
+        if hid:
+            final_seq[hid] = max(
+                final_seq.get(hid, 0), int(q.get("sequence_index") or 0)
+            )
     if len(rows) != len(questions):
         print(f"  STRUCTURE-FAIL: {len(rows)} CSV rows vs {len(questions)} meta records")
         return 1
@@ -232,6 +240,20 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
                       "(different streets / down-sampling / no include_ancestors?)")
                 exact_failures += 1
                 continue
+            # Showdown resolution (July 2026): the batch attaches it to each
+            # hand's FINAL leg; re-attach with the same seeded inputs so the
+            # animation_script column compares byte-exact.
+            hand_id = q.get("hand_id", "")
+            if hand_id and int(q.get("sequence_index") or 0) == final_seq.get(hand_id):
+                from pipeline.postflop.showdown import (  # noqa: PLC0415
+                    attach_showdown_resolution,
+                )
+
+                attach_showdown_resolution(
+                    rebuilt, node=solve.nodes[q["node_id"]], solve=solve,
+                    hero_combo=q["hero_combo"], correct_answer=correct,
+                    hand_id=hand_id,
+                )
 
         # 1. EXACT columns.
         for col in EXACT_COLS:

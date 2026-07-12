@@ -74,4 +74,52 @@ def line_premise_min_freq(node: PostflopNode, solve: PostflopSolve) -> float | N
     return min_freq
 
 
-__all__ = ["DEFAULT_MIN_PREMISE_FREQ", "line_premise_min_freq"]
+# --- artifact all-ins (July 2026, team standing rule) -----------------------
+# The deep-stack trees include "bet your whole stack" branches because the
+# TREE offers them, not because a 10x-pot jam is a realistic line. A question
+# built on such a line trains against play nobody sees. An all-in wager is an
+# ARTIFACT when it is both huge in absolute terms AND a large multiple of the
+# pot it goes into; realistic short-stack jams (a 20bb stack shoving into a
+# 15bb pot) pass both tests naturally, so no per-solve switch is needed here.
+ARTIFACT_ALLIN_MIN_BB = 40.0
+ARTIFACT_ALLIN_POT_MULT = 1.5
+
+
+def line_contains_artifact_allin(node: PostflopNode, solve: PostflopSolve) -> bool:
+    """True when any postflop action on this node's line is an artifact jam.
+
+    Walks the node's history with the pot (same math as the animation walk):
+    a step with ``all_in`` set is an artifact when its wager exceeds
+    :data:`ARTIFACT_ALLIN_MIN_BB` and :data:`ARTIFACT_ALLIN_POT_MULT` times
+    the pot it was fired into. Covers hero FACING the jam (it is the last
+    history step) and jams earlier in the line alike."""
+    pot = solve.starting_pot_bb
+    invested: dict[str, float] = {}
+    street = None
+    for step in node.history:
+        if step.street != street:
+            street = step.street
+            invested = {}
+        if step.verb in ("bet", "raise") and step.to_bb is not None:
+            wager = step.to_bb - invested.get(step.position, 0.0)
+            pot_before = pot
+            if step.all_in and wager > ARTIFACT_ALLIN_MIN_BB and (
+                pot_before > 0 and wager > ARTIFACT_ALLIN_POT_MULT * pot_before
+            ):
+                return True
+            pot += wager
+            invested[step.position] = step.to_bb
+        elif step.verb == "call":
+            need = max(invested.values(), default=0.0) - invested.get(step.position, 0.0)
+            pot += need
+            invested[step.position] = invested.get(step.position, 0.0) + need
+    return False
+
+
+__all__ = [
+    "ARTIFACT_ALLIN_MIN_BB",
+    "ARTIFACT_ALLIN_POT_MULT",
+    "DEFAULT_MIN_PREMISE_FREQ",
+    "line_contains_artifact_allin",
+    "line_premise_min_freq",
+]

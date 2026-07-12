@@ -83,6 +83,7 @@ from pipeline.postflop.preflop_entry import (
     standalone_entry_is_reliable,
 )
 from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ
+from pipeline.postflop.showdown import attach_showdown_resolution
 from pipeline.postflop.question_extractor import MAX_FREQUENCY, MIN_FREQUENCY
 from pipeline.postflop.solve import PostflopSolve, validate_solve
 from pipeline.postflop.validators import run_postflop_soft_validators
@@ -602,6 +603,7 @@ def generate_full_hand_batch(
     total_legs = sum(h.total for h in hands)
     done = 0
     hands_dropped_failed_leg = 0
+    showdown_resolutions = 0
     for hand in hands:
         # WHOLE-HAND ATOMICITY (July 2026): a play-through with a missing
         # street is a broken story (the app would show a hand starting at
@@ -718,6 +720,28 @@ def generate_full_hand_batch(
             hands_dropped_failed_leg += 1
             continue
         if hand_rows:
+            # Showdown resolution (July 2026): the hand's FINAL leg gets the
+            # closing sequence (hero's correct action, an invented villain
+            # call/fold where needed, reveals, pot push) appended to its
+            # animation timeline -- villain's revealed hand VINDICATES the
+            # correct answer (see pipeline/postflop/showdown.py). Attached
+            # only when the decision honestly ends the hand.
+            last_leg = hand.legs[-1]
+            if last_leg.kind == "postflop":
+                resolution = attach_showdown_resolution(
+                    hand_rows[-1],
+                    node=last_leg.spot.node, solve=solve,
+                    hero_combo=hand.hero_combo,
+                    correct_answer=hand_recs[-1].get("correct_answer", ""),
+                    hand_id=hand.hand_id,
+                )
+                if resolution is not None:
+                    showdown_resolutions += 1
+                    hand_recs[-1]["showdown"] = {
+                        "vindicates": resolution["vindicates"],
+                        "villain_cards": resolution["villain_cards"],
+                        "summary": resolution["summary"],
+                    }
             hd = hand_difficulties.get(hand.hand_id, 0)
             start = len(rows)
             for r in hand_rows:
@@ -796,6 +820,7 @@ def generate_full_hand_batch(
                 "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
                 "preflop_line_legs_dropped": preflop_line_legs_dropped,
                 "hands_dropped_failed_leg": hands_dropped_failed_leg,
+                "showdown_resolutions": showdown_resolutions,
                 "cross_check_problems": cross_check_problems,
                 "hands_written": len(hand_index),
                 "questions_written": len(rows),

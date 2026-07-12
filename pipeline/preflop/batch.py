@@ -105,7 +105,7 @@ from pipeline.preflop.node_enumerator import (
     enumerate_nodes,
 )
 from pipeline.preflop.options import build_options
-from pipeline.preflop.pack import PreflopPack
+from pipeline.preflop.pack import PreflopPack, pack_allins_realistic
 from pipeline.preflop.batch_cross_check import cross_check_batch
 from pipeline.preflop.sanity_checker import (
     check_solver_data_sanity,
@@ -1095,6 +1095,8 @@ def generate_preflop_batch(
     # BEFORE any equity sim / LLM spend.
     rare_line_filtered_out = 0
     rare_premise_filtered_out = 0
+    artifact_allin_filtered_out = 0
+    _allins_ok = pack_allins_realistic(pack)
     # Self-revision (auto-fix) outcome tallies. Only move when revise_pass is on:
     # how many SHIPPED rows the claim-check gate flagged, and how the auto-fix
     # resolved them. fixed + discarded + unchanged == flagged.
@@ -1160,6 +1162,20 @@ def generate_preflop_batch(
             if premise is not None and premise < min_hero_premise_freq:
                 rare_premise_filtered_out += 1
                 continue
+        # Artifact all-ins (July 2026, team standing rule): on deep-stack
+        # packs the all-in branches are TREE artifacts, not real lines --
+        # never build a question whose correct answer is such a jam or
+        # whose line already contains one. Realistic short-stack packs
+        # (<= 40bb) keep their jams (pack_allins_realistic).
+        if not _allins_ok and (
+            spot.dominant_action.startswith("All")
+            or any(
+                a.action_type is PreflopActionType.ALL_IN
+                for a in spot.node.history_before
+            )
+        ):
+            artifact_allin_filtered_out += 1
+            continue
         # --- difficulty fail-fast (cheap, pre-equity, pre-LLM) ------------
         # The 4-axis score is bounded above by a pure function of the spot's
         # dominant frequency alone. When that ceiling already misses the
@@ -1583,6 +1599,7 @@ def generate_preflop_batch(
                 "incoherent_mix_filtered_out": incoherent_mix_filtered_out,
                 "rare_line_filtered_out": rare_line_filtered_out,
                 "rare_premise_filtered_out": rare_premise_filtered_out,
+                "artifact_allin_filtered_out": artifact_allin_filtered_out,
                 "questions_attempted": attempted,
                 "questions_written": written,
                 "soft_flagged_rows": sum(1 for s in row_statuses if s),

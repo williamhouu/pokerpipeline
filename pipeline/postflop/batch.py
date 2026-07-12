@@ -43,7 +43,11 @@ from pipeline.postflop.format_writer import build_postflop_row, write_postflop_c
 from pipeline.postflop.range_export import _villain_decision_node
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
-from pipeline.postflop.premise import DEFAULT_MIN_PREMISE_FREQ, line_premise_min_freq
+from pipeline.postflop.premise import (
+    DEFAULT_MIN_PREMISE_FREQ,
+    line_contains_artifact_allin,
+    line_premise_min_freq,
+)
 from pipeline.postflop.quality import node_quality_issue
 from pipeline.postflop.question_extractor import (
     MAX_FREQUENCY,
@@ -84,6 +88,7 @@ def _collect_worthy(
     min_ev_gap_bb: float | None,
     quality_gate: bool = True,
     min_premise_freq: float | None = None,
+    exclude_artifact_allins: bool = True,
 ) -> tuple[list[Any], int, int]:
     """Every worthy spot in the solve, in a deterministic (node, combo) order.
 
@@ -110,6 +115,12 @@ def _collect_worthy(
             if pmf is not None and pmf < min_premise_freq:
                 premise_skipped += 1
                 continue
+        # Artifact all-ins (July 2026, team standing rule): never build a
+        # question on a line containing an unrealistic tree-artifact jam
+        # (counted with the premise skips -- both are line-realism gates).
+        if exclude_artifact_allins and line_contains_artifact_allin(node, solve):
+            premise_skipped += 1
+            continue
         for spot in enumerate_spots(node):
             ev = evaluate_spot(
                 spot,

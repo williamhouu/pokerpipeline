@@ -111,6 +111,21 @@ class PreflopPack:
             )
 
 
+def pack_allins_realistic(pack: "PreflopPack") -> bool:
+    """Whether this pack's all-in actions are REAL poker lines (team standing
+    rule, July 2026: no unrealistic all-ins in generated content).
+
+    Realism is about the SITUATION: a jam at short stacks is a normal line;
+    a 100-300bb preflop jam exists because the solver TREE offers it, not
+    because anyone plays it. Default: realistic only at short stacks
+    (<= 40bb effective); a pack can override via an ``allins_realistic``
+    attribute if a future registration needs to."""
+    override = getattr(pack, "allins_realistic", None)
+    if override is not None:
+        return bool(override)
+    return float(pack.stack_depth_bb) <= 40.0  # noqa: PLR2004
+
+
 @dataclass(frozen=True)
 class PreflopPackSignature:
     """Discoverable metadata for a known pack.

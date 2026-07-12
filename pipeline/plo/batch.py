@@ -89,13 +89,18 @@ def _first_worthy_spot(
     max_frequency: float = MAX_TOP_FREQUENCY,
     exclude_ambiguous_band: bool = False,
     exclude_indices: set[int] | frozenset[int] = frozenset(),
+    allow_allin_answers: bool = True,
 ) -> PloSpot | None:
     """A worthy spot at this node, skipping hands already drawn this batch
-    (``exclude_indices``) so repeat visits to a node yield a NEW hand."""
+    (``exclude_indices``) so repeat visits to a node yield a NEW hand.
+    ``allow_allin_answers=False`` also skips hands whose dominant action is
+    an all-in (the deep-stack tree artifact; team standing rule July 2026)."""
     for index in rng.sample(range(HAND_COUNT), k=min(_WORTHY_TRIES, HAND_COUNT)):
         if index in exclude_indices:
             continue
         spot = sample_plo_spot(node, index)
+        if not allow_allin_answers and spot.dominant_action.lower().startswith("all"):
+            continue
         if spot.presence >= _MIN_PRESENCE and is_question_worthy(
             spot,
             min_frequency=min_frequency,
@@ -176,10 +181,20 @@ def generate_plo_batch(
     rng = random.Random(seed)
     ctx_set = set(action_contexts) if action_contexts else None
     pc_set = set(player_counts) if player_counts else None
+    # Artifact all-ins (July 2026, team standing rule): at deep stacks the
+    # all-in branches are TREE artifacts, not real lines -- never build a
+    # question on a line through one, nor one whose correct answer is one
+    # (the per-spot check below). Realistic short-stack jams (<= 40bb)
+    # stay allowed.
+    allins_ok = float(stack_bb) <= 40.0  # noqa: PLR2004
     candidates = [
         n
         for n in nodes
         if (hero_positions is None or n.actor in hero_positions)
+        and (
+            allins_ok
+            or not any(a.action is PloActionType.ALL_IN for a in n.history_before)
+        )
         and (
             max_prior_raises is None
             or sum(1 for a in n.history_before if a.action in _AGGRESSIVE) <= max_prior_raises
@@ -229,6 +244,7 @@ def generate_plo_batch(
                 max_frequency=max_frequency,
                 exclude_ambiguous_band=exclude_ambiguous_band,
                 exclude_indices=drawn.setdefault(node.node_id, set()),
+                allow_allin_answers=allins_ok,
             )
             if spot is None:
                 continue

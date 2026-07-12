@@ -7462,6 +7462,19 @@ def _render_postflop_question_card(
                     "(machine-verified, not an AI opinion):\n\n"
                     + "\n".join(f"- {w}" for w in _cc)
                 )
+            # Showdown resolution (July 2026): the hand's final leg carries
+            # the closing reveal in its animation timeline -- show it so a
+            # reviewer can QA the vindicating hand like everything else.
+            try:
+                _anim = json.loads(_cell(row, "animation_script") or "{}")
+            except ValueError:
+                _anim = {}
+            _res = _anim.get("resolution")
+            if _res:
+                st.info(
+                    f"🃏 **Showdown reveal** (vindicates "
+                    f"{_res.get('vindicates', '?')}): {_res.get('summary', '')}"
+                )
             # The preflop leg of a play-through is written by a different (preflop)
             # prompt than the postflop legs -- say so where the reviewer is looking.
             _is_preflop_leg = _cell(row, "Hand Stage").lower() == "preflop"

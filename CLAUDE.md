@@ -821,6 +821,25 @@ display names) onto it. Shared `CSV_COLUMNS` is now 52 columns
 (animation_script last, after chat_context); PREFLOP/PLO schemas inherit
 it automatically.
 
+**Showdown resolution + artifact-all-in gates (July 2026).** Full-hand
+final legs carry a `resolution` object in `animation_script` (version 2):
+after the user answers, the app plays hero's correct action, an invented
+villain response where needed (CALL-OR-FOLD ONLY, never an artifact jam),
+reveals, and the pot push. THE VINDICATION RULE: the revealed villain hand
+is sampled (seeded, deterministic) from the villain's REAL reach range at
+the final node, restricted to the slice that proves the correct answer
+right (call -> weaker, fold -> stronger shown, value bet -> paid by worse,
+bluff -> folds out better; ties excluded; empty slice -> no resolution).
+Builder `pipeline/postflop/showdown.py`; counter
+`counters.showdown_resolutions`; re-attached by audit_full_hand_batch
+(byte-exact); Review shows a per-card reveal caption. ARTIFACT ALL-IN
+GATES (team standing rule): generation skips lines/answers built on
+unrealistic tree jams -- postflop `premise.line_contains_artifact_allin`
+(all-in wager > 40bb AND > 1.5x the pot it fires into; counted in
+premise_filtered_nodes), preflop `pack_allins_realistic` (realistic only
+<= 40bb stacks; `counters.artifact_allin_filtered_out`), PLO node+answer
+gates (stack > 40bb). Realistic short-stack jams stay allowed everywhere.
+
 **`neutral_credit` (June 2026).** A deterministic partial-credit column
 inserted **right after `Correct Answer`** in all four writers (shared
 schema + the self-contained postflop tuple), so the answer-key columns read
