@@ -353,7 +353,9 @@ def _build_pack_facts(
     node = step.node
     as_played = step.as_played_prefix
     hand_class = combo_str_to_hand_class(hero_combo)
-    spot = sample_spot(node, hand_class, combo=hero_combo)
+    spot = _sampled_pack_spot(node, hand_class, source.pack, combo=hero_combo)
+    if spot is None:  # artifact-material jam mix: the leg must never be asked
+        return None
     # Coherence gate: pack dominant must be the as-played FAMILY ("Raise" /
     # "Call"; an all-in is its own token, so a mostly-jam hand never passes
     # as a sized raise). Size-level matching isn't needed: these pack nodes
@@ -455,6 +457,29 @@ def _preflop_hand_label(combo: str) -> str:
     return f"{_RANK_NAME[hi]}-{_RANK_NAME[lo]}{tail}"
 
 
+def _sampled_pack_spot(node, hand_class: str, pack, *, combo: str | None = None):
+    """``sample_spot`` + the deep-pack ARTIFACT-STRIP (July 2026).
+
+    On packs whose all-ins are tree artifacts (``not pack_allins_realistic``)
+    the spot's trace AllIn dust is stripped + renormalised (so pack-leg
+    options, qualifiers, and the coherence gates all see the real mix), and
+    a MATERIAL jam mix returns ``None`` -- the leg must never be asked.
+    Realistic short-stack packs pass through untouched. The audit
+    re-verifier rebuilds legs through this same helper, so rows stay
+    byte-identical."""
+    from pipeline.preflop.pack import pack_allins_realistic  # noqa: PLC0415
+    from pipeline.preflop.spot_sampler import (  # noqa: PLC0415
+        sample_spot,
+        strip_artifact_allins,
+    )
+
+    spot = sample_spot(node, hand_class, combo=combo)
+    if pack_allins_realistic(pack):
+        return spot
+    spot = strip_artifact_allins(spot)
+    return None if spot.artifact_material else spot
+
+
 def fold_ender_hand_classes(
     source: PackLegSource, hero_position: str, *,
     step_index: int | None = None,
@@ -463,8 +488,6 @@ def fold_ender_hand_classes(
     """Hand classes whose dominant action at hero's step is FOLD, within the
     worthiness window -- the candidate pool for preflop-ending hands.
     Deterministic (sorted)."""
-    from pipeline.preflop.spot_sampler import sample_spot  # noqa: PLC0415
-
     step = source.step_at(hero_position, step_index)
     out: list[str] = []
     for hi_i, hi in enumerate(_RANKS_DESC):
@@ -474,11 +497,12 @@ def fold_ender_hand_classes(
             classes = [hi + lo] if hi == lo else [hi + lo + "s", hi + lo + "o"]
             for hand_class in classes:
                 try:
-                    spot = sample_spot(step.node, hand_class)
+                    spot = _sampled_pack_spot(step.node, hand_class, source.pack)
                 except (KeyError, ValueError):
                     continue
                 if (
-                    spot.dominant_action.startswith("Fold")
+                    spot is not None
+                    and spot.dominant_action.startswith("Fold")
                     and min_frequency <= spot.dominant_frequency <= max_frequency
                 ):
                     out.append(hand_class)
@@ -499,8 +523,6 @@ def raise_ender_hand_classes(
     RE-RAISE (never AllIn -- the artifact-jam rule), within the worthiness
     window -- the candidate pool for raise-ending hands (a correct 3-bet /
     4-bet that ends the hand). Deterministic (sorted grid order)."""
-    from pipeline.preflop.spot_sampler import sample_spot  # noqa: PLC0415
-
     step = source.step_at(hero_position, step_index)
     out: list[str] = []
     for hi_i, hi in enumerate(_RANKS_DESC):
@@ -510,11 +532,12 @@ def raise_ender_hand_classes(
             classes = [hi + lo] if hi == lo else [hi + lo + "s", hi + lo + "o"]
             for hand_class in classes:
                 try:
-                    spot = sample_spot(step.node, hand_class)
+                    spot = _sampled_pack_spot(step.node, hand_class, source.pack)
                 except (KeyError, ValueError):
                     continue
                 if (
-                    spot.dominant_action.startswith("Raise")
+                    spot is not None
+                    and spot.dominant_action.startswith("Raise")
                     and min_frequency <= spot.dominant_frequency <= max_frequency
                 ):
                     out.append(hand_class)

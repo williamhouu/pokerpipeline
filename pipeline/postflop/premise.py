@@ -29,6 +29,7 @@ hand at a node, so it is a per-NODE gate (compute once, skip the whole node).
 """
 from __future__ import annotations
 
+from pipeline.artifact_strip import ARTIFACT_MATERIALITY as _ARTIFACT_MATERIALITY
 from pipeline.postflop.solve import PostflopNode, PostflopSolve
 
 # Default floor: every prior action on the line must be taken at least this often
@@ -81,18 +82,46 @@ def line_premise_min_freq(node: PostflopNode, solve: PostflopSolve) -> float | N
 # ARTIFACT when it is both huge in absolute terms AND a large multiple of the
 # pot it goes into; realistic short-stack jams (a 20bb stack shoving into a
 # 15bb pot) pass both tests naturally, so no per-solve switch is needed here.
+# This is THE one shared realism definition -- the line gate below, the
+# artifact-strip in ``spot_sampler.sample_spot``, and every future consumer
+# must call :func:`is_artifact_allin_wager` rather than re-deriving it.
 ARTIFACT_ALLIN_MIN_BB = 40.0
 ARTIFACT_ALLIN_POT_MULT = 1.5
+
+# Artifact-strip materiality (July 2026, user-set). Mixing IS EV-parity: a
+# solver that jams even 10% of the time genuinely wants the raise sometimes
+# (EV(jam) ~= EV(call) across the mix), so that node is unaskable without
+# showing the real raise -- stripping it and rendering "Always Call" would be
+# a teaching lie. Only convergence-sliver frequencies BELOW this (the <=3-5%
+# dust the pack-improvement passes snap to zero) are strippable "trace"
+# artifacts. At or above it the spot is MATERIAL: never asked anywhere
+# (standalone, seed, final leg, or mid-hand question -- narrated only), until
+# the vendor ships real sized river raises. Value + strip math live in the
+# shared leaf ``pipeline.artifact_strip`` (the preflop pack path applies the
+# same rule to deep packs' AllIn files); re-exported here so postflop callers
+# keep one import site next to the artifact test.
+ARTIFACT_MATERIALITY = _ARTIFACT_MATERIALITY
+
+
+def is_artifact_allin_wager(wager_bb: float, pot_before_bb: float) -> bool:
+    """The shared artifact test: an ALL-IN wager of ``wager_bb`` fired into a
+    pot of ``pot_before_bb`` is an artifact iff it is both huge in absolute
+    terms (> :data:`ARTIFACT_ALLIN_MIN_BB`) and a large multiple of that pot
+    (> :data:`ARTIFACT_ALLIN_POT_MULT` x). The caller establishes that the
+    wager IS an all-in; this only judges realism."""
+    return wager_bb > ARTIFACT_ALLIN_MIN_BB and (
+        pot_before_bb > 0 and wager_bb > ARTIFACT_ALLIN_POT_MULT * pot_before_bb
+    )
 
 
 def line_contains_artifact_allin(node: PostflopNode, solve: PostflopSolve) -> bool:
     """True when any postflop action on this node's line is an artifact jam.
 
     Walks the node's history with the pot (same math as the animation walk):
-    a step with ``all_in`` set is an artifact when its wager exceeds
-    :data:`ARTIFACT_ALLIN_MIN_BB` and :data:`ARTIFACT_ALLIN_POT_MULT` times
-    the pot it was fired into. Covers hero FACING the jam (it is the last
-    history step) and jams earlier in the line alike."""
+    a step with ``all_in`` set is an artifact when its wager fails
+    :func:`is_artifact_allin_wager` against the pot it was fired into. Covers
+    hero FACING the jam (it is the last history step) and jams earlier in the
+    line alike."""
     pot = solve.starting_pot_bb
     invested: dict[str, float] = {}
     street = None
@@ -102,10 +131,7 @@ def line_contains_artifact_allin(node: PostflopNode, solve: PostflopSolve) -> bo
             invested = {}
         if step.verb in ("bet", "raise") and step.to_bb is not None:
             wager = step.to_bb - invested.get(step.position, 0.0)
-            pot_before = pot
-            if step.all_in and wager > ARTIFACT_ALLIN_MIN_BB and (
-                pot_before > 0 and wager > ARTIFACT_ALLIN_POT_MULT * pot_before
-            ):
+            if step.all_in and is_artifact_allin_wager(wager, pot):
                 return True
             pot += wager
             invested[step.position] = step.to_bb
@@ -116,10 +142,59 @@ def line_contains_artifact_allin(node: PostflopNode, solve: PostflopSolve) -> bo
     return False
 
 
+def _actor_invested_this_street(node: PostflopNode) -> float:
+    """How much ``node.actor`` has already wagered on ``node.street``.
+
+    Walked from the node's history (the same segment logic as the line walk
+    above): needed to turn a raise's ``to_bb`` (the amount raised TO) into the
+    incremental wager the artifact test judges. 0 when the actor hasn't put
+    chips in this street (the common case)."""
+    invested: dict[str, float] = {}
+    street = None
+    for step in node.history:
+        if step.street != street:
+            street = step.street
+            invested = {}
+        if step.verb in ("bet", "raise") and step.to_bb is not None:
+            invested[step.position] = step.to_bb
+        elif step.verb == "call":
+            invested[step.position] = max(invested.values(), default=0.0)
+    if street != node.street:
+        return 0.0
+    return invested.get(node.actor, 0.0)
+
+
+def artifact_allin_action_labels(node: PostflopNode) -> frozenset[str]:
+    """Labels of the actions AT ``node`` that are artifact jams.
+
+    An action is an all-in when the adapter labelled it ``"All-in"`` (the IR
+    convention -- see ``adapters/sqlite_db.py:_derive``) or, belt-and-braces,
+    when its incremental wager commits (about) the actor's remaining stack.
+    It is an ARTIFACT all-in per :func:`is_artifact_allin_wager` against
+    ``node.pot_bb`` (the pot the jam fires into, including any unmatched bet
+    the actor faces). Realistic short-stack jams return an empty set."""
+    invested = _actor_invested_this_street(node)
+    labels = set()
+    for action in node.actions:
+        if action.verb not in ("bet", "raise") or action.to_bb is None:
+            continue
+        wager = action.to_bb - invested
+        is_allin = action.label == "All-in" or (
+            node.effective_stack_bb > 0
+            and wager >= node.effective_stack_bb - 0.51
+        )
+        if is_allin and is_artifact_allin_wager(wager, node.pot_bb):
+            labels.add(action.label)
+    return frozenset(labels)
+
+
 __all__ = [
     "ARTIFACT_ALLIN_MIN_BB",
     "ARTIFACT_ALLIN_POT_MULT",
+    "ARTIFACT_MATERIALITY",
     "DEFAULT_MIN_PREMISE_FREQ",
+    "artifact_allin_action_labels",
+    "is_artifact_allin_wager",
     "line_contains_artifact_allin",
     "line_premise_min_freq",
 ]

@@ -67,6 +67,23 @@ def evaluate_spot(
     freq = spot.dominant_frequency
     ev_gap = spot_ev_gap_bb(spot)
 
+    # ARTIFACT-STRIP materiality (July 2026): the solver genuinely wants an
+    # artifact jam here often enough that the spot's real strategy needs a
+    # line we refuse to show -- never askable, on any street, via any path.
+    # The batch collector counts these separately; this is defence in depth
+    # so no other caller can feature one.
+    if spot.artifact_material:
+        return PostflopQuestionEvaluation(
+            is_worthy=False,
+            reason=(
+                "artifact-material: unrealistic all-in mixed at "
+                f"{sum(spot.action_frequencies.get(l, 0.0) for l in spot.artifact_labels):.0%}"
+                " -- the real strategy needs a line we refuse to show"
+            ),
+            dominant_frequency=freq,
+            ev_gap_bb=ev_gap,
+        )
+
     if not (min_frequency <= freq <= max_frequency):
         return PostflopQuestionEvaluation(
             is_worthy=False,

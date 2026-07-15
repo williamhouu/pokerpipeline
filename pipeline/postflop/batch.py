@@ -92,7 +92,8 @@ def _collect_worthy(
 ) -> tuple[list[Any], int, int]:
     """Every worthy spot in the solve, in a deterministic (node, combo) order.
 
-    Returns ``(worthy_spots, low_quality_nodes_skipped, premise_filtered_nodes)``.
+    Returns ``(worthy_spots, low_quality_nodes_skipped, premise_filtered_nodes,
+    artifact_material_spots_skipped)``.
     When ``quality_gate`` is on (default), nodes that fail the convergence / reach
     guard (:func:`pipeline.postflop.quality.node_quality_issue`) are skipped
     whole. When ``min_premise_freq`` is set, a node whose line includes a PRIOR
@@ -105,6 +106,7 @@ def _collect_worthy(
     worthy: list[Any] = []
     low_quality = 0
     premise_skipped = 0
+    artifact_material_skipped = 0
     for node_id in sorted(solve.nodes):
         node = solve.nodes[node_id]
         if quality_gate and node_quality_issue(node) is not None:
@@ -122,6 +124,13 @@ def _collect_worthy(
             premise_skipped += 1
             continue
         for spot in enumerate_spots(node):
+            # ARTIFACT-STRIP materiality (July 2026): this combo mixes an
+            # artifact jam at >= ARTIFACT_MATERIALITY -- its real strategy
+            # needs a line we refuse to show, so it can never be featured.
+            # Per-SPOT (frequencies are per combo), unlike the node gates.
+            if spot.artifact_material:
+                artifact_material_skipped += 1
+                continue
             ev = evaluate_spot(
                 spot,
                 min_frequency=min_frequency,
@@ -130,7 +139,7 @@ def _collect_worthy(
             )
             if ev.is_worthy:
                 worthy.append(spot)
-    return worthy, low_quality, premise_skipped
+    return worthy, low_quality, premise_skipped, artifact_material_skipped
 
 
 def _node_range_snapshots(node: Any) -> dict[str, dict[str, float]]:
@@ -278,7 +287,7 @@ def generate_postflop_batch(
         raise ValueError(f"solve {solve.solve_id} is malformed: {problems}")
 
     use_placeholder = dry_run or client is None
-    worthy, low_quality_filtered_out, premise_filtered_out = _collect_worthy(
+    worthy, low_quality_filtered_out, premise_filtered_out, artifact_material_out = _collect_worthy(
         solve,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
@@ -474,6 +483,14 @@ def generate_postflop_batch(
             record["claim_check_issues"] = claim_issues
         if revise_record is not None:
             record["revise"] = revise_record
+        # Artifact-strip transparency (July 2026): what trace-frequency jam
+        # mass was removed and renormalised away before this question was
+        # built, so a reviewer can see the strip happened.
+        if spot.stripped_artifact_freq > 0:
+            record["artifact_stripped"] = {
+                "labels": sorted(spot.artifact_labels),
+                "freq": round(spot.stripped_artifact_freq, 4),
+            }
         question_records.append(record)
 
     output_path = Path(output_path)
@@ -516,6 +533,10 @@ def generate_postflop_batch(
                 "worthy_spots_selected": len(worthy),
                 "low_quality_nodes_skipped": low_quality_filtered_out,
                 "premise_filtered_nodes": premise_filtered_out,
+                # Spots whose real strategy mixes an unrealistic tree-artifact
+                # jam at >= ARTIFACT_MATERIALITY -- silenced (never asked)
+                # until the vendor ships real sized raises for these nodes.
+                "artifact_material_spots_skipped": artifact_material_out,
                 "questions_attempted": attempted,
                 "questions_written": len(rows),
                 "soft_flagged_rows": soft_flagged,

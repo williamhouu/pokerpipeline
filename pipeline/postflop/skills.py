@@ -133,8 +133,11 @@ def _facing_overbet(facts: PostflopFacts) -> bool:
 
 
 def _multiple_bet_sizes(facts: PostflopFacts) -> bool:
-    """The node offers >=2 distinct bet/raise sizes -- a real sizing choice."""
-    sizes = {a.label for a in facts.spot.node.actions if a.verb in ("bet", "raise")}
+    """The node offers >=2 distinct bet/raise sizes -- a real sizing choice.
+
+    Reads ``live_actions`` (artifact-strip): a stripped tree-artifact jam is
+    not a real size the player is choosing between."""
+    sizes = {a.label for a in facts.spot.live_actions if a.verb in ("bet", "raise")}
     return len(sizes) >= 2
 
 

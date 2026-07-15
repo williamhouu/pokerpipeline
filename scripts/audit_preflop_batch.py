@@ -44,8 +44,16 @@ from pipeline.preflop.fact_extractor import extract_facts  # noqa: E402
 from pipeline.preflop.format_writer import build_preflop_row  # noqa: E402
 from pipeline.preflop.node_enumerator import enumerate_nodes  # noqa: E402
 from pipeline.preflop.options import build_options  # noqa: E402
-from pipeline.preflop.pack import clear_registry, discover_packs, get_pack  # noqa: E402
-from pipeline.preflop.spot_sampler import sample_spot  # noqa: E402
+from pipeline.preflop.pack import (  # noqa: E402
+    clear_registry,
+    discover_packs,
+    get_pack,
+    pack_allins_realistic,
+)
+from pipeline.preflop.spot_sampler import (  # noqa: E402
+    sample_spot,
+    strip_artifact_allins,
+)
 
 # Fields whose recomputation is pure-deterministic given (node, hand, combo).
 EXACT_COLS = (
@@ -120,6 +128,12 @@ def audit_batch(csv_path: Path) -> int:
             continue
         combo = combo_from_user_cards(row["User Cards"])
         spot = sample_spot(node, q["hand_class"], combo=combo)
+        # Mirror generation's ARTIFACT-STRIP (July 2026): on deep packs the
+        # trace AllIn dust was stripped + renormalised before the row was
+        # built; rebuilding unstripped would false-flag options/frequencies
+        # on every artifact-jam node. (Material spots never ship rows.)
+        if not pack_allins_realistic(pack):
+            spot = strip_artifact_allins(spot)
         facts = extract_facts(spot, pack, equity_runouts=300)
         # Mirror generation: the solver's own per-action EVs (Monker packs),
         # analytic fallback only for EV-less packs. Must match batch.py or this

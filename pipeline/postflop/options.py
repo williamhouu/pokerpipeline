@@ -124,9 +124,12 @@ def _spectrum_options(
 
 
 def _verb_frequencies(spot: PostflopSpot) -> dict[str, float]:
-    """Each verb's total solver frequency at this spot (summed over its sizes)."""
+    """Each verb's total solver frequency at this spot (summed over its sizes).
+
+    Reads ``spot.live_actions`` (artifact-strip invariant: a stripped jam
+    must not resurface as a live verb)."""
     freqs: dict[str, float] = {}
-    for a in spot.node.actions:
+    for a in spot.live_actions:
         freqs[a.verb] = freqs.get(a.verb, 0.0) + spot.action_frequencies.get(a.label, 0.0)
     return freqs
 
@@ -151,7 +154,7 @@ def _best_ev_alternative_verb(
     evs = spot_action_evs_bb(spot)
     if not evs:
         return None
-    verb_of = {a.label: a.verb for a in spot.node.actions}
+    verb_of = {a.label: a.verb for a in spot.live_actions}
     best_verb: str | None = None
     best_ev: float | None = None
     for label, ev in evs.items():
@@ -176,7 +179,7 @@ def _collapsed_spectrum_options(
     loses essentially nothing). The correct answer is the dominant verb FAMILY's
     claim -- "Always Bet" when the family is ~pure, else "Mostly Bet".
     """
-    actions = sorted(spot.node.actions, key=_aggression_key)
+    actions = sorted(spot.live_actions, key=_aggression_key)
     by_verb: dict[str, list[NodeAction]] = {}
     for a in actions:
         by_verb.setdefault(a.verb, []).append(a)
@@ -245,8 +248,12 @@ def build_options(
     Raises:
         ValueError: if the node exposes no actions (a malformed solve), or
             ``style`` isn't recognised.
+
+    ARTIFACT-STRIP INVARIANT: the menu is built from ``spot.live_actions``
+    (never ``spot.node.actions``) -- an artifact all-in label must never ship
+    as an option, in any style.
     """
-    actions = sorted(spot.node.actions, key=_aggression_key)
+    actions = sorted(spot.live_actions, key=_aggression_key)
     if not actions:
         raise ValueError(f"node {spot.node.node_id} has no actions to build options")
     labels = [a.label for a in actions]

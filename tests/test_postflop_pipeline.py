@@ -387,6 +387,7 @@ def test_options_gto_near_binary_collapse() -> None:
         return SimpleNamespace(
             node=SimpleNamespace(actions=acts, node_id="x"),
             action_frequencies=freqs, dominant_action=dom, dominant_frequency=dom_freq,
+            live_actions=acts,  # options read live_actions (artifact-strip)
         )
 
     # Fold 60 / Call 38 / Raise 2 -> Raise sliver dropped -> Fold-vs-Call.
@@ -1769,11 +1770,11 @@ def test_quality_gate_flags_low_reach_and_uniform() -> None:
 
 def test_collect_worthy_quality_gate_counts_skips(tmp_path: Path) -> None:
     from pipeline.postflop.batch import _collect_worthy
-    on, skipped_on, _premise_on = _collect_worthy(
+    on, skipped_on, _premise_on, _art_on = _collect_worthy(
         SOLVE, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
         quality_gate=True,
     )
-    off, skipped_off, _premise_off = _collect_worthy(
+    off, skipped_off, _premise_off, _art_off = _collect_worthy(
         SOLVE, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
         quality_gate=False,
     )
@@ -1836,9 +1837,9 @@ def test_line_premise_min_freq_skips_chance_and_closed_prefixes() -> None:
 def test_premise_gate_in_collect_worthy_filters_and_counts() -> None:
     # The fixture's node ids carry no betting line, so line_premise_min_freq is
     # None everywhere -> the gate is a no-op (nothing dropped) regardless of the
-    # threshold. Guards the wiring + the new 3-tuple return.
+    # threshold. Guards the wiring + the 4-tuple return.
     from pipeline.postflop.batch import _collect_worthy
-    worthy, _lq, premise_skipped = _collect_worthy(
+    worthy, _lq, premise_skipped, _art = _collect_worthy(
         SOLVE, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
         quality_gate=True, min_premise_freq=0.5,
     )
@@ -1898,6 +1899,7 @@ def test_options_gto_pure_spot_secondary_is_second_best_by_ev() -> None:
             hero_combo="AsQs",
             action_frequencies={"Fold": 0.0, "Call": 1.0, "Raise to 12bb": 0.0},
             dominant_action="Call", dominant_frequency=1.0,
+            live_actions=acts, artifact_labels=frozenset(),
         )
 
     # Raising (+1.95) beats folding (0.00) -> pair Call with the raise. The

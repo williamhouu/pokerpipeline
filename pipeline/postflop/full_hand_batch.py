@@ -268,6 +268,12 @@ def _postflop_leg_row(
         record["claim_check_issues"] = claim_issues
     if soft_warnings:
         record["validator_warnings"] = soft_warnings
+    # Artifact-strip transparency (July 2026), same as the standalone batch.
+    if spot.stripped_artifact_freq > 0:
+        record["artifact_stripped"] = {
+            "labels": sorted(spot.artifact_labels),
+            "freq": round(spot.stripped_artifact_freq, 4),
+        }
     return row, record, None, counters
 
 
@@ -414,7 +420,7 @@ def generate_full_hand_batch(
         raise ValueError(f"solve {solve.solve_id} is malformed: {problems}")
 
     use_placeholder = dry_run or client is None
-    worthy, low_quality, premise_skipped = _collect_worthy(
+    worthy, low_quality, premise_skipped, artifact_material_out = _collect_worthy(
         solve, min_frequency=min_frequency, max_frequency=max_frequency,
         min_ev_gap_bb=min_ev_gap_bb, quality_gate=quality_gate,
         min_premise_freq=min_premise_freq,
@@ -1046,6 +1052,10 @@ def generate_full_hand_batch(
                 "worthy_spots_available": len(worthy),
                 "low_quality_nodes_skipped": low_quality,
                 "premise_filtered_nodes": premise_skipped,
+                # Seed spots silenced by artifact-strip materiality (their
+                # real strategy mixes an unrealistic jam >= 5%); mid-hand
+                # material legs are additionally skipped inside _build_legs.
+                "artifact_material_spots_skipped": artifact_material_out,
                 "hands_assembled": hands_scanned,
                 "hands_difficulty_filtered": hands_difficulty_filtered,
                 # Band-scan diagnostics (July 2026): the hardest hand seen in

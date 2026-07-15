@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -96,6 +96,12 @@ class PreflopSpot:
     dominant_action: str = ""
     dominant_frequency: float = 0.0
     presence: float = -1.0
+    # ARTIFACT-STRIP (July 2026, see strip_artifact_allins below). Only set
+    # on spots the caller passed through the strip (deep packs whose AllIn
+    # files are tree artifacts): the trace jam mass removed, or the flag
+    # that the mass was MATERIAL and the spot must never be asked.
+    stripped_artifact_freq: float = 0.0
+    artifact_material: bool = False
 
     def __post_init__(self) -> None:
         if self.presence < 0:
@@ -258,6 +264,46 @@ def sample_spot(
         dominant_action=dominant_label,
         dominant_frequency=dominant_freq,
         presence=presence,
+    )
+
+
+def strip_artifact_allins(spot: PreflopSpot) -> PreflopSpot:
+    """ARTIFACT-STRIP for deep packs (July 2026, team standing rule).
+
+    Callers apply this ONLY when the pack's all-ins are unrealistic
+    (``not pack_allins_realistic(pack)`` -- a 100-300bb preflop jam is a tree
+    artifact, so realistic short-stack packs are never touched). The node's
+    ``AllIn`` actions are then judged by the shared
+    :func:`pipeline.artifact_strip.strip_artifact_mass` rule: a
+    convergence-sliver trace is REMOVED from ``action_frequencies`` (the
+    label leaves the dict entirely, so the option builders -- which read the
+    canonical strategy's keys -- can never ship "All-in") and the rest
+    renormalised; mass >= ARTIFACT_MATERIALITY marks the spot
+    ``artifact_material`` (frequencies kept honest; the spot must never be
+    asked). Applied identically by generation and the audit re-verifiers so
+    rebuilt rows stay byte-identical.
+    """
+    from pipeline.artifact_strip import strip_artifact_mass  # noqa: PLC0415
+    from pipeline.preflop.grammars.types import PreflopActionType  # noqa: PLC0415
+
+    labels = {
+        opt.label for opt in spot.node.actions
+        if opt.action_type is PreflopActionType.ALL_IN
+    }
+    if not labels:
+        return spot
+    freqs, mass, material = strip_artifact_mass(spot.action_frequencies, labels)
+    if material:
+        return replace(spot, artifact_material=True)
+    dominant_label, dominant_freq = (
+        max(freqs.items(), key=lambda kv: kv[1]) if freqs else ("", 0.0)
+    )
+    return replace(
+        spot,
+        action_frequencies=freqs,
+        dominant_action=dominant_label,
+        dominant_frequency=dominant_freq,
+        stripped_artifact_freq=mass,
     )
 
 

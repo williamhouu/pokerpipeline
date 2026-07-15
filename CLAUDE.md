@@ -850,6 +850,50 @@ premise_filtered_nodes), preflop `pack_allins_realistic` (realistic only
 <= 40bb stacks; `counters.artifact_allin_filtered_out`), PLO node+answer
 gates (stack > 40bb). Realistic short-stack jams stay allowed everywhere.
 
+**ARTIFACT-STRIP (July 14 2026 -- the option-surface + qualifier half of
+the artifact rule; the gates above cover lines/answers).** A node's OWN
+artifact-jam action used to leak into questions ("Mostly All-in" options
+on a 200bb river; "Mostly Call" instead of "Always Call" purely because of
+a 1% phantom jam). Now, per spot (node + combo), the artifact-jam
+frequency mass is judged against `ARTIFACT_MATERIALITY = 0.05`
+(shared leaf `pipeline/artifact_strip.py`; 5% = the convergence-sliver
+convention -- MIXING IS EV-PARITY, so >= 5% means the solver genuinely
+wants the jam and the spot is unaskable without the real size):
+
+- **Trace (< 5%)**: the jam is STRIPPED and the mix renormalized; the
+  stripped strategy drives EVERYTHING (worthiness, options + Always/
+  Mostly qualifiers -- "Always" at literal 100% POST-strip -- difficulty,
+  action_frequencies column, SOLVER DATA, neutral_credit, per-action
+  EVs). Meta records `artifact_stripped` {labels, freq} per question.
+- **Material (>= 5%)**: NEVER ASKED ANYWHERE -- not standalone, not a
+  seed, not a final leg; a mid-hand connective leg is skipped like the
+  forced-move guard (line narrated, no question pauses). Counters:
+  `artifact_material_spots_skipped` (postflop batch + full-hand + preflop).
+  Frequencies on a material spot stay honest/unstripped.
+- **Meta-solvability** (why featured call/folds stay real): a monster
+  whose raise is hidden either renormalizes to ~100% (exits the 65-99
+  window) or is material (gated), so surviving featured call/fold
+  questions are genuine bluff-catchers. Strong-hand river questions as a
+  CATEGORY return when the vendor ships sized river raises.
+
+Postflop: `premise.artifact_allin_action_labels(node)` (same >40bb &
+>1.5x-pot test on the node's menu; all-in = the `"All-in"` label or a
+wager committing the stack) feeds the strip inside
+`spot_sampler.sample_spot` (always on); `PostflopSpot.live_actions` is
+the menu invariant -- `options.build_options` and every menu surface read
+it, never `node.actions`. Preflop (deep packs only, via
+`pack_allins_realistic`): `spot_sampler.strip_artifact_allins` removes
+the `AllIn` label outright (even at ZERO mass -- `build_options_basic`
+lists zero-frequency actions, which is how "All-in" shipped as a wrong
+option on 200bb pack legs); applied in `collect_worthy_spots(
+strip_artifacts=)`, the pack-leg builder + ender pools
+(`preflop_leg_pack._sampled_pack_spot`, material -> leg dropped), and
+mirrored by `audit_preflop_batch.py`. All three re-verifiers rebuild
+through the same seams (verified 0/0 on real v7 batches). Realistic
+short-stack jams untouched everywhere (test-pinned). Tests:
+`tests/test_artifact_strip.py`. NB: old (pre-strip) batches no longer
+re-verify byte-exact on artifact-jam nodes -- regenerate instead.
+
 **`neutral_credit` (June 2026).** A deterministic partial-credit column
 inserted **right after `Correct Answer`** in all four writers (shared
 schema + the self-contained postflop tuple), so the answer-key columns read

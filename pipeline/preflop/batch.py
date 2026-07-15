@@ -124,6 +124,7 @@ from pipeline.preflop.spot_sampler import (
     _cached_parse_range_file,
     enumerate_spots_for_node,
     sample_spot,
+    strip_artifact_allins,
 )
 from pipeline.preflop.validators import run_preflop_soft_validators
 
@@ -415,6 +416,8 @@ def collect_worthy_spots(
     min_presence: float = MIN_PRESENCE,
     exclude_ambiguous_band: bool = False,
     exclude_near_pure_band: bool = False,
+    strip_artifacts: bool = False,
+    counters: dict[str, int] | None = None,
 ) -> list[tuple[PreflopSpot, PreflopQuestionEvaluation]]:
     """Enumerate every (node, hand class) spot and keep the worthy ones.
 
@@ -423,6 +426,14 @@ def collect_worthy_spots(
     action's frequency lies inside the configured window. Trivial spots
     (100% one action) are filtered out by the max_frequency ceiling.
 
+    ``strip_artifacts`` (July 2026, pass ``not pack_allins_realistic(pack)``):
+    each spot goes through :func:`pipeline.preflop.spot_sampler.
+    strip_artifact_allins` BEFORE worthiness -- trace jam mass is removed and
+    renormalised (the stripped mix drives the window and every later
+    surface), and a MATERIAL spot (jam mass >= 5%: the solver genuinely
+    wants a line we refuse to show) is skipped outright, counted into
+    ``counters["artifact_material_spots_skipped"]`` when a dict is given.
+
     Returns a list of ``(spot, evaluation)`` pairs so callers can keep
     the precomputed difficulty score without re-running ``evaluate_spot``
     later.
@@ -430,6 +441,14 @@ def collect_worthy_spots(
     out: list[tuple[PreflopSpot, PreflopQuestionEvaluation]] = []
     for node in nodes:
         for spot in enumerate_spots_for_node(node, min_total_weight=min_presence):
+            if strip_artifacts:
+                spot = strip_artifact_allins(spot)
+                if spot.artifact_material:
+                    if counters is not None:
+                        counters["artifact_material_spots_skipped"] = (
+                            counters.get("artifact_material_spots_skipped", 0) + 1
+                        )
+                    continue
             evaluation = evaluate_spot(
                 spot,
                 min_frequency=min_frequency,
@@ -1003,13 +1022,22 @@ def generate_preflop_batch(
         player_counts=player_counts,
     )
 
-    # 3. Collect worthy spots (presence + freq window).
+    # 3. Collect worthy spots (presence + freq window). On deep packs the
+    # ARTIFACT-STRIP runs first (July 2026): trace AllIn dust is stripped +
+    # renormalised so the window and every later surface see the real mix,
+    # and material-jam spots are skipped outright (never askable).
+    _collect_counters: dict[str, int] = {}
     worthy = collect_worthy_spots(
         filtered_nodes,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         exclude_ambiguous_band=exclude_ambiguous_band,
         exclude_near_pure_band=exclude_near_pure_band,
+        strip_artifacts=not pack_allins_realistic(pack),
+        counters=_collect_counters,
+    )
+    artifact_material_spots_skipped = _collect_counters.get(
+        "artifact_material_spots_skipped", 0
     )
 
     # 4. Nothing worthy -> empty result.
@@ -1164,15 +1192,14 @@ def generate_preflop_batch(
                 continue
         # Artifact all-ins (July 2026, team standing rule): on deep-stack
         # packs the all-in branches are TREE artifacts, not real lines --
-        # never build a question whose correct answer is such a jam or
-        # whose line already contains one. Realistic short-stack packs
-        # (<= 40bb) keep their jams (pack_allins_realistic).
-        if not _allins_ok and (
-            spot.dominant_action.startswith("All")
-            or any(
-                a.action_type is PreflopActionType.ALL_IN
-                for a in spot.node.history_before
-            )
+        # never build a question whose line already contains one. Realistic
+        # short-stack packs (<= 40bb) keep their jams (pack_allins_realistic).
+        # The spot's OWN jam mass was handled by the ARTIFACT-STRIP inside
+        # collect_worthy_spots (trace mass stripped + renormalised; material
+        # spots never entered the pool), so no dominant-action check remains.
+        if not _allins_ok and any(
+            a.action_type is PreflopActionType.ALL_IN
+            for a in spot.node.history_before
         ):
             artifact_allin_filtered_out += 1
             continue
@@ -1600,6 +1627,10 @@ def generate_preflop_batch(
                 "rare_line_filtered_out": rare_line_filtered_out,
                 "rare_premise_filtered_out": rare_premise_filtered_out,
                 "artifact_allin_filtered_out": artifact_allin_filtered_out,
+                # ARTIFACT-STRIP materiality (July 2026): spots whose real
+                # strategy mixes the deep pack's AllIn at >= 5% -- silenced
+                # (never asked); trace dust was stripped + renormalised.
+                "artifact_material_spots_skipped": artifact_material_spots_skipped,
                 "questions_attempted": attempted,
                 "questions_written": written,
                 "soft_flagged_rows": sum(1 for s in row_statuses if s),

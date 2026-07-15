@@ -376,6 +376,20 @@ def _build_legs(
         if len(n.actions) < 2:
             continue
         spot = sample_spot(n, combo)
+        # ARTIFACT-STRIP MATERIALITY (July 2026, team standing rule): this
+        # combo mixes an unrealistic tree-artifact jam at >= 5% here, so the
+        # node's real strategy needs a line we refuse to show -- rendering
+        # "Always Call" on a hand that really raises 30% would be a teaching
+        # lie. NEVER asked: a mid-hand node is skipped like a forced move
+        # (the next leg's prose narrates the line through it); a hand can't
+        # END on one (the seed pool already excludes material spots, so this
+        # return only fires for villain-frame lines). Trace-frequency jams
+        # (< 5%) were already stripped inside sample_spot and the leg is
+        # asked honestly on the renormalised strategy.
+        if spot.artifact_material:
+            if n is nodes[-1]:
+                return None
+            continue
         # FOLD-TRUNCATION COHERENCE (July 2026): if the solver's correct
         # action for this combo HERE is Fold, the hand ends HERE -- emitting
         # later legs would teach "the right play was to fold" and then keep
