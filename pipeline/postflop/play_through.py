@@ -79,6 +79,17 @@ class HandLeg:
     entry_facts: PreflopEntryFacts | None = None
     # Index into solve.preflop_summary for kind="preflop_line".
     step_index: int | None = None
+    # True on the LAST leg of a fold-ending hand: the correct action here is
+    # Fold and the hand ends. For kind="preflop_line" it also switches the
+    # pack builder's coherence gate from "matches the as-played action" to
+    # "dominant action IS fold" (a preflop-ending hand has no as-played
+    # continuation).
+    terminal_fold: bool = False
+    # True on the LAST leg of a raise-ending hand: the correct action is the
+    # sized RE-RAISE (3-bet / 4-bet) and the hand ends there (the villain's
+    # invented response is a fold drawn from the pack's real response node).
+    # Pack gate: dominant action must be the Raise.
+    terminal_raise: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,20 @@ class PlayThroughHand:
     @property
     def total(self) -> int:
         return len(self.legs)
+
+    @property
+    def ending_street(self) -> str:
+        """The street of the hand's LAST question -- the length bucket the
+        balanced generator quotas on (preflop / flop / turn / river)."""
+        return self.legs[-1].street if self.legs else "preflop"
+
+    @property
+    def ends_with_fold(self) -> bool:
+        return bool(self.legs) and self.legs[-1].terminal_fold
+
+    @property
+    def ends_with_raise(self) -> bool:
+        return bool(self.legs) and self.legs[-1].terminal_raise
 
 
 def _is_prefix(short, long) -> bool:
@@ -178,6 +203,73 @@ def balanced_hand_mix(hands: list, limit: int) -> list:
                 break
             out.append(q.pop(0))
     return out
+
+
+ENDING_STREETS = ("preflop", "flop", "turn", "river")
+
+# Length-profile weight maps (July 2026): the share of a batch's HANDS ending
+# on each street. River-leaning is the production default (the user's call):
+# full-arc hands are the flagship, and 20% per early street keeps a fold/raise
+# ending too likely to discount at any question. NOTE: question VOLUME skews
+# deeper than hand counts (enders are shorter hands).
+LENGTH_PROFILES: dict[str, dict[str, float]] = {
+    "river_leaning": {"preflop": 0.2, "flop": 0.2, "turn": 0.2, "river": 0.4},
+    "equal": {"preflop": 0.25, "flop": 0.25, "turn": 0.25, "river": 0.25},
+}
+
+
+def balanced_length_mix(
+    hands: list, limit: int, *, weights: dict[str, float] | None = None,
+) -> list:
+    """Quota ``hands`` EQUALLY across ending streets, ``limit // 4`` each.
+
+    The production anti-predictability rule (July 2026): a user must never
+    know whether the current question is the hand's last, so batches carry
+    an equal share of hands ending preflop, on the flop, on the turn, and
+    on the river (the early enders are correct-FOLD endings). Within each
+    street bucket, hands keep their input order (already variety-shuffled
+    + optionally strength-mixed). A street bucket that runs short is
+    back-filled from the other buckets round-robin, deepest first, so the
+    batch still fills to ``limit``; the counters report the ACTUAL mix.
+    Deterministic for a fixed input order.
+    """
+    if limit <= 0:
+        return []
+    weights = weights or LENGTH_PROFILES["equal"]
+    buckets: dict[str, list] = {s: [] for s in ENDING_STREETS}
+    for hand in hands:
+        buckets.setdefault(hand.ending_street, []).append(hand)
+    # Largest-remainder allocation of ``limit`` across the weight profile;
+    # remainder ties break deepest-first (river the richest real bucket).
+    ideal = {s: limit * weights.get(s, 0.0) for s in ENDING_STREETS}
+    quotas = {s: int(ideal[s]) for s in ENDING_STREETS}
+    left = limit - sum(quotas.values())
+    for street in sorted(
+        ENDING_STREETS,
+        key=lambda s: (-(ideal[s] - quotas[s]), -ENDING_STREETS.index(s)),
+    ):
+        if left <= 0:
+            break
+        quotas[street] += 1
+        left -= 1
+    out: list = []
+    for street in reversed(ENDING_STREETS):
+        quota = quotas[street]
+        out.extend(buckets[street][:quota])
+        buckets[street] = buckets[street][len(buckets[street][:quota]):]
+    # back-fill any shortfall, deepest-ending hands first
+    for street in reversed(ENDING_STREETS):
+        while len(out) < limit and buckets[street]:
+            out.append(buckets[street].pop(0))
+    # Re-sort into a stable interleaved order (by ending street rotation)
+    # so a short batch isn't "all the river hands first".
+    rotated: list = []
+    pools = {s: [h for h in out if h.ending_street == s] for s in ENDING_STREETS}
+    while any(pools.values()):
+        for street in ENDING_STREETS:
+            if pools[street]:
+                rotated.append(pools[street].pop(0))
+    return rotated[:limit]
 
 
 def _solve_tag(solve: PostflopSolve) -> str:
@@ -283,9 +375,48 @@ def _build_legs(
         # worthiness window requires a mixed strategy = 2+ actions).
         if len(n.actions) < 2:
             continue
+        spot = sample_spot(n, combo)
+        # FOLD-TRUNCATION COHERENCE (July 2026): if the solver's correct
+        # action for this combo HERE is Fold, the hand ends HERE -- emitting
+        # later legs would teach "the right play was to fold" and then keep
+        # playing, and it is also the leak that made mid-hand fold options
+        # dead (a user learns fold is never right while the hand continues).
+        # The leg is marked terminal_fold; every leg after it is dropped.
+        # INVARIANT: no leg before the last may have a fold-dominant spot.
+        if spot.dominant_verb == "fold":
+            legs.append(HandLeg(
+                kind="postflop", street=n.street, node_id=n.node_id,
+                spot=spot, terminal_fold=True,
+            ))
+            break
+        # AS-PLAYED COHERENCE (July 2026): on every NON-final node, the
+        # solver's dominant action must be the action the line actually
+        # took (the next step of the deepest node's history) -- otherwise
+        # the question says "Mostly Bet" and the narration continues "you
+        # check", the postflop version of the incoherence the pack legs'
+        # gate already blocks. A divergent hand is dropped (None): the
+        # solve contains the coherent branch too, so the pool refills.
+        # The FINAL node has no as-played continuation to match.
+        if n is not nodes[-1]:
+            taken = _as_played_verb(n, nodes[-1], hero)
+            if taken is not None and spot.dominant_verb != taken:
+                return None
         legs.append(HandLeg(kind="postflop", street=n.street, node_id=n.node_id,
-                            spot=sample_spot(n, combo)))
+                            spot=spot))
     return legs
+
+
+def _as_played_verb(node: PostflopNode, anchor: PostflopNode, hero: str) -> str | None:
+    """The verb ``hero`` actually played at ``node`` on ``anchor``'s line.
+
+    ``node`` is hero's decision point, so the next step of the anchor's
+    history after ``node``'s prefix is hero's taken action. ``None`` when
+    the anchor's history doesn't extend past the node (defensive)."""
+    k = len(node.history)
+    if len(anchor.history) <= k:
+        return None
+    step = anchor.history[k]
+    return step.verb if step.position == hero else None
 
 
 def assemble_hands(
@@ -349,6 +480,8 @@ def assemble_hands(
         for n in line:
             consumed.add((n.node_id, combo))
         legs = _build_legs(solve, hero, combo, line, include_preflop=include_preflop)
+        if legs is None:
+            continue  # as-played coherence: divergent line, drop the hand
         anchor = line[-1]
         hands.append(PlayThroughHand(
             hand_id=_hand_id(solve, hero, combo, anchor, "hero"),
@@ -373,7 +506,7 @@ def assemble_hands(
                 v_legs = _build_legs(
                     solve, villain, v_combo, v_nodes, include_preflop=include_preflop
                 )
-                if v_legs:
+                if v_legs:  # None (divergent) or [] both skip
                     hands.append(PlayThroughHand(
                         hand_id=_hand_id(solve, villain, v_combo, anchor, "villain"),
                         hero=villain, hero_combo=v_combo, frame="villain",
@@ -385,4 +518,12 @@ def assemble_hands(
     return hands
 
 
-__all__ = ["HandLeg", "PlayThroughHand", "assemble_hands"]
+__all__ = [
+    "ENDING_STREETS",
+    "LENGTH_PROFILES",
+    "HandLeg",
+    "PlayThroughHand",
+    "assemble_hands",
+    "balanced_hand_mix",
+    "balanced_length_mix",
+]

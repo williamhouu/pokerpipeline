@@ -158,29 +158,35 @@ def test_pack_legs_upgrade_the_preflop_question(tmp_path, monkeypatch) -> None:
         assert r["Cards on Table"] == ""
     for r in rows:
         assert r["hand_difficulty"], "every full-hand row carries hand_difficulty"
-    # hand_difficulty == max leg difficulty within each hand.
+    # hand_difficulty == the peak-anchored blend over the hand's legs
+    # (0.65 x hardest + 0.35 x mean of the rest -- July 2026).
+    from pipeline.postflop.difficulty import aggregate_hand_difficulty
+
     by_hand: dict[str, list[dict]] = {}
     for r in rows:
         by_hand.setdefault(r["hand_id"], []).append(r)
     for legs in by_hand.values():
-        assert {r["hand_difficulty"] for r in legs} == {
-            str(max(int(r["Difficulty Rating"]) for r in legs))
-        }
+        expected = aggregate_hand_difficulty(
+            [int(r["Difficulty Rating"]) for r in legs]
+        )
+        assert {r["hand_difficulty"] for r in legs} == {str(expected)}
 
 
-def test_coherence_gate_falls_back_to_entry_leg(tmp_path, monkeypatch) -> None:
-    """When the pack says the hand mostly 3-BETS, the as-played call would
-    contradict the pack's correct answer, so the leg falls back to the
-    entry-derived question (which frames the as-played action)."""
+def test_coherence_gate_drops_the_leg_pack_first(tmp_path, monkeypatch) -> None:
+    """PACK-FIRST RULE (July 2026, replaced the entry fallback): when the
+    pack says the hand mostly 3-BETS, the as-played call contradicts the
+    pack's correct answer -- the hand ships WITHOUT a preflop question
+    (the old fallback framed the as-played action as correct even when
+    the solver mostly disagreed, e.g. 'Mostly Open' over 'Fold: 81%')."""
     pack = _matching_pack(
         tmp_path, call_freq=0.2, threebet_freq=0.7, pack_id="fixture_3betty",
     )
     result, meta = _run_batch(tmp_path, monkeypatch, pack)
     assert result.questions_written > 0
     c = meta["counters"]
-    # Every BB defend leg disagrees (dominant 3-bet) -> entry fallback; BTN
-    # opener legs (if any) still agree.
-    assert c["preflop_leg_entry_fallback"] > 0
+    # Every BB defend leg disagrees (dominant 3-bet) -> DROPPED, not faked.
+    assert c["preflop_entry_legs_dropped"] > 0
+    assert c["preflop_leg_entry_fallback"] == 0
 
 
 def test_hand_difficulty_band_filter(tmp_path, monkeypatch) -> None:

@@ -255,3 +255,26 @@ __all__ = [
     "easy_freq_axis",
     "easy_hand_axis",
 ]
+
+
+# --- hand-level aggregation (July 2026) --------------------------------------
+# A full hand's difficulty tag: anchored on the HARDEST leg, tempered by the
+# average of the rest. Plain MAX over-promised (one 2000 spike over four 500
+# legs read as a "2000 hand" that feels easy); a plain mean ambushes (the
+# spike vanishes). The blend never drops below PEAK_WEIGHT * max, so a hard
+# spike can never rate into an Easy band.
+HAND_PEAK_WEIGHT = 0.65
+HAND_REST_WEIGHT = 0.35
+
+
+def aggregate_hand_difficulty(leg_scores: list[int]) -> int:
+    """``0.65 * hardest_leg + 0.35 * mean(other legs)``, rounded.
+
+    Single-leg hands return their own score; empty returns 0."""
+    if not leg_scores:
+        return 0
+    peak = max(leg_scores)
+    rest = [s for i, s in enumerate(leg_scores) if i != leg_scores.index(peak)]
+    if not rest:
+        return int(peak)
+    return round(HAND_PEAK_WEIGHT * peak + HAND_REST_WEIGHT * (sum(rest) / len(rest)))

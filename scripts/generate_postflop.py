@@ -159,6 +159,19 @@ def main(argv: list[str] | None = None) -> int:
              "flag only)",
     )
     parser.add_argument(
+        "--length-profile", choices=["river_leaning", "equal"],
+        default="river_leaning",
+        help="with --balanced-lengths: hand-count share per ending street "
+             "(river_leaning = 40%% river / 20%% each, the production "
+             "default; equal = 25%% each)")
+    parser.add_argument(
+        "--balanced-lengths", action="store_true",
+        help="full-hands mode: equal quarters of hands ending preflop / flop "
+             "/ turn / river (early enders = correct-fold endings; the "
+             "production anti-predictability mix); ignored with a "
+             "difficulty band",
+    )
+    parser.add_argument(
         "--diversify-hands", action="store_true",
         help="full-hands mode: round-robin the batch across hero seat, line "
              "depth, and hand strength (assembles an oversized pool first); "
@@ -237,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 variety_seed=args.variety_seed,
                 diversify_hands=args.diversify_hands,
+                balanced_lengths=args.balanced_lengths,
+                length_profile=args.length_profile,
                 min_ev_gap_bb=args.min_ev_gap,
                 quality_gate=not args.no_quality_gate,
                 min_premise_freq=(args.min_premise_freq if args.min_premise_freq > 0 else None),

@@ -378,11 +378,13 @@ def format_preflop_entry_question(
     hero = facts.hero_position
     lines = [f"You're {_SEAT_INTRO.get(hero, hero)} with {_cards_emoji(facts.hero_combo)}."]
     open_amt = _amount(facts.open_to_bb, solve=facts.solve, display_in_bb=display_in_bb)
+    # House question style (matches the pack-built preflop legs and every
+    # standalone preflop batch): preflop folds are implied by the seat and
+    # the narrated action -- no "It folds to you." preamble. Unified July
+    # 2026 after the two leg builders visibly diverged in one batch.
     if facts.entry_verb == "call":
         opener = _subject(facts.villain_position, hero, cap=True)
-        lines.append(f"{opener} opens to {open_amt} and it folds to you.")
-    else:
-        lines.append("It folds to you.")
+        lines.append(f"{opener} opens to {open_amt}.")
     return "\n".join(lines)
 
 

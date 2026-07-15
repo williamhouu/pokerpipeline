@@ -217,6 +217,10 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
                     # opener has TWO legs); absent on older SRP batches ->
                     # None = the hero's unique step.
                     step_index=q.get("preflop_step_index"),
+                    # Preflop-ENDING hand (balanced lengths, July 2026):
+                    # the coherence gate flips to require dominant Fold.
+                    terminal_fold=bool(q.get("terminal_fold")),
+                    terminal_raise=bool(q.get("terminal_raise")),
                 )
                 if _rec is not None:
                     options, correct = _rec["options"], _rec["correct_answer"]
@@ -225,6 +229,36 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:  # noqa: C901
                       "missing/changed or coherence gate flipped)")
                 exact_failures += 1
                 continue
+            # Preflop fold resolution: the batch attaches the raiser's
+            # vindication reveal to a preflop-ENDING hand's (only) leg;
+            # re-attach with the same seeded inputs for byte-exact compare.
+            if (
+                bool(q.get("terminal_fold")) or bool(q.get("terminal_raise"))
+            ) and pack_source is not None:
+                import json as _json  # noqa: PLC0415
+
+                from pipeline.postflop.preflop_leg_pack import (  # noqa: PLC0415
+                    build_preflop_fold_resolution,
+                    build_preflop_raise_resolution,
+                )
+
+                _builder = (
+                    build_preflop_raise_resolution
+                    if q.get("terminal_raise") else build_preflop_fold_resolution
+                )
+                _res = _builder(
+                    pack_source, q.get("hero_position", ""),
+                    q.get("hero_combo", ""), solve,
+                    hand_id=q.get("hand_id", ""),
+                    step_index=q.get("preflop_step_index"),
+                )
+                if _res is not None:
+                    _payload = _json.loads(rebuilt["animation_script"])
+                    _payload["version"] = 2
+                    _payload["resolution"] = _res
+                    rebuilt["animation_script"] = _json.dumps(
+                        _payload, separators=(",", ":")
+                    )
         elif is_preflop:
             rebuilt, options, correct = _rebuild_preflop(
                 row, q, solve, answer_style=answer_style, display_in_bb=display_in_bb

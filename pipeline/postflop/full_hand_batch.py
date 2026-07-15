@@ -29,6 +29,7 @@ end of the batch. Re-verify a finished batch with
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -44,7 +45,11 @@ from pipeline.postflop.batch import (
     _street_strategies,
 )
 from pipeline.postflop.claim_checker import POSTFLOP_CHECKER_SYSTEM_PROMPT
-from pipeline.postflop.difficulty import compute_difficulty, easy_freq_axis
+from pipeline.postflop.difficulty import (
+    aggregate_hand_difficulty,
+    compute_difficulty,
+    easy_freq_axis,
+)
 from pipeline.postflop.explanation_generator import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
@@ -65,7 +70,13 @@ from pipeline.postflop.format_writer import (
 )
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
-from pipeline.postflop.play_through import assemble_hands, balanced_hand_mix
+from pipeline.postflop.play_through import (
+    LENGTH_PROFILES,
+    assemble_hands,
+    balanced_hand_mix,
+    balanced_length_mix,
+)
+from pipeline.postflop.play_through import _solve_tag as _pt_solve_tag
 from pipeline.postflop.preflop_leg_pack import (
     _build_pack_facts,
     _facts_difficulty,
@@ -366,6 +377,8 @@ def generate_full_hand_batch(
     max_hand_difficulty: int | None = None,
     variety_seed: int | None = None,
     diversify_hands: bool = False,
+    balanced_lengths: bool = False,
+    length_profile: str = "river_leaning",
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
@@ -412,7 +425,14 @@ def generate_full_hand_batch(
     # usually deleted it -- a silent empty batch. With a band set, assemble a
     # larger candidate pool and scan until enough in-band hands are found.
     band_set = min_hand_difficulty is not None or max_hand_difficulty is not None
-    if band_set:
+    if balanced_lengths and not band_set:
+        # Balanced lengths assembles the WHOLE pool: fold-truncated flop
+        # enders come from combos that rarely reach deep streets, so they
+        # live at the very END of the deepest-first seed order -- any cap
+        # starves that bucket. Assembly is cheap (pure range math, no
+        # equity sims); facts are only computed for the quota-mixed keep.
+        scan_cap = None
+    elif band_set or balanced_lengths:
         scan_cap = max(60, total_hands * 20)
     elif diversify_hands:
         # Balanced mix needs an oversized pool to round-robin across
@@ -429,20 +449,124 @@ def generate_full_hand_batch(
         include_preflop=include_preflop, include_villain=include_villain,
         variety_seed=variety_seed,
     )
-    if diversify_hands and not band_set:
-        # With a difficulty band the scan-order heuristic governs instead
-        # (the band itself is the selector); mixing there would fight it.
-        hands = balanced_hand_mix(hands, total_hands)
 
     # --- pack-backed preflop legs (July 2026) -----------------------------
     # When a preflop range pack provably matches this solve's preflop line
     # (same table size / stack / open size), the preflop leg is built with
     # the FULL preflop pipeline (EVs, ranges, stat_notes, 4-axis difficulty)
     # instead of the entry-derived approximation. Per-hand coherence gate
-    # inside the builder; entry-derived leg is the fallback.
+    # inside the builder; entry-derived leg is the fallback. (Resolved
+    # BEFORE the length mix: preflop-ENDING hands are built from the pack.)
     pack_source = None
     if include_preflop and preflop_leg_pack_root is not None:
         pack_source = find_pack_leg_source(solve, preflop_leg_pack_root)
+
+    # --- preflop-ENDING hands (balanced lengths, July 2026) ---------------
+    # A quarter of a balanced batch ends preflop: hero's correct action at
+    # their deepest preflop decision is FOLD (worthy window), the hand is a
+    # single-leg (SRP) or open-then-fold story, and -- when folding to a
+    # raise -- the raiser reveals a clearly-stronger hand. Built from the
+    # matched pack only (entry weights cannot express a fold decision); with
+    # no pack the quota back-fills from the other streets and the counter
+    # says so.
+    preflop_ender_hands: list[Any] = []
+    if balanced_lengths and pack_source is not None and include_preflop:
+        import zlib as _zlib  # noqa: PLC0415
+
+        from pipeline.postflop.play_through import (  # noqa: PLC0415
+            HandLeg,
+            PlayThroughHand,
+        )
+        from pipeline.postflop.preflop_leg_pack import (  # noqa: PLC0415
+            combo_for_hand_class,
+            fold_ender_hand_classes,
+            raise_ender_hand_classes,
+        )
+        import random as _random  # noqa: PLC0415
+
+        ender_quota = total_hands // 4 + 2
+        seats = tuple(heroes) or tuple(solve.positions)
+        for hero in seats:
+            try:
+                steps = pack_source.steps_for(hero)
+            except (KeyError, ValueError):
+                continue
+            if not steps:
+                continue
+            step = steps[-1]  # the hero's DEEPEST preflop decision
+            fold_classes = fold_ender_hand_classes(
+                pack_source, hero, step_index=step.step_index,
+                min_frequency=min_frequency, max_frequency=max_frequency,
+            )
+            raise_classes = raise_ender_hand_classes(
+                pack_source, hero, step_index=step.step_index,
+                min_frequency=min_frequency, max_frequency=max_frequency,
+            )
+            order_rng = _random.Random(
+                variety_seed if variety_seed is not None else 0
+            )
+            order_rng.shuffle(fold_classes)
+            order_rng.shuffle(raise_classes)
+            # Interleave fold- and raise-enders so the preflop quarter
+            # itself is unpredictable: a preflop question's answer can be
+            # fold, call (the hand continues), or the re-raise (the hand
+            # ends with the pot pushed to hero).
+            classes: list[tuple[str, bool]] = []
+            fi = ri = 0
+            while len(classes) < ender_quota and (
+                fi < len(fold_classes) or ri < len(raise_classes)
+            ):
+                if fi < len(fold_classes):
+                    classes.append((fold_classes[fi], False)); fi += 1
+                if len(classes) < ender_quota and ri < len(raise_classes):
+                    classes.append((raise_classes[ri], True)); ri += 1
+            for hand_class, is_raise_ender in classes:
+                combo = combo_for_hand_class(
+                    hand_class,
+                    _random.Random(_zlib.crc32(
+                        f"{solve.source_reference}|ender|{hero}|{hand_class}".encode()
+                    )),
+                )
+                digest = hashlib.sha1(
+                    f"{solve.source_reference}|preflop_ender|{hero}|{combo}"
+                    f"|{step.step_index}".encode()
+                ).hexdigest()[:8]
+                preflop_ender_hands.append(PlayThroughHand(
+                    hand_id=f"{_pt_solve_tag(solve)}_{combo}_pf_{digest}",
+                    hero=hero, hero_combo=combo, frame="hero",
+                    legs=(HandLeg(
+                        kind="preflop_line", street="preflop",
+                        node_id=f"preflop_step:{step.step_index}",
+                        step_index=step.step_index,
+                        terminal_fold=not is_raise_ender,
+                        terminal_raise=is_raise_ender,
+                    ),),
+                ))
+        hands = hands + preflop_ender_hands
+
+    length_reserve: dict[str, list] = {}
+    if balanced_lengths and not band_set:
+        # Ending-street quotas per the length profile (river-leaning is the
+        # production default). The UNSELECTED pool is kept as a per-street
+        # RESERVE: when a hand dies mid-generation (whole-hand atomicity),
+        # a same-ending replacement takes its slot so a small batch can't
+        # silently lose its river hand. With a difficulty band the band
+        # scan governs instead.
+        pool = hands
+        hands = balanced_length_mix(
+            pool, total_hands,
+            weights=LENGTH_PROFILES.get(
+                length_profile, LENGTH_PROFILES["equal"]
+            ),
+        )
+        _selected = {id(h) for h in hands}
+        for h in pool:
+            if id(h) not in _selected:
+                length_reserve.setdefault(h.ending_street, []).append(h)
+    elif diversify_hands and not band_set:
+        # With a difficulty band the scan-order heuristic governs instead
+        # (the band itself is the selector); mixing there would fight it.
+        hands = balanced_hand_mix(hands, total_hands)
 
     # --- hand-difficulty pre-pass (July 2026) ------------------------------
     # hand_difficulty = MAX over the legs' Difficulty Ratings: the hand
@@ -466,24 +590,68 @@ def generate_full_hand_batch(
     # buildable legs. The hand itself survives (its postflop legs narrate
     # the full preflop line in their Question prose).
     preflop_line_legs_dropped = 0
-    if any(leg.kind == "preflop_line" for h in hands for leg in h.legs):
+    preflop_entry_legs_dropped = 0
+
+    def _filter_preflop_legs(hand):
+        """Validate/drop the hand's preflop legs (pack coherence, the
+        pack-first rule, the no-pack dominance gate). Pure reshaping --
+        counters via nonlocal. Used on the selected batch AND on every
+        top-up replacement, so a replacement can never skip the gates."""
+        nonlocal preflop_line_legs_dropped, preflop_entry_legs_dropped
         from dataclasses import replace as _dc_replace  # noqa: PLC0415
 
-        filtered_hands = []
-        for hand in hands:
+        if not any(
+            leg.kind in ("preflop_line", "preflop_entry") for leg in hand.legs
+        ):
+            return hand
+        if True:  # keep the original loop body's indentation
             kept_legs = []
             for leg in hand.legs:
+                if leg.kind == "preflop_entry":
+                    # PACK-FIRST RULE (July 2026, the user's call): when a
+                    # matching preflop chart exists, it is the ONLY source
+                    # of preflop questions -- a hand the pack's coherence
+                    # gate refuses gets NO preflop leg (never the entry
+                    # fallback, whose as-played framing can contradict the
+                    # solver: 'Mostly Open' correct above 'Fold: 81%').
+                    # With NO pack, the entry leg ships only when the
+                    # continue action is genuinely dominant (>= 50%).
+                    if pack_source is not None:
+                        key = (leg.entry_facts.hero_position,
+                               leg.entry_facts.hero_combo)
+                        if key not in pack_facts_cache:
+                            b = _build_pack_facts(
+                                pack_source, key[0], key[1], solve,
+                                equity_runouts=equity_runouts,
+                            )
+                            pack_facts_cache[key] = (
+                                None if b is None else _facts_difficulty(
+                                    b, trap_difficulty=trap_difficulty,
+                                    razor_difficulty=razor_difficulty,
+                                )
+                            )
+                        if pack_facts_cache[key] is None:
+                            preflop_entry_legs_dropped += 1
+                            continue
+                    elif leg.entry_facts.continue_freq < 0.5:  # noqa: PLR2004
+                        preflop_entry_legs_dropped += 1
+                        continue
+                    kept_legs.append(leg)
+                    continue
                 if leg.kind != "preflop_line":
                     kept_legs.append(leg)
                     continue
                 built = None
                 if pack_source is not None:
-                    key = (leg.step_index, hand.hero_combo)
+                    key = (leg.step_index, hand.hero_combo,
+                           leg.terminal_fold, leg.terminal_raise)
                     if key not in line_facts_cache:
                         b = _build_pack_facts(
                             pack_source, hand.hero, hand.hero_combo, solve,
                             equity_runouts=equity_runouts,
                             step_index=leg.step_index,
+                            terminal_fold=leg.terminal_fold,
+                            terminal_raise=leg.terminal_raise,
                         )
                         line_facts_cache[key] = (
                             None if b is None else _facts_difficulty(
@@ -496,12 +664,15 @@ def generate_full_hand_batch(
                     preflop_line_legs_dropped += 1
                     continue
                 kept_legs.append(leg)
-            filtered_hands.append(_dc_replace(hand, legs=tuple(kept_legs)))
-        hands = filtered_hands
+            return _dc_replace(hand, legs=tuple(kept_legs))
+
+    hands = [_filter_preflop_legs(h) for h in hands]
 
     def _score_hand(hand) -> int:
-        """hand_difficulty = MAX over the hand's legs (facts cached for the
-        generation loop, so nothing is computed twice)."""
+        """hand_difficulty = peak-anchored blend over the hand's legs
+        (aggregate_hand_difficulty: 0.65 x hardest + 0.35 x mean of the
+        rest -- see pipeline/postflop/difficulty.py). Facts cached for the
+        generation loop, so nothing is computed twice."""
         leg_scores: list[int] = []
         for leg in hand.legs:
             if leg.kind == "preflop_entry":
@@ -527,7 +698,10 @@ def generate_full_hand_batch(
             elif leg.kind == "preflop_line":
                 # Validated + cached by the up-front filter above; a leg
                 # whose facts failed was already dropped from the hand.
-                _pf, pd = line_facts_cache[(leg.step_index, hand.hero_combo)]
+                _pf, pd = line_facts_cache[
+                    (leg.step_index, hand.hero_combo,
+                     leg.terminal_fold, leg.terminal_raise)
+                ]
                 score = pd.score
             else:
                 key = (leg.spot.node.node_id, leg.spot.hero_combo)
@@ -539,7 +713,7 @@ def generate_full_hand_batch(
                     facts_cache[key], apply_trap_bump=trap_difficulty,
                 ).score
             leg_scores.append(score)
-        return max(leg_scores) if leg_scores else 0
+        return aggregate_hand_difficulty(leg_scores)
 
     hands_difficulty_filtered = 0
     hands_scanned = len(hands)
@@ -603,8 +777,14 @@ def generate_full_hand_batch(
     total_legs = sum(h.total for h in hands)
     done = 0
     hands_dropped_failed_leg = 0
+    hands_topped_up = 0
     showdown_resolutions = 0
-    for hand in hands:
+    ending_counts: dict[str, int] = {}
+    from collections import deque as _deque  # noqa: PLC0415
+
+    pending = _deque(hands)
+    while pending:
+        hand = pending.popleft()
         # WHOLE-HAND ATOMICITY (July 2026): a play-through with a missing
         # street is a broken story (the app would show a hand starting at
         # question 2 of 4), so legs are buffered per hand and committed only
@@ -639,8 +819,13 @@ def generate_full_hand_batch(
                     razor_difficulty=razor_difficulty,
                     system_prompt=preflop_pack_system_prompt,
                     usage_cb=_usage,
-                    prebuilt=line_facts_cache[(leg.step_index, hand.hero_combo)],
+                    prebuilt=line_facts_cache[
+                        (leg.step_index, hand.hero_combo,
+                         leg.terminal_fold, leg.terminal_raise)
+                    ],
                     step_index=leg.step_index,
+                    terminal_fold=leg.terminal_fold,
+                    terminal_raise=leg.terminal_raise,
                     run_claim_checker=run_claim_checker,
                     revise_pass=revise_pass,
                     final_audit=final_audit and revise_pass,
@@ -718,6 +903,25 @@ def generate_full_hand_batch(
             hand_recs.append(record)  # type: ignore[arg-type]
         if hand_failed:
             hands_dropped_failed_leg += 1
+            # TOP-UP (July 2026): whole-hand atomicity just cost the batch a
+            # hand -- pull a SAME-ENDING replacement from the reserve (then
+            # any street, deepest first) so a 2-hand batch can't silently
+            # lose its river hand. Replacements pass the same preflop-leg
+            # gates and get scored like everything else.
+            for street in (hand.ending_street, "river", "turn", "flop",
+                           "preflop"):
+                queue = length_reserve.get(street) or []
+                while queue:
+                    cand = _filter_preflop_legs(queue.pop(0))
+                    if cand.legs:
+                        hand_difficulties[cand.hand_id] = _score_hand(cand)
+                        pending.append(cand)
+                        total_legs += cand.total
+                        hands_topped_up += 1
+                        break
+                else:
+                    continue
+                break
             continue
         if hand_rows:
             # Showdown resolution (July 2026): the hand's FINAL leg gets the
@@ -727,6 +931,7 @@ def generate_full_hand_batch(
             # correct answer (see pipeline/postflop/showdown.py). Attached
             # only when the decision honestly ends the hand.
             last_leg = hand.legs[-1]
+            resolution = None
             if last_leg.kind == "postflop":
                 resolution = attach_showdown_resolution(
                     hand_rows[-1],
@@ -735,17 +940,48 @@ def generate_full_hand_batch(
                     correct_answer=hand_recs[-1].get("correct_answer", ""),
                     hand_id=hand.hand_id,
                 )
+            elif (
+                last_leg.kind == "preflop_line"
+                and (last_leg.terminal_fold or last_leg.terminal_raise)
+                and pack_source is not None
+            ):
+                # Preflop-ending hand: the raiser (if any) reveals a
+                # clearly-stronger starting hand -- the preflop analogue of
+                # the postflop vindication reveal. First-in folds get none.
+                from pipeline.postflop.preflop_leg_pack import (  # noqa: PLC0415
+                    build_preflop_fold_resolution,
+                    build_preflop_raise_resolution,
+                )
+
+                builder = (
+                    build_preflop_raise_resolution
+                    if last_leg.terminal_raise else build_preflop_fold_resolution
+                )
+                resolution = builder(
+                    pack_source, hand.hero, hand.hero_combo, solve,
+                    hand_id=hand.hand_id, step_index=last_leg.step_index,
+                )
                 if resolution is not None:
-                    showdown_resolutions += 1
-                    hand_recs[-1]["showdown"] = {
-                        "vindicates": resolution["vindicates"],
-                        "villain_cards": resolution["villain_cards"],
-                        "summary": resolution["summary"],
-                    }
+                    payload = json.loads(hand_rows[-1]["animation_script"])
+                    payload["version"] = 2
+                    payload["resolution"] = resolution
+                    hand_rows[-1]["animation_script"] = json.dumps(
+                        payload, separators=(",", ":")
+                    )
+            if resolution is not None:
+                showdown_resolutions += 1
+                hand_recs[-1]["showdown"] = {
+                    "vindicates": resolution["vindicates"],
+                    "villain_cards": resolution["villain_cards"],
+                    "summary": resolution["summary"],
+                }
             hd = hand_difficulties.get(hand.hand_id, 0)
             start = len(rows)
             for r in hand_rows:
                 r["hand_difficulty"] = str(hd)
+            ending_counts[hand.ending_street] = (
+                ending_counts.get(hand.ending_street, 0) + 1
+            )
             rows.extend(hand_rows)
             records.extend(hand_recs)
             leg_numbers = list(range(start + 1, start + len(hand_rows) + 1))
@@ -800,6 +1036,8 @@ def generate_full_hand_batch(
                 # settings + this seed = the same hands.
                 "variety_seed": variety_seed,
                 "diversify_hands": diversify_hands,
+                "balanced_lengths": balanced_lengths,
+                "length_profile": length_profile,
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
                 "final_audit": final_audit and revise_pass,
@@ -819,9 +1057,17 @@ def generate_full_hand_batch(
                 "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
                 "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
                 "preflop_line_legs_dropped": preflop_line_legs_dropped,
+                "preflop_entry_legs_dropped": preflop_entry_legs_dropped,
                 "hands_dropped_failed_leg": hands_dropped_failed_leg,
+                "hands_topped_up": hands_topped_up,
                 "showdown_resolutions": showdown_resolutions,
                 "cross_check_problems": cross_check_problems,
+                # Balanced-lengths accounting: the ACTUAL ending-street mix
+                # of the committed hands (quotas back-fill when a bucket
+                # runs short, so this is the ground truth, not the target),
+                # and how many preflop-ender candidates the pack yielded.
+                "hands_by_ending": ending_counts,
+                "preflop_ender_candidates": len(preflop_ender_hands),
                 "hands_written": len(hand_index),
                 "questions_written": len(rows),
                 # Layer-7 + soft-validator tallies (postflop legs only; 0 unless
