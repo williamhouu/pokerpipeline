@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "table_size": 8,
+  "seats": [
+    "UTG",
+    "UTG+1",
+    "LJ",
+    "HJ",
+    "CO",
+    "BTN",
+    "SB",
+    "BB"
+  ],
+  "hero_seat": "BTN",
+  "sb_bb": 0.5,
+  "bb_bb": 1.0,
+  "starting_stack_bb": 200.0,
+  "events": [
+    {
+      "i": 1,
+      "type": "post",
+      "seat": "SB",
+      "amount_bb": 0.5,
+      "amount_dollars": 1.0,
+      "to_bb": 0.5,
+      "to_dollars": 1.0,
+      "pot_bb": 0.5,
+      "pot_dollars": 1.0,
+      "stack_bb": 199.5,
+      "stack_dollars": 399.0
+    },
+    {
+      "i": 2,
+      "type": "post",
+      "seat": "BB",
+      "amount_bb": 1.0,
+      "amount_dollars": 2.0,
+      "to_bb": 1.0,
+      "to_dollars": 2.0,
+      "pot_bb": 1.5,
+      "pot_dollars": 3.0,
+      "stack_bb": 199.0,
+      "stack_dollars": 398.0
+    },
+    {
+      "i": 3,
+      "type": "fold",
+      "seat": "UTG"
+    },
+    {
+      "i": 4,
+      "type": "fold",
+      "seat": "UTG+1"
+    },
+    {
+      "i": 5,
+      "type": "fold",
+      "seat": "LJ"
+    },
+    {
+      "i": 6,
+      "type": "fold",
+      "seat": "HJ"
+    },
+    {
+      "i": 7,
+      "type": "fold",
+      "seat": "CO"
+    },
+    {
+      "i": 8,
+      "type": "raise",
+      "seat": "BTN",
+      "amount_bb": 3.0,
+      "amount_dollars": 6.0,
+      "to_bb": 3.0,
+      "to_dollars": 6.0,
+      "pot_bb": 4.5,
+      "pot_dollars": 9.0,
+      "stack_bb": 197.0,
+      "stack_dollars": 394.0
+    },
+    {
+      "i": 9,
+      "type": "fold",
+      "seat": "SB"
+    },
+    {
+      "i": 10,
+      "type": "call",
+      "seat": "BB",
+      "amount_bb": 2.0,
+      "amount_dollars": 4.0,
+      "pot_bb": 6.5,
+      "pot_dollars": 13.0,
+      "stack_bb": 197.0,
+      "stack_dollars": 394.0
+    },
+    {
+      "i": 11,
+      "type": "deal",
+      "street": "flop",
+      "cards": [
+        "Kd",
+        "7s",
+        "3s"
+      ]
+    },
+    {
+      "i": 12,
+      "type": "check",
+      "seat": "BB"
+    },
+    {
+      "i": 13,
+      "type": "decision",
+      "seat": "BTN",
+      "street": "flop"
+    }
+  ],
+  "bb_dollars": 2.0
+}

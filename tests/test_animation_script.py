@@ -113,6 +113,29 @@ def test_preflop_leg_stops_at_the_right_decision() -> None:
     assert ev[-1]["seat"] == "BB" and ev[-1]["type"] == "decision"
 
 
+def test_consecutive_leg_timelines_are_prefix_extensions() -> None:
+    """The full-hand fast-forward contract, documented for the app team in
+    docs/animation_script_format.md: drop a leg's terminal ``decision`` event
+    and what remains is an EXACT prefix of the next leg's event list (the
+    decision is replaced by the action the hand actually took), so a renderer
+    may play only the new tail. INVARIANT: any change that breaks this must
+    update the format doc and bump the renderer guidance."""
+    solve = btn_vs_bb_srp_2cJs7s()
+    legs = [
+        _events(build_preflop_animation_script(solve, "BB"))[1],
+        _events(build_postflop_animation_script(
+            solve.nodes["flop_oop_lead"], solve))[1],
+        _events(build_postflop_animation_script(
+            solve.nodes["turn_oop"], solve))[1],
+    ]
+    for prev, nxt in zip(legs, legs[1:]):
+        assert prev[-1]["type"] == "decision"
+        body = prev[:-1]
+        assert nxt[:len(body)] == body
+        # The event replacing the decision is the hero acting at that spot.
+        assert nxt[len(body)]["seat"] == prev[-1]["seat"]
+
+
 def test_dollar_twins_only_on_cash() -> None:
     solve = btn_vs_bb_srp_2cJs7s()
     node = next(iter(solve.nodes.values()))

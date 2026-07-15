@@ -39,6 +39,13 @@ response invented), and a river CHECK that closes the action.
 Deterministic: the villain hand and any runout are drawn from an RNG
 seeded by (hand_id, node_id, hero combo), so regeneration and the
 re-verifier reproduce the same reveal byte-for-byte.
+
+Winner metadata (July 2026, additive -- version stays 2): each ``reveal``
+carries ``best_five`` (the exact five cards making the hand, for the app
+to highlight); the ``win`` event carries ``reason`` ("showdown" | "fold"),
+``hand_label`` (showdown wins only -- on a fold win the winner's hand may
+never have been shown), and the winner's ``stack_bb`` AFTER collecting the
+pot (the renderer-does-zero-arithmetic invariant).
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ from __future__ import annotations
 import json
 import random
 import zlib
+from itertools import combinations
 
 from pipeline.action_history import format_card
 from pipeline.animation import AnimationTable
@@ -120,6 +128,18 @@ _SEAT_SUBJECT = {
 def _hand_prose(cards: list[str], board: list[str]) -> str:
     token = classify_hand(cards, board)["made_hand"]
     return _MADE_HAND_PROSE.get(token, token.replace("_", " "))
+
+
+def _best_five(cards: list[str], board: list[str]) -> list[str]:
+    """The exact five cards that make the hand (for the app to highlight).
+
+    Max over all 5-card subsets of hole+board by the shared evaluator;
+    deterministic (fixed input order, first max wins ties, e.g. a board
+    quads where the kicker choice is equivalent)."""
+    seven = cards + board
+    if len(seven) <= 5:  # noqa: PLR2004 -- a pre-river fold ending
+        return list(seven)
+    return list(max(combinations(seven, 5), key=lambda c: rank_hand(list(c))))
 
 
 def _cards_emoji(cards: list[str]) -> str:
@@ -298,11 +318,15 @@ def build_showdown_resolution(
     table.emit(
         "reveal", seat=villain, cards=list(villain_cards),
         hand_label=villain_label,
+        best_five=_best_five(villain_cards, final_board),
         **({"folded": True} if villain_folds else {}),
     )
     hero_label = _hand_prose(hero_cards, final_board)
     if hero_shows:
-        table.emit("reveal", seat=hero, cards=hero_cards, hand_label=hero_label)
+        table.emit(
+            "reveal", seat=hero, cards=hero_cards, hand_label=hero_label,
+            best_five=_best_five(hero_cards, final_board),
+        )
 
     if verb == "fold":
         winner = villain
@@ -312,8 +336,19 @@ def build_showdown_resolution(
         winner = hero if rank_hand(hero_cards + final_board) > rank_hand(
             villain_cards + final_board
         ) else villain
-    win_event = table.emit("win", seat=winner)
-    table.money(win_event, pot_bb=table.pot)
+    # The win event carries everything the app's pot-push + result banner
+    # needs, so the renderer does zero inference: WHY the seat won
+    # ("showdown" | "fold"), the winning hand's label at a showdown (never
+    # on a fold win -- the winner's hand may not have been shown), and the
+    # winner's stack AFTER collecting the pot (the money invariant: every
+    # chip event states the resulting state).
+    won_at_showdown = verb != "fold" and not villain_folds
+    win_fields: dict = {"reason": "showdown" if won_at_showdown else "fold"}
+    if won_at_showdown:
+        win_fields["hand_label"] = hero_label if winner == hero else villain_label
+    win_event = table.emit("win", seat=winner, **win_fields)
+    table.stacks[winner] += table.pot
+    table.money(win_event, pot_bb=table.pot, stack_bb=table.stacks[winner])
 
     # --- the one-line summary for the app's result screen -------------------
     v_subj = _SEAT_SUBJECT.get(villain, villain)

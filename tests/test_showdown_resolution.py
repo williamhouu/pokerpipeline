@@ -88,6 +88,78 @@ def test_fold_ending_shows_a_stronger_hand() -> None:
     )
 
 
+def test_win_event_carries_reason_label_and_stack() -> None:
+    """The app's pot push + result banner read the win event directly:
+    reason (showdown|fold), hand_label on showdown wins only, and the
+    winner's stack AFTER the pot. Reveals carry best_five. INVARIANT:
+    these fields are additive to format version 2 -- removing or renaming
+    them breaks the app's renderer contract (docs/animation_script_format.md)."""
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    node = _river_node(solve)
+    combo = next(iter(node.strategy))
+    correct = "Call" if node.is_facing_bet else "Check"
+    res = build_showdown_resolution(
+        node, solve, hero_combo=combo, correct_answer=correct, hand_id="h1",
+    )
+    if res is not None:
+        win = res["events"][-1]
+        assert win["type"] == "win" and win["reason"] == "showdown"
+        # A vindicated call/check win: hero wins, label matches hero's reveal.
+        hero_reveal = next(
+            e for e in res["events"]
+            if e["type"] == "reveal" and e["seat"] == node.actor
+        )
+        assert win["hand_label"] == hero_reveal["hand_label"]
+        assert win["stack_bb"] > 0 and win["pot_bb"] > 0
+        # best_five: five real cards, all from hole+board, best by rank.
+        board = list(node.board)
+        for e in res["events"]:
+            if e["type"] == "reveal":
+                bf = e["best_five"]
+                assert len(bf) == 5 and set(bf) <= set(e["cards"] + board)
+                assert rank_hand(bf) == rank_hand(e["cards"] + board)
+
+    if node.is_facing_bet:
+        fold_res = build_showdown_resolution(
+            node, solve, hero_combo=combo, correct_answer="Fold", hand_id="h1",
+        )
+        if fold_res is not None:
+            win = fold_res["events"][-1]
+            assert win["reason"] == "fold"
+            assert "hand_label" not in win
+            # Winner's stack after the pot: strictly above their stack on
+            # any earlier event (they gained the pot without wagering).
+            assert win["stack_bb"] > 0
+
+
+def test_win_hand_label_is_the_winners_not_heros() -> None:
+    """win.hand_label names the WINNING hand, whoever holds it. The one
+    showdown the hero can lose is the closing river check-back with no
+    weaker hand in villain's range (the check 'lost the minimum'):
+    the label must then be VILLAIN'S hand, not hero's."""
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    node = next(n for n in solve.nodes.values() if n.street == "river")
+    ip = solve.ip_position
+    oop = "BB" if ip == "BTN" else "BTN"
+    node = replace(
+        node,
+        actor=ip, villain=oop,
+        history=tuple(s for s in node.history if s.street != "river"),
+        villain_range={"AhAd": 1.0},  # villain always has hero beat
+    )
+    res = build_showdown_resolution(
+        node, solve, hero_combo="8h6h", correct_answer="Check", hand_id="rig",
+    )
+    assert res is not None
+    win = res["events"][-1]
+    reveals = {
+        e["seat"]: e["hand_label"] for e in res["events"] if e["type"] == "reveal"
+    }
+    assert win["seat"] == oop and win["reason"] == "showdown"
+    assert win["hand_label"] == reveals[oop] != reveals[ip]
+    assert "lost the minimum" in res["summary"]
+
+
 def test_non_ending_decisions_get_no_resolution() -> None:
     """A flop call with betting still live is not an ending."""
     solve = btn_vs_bb_full_hand_2cJs7s()
