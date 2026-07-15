@@ -169,6 +169,126 @@ def validate_no_garbled_card_glyphs(
     return PostflopValidationResult.ok()
 
 
+
+
+# --- made-hand naming + impossible-hand validators (July 2026) ---------------
+# Built because the Layer-7 audit history showed the SAME two error classes
+# surviving (and sometimes being INTRODUCED by) the LLM rewrite: hero's hand
+# named wrong ("top pair" for second pair on A-K-9) and villain hands that
+# cannot exist ("99 through QQ" on a 9-paired board). Both are pure code
+# checks; per the project's founding rule, a recurring LLM-caught error moves
+# down into a deterministic validator.
+
+# Hand-name vocabulary -> the made_hand tokens each name is allowed to
+# describe. Names not listed (king-high, "a pair", draws) are never checked.
+_HAND_NAME_ALLOWED: tuple[tuple[str, frozenset[str]], ...] = (
+    ("top two pair", frozenset({"two_pair_top", "two_pair_top_and_bottom"})),
+    ("two pair", frozenset({
+        "two_pair", "two_pair_top", "two_pair_mid", "two_pair_top_and_bottom",
+        "full_house", "full_house_set_plus_board", "full_house_trips_plus_pocket",
+    })),
+    ("top pair", frozenset({
+        "top_pair_top_kicker", "top_pair_good_kicker", "top_pair_weak_kicker",
+        "two_pair_top", "two_pair_top_and_bottom",
+    })),
+    ("second pair", frozenset({"second_pair"})),
+    ("middle pair", frozenset({"middle_pair", "second_pair", "third_pair"})),
+    ("third pair", frozenset({"third_pair"})),
+    ("bottom pair", frozenset({"bottom_pair"})),
+    ("overpair", frozenset({"overpair"})),
+    ("underpair", frozenset({"underpair", "pocket_pair_below_overcards"})),
+    ("full house", frozenset({
+        "full_house", "full_house_set_plus_board", "full_house_trips_plus_pocket",
+    })),
+    ("trips", frozenset({"trips", "full_house_trips_plus_pocket"})),
+    ("a set", frozenset({"set", "full_house_set_plus_board"})),
+    ("quads", frozenset({"quads"})),
+)
+_HERO_CUES = ("you", "your")
+_VILLAIN_CUES = ("their", "they", "villain", "opponent", "bb'", "btn'",
+                 "bb ", "btn ", "blind")
+
+
+def validate_hero_hand_name(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,
+) -> PostflopValidationResult:
+    """Hero's made hand must be NAMED as the solver classified it.
+
+    Scans the prose for hand-name vocabulary in a hero context ("you have /
+    your ..." nearby, with no villain cue in between) and fails when the
+    name is incompatible with ``facts.made_hand``. Conservative on purpose:
+    villain references, generic words ("a pair"), and unlisted names are
+    never flagged. INVARIANT: runs on first drafts AND on Layer-7 rewrites
+    (the observed failure was a rewrite INTRODUCING "top pair").
+    """
+    text = generated.answer_explanation.lower()
+    token = facts.made_hand
+    for name, allowed in _HAND_NAME_ALLOWED:
+        start = 0
+        while True:
+            i = text.find(name, start)
+            if i < 0:
+                break
+            start = i + len(name)
+            window = text[max(0, i - 45):i]
+            if any(c in window for c in _VILLAIN_CUES):
+                continue
+            if not any(c in window for c in _HERO_CUES):
+                continue
+            # "top two pair" contains "two pair"/"top pair": skip submatches
+            wider = text[max(0, i - 4):i + len(name) + 4]
+            if name != "top two pair" and "top two pair" in wider:
+                continue
+            if token not in allowed:
+                return PostflopValidationResult.fail(
+                    f"prose calls hero's hand '{name}' but the solver "
+                    f"classified it as '{token}' -- name the hand exactly "
+                    "as the HAND CLASS line states"
+                )
+    return PostflopValidationResult.ok()
+
+
+_HAND_TOKEN_RE = re.compile(
+    r"\b([AKQJT98765432])([AKQJT98765432])(s|o)?\b"
+)
+
+
+def validate_no_impossible_hands(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,
+) -> PostflopValidationResult:
+    """Any hand-class token in the prose ("99", "AQ", "KTs") must still be
+    dealable given the board + hero's cards.
+
+    Rank-level card counting: a pair needs 2 unseen cards of the rank; an
+    unpaired class needs 1 of each. Catches "pairs like 99 through QQ" on a
+    9-paired board -- impossible hands the audit kept flagging in prose.
+    """
+    text = generated.answer_explanation
+    seen: dict[str, int] = {}
+    hero = facts.spot.hero_combo
+    for card in list(facts.board) + [hero[:2], hero[2:]]:
+        r = card[0].upper()
+        seen[r] = seen.get(r, 0) + 1
+    for m in _HAND_TOKEN_RE.finditer(text):
+        r1, r2 = m.group(1), m.group(2)
+        if r1 == r2:  # pocket pair token like "99"
+            if 4 - seen.get(r1, 0) < 2:
+                return PostflopValidationResult.fail(
+                    f"prose mentions '{m.group(0)}' but only "
+                    f"{4 - seen.get(r1, 0)} {r1}s remain unseen -- that "
+                    "hand is impossible on this board"
+                )
+        else:
+            if 4 - seen.get(r1, 0) < 1 or 4 - seen.get(r2, 0) < 1:
+                return PostflopValidationResult.fail(
+                    f"prose mentions '{m.group(0)}' but every {r1 if 4 - seen.get(r1, 0) < 1 else r2} "
+                    "is already visible -- that hand is impossible"
+                )
+    return PostflopValidationResult.ok()
+
+
 def run_postflop_audit_validators(
     generated: GeneratedExplanation,
     facts: PostflopFacts,
@@ -179,6 +299,8 @@ def run_postflop_audit_validators(
         validate_banned_phrases,
         validate_card_suit_consistency,
         validate_no_garbled_card_glyphs,
+        validate_hero_hand_name,
+        validate_no_impossible_hands,
     ):
         result = check(generated, facts)
         if not result.is_valid:
@@ -422,4 +544,6 @@ __all__ = [
     "validate_card_suit_consistency",
     "validate_correct_answer",
     "validate_no_garbled_card_glyphs",
+    "validate_hero_hand_name",
+    "validate_no_impossible_hands",
 ]

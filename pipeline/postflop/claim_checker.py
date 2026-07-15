@@ -37,6 +37,18 @@ from pipeline.postflop.explanation_generator import DEFAULT_MODEL
 # The checker's output is a short JSON list, so it needs little room.
 _CHECKER_MAX_TOKENS = 1024
 
+_CHECKER_CALIBRATION = (
+    "\nCALIBRATION -- WHAT NOT TO FLAG:\n"
+    "- Flag ONLY claims that CONTRADICT the SOLVER DATA or the QUESTION's "
+    "action history. Style, tone, emphasis, and word choice are out of "
+    "scope.\n"
+    "- If you find yourself writing 'minor', 'slightly', 'defensible', "
+    "'imprecise but', or 'technically', do NOT flag it -- that is the "
+    "signal the claim is acceptable.\n"
+    "- A number that matches the data within rounding is correct; do not "
+    "flag how it is framed unless the framing reverses its meaning.\n"
+)
+
 POSTFLOP_CHECKER_SYSTEM_PROMPT = (
     "You are a sharp No-Limit Hold'em poker editor reviewing ONE answer "
     "explanation for a single POSTFLOP spot (a flop, turn, or river decision). "
@@ -125,6 +137,7 @@ POSTFLOP_CHECKER_SYSTEM_PROMPT = (
     "from the explanation>\", \"problem\": \"<one sentence on why it confuses "
     "the reader or is wrong>\"}]}. If nothing is wrong, return {\"issues\": []}. "
     "Output only the JSON, with no preamble and no code fence."
+    + _CHECKER_CALIBRATION
 )
 
 

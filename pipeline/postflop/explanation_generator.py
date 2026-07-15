@@ -121,7 +121,16 @@ equity. When the CURRENTLY AHEAD line shows a chop share (TIES), treat it honest
 ("You should bet 53%" is wrong). State the action so it matches the correct \
 option's wording, and express any size in natural poker language with the real \
 amount where given: "bet about half the pot (4bb)", "a small third-pot bet", \
-"an overbet". Rough map: ~33% = about a third of the pot, ~50-60% = about half \
+"an overbet".
+12. Hand naming: name YOUR made hand exactly as the HAND CLASS line \
+classifies it, every time you name it. Never re-derive it from the cards: \
+if the class says second pair, "top pair" is wrong even if the king looks \
+big. When unsure, repeat the class name verbatim.
+13. Range-share numbers: the strong-made percentages in the RANGE/NUT \
+ADVANTAGE facts are each player's SHARE OF THEIR OWN RANGE that is \
+two-pair-plus -- not equity, not combo counts, not the chance of being \
+ahead. Describe them only as "X% of your/their range is two pair or \
+better", or leave them out. Rough map: ~33% = about a third of the pot, ~50-60% = about half \
 the pot, ~66-80% = about two-thirds pot, ~100% = a pot-sized bet, 110%+ = an \
 overbet.
 Return only the explanation text, no preamble, no headings.

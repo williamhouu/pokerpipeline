@@ -1998,3 +1998,67 @@ def test_action_ev_display_normalizes_fold_to_zero() -> None:
     assert _format_action_evs(evs, freqs) == "Fold: +0.00, Call: -4.16"
     # No fold at the node -> untouched.
     assert _format_action_evs({"Check": 1.18}, {"Check": 1.0}) == "Check: +1.18"
+
+
+def test_validate_hero_hand_name_and_impossible_hands():
+    """The two July-2026 hard validators built from Layer-7 audit history:
+    hero's hand must be NAMED per the solver's classification (the top
+    residual rewrite error: "top pair" for second pair on A-K-9), and prose
+    may not cite hands the visible cards make impossible ("99" on a
+    9-paired board)."""
+    from types import SimpleNamespace
+
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.postflop.validators import (
+        validate_hero_hand_name,
+        validate_no_impossible_hands,
+    )
+
+    def gen(text):
+        return GeneratedExplanation(
+            option_1="Always Check", option_2="Mostly Check",
+            option_3="Mostly Bet", option_4="Always Bet",
+            correct_answer="Mostly Bet", answer_explanation=text,
+        )
+
+    facts = SimpleNamespace(
+        made_hand="second_pair",
+        board=("As", "Kd", "9h"),
+        spot=SimpleNamespace(hero_combo="KsTs"),
+    )
+    # the exact observed regression: rewrite calls second pair "top pair"
+    bad = validate_hero_hand_name(gen("You have top pair with a decent kicker."), facts)
+    assert not bad.is_valid and "second_pair" in bad.error_message
+    assert validate_hero_hand_name(gen("You have second pair here."), facts).is_valid
+    # villain context is never flagged
+    assert validate_hero_hand_name(
+        gen("You beat their top pair rarely."), facts
+    ).is_valid
+    # unlisted names are never flagged
+    assert validate_hero_hand_name(gen("Your king-high misses."), facts).is_valid
+
+    # impossible-hand check: THREE 9s visible (paired board + hero 9) ->
+    # "99" is dead; two visible leaves the last two, still dealable.
+    facts2 = SimpleNamespace(
+        made_hand="trips",
+        board=("9s", "9d", "Th"),
+        spot=SimpleNamespace(hero_combo="9h8s"),
+    )
+    bad = validate_no_impossible_hands(gen("Pairs like 99 keep calling."), facts2)
+    assert not bad.is_valid and "99" in bad.error_message
+    assert validate_no_impossible_hands(gen("Pairs like 88 keep calling."), facts2).is_valid
+    # two 9s visible only: 99 still possible (never flag)
+    facts3 = SimpleNamespace(
+        made_hand="second_pair",
+        board=("9s", "9d", "Th"),
+        spot=SimpleNamespace(hero_combo="KsQs"),
+    )
+    assert validate_no_impossible_hands(gen("99 turned quads."), facts3).is_valid
+    # unpaired token: "A9" with one ace left is fine; dead only at zero aces
+    facts4 = SimpleNamespace(
+        made_hand="two_pair",
+        board=("Ah", "Ad", "9c"),
+        spot=SimpleNamespace(hero_combo="AsAc"),
+    )
+    bad = validate_no_impossible_hands(gen("A9 is in their range."), facts4)
+    assert not bad.is_valid
