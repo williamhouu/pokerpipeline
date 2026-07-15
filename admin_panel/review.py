@@ -360,6 +360,193 @@ def approved_rows_to_csv(fieldnames: list[str], rows: list[dict[str, str]]) -> s
     return buf.getvalue()
 
 
+# --- full-hand (play-through) hand-level review ------------------------------
+# The unit a reviewer ships is the HAND, not the leg: the app only ever
+# receives complete preflop->river sequences, so one bad leg poisons its whole
+# hand. These helpers are pure/file-level (no Streamlit) so the hand-level UI
+# is a thin shell over browserlessly-tested logic (the fix-durability rule).
+
+HAND_FILTER_MODES = ("all", "drop_rejected", "approved_only")
+
+
+def hand_status(leg_nos: list[object], reviews: dict[str, dict[str, str]]) -> str:
+    """Aggregate one full hand's review status from its legs' grades.
+
+    WHOLE-HAND ATOMICITY: any rejected leg -> ``"rejected"`` (the hand can't
+    ship with a bad leg, and shipping it without that leg would be a partial
+    hand); else any needs_review leg -> ``"needs_review"``; else ALL legs
+    approved -> ``"approved"``; anything else -> ``""`` (pending).
+    """
+    statuses = [reviews.get(str(n), {}).get("status", "") for n in leg_nos]
+    if "rejected" in statuses:
+        return "rejected"
+    if "needs_review" in statuses:
+        return "needs_review"
+    if statuses and all(s == "approved" for s in statuses):
+        return "approved"
+    return ""
+
+
+def save_reviews_bulk(
+    csv_path: Path,
+    nos: list[object],
+    status: str,
+    note: str | None = None,
+) -> None:
+    """Grade many questions in ONE sidecar write (the hand-level buttons).
+
+    ``note=None`` PRESERVES each leg's existing note (audit flags live
+    there); a string replaces it. Existing reviewer-edited explanation
+    overrides are always preserved.
+    """
+    if status not in REVIEW_STATUSES:
+        raise ValueError(f"status must be one of {REVIEW_STATUSES}, got {status!r}")
+    reviews = load_reviews(csv_path)
+    for no in nos:
+        old = reviews.get(str(no), {})
+        entry: dict[str, str] = {
+            "status": status,
+            "note": old.get("note", "") if note is None else note,
+        }
+        if old.get("explanation"):
+            entry["explanation"] = old["explanation"]
+        reviews[str(no)] = entry
+    path = review_sidecar_path(csv_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(reviews, fh, indent=2, ensure_ascii=False)
+
+
+def remove_hand(csv_path: Path, nos: list[object]) -> int:
+    """Remove ALL of a hand's legs from a batch CSV in one rewrite.
+
+    The hand-level analogue of :func:`remove_question` -- removing legs
+    one-by-one could leave an orphaned partial hand if interrupted; this
+    drops the whole set atomically and clears their sidecar grades.
+    Remaining rows keep their ``No`` (stable ids; gaps are fine). Returns
+    the number of rows removed.
+    """
+    if not csv_path.is_file():
+        return 0
+    wanted = {str(n) for n in nos}
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+    kept = [row for row in rows if str(row.get("No")) not in wanted]
+    removed = len(rows) - len(kept)
+    if removed == 0:
+        return 0
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    reviews = load_reviews(csv_path)
+    if any(str(n) in reviews for n in nos):
+        for n in nos:
+            reviews.pop(str(n), None)
+        with review_sidecar_path(csv_path).open("w", encoding="utf-8") as fh:
+            json.dump(reviews, fh, indent=2, ensure_ascii=False)
+    return removed
+
+
+def group_hand_rows(rows: list[dict[str, str]]) -> list[tuple[str, list[dict[str, str]]]]:
+    """Group batch rows into hands, preserving CSV order.
+
+    Rows sharing a non-blank ``hand_id`` form one hand (legs sorted by
+    ``sequence_index``); a blank ``hand_id`` row is its own singleton group
+    (standalone question). Group key is the hand_id or ``"__row_<No>"``.
+    """
+    groups: dict[str, list[dict[str, str]]] = {}
+    order: list[str] = []
+    for row in rows:
+        hid = str(row.get("hand_id", "") or "").strip()
+        key = hid if hid else f"__row_{row.get('No', '')}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+
+    def _seq(r: dict[str, str]) -> int:
+        try:
+            return int(float(str(r.get("sequence_index", "") or 0)))
+        except ValueError:
+            return 0
+
+    return [(k, sorted(groups[k], key=_seq)) for k in order]
+
+
+def filter_hand_rows(
+    rows: list[dict[str, str]],
+    reviews: dict[str, dict[str, str]],
+    mode: str,
+) -> tuple[list[dict[str, str]], int, int]:
+    """Filter a batch to WHOLE hands by review status, for export.
+
+    ``mode``: ``"all"`` keeps everything; ``"drop_rejected"`` keeps every
+    hand except rejected ones; ``"approved_only"`` keeps only fully-approved
+    hands (see :func:`hand_status`). Output rows are COPIES with ``No``
+    renumbered contiguously from 1 (the on-disk batch is untouched) and any
+    reviewer-edited explanation override substituted, so the export always
+    carries the latest text. Hands are never split.
+
+    Returns ``(rows, kept_hands, total_hands)``.
+    """
+    if mode not in HAND_FILTER_MODES:
+        raise ValueError(f"mode must be one of {HAND_FILTER_MODES}, got {mode!r}")
+    out: list[dict[str, str]] = []
+    kept_hands = total_hands = 0
+    next_no = 1
+    for _key, legs in group_hand_rows(rows):
+        total_hands += 1
+        status = hand_status([r.get("No", "") for r in legs], reviews)
+        keep = (
+            mode == "all"
+            or (mode == "drop_rejected" and status != "rejected")
+            or (mode == "approved_only" and status == "approved")
+        )
+        if not keep:
+            continue
+        kept_hands += 1
+        for r in legs:
+            grade = reviews.get(str(r.get("No", "")), {})
+            row = dict(r)
+            if grade.get("explanation"):
+                row["Answer Explanation"] = grade["explanation"]
+            row["No"] = str(next_no)
+            next_no += 1
+            out.append(row)
+    return out, kept_hands, total_hands
+
+
+def meta_question_for_leg(
+    meta: dict[str, object] | None,
+    *,
+    hand_id: str,
+    sequence_index: str,
+) -> dict[str, object] | None:
+    """Find a FULL-HAND row's meta question record by (hand_id,
+    sequence_index) -- the one key that is unique and present for EVERY leg
+    kind. The older (node_id, last-path-segment-as-combo) join silently
+    missed pack PREFLOP legs, whose solver_reference ends in the node id,
+    hiding their Layer-7 panels (the audit ran; Review showed nothing).
+    Returns None for blank hand_id (standalone rows use the node/combo join).
+    """
+    if not isinstance(meta, dict) or not str(hand_id).strip():
+        return None
+    questions = meta.get("questions")
+    if not isinstance(questions, list):
+        return None
+    for q in questions:
+        if (
+            isinstance(q, dict)
+            and str(q.get("hand_id", "")) == str(hand_id)
+            and str(q.get("sequence_index", "")) == str(sequence_index)
+        ):
+            return q
+    return None
+
+
 def batch_meta_path(csv_path: Path) -> Path:
     """Path to the prompt/inputs metadata sidecar for a batch CSV."""
     return csv_path.with_suffix(".meta.json")

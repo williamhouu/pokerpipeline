@@ -654,7 +654,7 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   (0/0 on the real v7 batch). Tests: `tests/test_full_hand_pack_legs.py`.
 - **Full-hand difficulty (July 2026).** Every leg keeps its own per-
   question `Difficulty Rating` (the app's per-question scoring); a new
-  END-of-schema column **`hand_difficulty` = MAX over the hand's legs**
+  END-of-schema column **`hand_difficulty` = peak-anchored blend over the hand's legs (July 13: 0.65 x hardest leg + 0.35 x mean of the rest, `pipeline/postflop/difficulty.py:aggregate_hand_difficulty` -- was MAX, which over-promised on one-spike hands)**
   (same value on every leg; blank on standalone rows) is the hand-level
   selector — a hand demands what its hardest decision demands, so a mean
   would wash out a 2400 river bluff-catch behind three easy calls.
@@ -819,7 +819,11 @@ histories (folds EXPLICIT, sizes from the same resolution as the prose --
 `resolve_preflop_history` / PLO `resolve_pot_limit`, Monker seats mapped to
 display names) onto it. Shared `CSV_COLUMNS` is now 52 columns
 (animation_script last, after chat_context); PREFLOP/PLO schemas inherit
-it automatically.
+it automatically. **App-team format spec: `docs/animation_script_format.md`
++ real sample payloads in `docs/animation_script_samples/`** (July 2026);
+the documented fast-forward contract (drop a leg's terminal `decision` ->
+exact prefix of the next leg) is pinned by
+`tests/test_animation_script.py:test_consecutive_leg_timelines_are_prefix_extensions`.
 
 **Showdown resolution + artifact-all-in gates (July 2026).** Full-hand
 final legs carry a `resolution` object in `animation_script` (version 2):
@@ -832,7 +836,13 @@ right (call -> weaker, fold -> stronger shown, value bet -> paid by worse,
 bluff -> folds out better; ties excluded; empty slice -> no resolution).
 Builder `pipeline/postflop/showdown.py`; counter
 `counters.showdown_resolutions`; re-attached by audit_full_hand_batch
-(byte-exact); Review shows a per-card reveal caption. ARTIFACT ALL-IN
+(byte-exact); Review shows a per-card reveal caption. Winner metadata
+(July 13, additive, version stays 2): `win` events carry `reason`
+(showdown|fold), `hand_label` (showdown wins only), and the winner's
+post-pot `stack_bb`; `reveal` events carry `best_five` (the exact five
+cards to highlight). Ending taxonomy for the app (incl. the no-resolution
+fallback + wrong-answer rule) documented in
+`docs/animation_script_format.md` "Endings" section. ARTIFACT ALL-IN
 GATES (team standing rule): generation skips lines/answers built on
 unrealistic tree jams -- postflop `premise.line_contains_artifact_allin`
 (all-in wager > 40bb AND > 1.5x the pot it fires into; counted in

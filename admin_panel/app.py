@@ -603,6 +603,20 @@ def _pack_display_framing(pack: PreflopPack) -> tuple[str, float]:
     return ("Live", 2.00) if is_live else ("Online", 0.50)
 
 
+def _default_postflop_venue(table_size: int | None) -> str:
+    """Venue display default for a postflop ``.db`` solve.
+
+    Full-ring tables (8/9-max) read as LIVE games -- every current solve
+    family is a live-cash structure (the v7 8-max 200bb DBs' own gametype is
+    ``Cash8mLiveGeneral``; the v8 9-max has a live 10% rake) -- while 6-max
+    is the online convention. The old ``>= 9`` rule silently framed every
+    8-max batch as "Online $1/$2 with a capped live rake" (contradictory);
+    pinned by a browserless test so the threshold can't regress when the
+    widget block is refactored.
+    """
+    return "Live" if (table_size or 9) >= 8 else "Online"  # noqa: PLR2004
+
+
 def _select_preflop_pack(widget_key: str) -> PreflopPack | None:
     """Render the pack selector and return the chosen pack.
 
@@ -1082,7 +1096,41 @@ def _render_generate_page_postflop() -> None:
         )
     pf_include_villain = False
     pf_diversify_hands = False
+    pf_balanced_lengths = False
     if pf_mode == "full_hand":
+        pf_balanced_lengths = st.checkbox(
+            "⚖️ Balanced hand lengths (production default)",
+            value=True,
+            key="postflop_balanced_lengths",
+            help=(
+                "Equal quarters of hands ending preflop, on the flop, on the "
+                "turn, and on the river. The early enders finish on a correct "
+                "FOLD (with the raiser revealing a stronger hand where one "
+                "exists), so a user can never infer 'the hand continues, so "
+                "fold is wrong'. Needs the matched preflop pack for the "
+                "preflop-ending quarter; a short bucket back-fills from the "
+                "others (counters report the actual mix). Ignored when a "
+                "difficulty band is set."
+            ),
+        )
+        pf_length_profile = "river_leaning"
+        if pf_balanced_lengths:
+            pf_length_profile = st.radio(
+                "Length profile",
+                ["river_leaning", "equal"],
+                format_func=lambda v: (
+                    "River-leaning — 40% river / 20% each (default)"
+                    if v == "river_leaning" else "Equal — 25% each"
+                ),
+                horizontal=True,
+                key="postflop_length_profile",
+                help=(
+                    "Share of the batch's HANDS ending on each street. "
+                    "River hands carry the most questions either way; "
+                    "20% per early street keeps fold/raise endings too "
+                    "common to discount."
+                ),
+            )
         pf_diversify_hands = st.checkbox(
             "🎨 Balanced hand mix",
             value=True,
@@ -1530,10 +1578,17 @@ def _render_generate_page_postflop() -> None:
             help="How the pot / stack / bets render in the question prose.",
         )
         display_in_bb = display_choice == "Big blinds"
-        default_live_idx = 0 if (solve.table_size or 9) >= 9 else 1  # noqa: PLR2004
+        _venue_default = _default_postflop_venue(solve.table_size)
         live = st.radio(
-            "Venue", ["Live", "Online"], index=default_live_idx, horizontal=True,
+            "Venue", ["Live", "Online"],
+            index=["Live", "Online"].index(_venue_default),
+            horizontal=True,
             key="postflop_live",
+            help=(
+                "Display framing only. Defaults to Live for full-ring solves "
+                "(8/9-max — every current .db is a live-cash solve); Online "
+                "for 6-max."
+            ),
         )
         stakes = st.text_input("Stakes (display)", value="$1/$2", key="postflop_stakes")
         bb_dollars = st.number_input(
@@ -1807,6 +1862,8 @@ def _render_generate_page_postflop() -> None:
                     # meta run_settings, so any batch stays reproducible.
                     variety_seed=random.randrange(2**31),
                     diversify_hands=pf_diversify_hands,
+                    balanced_lengths=pf_balanced_lengths,
+                    length_profile=pf_length_profile,
                     run_claim_checker=pf_run_claim_checker,
                     claim_checker_prompt=pf_claim_checker_prompt,
                     revise_pass=pf_revise_pass,
@@ -4279,11 +4336,15 @@ def _scan_preflop_outputs() -> pd.DataFrame:
     for path in PREFLOP_OUTPUT_DIR.glob("*.csv"):
         stat = path.stat()
         try:
-            # Quick row count: newlines - 1 for the header row. Cheap
-            # even on multi-MB files since we just count bytes.
-            with path.open("rb") as fh:
-                row_count = max(0, sum(1 for _ in fh) - 1)
-        except OSError:
+            # Real CSV row count (csv.reader, not raw newlines): question
+            # prose is multiline, so counting lines overstated the number
+            # ("79 questions" on a 24-row batch). Files are small; fine per
+            # rerun.
+            import csv as _csv  # noqa: PLC0415
+
+            with path.open(newline="", encoding="utf-8-sig") as fh:
+                row_count = max(0, sum(1 for _ in _csv.reader(fh)) - 1)
+        except (OSError, UnicodeDecodeError):
             row_count = 0
         rows.append(
             {
@@ -6297,6 +6358,83 @@ def _render_claim_check_panel(row: dict[str, str]) -> None:
             st.caption(it.get("problem", ""))
 
 
+
+def _render_audit_legend(meta, qrec, row_strs) -> None:
+    """Per-question QA map: lists ONLY the stages that actually ran for THIS
+    question (from the batch run_settings + this question's record), each
+    tagged [LLM] or [code] and carrying this question's own outcome. One
+    popover row -- space-neutral until clicked."""
+    rs = meta.get("run_settings", {}) if isinstance(meta, dict) else {}
+    qrec = qrec or {}
+    dry = bool(meta.get("dry_run")) if isinstance(meta, dict) else False
+    claim_on = bool(rs.get("run_claim_checker")) or bool(rs.get("revise_pass"))
+    revise_on = bool(rs.get("revise_pass"))
+    rev_status = (qrec.get("revise") or {}).get("status") if qrec else None
+
+    lines: list[str] = []
+    lines.append(
+        "1. ✍️ **Write** `[LLM]` — "
+        + ("placeholder text (dry-run batch, no LLM was called)."
+           if dry else
+           "one LLM call turns the solver facts into the explanation "
+           "(it never decides strategy).")
+    )
+    lines.append(
+        "2. 🧱 **Hard validators** `[code]` — deterministic rules (cards, "
+        "blocker claims vs facts, terminology). A failure forces a retry; "
+        "bad text can never ship. Ran on this question."
+    )
+    warns = qrec.get("validator_warnings") or []
+    lines.append(
+        "3. 🚩 **Soft validators** `[code]` — deterministic style checks, "
+        "flag-only. This question: "
+        + (f"flagged ({len(warns)}) → the `flagged` status." if warns
+           else "no flags.")
+    )
+    step = 4
+    if claim_on and not dry:
+        issues = qrec.get("claim_check_issues") or []
+        lines.append(
+            f"{step}. 🔎 **Claim check** `[LLM]` — a second LLM reads the "
+            "finished text against the solver data (2 passes, issues "
+            "combined). This question: "
+            + (f"flagged {len(issues)} issue(s)." if issues
+               else "found nothing.")
+        )
+        step += 1
+    if revise_on and not dry:
+        outcome = {
+            "clean": "the claim check found nothing, so NO rewrite happened "
+                     "— the original shipped (the green CLEAN banner).",
+            "fixed": "the flagged prose was REWRITTEN by one more LLM call, "
+                     "then re-checked by the hard validators `[code]` before "
+                     "shipping (the REWRITTEN banner; first draft in the "
+                     "expander).",
+            "discarded": "a rewrite was attempted but broke a hard rule, so "
+                         "it was DISCARDED and the original shipped, flagged.",
+            "unchanged": "the rewrite came back identical; original shipped.",
+        }.get(rev_status or "", "did not run for this question.")
+        lines.append(
+            f"{step}. 🛠 **Auto-fix** `[LLM + code]` — this question: {outcome}"
+        )
+        step += 1
+        if rev_status == "fixed":
+            lines.append(
+                f"{step}. ✅ **Final audit** `[LLM]` — the claim check re-ran "
+                "on the REWRITTEN text (that is the 'Claim check: …' box "
+                "below — it only exists on rewritten questions)."
+            )
+            step += 1
+    cc = qrec.get("cross_check_issues") or []
+    lines.append(
+        f"{step}. 🔬 **Cross-check** `[code]` — pure-math re-verification of "
+        "the written row (positions, sums, skills). This question: "
+        + (f"{len(cc)} problem(s) — see the red box." if cc else "clean.")
+    )
+    with st.popover("❓ What checked this question"):
+        st.markdown("\n".join(lines))
+
+
 def _render_revise_panel(qmeta: dict[str, object] | None) -> None:
     """Per-question auto-fix lifecycle on the Review page.
 
@@ -7073,9 +7211,13 @@ def _scan_postflop_outputs() -> pd.DataFrame:
     for path in POSTFLOP_OUTPUT_DIR.glob("*.csv"):
         stat = path.stat()
         try:
-            with path.open("rb") as fh:
-                n = max(0, sum(1 for _ in fh) - 1)
-        except OSError:
+            # Real CSV row count -- see the identical fix in
+            # _scan_preflop_outputs (multiline prose broke raw line counts).
+            import csv as _csv  # noqa: PLC0415
+
+            with path.open(newline="", encoding="utf-8-sig") as fh:
+                n = max(0, sum(1 for _ in _csv.reader(fh)) - 1)
+        except (OSError, UnicodeDecodeError):
             n = 0
         rows.append({
             "filename": path.name,
@@ -7441,14 +7583,25 @@ def _render_postflop_question_card(
             _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
             _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
             _ref_combo = _ref_parts[-1] if _ref_parts else ""
-            _qrec = next(
-                (
-                    q for q in _qrecs
-                    if q.get("node_id") == _ref_node and q.get("hero_combo") == _ref_combo
-                ),
-                None,
+            # Full-hand legs join on (hand_id, sequence_index) -- unique for
+            # every leg kind; the node/combo join below missed pack PREFLOP
+            # legs (their solver_reference ends in the node id, not the
+            # combo), which hid their Layer-7 panels entirely.
+            _qrec = review.meta_question_for_leg(
+                meta, hand_id=_cell(row, "hand_id"),
+                sequence_index=_cell(row, "sequence_index"),
             )
+            if _qrec is None:
+                _qrec = next(
+                    (
+                        q for q in _qrecs
+                        if q.get("node_id") == _ref_node
+                        and q.get("hero_combo") == _ref_combo
+                    ),
+                    None,
+                )
             row_strs = {c: _cell(row, c) for c in df.columns}
+            _render_audit_legend(meta, _qrec, row_strs)  # per-question QA map
             _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
             _render_claim_check_panel(row_strs)  # claim-checker flags (if it ran)
             # Deterministic post-batch cross-check findings (July 2026,
@@ -7628,27 +7781,120 @@ def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> 
     st.caption(
         f"**{len(groups)}** full hand(s)"
         + (f" · {len(standalone)} standalone row(s)" if standalone else "")
-        + ". Each card is one hand, played preflop → river — open a hand to "
-        "review every leg exactly as on the single-question view."
+        + ". Each card is one hand, played preflop → river — grade the WHOLE "
+        "hand with one click (Keep / Reject), or open it to review every leg."
     )
 
     ordered = sorted(
         groups.items(),
         key=lambda kv: min(int(_cell(r, "No") or 0) for r in kv[1]),
     )
+
+    # --- hand-level tally + filtered export (the shipping workflow) --------
+    hand_statuses = {
+        hid: review.hand_status([_cell(r, "No") for r in rows], reviews)
+        for hid, rows in ordered
+    }
+    n_kept = sum(1 for s in hand_statuses.values() if s == "approved")
+    n_rej = sum(1 for s in hand_statuses.values() if s == "rejected")
+    n_needs = sum(1 for s in hand_statuses.values() if s == "needs_review")
+    hm = st.columns(4)
+    hm[0].metric("Hands", len(ordered))
+    hm[1].metric("✅ Kept", n_kept)
+    hm[2].metric("⚠️ Needs review", n_needs)
+    hm[3].metric("❌ Rejected", n_rej)
+
+    _mode_labels = {
+        "drop_rejected": "All except ❌ rejected",
+        "approved_only": "✅ Kept hands only",
+        "all": "All hands",
+    }
+    mode = st.radio(
+        "Which hands go into the download?",
+        options=list(_mode_labels),
+        format_func=_mode_labels.get,
+        horizontal=True,
+        key=f"postflop_hand_dl_mode::{csv_path.name}",
+        help=(
+            "Grades never change the batch file on disk — the download is "
+            "filtered at export time, always to WHOLE hands (a hand with any "
+            "rejected leg counts as rejected)."
+        ),
+    )
+    all_rows = df.to_dict("records")
+    export_rows, kept_hands, total_hands = review.filter_hand_rows(
+        all_rows, reviews, mode,
+    )
+    st.download_button(
+        f"⬇️ Download {kept_hands} of {total_hands} hands (CSV)",
+        data=review.approved_rows_to_csv(df.columns.tolist(), export_rows),
+        file_name=f"{csv_path.stem}_{mode}.csv",
+        mime="text/csv",
+        type="primary",
+        disabled=not export_rows,
+        key=f"postflop_hand_dl::{csv_path.name}",
+    )
+    if mode == "approved_only" and not n_kept:
+        st.caption("No hands kept yet — click ✅ Keep hand on the good ones first.")
+
+    _status_icon = {"approved": "✅", "rejected": "❌", "needs_review": "⚠️", "": "⬜"}
     for _hid, rows in ordered:
         legs = sorted(rows, key=_seq)
         first = legs[0]
+        leg_nos = [_cell(r, "No") for r in legs]
+        hstatus = hand_statuses[_hid]
         hero_cards = _cell(first, "User Cards")
         board = _cell(legs[-1], "Cards on Table")
-        graded = sum(1 for r in legs if reviews.get(_cell(r, "No"), {}).get("status"))
         title = (
-            f"🃏 {hero_cards}  ·  {len(legs)} questions"
+            f"{_status_icon[hstatus]} 🃏 {hero_cards}  ·  {len(legs)} questions"
             + (f"  ·  board {board}" if board else "")
-            + (f"  ·  {graded}/{len(legs)} graded" if graded else "")
         )
         with st.expander(title, expanded=False):
             st.caption(f"`{_hid}`  ·  {_cell(first, 'Context')}")
+            # One-click WHOLE-HAND grading: writes every leg in one sidecar
+            # update (per-leg notes/edited explanations are preserved). The
+            # per-leg grade buttons below still work; any rejected leg
+            # rejects the hand (review.hand_status).
+            # EDIT-LOSS NOTE: these buttons live OUTSIDE the legs' forms, so
+            # an in-flight explanation edit inside a leg does NOT ship with
+            # them -- the caption warns to Save first (Streamlit form values
+            # are not readable server-side before a submit).
+            st.caption(
+                "✍️ Editing an explanation below? Click its **Save edits** "
+                "(or a per-question grade) BEFORE using these hand buttons — "
+                "hand-level clicks don't carry an unsaved edit."
+            )
+            hb = st.columns([1, 1, 1, 1.6])
+            if hb[0].button(
+                "✅ Keep hand", key=f"hand_keep::{csv_path.name}::{_hid}",
+                use_container_width=True, type="primary",
+            ):
+                review.save_reviews_bulk(csv_path, leg_nos, "approved")
+                st.rerun()
+            if hb[1].button(
+                "⚠️ Needs review", key=f"hand_needs::{csv_path.name}::{_hid}",
+                use_container_width=True,
+            ):
+                review.save_reviews_bulk(csv_path, leg_nos, "needs_review")
+                st.rerun()
+            if hb[2].button(
+                "❌ Reject hand", key=f"hand_rej::{csv_path.name}::{_hid}",
+                use_container_width=True,
+            ):
+                review.save_reviews_bulk(csv_path, leg_nos, "rejected")
+                st.rerun()
+            if hb[3].button(
+                "🗑 Remove hand from batch",
+                key=f"hand_rm::{csv_path.name}::{_hid}",
+                use_container_width=True,
+                help=(
+                    "Permanently deletes ALL of this hand's legs from the "
+                    "batch CSV (regenerate to recover). Prefer ❌ Reject — "
+                    "it just keeps the hand out of the download."
+                ),
+            ):
+                review.remove_hand(csv_path, leg_nos)
+                st.rerun()
             for r in legs:
                 _render_postflop_question_card(
                     r, df=df, csv_path=csv_path, reviews=reviews, meta=meta,
