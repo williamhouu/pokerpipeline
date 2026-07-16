@@ -14,6 +14,7 @@ caps to include it.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 from dataclasses import dataclass
@@ -46,7 +47,11 @@ from pipeline.plo.question_extractor import (
     MIN_TOP_FREQUENCY,
     is_question_worthy,
 )
-from pipeline.plo.spot_sampler import PloSpot, sample_plo_spot
+from pipeline.plo.spot_sampler import (
+    PloSpot,
+    sample_plo_spot,
+    strip_artifact_allins,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,12 @@ class PloBatchResult:
     # Human-readable reason per failed explanation (e.g. the validation error),
     # so the UI can show WHY a row shipped blank instead of just a count.
     explanation_failure_reasons: tuple[str, ...] = ()
+    # ARTIFACT-STRIP (July 2026): deep-stack spots skipped because their real
+    # strategy mixes the artifact All-in at >= 5% (never askable).
+    artifact_material_spots_skipped: int = 0
+    # The .meta.json sidecar written next to the CSV (July 2026) -- the batch
+    # re-verifier's input.
+    meta_path: Path | None = None
 
     @property
     def shortfall(self) -> int:
@@ -90,17 +101,32 @@ def _first_worthy_spot(
     exclude_ambiguous_band: bool = False,
     exclude_indices: set[int] | frozenset[int] = frozenset(),
     allow_allin_answers: bool = True,
+    counters: dict[str, int] | None = None,
 ) -> PloSpot | None:
     """A worthy spot at this node, skipping hands already drawn this batch
     (``exclude_indices``) so repeat visits to a node yield a NEW hand.
-    ``allow_allin_answers=False`` also skips hands whose dominant action is
-    an all-in (the deep-stack tree artifact; team standing rule July 2026)."""
+
+    ``allow_allin_answers=False`` (deep stacks, where the pack's All-in
+    branches are tree artifacts) routes every sampled hand through the
+    ARTIFACT-STRIP (July 2026, :func:`pipeline.plo.spot_sampler.
+    strip_artifact_allins`): trace jam mass is stripped + renormalised
+    BEFORE the worthiness window, so the stripped mix drives worthiness,
+    options, qualifiers, EV gap, and difficulty; a MATERIAL jam mix (>= 5%:
+    the solver genuinely wants a line we refuse to show) is skipped outright
+    and counted into ``counters["artifact_material_spots_skipped"]`` when a
+    dict is given. Subsumes the old dominant-is-all-in check."""
     for index in rng.sample(range(HAND_COUNT), k=min(_WORTHY_TRIES, HAND_COUNT)):
         if index in exclude_indices:
             continue
         spot = sample_plo_spot(node, index)
-        if not allow_allin_answers and spot.dominant_action.lower().startswith("all"):
-            continue
+        if not allow_allin_answers:
+            spot = strip_artifact_allins(spot)
+            if spot.artifact_material:
+                if counters is not None:
+                    counters["artifact_material_spots_skipped"] = (
+                        counters.get("artifact_material_spots_skipped", 0) + 1
+                    )
+                continue
         if spot.presence >= _MIN_PRESENCE and is_question_worthy(
             spot,
             min_frequency=min_frequency,
@@ -141,6 +167,8 @@ def generate_plo_batch(
     explanation_temperature: float = DEFAULT_TEMPERATURE,
     explanation_system_prompt: str | None = None,
     explanation_include_skills: bool = False,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
     usage_callback: UsageCallback | None = None,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
@@ -177,6 +205,14 @@ def generate_plo_batch(
     Layer 6 system prompt verbatim -- the admin prompt library + Compare page
     pass an edited prompt here.
     """
+    # Resolve a concrete seed up front (July 2026): ``None`` used to mean
+    # "irreproducible OS entropy", which made a batch impossible to re-verify.
+    # Now None draws a fresh random seed ONCE and records it in the meta
+    # sidecar, so every batch stays different run-to-run AND byte-exactly
+    # rebuildable by scripts/audit_plo_batch.py. An explicit int behaves as
+    # before (pinned test sets).
+    if seed is None:
+        seed = random.SystemRandom().randrange(2**32)
     nodes = enumerate_plo_nodes(pack)
     rng = random.Random(seed)
     ctx_set = set(action_contexts) if action_contexts else None
@@ -209,7 +245,10 @@ def generate_plo_batch(
     rng.shuffle(candidates)
 
     rows: list[dict[str, str]] = []
+    question_records: list[dict[str, Any]] = []
+    strip_counters: dict[str, int] = {}
     scanned = 0
+    claim_flagged_rows = 0
     explanations_written = 0
     explanations_failed = 0
     explanation_failure_reasons: list[str] = []
@@ -245,6 +284,7 @@ def generate_plo_batch(
                 exclude_ambiguous_band=exclude_ambiguous_band,
                 exclude_indices=drawn.setdefault(node.node_id, set()),
                 allow_allin_answers=allins_ok,
+                counters=strip_counters,
             )
             if spot is None:
                 continue
@@ -273,6 +313,8 @@ def generate_plo_batch(
             options, correct = build_options(facts, style=answer_style)
 
             explanation = ""
+            claim_check_cell = ""
+            claim_issues: list[dict[str, str]] = []
             if generate_explanations:
                 try:
                     generated = generate_plo_answer_explanation(
@@ -289,6 +331,40 @@ def generate_plo_batch(
                     explanation = generated.answer_explanation
                     explanations_written += 1
                     consecutive_failures = 0
+                    # --- Layer-7 claim check (opt-in, FLAG-ONLY, fails open;
+                    # July 2026 port of the NLHE checker). One extra call per
+                    # question; flags land in the claim_check column + the
+                    # meta record for the Review page -- never a rewrite.
+                    if run_claim_checker:
+                        from pipeline.plo.claim_checker import (  # noqa: PLC0415
+                            PLO_CHECKER_SYSTEM_PROMPT,
+                            check_plo_explanation_claims,
+                            claim_check_to_json,
+                        )
+                        from pipeline.plo.explanation_generator import (  # noqa: PLC0415
+                            build_solver_data,
+                        )
+
+                        _ccres = check_plo_explanation_claims(
+                            explanation,
+                            build_solver_data(
+                                facts, list(options), correct,
+                                include_skills=explanation_include_skills,
+                            ),
+                            explanation_client,
+                            model=explanation_model,
+                            system_prompt=(
+                                claim_checker_prompt or PLO_CHECKER_SYSTEM_PROMPT
+                            ),
+                            usage_callback=usage_callback,
+                        )
+                        claim_check_cell = claim_check_to_json(_ccres)
+                        if not _ccres.passed:
+                            claim_flagged_rows += 1
+                            claim_issues = [
+                                {"claim": i.claim, "problem": i.problem}
+                                for i in _ccres.issues
+                            ]
                 except (ExplanationValidationError, OSError, KeyError) as exc:
                     # A failed explanation DROPS the question from the CSV --
                     # a blank-explanation row is not shippable. The failure is
@@ -315,26 +391,103 @@ def generate_plo_batch(
                         aborted = True
                     continue
 
-            rows.append(
-                build_plo_row(
-                    facts,
-                    difficulty=difficulty,
-                    options=options,
-                    correct_answer=correct,
-                    explanation=explanation,
-                    number=len(rows) + 1,
-                    pack_label=pack_label,
-                    stakes_bb_dollars=stakes_bb_dollars,
-                    game_format=game_format,
-                    display_in_bb=display_in_bb,
-                    stack_bb=stack_bb,
-                )
+            row = build_plo_row(
+                facts,
+                difficulty=difficulty,
+                options=options,
+                correct_answer=correct,
+                explanation=explanation,
+                number=len(rows) + 1,
+                pack_label=pack_label,
+                stakes_bb_dollars=stakes_bb_dollars,
+                game_format=game_format,
+                display_in_bb=display_in_bb,
+                stack_bb=stack_bb,
+                validation_status="flagged" if claim_issues else "draft",
             )
+            # Layer-7 verdict (""=not checked, "[]"=checked clean, else the
+            # JSON issue list) -- same convention as the NLHE claim_check.
+            row["claim_check"] = claim_check_cell
+            rows.append(row)
+            record: dict[str, Any] = {
+                "number": len(rows),
+                "node_id": node.node_id,
+                "actor": node.actor,
+                # The .rng hand index -- the re-verifier's join key (User
+                # Cards is only a representative rendering of the class).
+                "hero_index": spot.hero_index,
+                "hero_label": spot.hero_label,
+                "correct_answer": correct,
+                "options": list(options),
+                "difficulty": difficulty.score,
+            }
+            # Artifact-strip transparency (July 2026), as in the NLHE metas.
+            if spot.stripped_artifact_freq > 0:
+                record["artifact_stripped"] = {
+                    "labels": ["All-in"],
+                    "freq": round(spot.stripped_artifact_freq, 4),
+                }
+            if claim_issues:
+                record["claim_check_issues"] = claim_issues
+            question_records.append(record)
         if not drew_this_pass:
             break  # every node is out of new worthy hands
 
     output_path = Path(output_path)
     write_plo_csv(rows, output_path)
+
+    # Meta sidecar (July 2026, parity with the NLHE batches): everything the
+    # batch re-verifier (scripts/audit_plo_batch.py) needs to rebuild every
+    # row byte-exactly -- the RESOLVED seed, the full run settings, filter
+    # counters, and one record per question with the node id + hand index.
+    # Deterministic content only (no timestamps).
+    meta_path = output_path.with_suffix(".meta.json")
+    meta = {
+        "pack_label": pack_label,
+        "run_settings": {
+            "seed": seed,
+            "total_questions": total_questions,
+            "hero_positions": hero_positions,
+            "max_prior_raises": max_prior_raises,
+            "max_active_players": max_active_players,
+            "action_contexts": action_contexts,
+            "player_counts": player_counts,
+            "min_frequency": min_frequency,
+            "max_frequency": max_frequency,
+            "exclude_ambiguous_band": exclude_ambiguous_band,
+            "min_ev_gap_bb": min_ev_gap_bb,
+            "compute_equity": compute_equity,
+            "answer_style": answer_style,
+            "stakes_bb_dollars": stakes_bb_dollars,
+            "game_format": game_format,
+            "display_in_bb": display_in_bb,
+            "stack_bb": stack_bb,
+            "min_difficulty": min_difficulty,
+            "max_difficulty": max_difficulty,
+            "generate_explanations": generate_explanations,
+            "model": explanation_model if generate_explanations else "",
+            "run_claim_checker": run_claim_checker,
+        },
+        "counters": {
+            "nodes_scanned": scanned,
+            "questions_written": len(rows),
+            "difficulty_filtered_out": difficulty_filtered_out,
+            "ev_gap_filtered_out": ev_gap_filtered_out,
+            "explanations_written": explanations_written,
+            "explanations_failed": explanations_failed,
+            # Layer-7 claim checker (opt-in, flag-only): rows with >= 1 flag.
+            "claim_flagged_rows": claim_flagged_rows,
+            # Deep-stack spots whose real strategy mixes the artifact All-in
+            # at >= 5% -- silenced (never asked); trace dust was stripped +
+            # renormalised (per-question artifact_stripped records).
+            "artifact_material_spots_skipped": strip_counters.get(
+                "artifact_material_spots_skipped", 0
+            ),
+        },
+        "questions": question_records,
+    }
+    meta_path.write_text(json.dumps(meta, indent=2, default=str))
+
     return PloBatchResult(
         output_path=output_path,
         questions_written=len(rows),
@@ -345,6 +498,10 @@ def generate_plo_batch(
         explanation_failure_reasons=tuple(explanation_failure_reasons),
         difficulty_filtered_out=difficulty_filtered_out,
         ev_gap_filtered_out=ev_gap_filtered_out,
+        artifact_material_spots_skipped=strip_counters.get(
+            "artifact_material_spots_skipped", 0
+        ),
+        meta_path=meta_path,
     )
 
 

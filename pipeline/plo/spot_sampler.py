@@ -79,6 +79,12 @@ class PloSpot:
     action_frequencies: dict[str, float] = field(default_factory=dict)
     ev_by_action: dict[str, float] = field(default_factory=dict)
     presence: float = 0.0
+    # ARTIFACT-STRIP (July 2026, see strip_artifact_allins below). Only set
+    # on spots the caller passed through the strip (deep stacks, where the
+    # pack's All-in branches are tree artifacts): the trace jam mass removed,
+    # or the flag that the mass was MATERIAL and the spot must never be asked.
+    stripped_artifact_freq: float = 0.0
+    artifact_material: bool = False
 
     @property
     def dominant_action(self) -> str:
@@ -156,6 +162,52 @@ def sample_plo_spot(node: PloDecisionNode, hero_index: int) -> PloSpot:
         action_frequencies=action_freqs,
         ev_by_action=ev_by_action,
         presence=presence,
+    )
+
+
+def strip_artifact_allins(spot: PloSpot) -> PloSpot:
+    """ARTIFACT-STRIP for deep stacks (July 2026, team standing rule; the PLO
+    port of the NLHE preflop/postflop strip).
+
+    Callers apply this ONLY when the stack depth makes the pack's All-in
+    branches tree artifacts (> 40bb -- the same ``allins_ok`` test the batch
+    already uses for its line/answer gates; realistic short-stack jams are
+    never touched). The node's ``All-in`` action is judged by the shared
+    :func:`pipeline.artifact_strip.strip_artifact_mass` rule: a
+    convergence-sliver trace is REMOVED from ``action_frequencies`` (the
+    label leaves the dict entirely, so the option builders -- which read the
+    canonical strategy's keys -- can never ship "All-in", even at zero mass)
+    and the rest renormalised, and the label also leaves ``ev_by_action`` so
+    ``ev_gap_sb`` measures the real alternatives; mass >= ARTIFACT_MATERIALITY
+    (5%) marks the spot ``artifact_material`` (frequencies kept honest; the
+    spot must never be asked). ``dominant_action``/``dominant_frequency`` are
+    properties over ``action_frequencies``, so the Always/Mostly qualifier
+    follows the stripped mix automatically ("Always" at literal 100%
+    POST-strip). Applied identically by generation and the batch re-verifier
+    so rebuilt rows stay byte-identical.
+    """
+    from dataclasses import replace  # noqa: PLC0415
+
+    from pipeline.artifact_strip import strip_artifact_mass  # noqa: PLC0415
+    from pipeline.plo.pack import PloActionType  # noqa: PLC0415
+
+    labels = {
+        opt.label for opt in spot.node.actions
+        if opt.action.action is PloActionType.ALL_IN
+    }
+    if not labels:
+        return spot
+    freqs, mass, material = strip_artifact_mass(spot.action_frequencies, labels)
+    if material:
+        return replace(spot, artifact_material=True)
+    return replace(
+        spot,
+        action_frequencies=freqs,
+        ev_by_action={
+            label: ev for label, ev in spot.ev_by_action.items()
+            if label not in labels
+        },
+        stripped_artifact_freq=mass,
     )
 
 

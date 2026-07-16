@@ -337,6 +337,107 @@ def test_preflop_deep_pack_allin_strip() -> None:
     assert out.artifact_material
 
 
+# --- PLO deep stacks: the same rule via pipeline.artifact_strip --------------
+def test_plo_deep_stack_allin_strip() -> None:
+    """The PLO port: at deep stacks the pack's All-in branches are tree
+    artifacts. Trace mass is stripped + renormalised (and leaves ev_by_action
+    so ev_gap_sb measures real alternatives); zero-mass labels leave the
+    menu; material mixes mark the spot unaskable. dominant_* are properties,
+    so the Always/Mostly qualifier follows the stripped mix automatically."""
+    from types import SimpleNamespace
+
+    from pipeline.plo.pack import PloAction, PloActionType
+    from pipeline.plo.spot_sampler import PloSpot, strip_artifact_allins
+
+    def _opt(action_type, pct=None):
+        return SimpleNamespace(
+            action=PloAction(seat="BU", action=action_type, raise_pct=pct),
+            label={"fold": "Fold", "call": "Call", "raise": "Raise 100%",
+                   "all_in": "All-in"}[action_type.value],
+        )
+
+    acts = (
+        _opt(PloActionType.FOLD), _opt(PloActionType.CALL),
+        _opt(PloActionType.RAISE, 100), _opt(PloActionType.ALL_IN),
+    )
+
+    def _spot(freqs, evs):
+        return PloSpot(
+            node=SimpleNamespace(actions=acts), hero_index=0,
+            hero_label="(AA)(KK)", hero_cards=("Ac", "Ad", "Kc", "Kd"),
+            action_frequencies=freqs, ev_by_action=evs, presence=1.0,
+        )
+
+    evs = {"Fold": 0.0, "Call": 2.0, "Raise 100%": 2.2, "All-in": 2.1}
+    # 99/1 trace: stripped, renormalised to literal 100%, EVs jam-free.
+    out = strip_artifact_allins(
+        _spot({"Raise 100%": 0.99, "All-in": 0.01, "Fold": 0.0, "Call": 0.0}, evs)
+    )
+    assert "All-in" not in out.action_frequencies
+    assert "All-in" not in out.ev_by_action
+    assert out.dominant_action == "Raise 100%" and out.dominant_frequency == 1.0
+    assert abs(out.stripped_artifact_freq - 0.01) < 1e-9
+    # Material 90/10: unaskable, honest frequencies kept.
+    out = strip_artifact_allins(
+        _spot({"Raise 100%": 0.90, "All-in": 0.10, "Fold": 0.0, "Call": 0.0}, evs)
+    )
+    assert out.artifact_material
+    assert out.action_frequencies["All-in"] == 0.10  # noqa: PLR2004
+
+
+def test_plo_batch_meta_sidecar_and_reverify_roundtrip(tmp_path) -> None:
+    """The July 2026 PLO audit loop: a batch writes a .meta.json sidecar
+    (resolved seed + per-question node/hand identity), and rebuilding each
+    row through the same seams reproduces the CSV byte-for-byte -- the
+    contract scripts/audit_plo_batch.py enforces on real packs."""
+    import csv
+    import json
+    import random
+
+    from tests.test_plo_batch import _clean_hj_pack  # the fixture mini-pack
+
+    from pipeline.plo.batch import generate_plo_batch
+    from pipeline.plo.difficulty import compute_plo_difficulty
+    from pipeline.plo.fact_extractor import extract_plo_facts
+    from pipeline.plo.format_writer import PLO_CSV_COLUMNS, build_plo_row
+    from pipeline.plo.node_enumerator import enumerate_plo_nodes
+    from pipeline.plo.options import build_options
+    from pipeline.plo.spot_sampler import sample_plo_spot, strip_artifact_allins
+
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "b.csv"
+    res = generate_plo_batch(
+        pack, output_path=out, total_questions=3, seed=None, compute_equity=True,
+    )
+    assert res.meta_path is not None and res.meta_path.exists()
+    meta = json.loads(res.meta_path.read_text())
+    assert isinstance(meta["run_settings"]["seed"], int)  # None was RESOLVED
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    assert len(rows) == len(meta["questions"]) == res.questions_written
+
+    nodes_by_id = {n.node_id: n for n in enumerate_plo_nodes(pack)}
+    rs = meta["run_settings"]
+    for row, q in zip(rows, meta["questions"], strict=True):
+        spot = sample_plo_spot(nodes_by_id[q["node_id"]], int(q["hero_index"]))
+        if float(rs["stack_bb"]) > 40.0:  # noqa: PLR2004
+            spot = strip_artifact_allins(spot)
+        facts = extract_plo_facts(
+            spot, pack, compute_equity=True, rng=random.Random(rs["seed"]),
+        )
+        difficulty = compute_plo_difficulty(facts)
+        options, correct = build_options(facts, style=rs["answer_style"])
+        rebuilt = build_plo_row(
+            facts, difficulty=difficulty, options=options, correct_answer=correct,
+            explanation=row.get("Answer Explanation", ""), number=int(q["number"]),
+            pack_label=meta["pack_label"],
+            stakes_bb_dollars=float(rs["stakes_bb_dollars"]),
+            game_format=rs["game_format"], display_in_bb=bool(rs["display_in_bb"]),
+            stack_bb=float(rs["stack_bb"]),
+        )
+        for col in PLO_CSV_COLUMNS:
+            assert str(rebuilt.get(col, "")) == str(row.get(col, "")), col
+
+
 def test_hand_cannot_end_on_a_material_node() -> None:
     # Swap the anchor's sized raise for an artifact jam so its 10% mass is
     # material.
