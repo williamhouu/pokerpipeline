@@ -213,6 +213,15 @@ ENDING_STREETS = ("preflop", "flop", "turn", "river")
 # ending too likely to discount at any question. NOTE: question VOLUME skews
 # deeper than hand counts (enders are shorter hands).
 LENGTH_PROFILES: dict[str, dict[str, float]] = {
+    # PRODUCTION DEFAULT (July 15 2026, user feedback): most hands must run
+    # all the way to the river. The old river_leaning default (40%) was too
+    # mild AND degenerated at small batch sizes -- 40/20/20/20 over 4 hands
+    # quotas to 1.6/0.8/0.8/0.8, which largest-remainder rounds to a flat
+    # 1/1/1/1, so a small "river-leaning" batch shipped 3 of 4 hands short.
+    # 70/10/10/10 keeps a real minority of early enders (the
+    # anti-predictability rule) while making river hands the clear majority
+    # at every batch size (n=4 -> 3 river; n=10 -> 7 river).
+    "river_heavy": {"preflop": 0.1, "flop": 0.1, "turn": 0.1, "river": 0.7},
     "river_leaning": {"preflop": 0.2, "flop": 0.2, "turn": 0.2, "river": 0.4},
     "equal": {"preflop": 0.25, "flop": 0.25, "turn": 0.25, "river": 0.25},
 }

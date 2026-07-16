@@ -159,11 +159,12 @@ def main(argv: list[str] | None = None) -> int:
              "flag only)",
     )
     parser.add_argument(
-        "--length-profile", choices=["river_leaning", "equal"],
-        default="river_leaning",
+        "--length-profile", choices=["river_heavy", "river_leaning", "equal"],
+        default="river_heavy",
         help="with --balanced-lengths: hand-count share per ending street "
-             "(river_leaning = 40%% river / 20%% each, the production "
-             "default; equal = 25%% each)")
+             "(river_heavy = 70%% river, the production default since July "
+             "2026 -- river_leaning's 40%% rounds to a near-equal mix on "
+             "small batches; equal = 25%% each)")
     parser.add_argument(
         "--balanced-lengths", action="store_true",
         help="full-hands mode: equal quarters of hands ending preflop / flop "

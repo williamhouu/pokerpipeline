@@ -266,9 +266,39 @@ def test_pack_first_no_entry_fallback(tmp_path: Path, monkeypatch) -> None:
             )
 
 
+def test_river_heavy_profile_quotas() -> None:
+    """The production default since July 15 2026 (user feedback: batches
+    were 'mostly non-river'): 70% river, so river hands are the clear
+    MAJORITY at every batch size -- including the small ones where the old
+    river_leaning default degenerated (40% of 4 hands quotas to 1.6, which
+    largest-remainder rounds to a flat 1/1/1/1)."""
+    from pipeline.postflop.play_through import LENGTH_PROFILES
+
+    pool = (
+        [_stub_hand("river", i) for i in range(20)]
+        + [_stub_hand("turn", i) for i in range(20)]
+        + [_stub_hand("flop", i) for i in range(20)]
+        + [_stub_hand("preflop", i) for i in range(20)]
+    )
+    w = LENGTH_PROFILES["river_heavy"]
+
+    def mix(n):
+        out = balanced_length_mix(pool, n, weights=w)
+        return {s: sum(1 for h in out if h.ending_street == s)
+                for s in ENDING_STREETS if any(h.ending_street == s for h in out)}
+
+    assert mix(1) == {"river": 1}
+    assert mix(4) == {"river": 3, "turn": 1}      # was 1/1/1/1 under river_leaning
+    assert mix(10) == {"preflop": 1, "flop": 1, "turn": 1, "river": 7}
+    # River is the strict majority at every realistic size.
+    for n in (2, 3, 4, 5, 6, 8, 10, 12, 20):
+        m = mix(n)
+        assert m.get("river", 0) * 2 > n, (n, m)
+
+
 def test_river_leaning_profile_quotas() -> None:
-    """The production default: 40% river / 20% each; largest-remainder
-    ties break deepest-first (n=1 -> river; n=2 -> river+turn)."""
+    """The older (pre-July-15) profile: 40% river / 20% each; largest-
+    remainder ties break deepest-first (n=1 -> river; n=2 -> river+turn)."""
     from pipeline.postflop.play_through import LENGTH_PROFILES
 
     pool = (

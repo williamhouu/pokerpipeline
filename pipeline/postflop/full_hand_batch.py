@@ -384,7 +384,7 @@ def generate_full_hand_batch(
     variety_seed: int | None = None,
     diversify_hands: bool = False,
     balanced_lengths: bool = False,
-    length_profile: str = "river_leaning",
+    length_profile: str = "river_heavy",
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
@@ -551,6 +551,7 @@ def generate_full_hand_batch(
         hands = hands + preflop_ender_hands
 
     length_reserve: dict[str, list] = {}
+    diversify_backfill: list = []
     if balanced_lengths and not band_set:
         # Ending-street quotas per the length profile (river-leaning is the
         # production default). The UNSELECTED pool is kept as a per-street
@@ -572,7 +573,15 @@ def generate_full_hand_batch(
     elif diversify_hands and not band_set:
         # With a difficulty band the scan-order heuristic governs instead
         # (the band itself is the selector); mixing there would fight it.
-        hands = balanced_hand_mix(hands, total_hands)
+        # The unselected remainder is kept (deterministic order) so a hand
+        # dropped by the preflop-coherence filter below pulls a replacement
+        # instead of shrinking the batch (July 15 2026).
+        _mix_pool = hands
+        hands = balanced_hand_mix(_mix_pool, total_hands)
+        _mix_selected = {id(h) for h in hands}
+        diversify_backfill = [
+            h for h in _mix_pool if id(h) not in _mix_selected
+        ]
 
     # --- hand-difficulty pre-pass (July 2026) ------------------------------
     # hand_difficulty = MAX over the legs' Difficulty Ratings: the hand
@@ -590,89 +599,125 @@ def generate_full_hand_batch(
     # A preflop_line leg is built EXCLUSIVELY from the matched pack: the
     # solve's entry weights cannot express a raise-or-call-or-fold decision,
     # so there is no honest entry fallback. Validate every such leg UP FRONT
-    # (build + cache its pack facts); a leg with no matching pack or a
-    # coherence failure is DROPPED here, so sequence numbering stays
-    # contiguous and the difficulty pre-pass / generation loop only ever see
-    # buildable legs. The hand itself survives (its postflop legs narrate
-    # the full preflop line in their Question prose).
+    # (build + cache its pack facts). NO FLOP-START HANDS (July 15 2026, the
+    # user's call, reversing the July 13 narrate-through rule): a refused
+    # preflop leg now drops the WHOLE hand -- a play-through must never
+    # start mid-hand, and a hand whose preflop premise the chart refuses
+    # (K4o open at 200bb: the pack plays Fold 64%) is built on a decision
+    # we would not teach. Same rule the postflop as-played coherence gate
+    # already applies to mid-hand legs. Backfill below keeps the batch full.
     preflop_line_legs_dropped = 0
     preflop_entry_legs_dropped = 0
+    hands_dropped_preflop_incoherent = 0
 
     def _filter_preflop_legs(hand):
-        """Validate/drop the hand's preflop legs (pack coherence, the
-        pack-first rule, the no-pack dominance gate). Pure reshaping --
-        counters via nonlocal. Used on the selected batch AND on every
-        top-up replacement, so a replacement can never skip the gates."""
+        """Validate the hand's preflop legs (pack coherence, the pack-first
+        rule, the no-pack dominance gate). Returns the hand unchanged when
+        every preflop leg is buildable, or ``None`` when ANY is refused --
+        the whole hand is then dropped (no flop-start play-throughs).
+        Counters via nonlocal. Used on the selected batch AND on every
+        backfill/top-up replacement, so a replacement can never skip the
+        gates. Hands with no preflop legs at all (the --no-preflop-leg
+        mode) pass through untouched -- that mode asks for flop-start
+        hands explicitly."""
         nonlocal preflop_line_legs_dropped, preflop_entry_legs_dropped
-        from dataclasses import replace as _dc_replace  # noqa: PLC0415
+        nonlocal hands_dropped_preflop_incoherent
 
         if not any(
             leg.kind in ("preflop_line", "preflop_entry") for leg in hand.legs
         ):
             return hand
-        if True:  # keep the original loop body's indentation
-            kept_legs = []
-            for leg in hand.legs:
-                if leg.kind == "preflop_entry":
-                    # PACK-FIRST RULE (July 2026, the user's call): when a
-                    # matching preflop chart exists, it is the ONLY source
-                    # of preflop questions -- a hand the pack's coherence
-                    # gate refuses gets NO preflop leg (never the entry
-                    # fallback, whose as-played framing can contradict the
-                    # solver: 'Mostly Open' correct above 'Fold: 81%').
-                    # With NO pack, the entry leg ships only when the
-                    # continue action is genuinely dominant (>= 50%).
-                    if pack_source is not None:
-                        key = (leg.entry_facts.hero_position,
-                               leg.entry_facts.hero_combo)
-                        if key not in pack_facts_cache:
-                            b = _build_pack_facts(
-                                pack_source, key[0], key[1], solve,
-                                equity_runouts=equity_runouts,
-                            )
-                            pack_facts_cache[key] = (
-                                None if b is None else _facts_difficulty(
-                                    b, trap_difficulty=trap_difficulty,
-                                    razor_difficulty=razor_difficulty,
-                                )
-                            )
-                        if pack_facts_cache[key] is None:
-                            preflop_entry_legs_dropped += 1
-                            continue
-                    elif leg.entry_facts.continue_freq < 0.5:  # noqa: PLR2004
-                        preflop_entry_legs_dropped += 1
-                        continue
-                    kept_legs.append(leg)
-                    continue
-                if leg.kind != "preflop_line":
-                    kept_legs.append(leg)
-                    continue
-                built = None
+        for leg in hand.legs:
+            if leg.kind == "preflop_entry":
+                # PACK-FIRST RULE (July 2026, the user's call): when a
+                # matching preflop chart exists, it is the ONLY source
+                # of preflop questions -- never the entry fallback, whose
+                # as-played framing can contradict the solver ('Mostly
+                # Open' correct above 'Fold: 81%'). With NO pack, the
+                # entry leg needs a genuinely dominant continue (>= 50%).
                 if pack_source is not None:
-                    key = (leg.step_index, hand.hero_combo,
-                           leg.terminal_fold, leg.terminal_raise)
-                    if key not in line_facts_cache:
+                    key = (leg.entry_facts.hero_position,
+                           leg.entry_facts.hero_combo)
+                    if key not in pack_facts_cache:
                         b = _build_pack_facts(
-                            pack_source, hand.hero, hand.hero_combo, solve,
+                            pack_source, key[0], key[1], solve,
                             equity_runouts=equity_runouts,
-                            step_index=leg.step_index,
-                            terminal_fold=leg.terminal_fold,
-                            terminal_raise=leg.terminal_raise,
                         )
-                        line_facts_cache[key] = (
+                        pack_facts_cache[key] = (
                             None if b is None else _facts_difficulty(
                                 b, trap_difficulty=trap_difficulty,
                                 razor_difficulty=razor_difficulty,
                             )
                         )
-                    built = line_facts_cache[key]
-                if built is None:
-                    preflop_line_legs_dropped += 1
-                    continue
-                kept_legs.append(leg)
-            return _dc_replace(hand, legs=tuple(kept_legs))
+                    if pack_facts_cache[key] is None:
+                        preflop_entry_legs_dropped += 1
+                        hands_dropped_preflop_incoherent += 1
+                        return None
+                elif leg.entry_facts.continue_freq < 0.5:  # noqa: PLR2004
+                    preflop_entry_legs_dropped += 1
+                    hands_dropped_preflop_incoherent += 1
+                    return None
+                continue
+            if leg.kind != "preflop_line":
+                continue
+            built = None
+            if pack_source is not None:
+                key = (leg.step_index, hand.hero_combo,
+                       leg.terminal_fold, leg.terminal_raise)
+                if key not in line_facts_cache:
+                    b = _build_pack_facts(
+                        pack_source, hand.hero, hand.hero_combo, solve,
+                        equity_runouts=equity_runouts,
+                        step_index=leg.step_index,
+                        terminal_fold=leg.terminal_fold,
+                        terminal_raise=leg.terminal_raise,
+                    )
+                    line_facts_cache[key] = (
+                        None if b is None else _facts_difficulty(
+                            b, trap_difficulty=trap_difficulty,
+                            razor_difficulty=razor_difficulty,
+                        )
+                    )
+                built = line_facts_cache[key]
+            if built is None:
+                preflop_line_legs_dropped += 1
+                hands_dropped_preflop_incoherent += 1
+                return None
+        return hand
 
-    hands = [_filter_preflop_legs(h) for h in hands]
+    # Filter the selected batch; a dropped hand pulls a replacement so the
+    # batch stays full: balanced lengths -> the same-ending reserve (then
+    # any street, deepest first); diversify -> the unselected remainder in
+    # its deterministic order. Plain/band paths have their own semantics
+    # (the band scan filters its whole pool below; plain assembles exactly
+    # total_hands, so a drop shrinks the batch -- counted).
+    _kept_hands: list[Any] = []
+    for _h in hands:
+        _fh = _filter_preflop_legs(_h)
+        if _fh is not None:
+            _kept_hands.append(_fh)
+            continue
+        replacement = None
+        if length_reserve:
+            for street in (_h.ending_street, "river", "turn", "flop",
+                           "preflop"):
+                queue = length_reserve.get(street) or []
+                while queue:
+                    cand = _filter_preflop_legs(queue.pop(0))
+                    if cand is not None:
+                        replacement = cand
+                        break
+                if replacement is not None:
+                    break
+        elif diversify_backfill:
+            while diversify_backfill:
+                cand = _filter_preflop_legs(diversify_backfill.pop(0))
+                if cand is not None:
+                    replacement = cand
+                    break
+        if replacement is not None:
+            _kept_hands.append(replacement)
+    hands = _kept_hands
 
     def _score_hand(hand) -> int:
         """hand_difficulty = peak-anchored blend over the hand's legs
@@ -919,7 +964,9 @@ def generate_full_hand_batch(
                 queue = length_reserve.get(street) or []
                 while queue:
                     cand = _filter_preflop_legs(queue.pop(0))
-                    if cand.legs:
+                    # None = the candidate's own preflop leg was refused
+                    # (July 15: whole-hand drop) -- keep pulling.
+                    if cand is not None and cand.legs:
                         hand_difficulties[cand.hand_id] = _score_hand(cand)
                         pending.append(cand)
                         total_legs += cand.total
@@ -1068,6 +1115,11 @@ def generate_full_hand_batch(
                 "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
                 "preflop_line_legs_dropped": preflop_line_legs_dropped,
                 "preflop_entry_legs_dropped": preflop_entry_legs_dropped,
+                # July 15 2026 (user's call): a refused preflop leg drops the
+                # WHOLE hand -- no play-through ever starts at the flop. This
+                # counts the hands discarded for it (backfill refills the
+                # batch where a reserve/remainder exists).
+                "hands_dropped_preflop_incoherent": hands_dropped_preflop_incoherent,
                 "hands_dropped_failed_leg": hands_dropped_failed_leg,
                 "hands_topped_up": hands_topped_up,
                 "showdown_resolutions": showdown_resolutions,

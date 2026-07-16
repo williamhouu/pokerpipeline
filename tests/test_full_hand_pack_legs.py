@@ -172,21 +172,35 @@ def test_pack_legs_upgrade_the_preflop_question(tmp_path, monkeypatch) -> None:
         assert {r["hand_difficulty"] for r in legs} == {str(expected)}
 
 
-def test_coherence_gate_drops_the_leg_pack_first(tmp_path, monkeypatch) -> None:
-    """PACK-FIRST RULE (July 2026, replaced the entry fallback): when the
-    pack says the hand mostly 3-BETS, the as-played call contradicts the
-    pack's correct answer -- the hand ships WITHOUT a preflop question
-    (the old fallback framed the as-played action as correct even when
-    the solver mostly disagreed, e.g. 'Mostly Open' over 'Fold: 81%')."""
+def test_coherence_gate_drops_the_whole_hand_no_flop_start(tmp_path, monkeypatch) -> None:
+    """NO FLOP-START HANDS (July 15 2026, the user's call, tightening the
+    July 13 pack-first rule): when the pack says the hand mostly 3-BETS,
+    the as-played call contradicts the pack's correct answer -- the WHOLE
+    hand is dropped (the old rule shipped it without a preflop question,
+    so play-throughs started at the flop on a preflop premise the chart
+    refuses, e.g. a K4o open the pack plays as Fold 64%). Every shipped
+    hand must start with a preflop question."""
+    import csv as _csv
+
     pack = _matching_pack(
         tmp_path, call_freq=0.2, threebet_freq=0.7, pack_id="fixture_3betty",
     )
     result, meta = _run_batch(tmp_path, monkeypatch, pack)
     assert result.questions_written > 0
     c = meta["counters"]
-    # Every BB defend leg disagrees (dominant 3-bet) -> DROPPED, not faked.
+    # Every BB defend leg disagrees (dominant 3-bet) -> its HAND is dropped.
     assert c["preflop_entry_legs_dropped"] > 0
+    assert c["hands_dropped_preflop_incoherent"] > 0
     assert c["preflop_leg_entry_fallback"] == 0
+    # INVARIANT: no shipped hand starts mid-hand -- the first leg of every
+    # hand is a Preflop question.
+    rows = list(_csv.DictReader(
+        (tmp_path / "out.csv").open(encoding="utf-8-sig")
+    ))
+    firsts = [r for r in rows if r["sequence_index"] == "1"]
+    assert firsts
+    for r in firsts:
+        assert r["Hand Stage"] == "Preflop", (r["hand_id"], r["Hand Stage"])
 
 
 def test_hand_difficulty_band_filter(tmp_path, monkeypatch) -> None:
@@ -538,12 +552,16 @@ def test_full_hand_three_bet_pot_builds_line_legs(tmp_path, monkeypatch) -> None
     assert meta["counters"]["preflop_leg_pack_used"] >= 3
 
 
-def test_three_bet_pot_drops_incoherent_or_packless_legs(tmp_path, monkeypatch) -> None:
-    """No honest fallback exists for a multi-raise preflop leg: a hand whose
-    pack strategy contradicts the as-played line drops the leg; with no
-    matching pack at all every line leg is dropped (hands stay postflop-only)."""
+def test_three_bet_pot_drops_incoherent_or_packless_hands(tmp_path, monkeypatch) -> None:
+    """No honest fallback exists for a multi-raise preflop leg, and since
+    July 15 2026 (the user's no-flop-start rule) a refused leg drops the
+    WHOLE hand: a hand whose pack strategy contradicts the as-played line
+    is gone, and with no matching pack at all a 3-bet-pot full-hand batch
+    writes ZERO hands (the counters explain the empty CSV) rather than
+    play-throughs that start mid-hand."""
     # Pack where the BB mostly CALLS (3-bet freq 0.1) -> the BB 3-bettor's
-    # leg fails coherence and is dropped; BTN's two legs survive.
+    # leg fails coherence and its whole hand is dropped; BTN hands (both
+    # legs coherent) survive.
     pack = _threebet_pack(
         tmp_path, threebet_freq=0.1, call_freq=0.7, pack_id="fixture_3bp_calls",
     )
@@ -562,18 +580,27 @@ def test_three_bet_pot_drops_incoherent_or_packless_legs(tmp_path, monkeypatch) 
               if q["street"] == "preflop" and q["hero_position"] == "BB"]
     assert bb_pre == []  # coherence-dropped, never faked
     assert meta["counters"]["preflop_line_legs_dropped"] >= 1
+    assert meta["counters"]["hands_dropped_preflop_incoherent"] >= 1
+    # Surviving hands all start preflop (the BTN opener's leg 1).
+    hand_ids = {q["hand_id"] for q in meta["questions"]}
+    for hid in hand_ids:
+        first = min(
+            (q for q in meta["questions"] if q["hand_id"] == hid),
+            key=lambda q: q["sequence_index"],
+        )
+        assert first["street"] == "preflop", (hid, first["street"])
 
-    # No pack at all -> every preflop line leg dropped; hands still generate.
+    # No pack at all -> every hand's preflop leg is unbuildable -> the batch
+    # is EMPTY (never flop-start hands), with the counter explaining why.
     monkeypatch.setattr(fhb, "find_pack_leg_source", lambda *a, **k: None)
     out2 = tmp_path / "out2.csv"
     result = generate_full_hand_batch(
         solve=solve, output_path=out2, total_hands=2, dry_run=True,
         equity_runouts=20, preflop_leg_pack_root=tmp_path,
     )
-    assert result.questions_written > 0
+    assert result.questions_written == 0
     meta2 = json.loads(out2.with_suffix(".meta.json").read_text(encoding="utf-8"))
-    assert all(q["street"] != "preflop" for q in meta2["questions"])
-    assert meta2["counters"]["preflop_line_legs_dropped"] >= 1
+    assert meta2["counters"]["hands_dropped_preflop_incoherent"] >= 1
 
 
 def test_preflop_entry_refuses_a_three_bet_pot_solve(tmp_path: Path) -> None:

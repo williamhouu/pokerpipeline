@@ -297,6 +297,13 @@ def compare_postflop_batches_from_db(
         "model_b": res_b.model_used,
         "in_tokens": res_a.total_input_tokens + res_b.total_input_tokens,
         "out_tokens": res_a.total_output_tokens + res_b.total_output_tokens,
+        # Per-side splits (July 2026 spend-logger fix): the two sides can run
+        # DIFFERENT models, so the lifetime ledger logs one entry per side at
+        # that side's price instead of a mispriced blended total.
+        "a_in_tokens": res_a.total_input_tokens,
+        "a_out_tokens": res_a.total_output_tokens,
+        "b_in_tokens": res_b.total_input_tokens,
+        "b_out_tokens": res_b.total_output_tokens,
     }
 
 
@@ -335,7 +342,7 @@ def generate_full_hand_batch_from_db(
     variety_seed: int | None = None,
     diversify_hands: bool = False,
     balanced_lengths: bool = False,
-    length_profile: str = "river_leaning",
+    length_profile: str = "river_heavy",
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
