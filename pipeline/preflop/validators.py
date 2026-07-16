@@ -1430,6 +1430,28 @@ def run_preflop_soft_validators(
     return warnings
 
 
+# Markdown-style list formatting: a line opening with a bullet or a numbered
+# item. The gold voice is 2-5 sentences of flowing coaching prose -- never a
+# list. Caught live July 2026 (a reviser rewrite restructured a paragraph
+# into "Here's why:" + dash bullets); guarded on both pipelines.
+_LIST_LINE_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", re.MULTILINE)
+
+
+def validate_no_list_formatting(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,  # noqa: ARG001
+) -> PreflopValidationResult:
+    """Reject bulleted/numbered-list formatting in the explanation prose."""
+    text = generated.answer_explanation or ""
+    if _LIST_LINE_RE.search(text):
+        return PreflopValidationResult.fail(
+            "explanation uses bulleted or numbered list formatting. The team's "
+            "voice is flowing coaching prose (2-5 sentences), never a list. "
+            "Rewrite the same content as normal sentences."
+        )
+    return PreflopValidationResult.ok()
+
+
 # --- runner -----------------------------------------------------------------
 def run_preflop_audit_validators(
     generated: GeneratedExplanation,
@@ -1454,6 +1476,7 @@ def run_preflop_audit_validators(
         validate_composite_label_frequencies,
         validate_no_postflop_on_allin,
         validate_banned_phrases,
+        validate_no_list_formatting,
         validate_card_suit_consistency,
         validate_blocker_claims,
         validate_terminology,

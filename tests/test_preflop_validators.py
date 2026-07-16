@@ -1246,3 +1246,19 @@ def test_soft_named_combo_skips_hero_possessive_mention() -> None:
     # A REAL absent-class possession claim still flags.
     gen2 = _gen(prose="Villain's range has plenty of T5s in it.")
     assert len(soft_validate_named_combo_in_range(gen2, facts)) == 1
+
+
+def test_validate_no_list_formatting() -> None:
+    """List formatting never appears in the gold voice. Caught live July
+    2026: a reviser rewrite restructured a paragraph into 'Here's why:' +
+    dash bullets and passed every other validator."""
+    from pipeline.preflop.validators import validate_no_list_formatting
+
+    facts = _facts()
+    bullets = _gen(prose="Call. Here's why:\n- You need 26% to continue.\n- Villain bluffs a lot.")
+    assert not validate_no_list_formatting(bullets, facts).is_valid
+    numbered = _gen(prose="Raise. Two reasons.\n1. You dominate his aces.\n2. Position.")
+    assert not validate_no_list_formatting(numbered, facts).is_valid
+    # Normal prose with an inline hyphen or number is untouched.
+    prose = _gen(prose="Call. You need 26% and win more than that. A6-type hands dominate you 3-to-1.")
+    assert validate_no_list_formatting(prose, facts).is_valid

@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 UsageCallback = Callable[[object], None]
 
+# Total rewrite attempts: the first pass plus ONE corrective retry that feeds
+# the hard-validator rejection back (July 2026). Bounded -- the discard path
+# is rare, so the extra call is cheap, but never loop unbounded.
+_REVISE_ATTEMPTS = 2
+
 # The editor's mandate. Kept terse; the VOICE RULES it must still obey come from
 # the (reused) generation system prompt, so they never drift out of sync.
 _REVISER_INSTRUCTION = (
@@ -182,42 +187,67 @@ def revise_postflop_explanation(
         + _REVISER_INSTRUCTION
     )
 
-    try:
-        response = call_messages_create(
-            client,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        if usage_callback is not None and getattr(response, "usage", None) is not None:
-            usage_callback(response.usage)
-        revised_text = _extract_text(response).strip()
-    except Exception as exc:  # noqa: BLE001 - a reviser hiccup must never drop the row
-        logger.warning("postflop reviser: call/parse failed: %s", exc)
-        return ReviseResult(
-            explanation=explanation,
-            changed=False,
-            rejected_reason=f"revision call failed: {exc}",
+    # CORRECTIVE RETRY (July 2026): a rewrite that breaks a hard rule used to
+    # be discarded outright, shipping the WORST questions (flagged AND failed
+    # auto-fix) as unfixed originals. Now the rejection -- the exact validator
+    # error plus the rejected text -- is fed back for ONE more attempt (the
+    # same corrective-retry pattern Layer-6 generation uses). Bounded to
+    # _REVISE_ATTEMPTS total; a second failure keeps today's behavior exactly
+    # (original ships, flagged, with the last rejection recorded).
+    corrective = ""
+    last_text = ""
+    last_reason = ""
+    for _attempt in range(_REVISE_ATTEMPTS):
+        try:
+            response = call_messages_create(
+                client,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                messages=[{"role": "user", "content": user + corrective}],
+            )
+            if usage_callback is not None and getattr(response, "usage", None) is not None:
+                usage_callback(response.usage)
+            revised_text = _extract_text(response).strip()
+        except Exception as exc:  # noqa: BLE001 - a reviser hiccup must never drop the row
+            logger.warning("postflop reviser: call/parse failed: %s", exc)
+            return ReviseResult(
+                explanation=explanation,
+                changed=False,
+                rejected_reason=f"revision call failed: {exc}",
+            )
+
+        if not revised_text or revised_text == explanation.answer_explanation.strip():
+            return ReviseResult(
+                explanation=explanation, changed=False, revised_text=revised_text
+            )
+
+        revised = _rebuild(explanation, revised_text)
+        # The deterministic floor: a rewrite that breaks a hard rule never ships.
+        result = run_postflop_audit_validators(revised, facts)
+        if result.is_valid:
+            return ReviseResult(
+                explanation=revised, changed=True, revised_text=revised_text
+            )
+        last_text, last_reason = revised_text, result.error_message
+        corrective = (
+            "\n\nYOUR PREVIOUS REWRITE (below) WAS REJECTED by a deterministic "
+            "hard rule and discarded:\n"
+            f"{revised_text}\n\n"
+            "THE RULE IT BROKE:\n"
+            f"{result.error_message}\n\n"
+            "Produce a NEW rewrite of the original explanation that fixes the "
+            "audit issues WITHOUT breaking this rule. Change only the flagged "
+            "sentences and introduce no claim the original did not make."
         )
 
-    if not revised_text or revised_text == explanation.answer_explanation.strip():
-        return ReviseResult(
-            explanation=explanation, changed=False, revised_text=revised_text
-        )
-
-    revised = _rebuild(explanation, revised_text)
-    # The deterministic floor: a rewrite that breaks a hard rule is discarded.
-    result = run_postflop_audit_validators(revised, facts)
-    if not result.is_valid:
-        return ReviseResult(
-            explanation=explanation,
-            changed=False,
-            revised_text=revised_text,
-            rejected_reason=result.error_message,
-        )
-    return ReviseResult(explanation=revised, changed=True, revised_text=revised_text)
+    return ReviseResult(
+        explanation=explanation,
+        changed=False,
+        revised_text=last_text,
+        rejected_reason=last_reason,
+    )
 
 
 __all__ = ["ReviseResult", "revise_postflop_explanation"]

@@ -77,15 +77,54 @@ def test_revise_applies_clean_rewrite() -> None:
 
 
 def test_revise_rejects_rewrite_that_breaks_a_validator() -> None:
-    # A semicolon is a banned phrase -> the rewrite fails re-validation and is
-    # discarded, so the ORIGINAL explanation is kept.
+    # A semicolon is a banned phrase -> the rewrite fails re-validation. Both
+    # attempts fail here (the corrective retry runs once, bounded), so the
+    # ORIGINAL explanation is kept -- exactly the pre-retry behavior.
     bad = "The best play is to raise; AKo is strong."
-    client = _mock_client([json.dumps({"answer_explanation": bad})])
+    bad2 = "The best play is to raise; AKo is premium."
+    client = _mock_client([
+        json.dumps({"answer_explanation": bad}),
+        json.dumps({"answer_explanation": bad2}),
+    ])
     original = _gen()
     res = revise_explanation(original, _facts(), issues=["x -- y"], client=client)
     assert not res.changed
     assert res.explanation.answer_explanation == original.answer_explanation
     assert res.rejected_reason  # records why the rewrite was thrown out
+    assert len(client._calls) == 2  # exactly ONE corrective retry, no loop
+    # The retry was CORRECTIVE: the rejected text + broken rule were fed back.
+    second_user = client._calls[1]["messages"][0]["content"]
+    assert "WAS REJECTED" in second_user and bad in second_user
+
+
+def test_revise_corrective_retry_recovers_after_hard_reject() -> None:
+    """July 2026 upgrade (user-requested): a rewrite that breaks a hard rule
+    gets ONE corrective retry with the exact validator error fed back,
+    instead of shipping the flagged original unfixed."""
+    bad = "The best play is to raise; AKo is strong."
+    good = "The best play is to raise. AKo is a premium opening hand."
+    client = _mock_client([
+        json.dumps({"answer_explanation": bad}),
+        json.dumps({"answer_explanation": good}),
+    ])
+    res = revise_explanation(_gen(), _facts(), issues=["x -- y"], client=client)
+    assert res.changed
+    assert res.explanation.answer_explanation == good
+    assert len(client._calls) == 2
+
+
+def test_reviser_instruction_has_minimal_edit_rules() -> None:
+    """The July 2026 port of the postflop MINIMAL-EDIT rules: the screenshot
+    failure (a rewrite INVENTING a blocker claim on an open spot) came from
+    the preflop reviser re-deriving unflagged content. Pin the rules so they
+    can't silently drop out of the instruction."""
+    from pipeline.preflop.reviser import _REVISER_INSTRUCTION
+
+    p = _REVISER_INSTRUCTION
+    assert "MINIMAL EDIT" in p
+    assert "VERBATIM" in p
+    assert "re-derive" in p
+    assert "INTRODUCE" in p  # never add a claim the original did not make
 
 
 def test_revise_noop_when_rewrite_is_identical() -> None:

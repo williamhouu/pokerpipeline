@@ -103,6 +103,28 @@ def validate_banned_phrases(
     return PostflopValidationResult.ok()
 
 
+# Markdown-style list formatting: a line opening with a bullet or a numbered
+# item. The gold voice is 2-5 sentences of flowing coaching prose -- never a
+# list. Caught live July 2026: a reviser rewrite restructured a paragraph
+# into "Here's why:" + dash bullets and sailed through every other validator.
+_LIST_LINE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", re.MULTILINE)
+
+
+def validate_no_list_formatting(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,  # noqa: ARG001
+) -> PostflopValidationResult:
+    """Reject bulleted/numbered-list formatting in the explanation prose."""
+    text = generated.answer_explanation or ""
+    if _LIST_LINE.search(text):
+        return PostflopValidationResult.fail(
+            "explanation uses bulleted or numbered list formatting. The team's "
+            "voice is flowing coaching prose (2-5 sentences), never a list. "
+            "Rewrite the same content as normal sentences."
+        )
+    return PostflopValidationResult.ok()
+
+
 def validate_card_suit_consistency(
     generated: GeneratedExplanation,
     facts: PostflopFacts,
@@ -297,6 +319,7 @@ def run_postflop_audit_validators(
     for check in (
         validate_correct_answer,
         validate_banned_phrases,
+        validate_no_list_formatting,
         validate_card_suit_consistency,
         validate_no_garbled_card_glyphs,
         validate_hero_hand_name,

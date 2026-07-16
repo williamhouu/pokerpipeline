@@ -1219,14 +1219,38 @@ def test_reviser_discards_rewrite_that_breaks_a_validator() -> None:
     original = GeneratedExplanation(
         *(opts + ["", "", "", ""])[:4], correct, "Bet big for value here.",
     )
-    # The rewrite has an em dash (a hard-validator failure) -> discarded.
-    client = _MockClient(["Bet big — for value."])
+    # BOTH attempts break a hard rule (em dash): the corrective retry runs
+    # once, then the rewrite is discarded and the original ships (July 2026:
+    # one retry, never an unbounded loop, second failure = old behavior).
+    client = _CapturingClient(["Bet big — for value.", "Bet big — again."])
     res = revise_postflop_explanation(
         original, facts, issues=["x -- y"], client=client,
     )
     assert not res.changed
     assert res.explanation.answer_explanation == "Bet big for value here."  # original kept
-    assert res.rejected_reason  # records why it was discarded
+    assert res.rejected_reason  # records why it was discarded (the LAST reason)
+    # The retry was CORRECTIVE: the 2nd call carries the rejected text + rule.
+    assert "WAS REJECTED" in client.messages.last_user
+    assert "Bet big — for value." in client.messages.last_user
+
+
+def test_reviser_corrective_retry_recovers_after_hard_reject() -> None:
+    """The user-requested July 2026 upgrade: a rewrite that breaks a hard rule
+    gets ONE corrective retry (the exact validator error + rejected text fed
+    back) instead of shipping the flagged original unfixed."""
+    facts = _facts_for()
+    opts, correct = build_options(facts.spot)
+    original = GeneratedExplanation(
+        *(opts + ["", "", "", ""])[:4], correct, "Bet big for value here.",
+    )
+    good = "Bet big for value. Worse hands still pay you off."
+    client = _CapturingClient(["Bet big — for value.", good])
+    res = revise_postflop_explanation(
+        original, facts, issues=["x -- y"], client=client,
+    )
+    assert res.changed
+    assert res.explanation.answer_explanation == good
+    assert "WAS REJECTED" in client.messages.last_user
 
 
 def test_reviser_noop_without_issues_or_client() -> None:
@@ -2064,3 +2088,71 @@ def test_validate_hero_hand_name_and_impossible_hands():
     )
     bad = validate_no_impossible_hands(gen("A9 is in their range."), facts4)
     assert not bad.is_valid
+
+
+def test_layer7_checker_calls_report_usage():
+    """Spend-logger rule (July 2026): the Layer-7 checker calls (the gate's
+    best-of-2 + the final audit) must report usage like generation and the
+    reviser do -- they used to burn tokens the lifetime ledger never saw."""
+    from types import SimpleNamespace
+
+    from pipeline.explanation_generator import GeneratedExplanation
+    from pipeline.postflop.layer7 import run_layer7_audit
+
+    usage = SimpleNamespace(input_tokens=900, output_tokens=30)
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text='{"issues": []}')],
+        usage=usage,
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response))
+    seen: list[object] = []
+    expl = GeneratedExplanation(
+        option_1="Fold", option_2="Call", option_3="", option_4="",
+        correct_answer="Call", answer_explanation="The best play is to call.",
+    )
+    out = run_layer7_audit(
+        expl, facts=SimpleNamespace(),  # facts only feed the reviser path
+        solver_data_block="STREET: river", question_text="q",
+        node_id="r:0", client=client, model="test-model", temperature=0.0,
+        max_tokens=512, system_prompt=None, checker_prompt="check",
+        run_claim_checker=True, revise_pass=False, final_audit=False,
+        usage_callback=seen.append,
+    )
+    assert out.claim_check_json == "[]"
+    assert len(seen) == 1 and seen[0].input_tokens == 900
+
+    # The revise gate runs best-of-2: with a clean gate, exactly 2 checker
+    # calls report usage (no reviser call happens).
+    seen.clear()
+    run_layer7_audit(
+        expl, facts=SimpleNamespace(),
+        solver_data_block="STREET: river", question_text="q",
+        node_id="r:0", client=client, model="test-model", temperature=0.0,
+        max_tokens=512, system_prompt=None, checker_prompt="check",
+        run_claim_checker=False, revise_pass=True, final_audit=True,
+        usage_callback=seen.append,
+    )
+    assert len(seen) == 2
+
+
+def test_validate_no_list_formatting_postflop() -> None:
+    """The postflop twin of the preflop list-formatting guard: a rewrite that
+    restructures prose into bullets is hard-rejected (and the reviser's
+    corrective retry then reformats it as sentences)."""
+    from pipeline.postflop.validators import validate_no_list_formatting
+
+    facts = _facts_for()
+
+    def gen(text):
+        return GeneratedExplanation("Check", "Bet 75%", "", "", "Bet 75%", text)
+
+    live_sample = (
+        "Call. Here's why:\n"
+        "- You need 26% to continue and you have 23%.\n"
+        "- BB's line is uncapped on bluffs.\n"
+    )
+    assert not validate_no_list_formatting(gen(live_sample), facts).is_valid
+    assert validate_no_list_formatting(
+        gen("Bet 75% for value. Worse hands call, and 5-4 suited folds out."),
+        facts,
+    ).is_valid
