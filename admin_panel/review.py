@@ -876,3 +876,145 @@ __all__ = [
     "update_difficulty",
     "update_explanation",
 ]
+
+
+# --- flagged-phrase highlighting (July 2026) ---------------------------------
+# The Layer-7 checkers quote the EXACT offending phrase in every flag, so the
+# Review page can render the explanation with those phrases highlighted -- the
+# reviewer scans the marks instead of hunting through prose. Pure functions
+# (browserless-tested, per the fix-durability rule); the Streamlit card is a
+# thin shell over these.
+
+_MARK_STYLE = (
+    "background:#ffe08a;color:#111;border-radius:3px;padding:0 2px"
+)
+
+
+def flagged_claims_for_row(
+    claim_check_cell: str, qrec: dict | None = None
+) -> list[str]:
+    """The audit-flagged claim phrases that refer to the row's SHIPPED prose.
+
+    Primary source: the ``claim_check`` CSV column -- by construction it
+    always describes the shipped text (flag-only -> the gate on the shipped
+    original; auto-fixed -> the final audit on the shipped rewrite;
+    discarded/unchanged -> the gate on the shipped original). Fallback /
+    supplement: the meta question record's ``claim_check_issues`` (either
+    ``"claim -- problem"`` strings or ``{claim, problem}`` dicts) and, when
+    the revise record says the REWRITE shipped, its ``final_audit_issues``.
+    Deduped, order kept.
+    """
+    claims: list[str] = []
+
+    def _add(claim: str) -> None:
+        claim = (claim or "").strip()
+        if claim and claim not in claims:
+            claims.append(claim)
+
+    if claim_check_cell and claim_check_cell.strip():
+        try:
+            data = json.loads(claim_check_cell)
+        except (ValueError, TypeError):
+            data = []
+        if isinstance(data, list):
+            for d in data:
+                if isinstance(d, dict):
+                    _add(str(d.get("claim", "")))
+
+    def _add_mixed(items: object) -> None:
+        for it in items if isinstance(items, list) else []:
+            if isinstance(it, dict):
+                _add(str(it.get("claim", "")))
+            elif isinstance(it, str):
+                _add(it.split(" -- ", 1)[0])
+
+    if isinstance(qrec, dict):
+        _add_mixed(qrec.get("claim_check_issues"))
+        revise = qrec.get("revise")
+        if isinstance(revise, dict):
+            if revise.get("status") == "fixed":
+                _add_mixed(revise.get("final_audit_issues"))
+            elif revise.get("status") in ("discarded", "unchanged"):
+                _add_mixed(revise.get("gate_issues"))
+    return claims
+
+
+def _claim_spans(text: str, claim: str) -> tuple[int, int] | None:
+    """Locate ``claim`` in ``text``: exact, then case-insensitive, then
+    whitespace-tolerant + straight/curly quote-tolerant. None if not found
+    (the checker sometimes elides or paraphrases a long phrase)."""
+    import re as _re
+
+    idx = text.find(claim)
+    if idx >= 0:
+        return (idx, idx + len(claim))
+    low = text.lower()
+    idx = low.find(claim.lower())
+    if idx >= 0:
+        return (idx, idx + len(claim))
+    pattern = _re.escape(claim)
+    pattern = pattern.replace(r"\ ", r"\s+")
+    for a, b in (("'", "['’]"), ('"', "[\"“”]")):
+        pattern = pattern.replace(_re.escape(a), b)
+    m = _re.search(pattern, text, _re.IGNORECASE)
+    if m:
+        return (m.start(), m.end())
+    return None
+
+
+def highlight_claims_html(text: str, claims: list[str]) -> tuple[str, int]:
+    """Escaped HTML of ``text`` with each located claim wrapped in a
+    ``<mark>``. Returns ``(html, located_count)``; claims that can't be
+    located are simply not marked (the flag list below the card still shows
+    them). Overlapping matches keep the first-located span."""
+    import html as _html
+
+    spans: list[tuple[int, int]] = []
+    located = 0
+    for claim in claims:
+        span = _claim_spans(text, claim)
+        if span is None:
+            continue
+        if any(not (span[1] <= s or span[0] >= e) for s, e in spans):
+            located += 1  # overlaps an existing mark -- already visible
+            continue
+        spans.append(span)
+        located += 1
+    spans.sort()
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(_html.escape(text[cursor:start]))
+        parts.append(
+            f'<mark style="{_MARK_STYLE}">'
+            + _html.escape(text[start:end])
+            + "</mark>"
+        )
+        cursor = end
+    parts.append(_html.escape(text[cursor:]))
+    body = "".join(parts)
+    return (
+        '<div style="white-space:pre-wrap;line-height:1.55">' + body + "</div>",
+        located,
+    )
+
+
+def hand_rows_to_csv(
+    fieldnames: list[str],
+    legs: list[dict[str, str]],
+    reviews: dict[str, dict[str, str]],
+) -> str:
+    """One HAND's legs as a standalone CSV (July 2026, per-hand download).
+
+    ``legs`` are the hand's rows in play (sequence) order; any reviewer-edited
+    explanation in the sidecar overrides the generated one, same rule as the
+    approved-pool download. Pure (browserless-tested); the grouped Review
+    page's download button is a thin shell over this."""
+    out: list[dict[str, str]] = []
+    for row in legs:
+        d = dict(row)
+        override = reviews.get(str(d.get("No", "")), {}).get("explanation")
+        if override:
+            d["Answer Explanation"] = override
+        out.append(d)
+    return approved_rows_to_csv(fieldnames, out)

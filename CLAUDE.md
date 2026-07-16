@@ -638,8 +638,10 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   all-others-fold; and per-hand coherence — the pack's dominant action ==
   the as-played action at that step). Multi-raise legs have NO
   entry-derived fallback (entry weights can't express raise-or-call-or-
-  fold): coherence failures DROP the leg (`counters.preflop_line_legs_
-  dropped`); standalone preflop-entry mode stays SRP-only. Each pack leg
+  fold): a coherence failure DROPS THE WHOLE HAND (July 15 2026, the
+  user's no-flop-start rule -- see below; `counters.preflop_line_legs_
+  dropped` still counts the refusals); standalone preflop-entry mode
+  stays SRP-only. Each pack leg
   is built with the FULL preflop pipeline
   (per-action EVs, GTO options under the EV-secondary rule, stat_notes,
   `ranges` JSON, domination, skills, 4-axis difficulty + trap/razor,
@@ -1116,6 +1118,185 @@ shoved every score up ~350-500 points, making the Easy tier unreachable
 `easy_ev` is populated on PLO rows but does NOT feed the score); it could
 be re-added if rescaled to PLO's compressed magnitude (~0.5 bb full
 credit) or if the spot pool widens. The PLO popover documents this.
+
+**PLO QA parity wave (July 15 2026)** — the NLHE audit machinery ported
+to PLO ahead of the next PLO production push:
+
+- **Meta sidecar + resolved seed.** `generate_plo_batch` now writes a
+  `.meta.json` next to every CSV (full `run_settings`, `counters`, one
+  record per question with `node_id` + `hero_index` -- the re-verifier's
+  join key; `User Cards` is only a representative rendering). `seed=None`
+  (the admin default) is RESOLVED to a concrete random value up front and
+  recorded, so every batch stays different run-to-run AND byte-exactly
+  rebuildable. `PloBatchResult` gained `meta_path` +
+  `artifact_material_spots_skipped`.
+- **Batch re-verifier: `scripts/audit_plo_batch.py <batch.csv>`.**
+  Rebuilds every row from `plo_ranges/` + the meta (per-spot equity RNG =
+  `random.Random(seed)`, exactly as generation) and diffs EXACT on every
+  column except the LLM passthroughs (`Answer Explanation`,
+  `claim_check`, `validation_status`). Proven 0/0 on real batches incl.
+  seed=None + real-API + checker-on runs. Pre-July-2026 batches have no
+  meta -> not auditable, regenerate.
+- **Artifact-strip (the July 14 NLHE rule).** At deep stacks
+  (`stack_bb > 40`, same `allins_ok` test as the existing line/answer
+  gates) every sampled hand passes through
+  `plo/spot_sampler.strip_artifact_allins` via the shared
+  `pipeline/artifact_strip.py` leaf: trace All-in dust (< 5%) is
+  stripped + renormalised (label leaves `action_frequencies` AND
+  `ev_by_action`, so options -- which list zero-frequency actions --
+  qualifiers, EV gap, and difficulty all see the real mix); material
+  mixes (>= 5%) are never asked (counter
+  `artifact_material_spots_skipped`; per-question `artifact_stripped`
+  meta records). Measured on the real pack: 1,184/6,785 clean-line nodes
+  offer an All-in; a sample scan found ~682 material + ~115 trace spots.
+- **Layer-7 claim checker (`pipeline/plo/claim_checker.py`).** The
+  flag-only, fails-open, opt-in port of the NLHE checker (PLO-specific
+  prompt: equity/flip pinned to one named hand, reversed suit-dominance,
+  prose vs `your_hand_shape`/`card_redundancy`, action-mix vs
+  `action_strategy`, NLHE logic imported into PLO; carries the NLHE
+  calibration rules -- data contradictions only, never Always/Mostly
+  bucket wording). Batch flag `run_claim_checker` -> `claim_check`
+  column ("" not run / "[]" clean / issue list) + `validation_status`
+  "flagged" + `counters.claim_flagged_rows` + meta `claim_check_issues`;
+  admin PLO Generate checkbox "🔍 Layer-7 claim checker" (persisted) and
+  a flagged/clean panel on the PLO Review card. First live calibration
+  (6 real questions): 4 flags, ALL genuine (two position reversals, one
+  equity-vs-verdict contradiction, one garbled sentence) -- PLO prose
+  has a real position-claim failure mode, so run the checker ON for PLO
+  batches. Reviser (auto-fix) NOT ported yet -- flags are for human
+  review.
+- **Deliberate non-ports**: trap-aware difficulty (needs equity-vs-price;
+  PLO equity is optional/off by default and the pack is multiway-heavy,
+  the exact case NLHE excludes), razor's-edge (no 13x13 grid-neighbor
+  concept for 16,432 4-card classes), sanity audit (still awaiting NLHE
+  recalibration), stat_notes/exploit_notes (4-card math doesn't map;
+  columns stay deliberately blank), preflop-style deterministic
+  cross-check (subsumed by the byte-exact re-verifier for meta-bearing
+  batches).
+- Tests: `tests/test_plo_claim_checker.py` + the PLO cases in
+  `tests/test_artifact_strip.py` (strip unit + meta/re-verify roundtrip).
+
+**Spend-logger fix (July 15 2026) + THE USAGE RULE.** The lifetime-spend
+ledger (`test_output/usage_log.jsonl`, written per batch by the admin's
+job-completion hooks from each batch's token totals) was UNDER-counting
+audited batches by roughly half: generation and the REVISERS reported
+usage, but every CLAIM-CHECKER call did not -- the preflop/postflop gate,
+the revise gate's best-of-2 (2 calls/question), the final audit, the
+pack-preflop-leg checker calls, the sanity checker, and the new PLO
+checker all burned tokens invisibly. Fixed by adding `usage_callback` to
+all five checker entry points (`preflop/claim_checker.
+check_explanation_claims`, `preflop/sanity_checker.
+check_solver_data_sanity` -- both 5-arg convention;
+`postflop/claim_checker.check_postflop_claims` -- 1-object convention;
+`plo/claim_checker.check_plo_explanation_claims` -- 5-arg) and threading
+it through `postflop/layer7.py`, `preflop/batch.py`,
+`preflop_leg_pack.py`, and `plo/batch.py`. VERIFIED with an instrumented
+client wrapper on real-API batches: postflop 3 audited questions = 14
+API calls, batch-reported totals == independently-summed ground truth
+EXACTLY; same for PLO. **STANDING RULE: any new LLM call site MUST take
+and invoke a usage_callback** -- an uncounted call is invisible spend
+(this is how the ledger drifted). Notes: cache_creation/cache_read = 0
+on postflop/PLO entries is CORRECT (only the preflop generator
+prompt-caches); CLI-script runs never write the admin ledger (it is an
+admin-layer artifact); pricing was corrected June 2026 (Opus $15->$5/M
+in), so old entries also over-priced -- both effects made recent spend
+LOOK small vs earlier entries.
+
+**Reviser upgrade (July 15 2026, user-requested): minimal-edit everywhere
++ corrective retry on discard.** A discarded rewrite used to ship the
+WORST questions (flagged AND failed auto-fix) as unfixed originals. Two
+fixes: (1) the preflop reviser got the postflop MINIMAL-EDIT rules
+(verbatim except flagged sentences; never re-derive unflagged content;
+NEVER introduce a claim the original didn't make -- the observed failure
+was a rewrite inventing a blocker claim on an open spot) -- pinned by
+`test_reviser.py::test_reviser_instruction_has_minimal_edit_rules`;
+(2) BOTH revisers now run ONE corrective retry when a rewrite breaks a
+hard rule: the rejected text + the exact validator error are fed back
+("YOUR PREVIOUS REWRITE WAS REJECTED...") for a second attempt --
+the same corrective-retry pattern Layer-6 generation uses.
+`_REVISE_ATTEMPTS = 2` (never unbounded); the retry passes through the
+SAME hard re-validation + final audit; a second failure keeps the old
+behavior exactly (original ships, flagged, last rejection recorded).
+Callers (batch, layer7, pack legs) unchanged -- the loop lives inside
+`revise_explanation` / `revise_postflop_explanation`. Live-verified:
+real full-hand batch (both revisers via pack + postflop legs) 6/6
+flagged legs fixed, 0 discarded, re-verifier 0/0; the retry path itself
+is mock-pinned (discard-path live occurrences are rare by design).
+BONUS from that live run: one rewrite restructured its paragraph into
+"Here's why:" + dash bullets -- a gold-voice violation NO validator
+caught. New hard validator `validate_no_list_formatting` (both
+pipelines' audit stacks, so generation retries AND rewrites bounce on
+it, and the corrective retry then reformats): bulleted/numbered lines
+are rejected; inline hyphens/numbers ("3-to-1", "A6-type") pass.
+
+**NO FLOP-START HANDS (July 15 2026, the user's call -- tightens the
+July 13 pack-first rule).** The user caught a live play-through whose
+FIRST question was the flop: the K4o hand's preflop leg had been
+refused by the pack-coherence gate (the 200bb chart plays K4o on the
+BTN as Fold 64%/Open 36%, so asking the open is unteachable) and the
+July 13 rule shipped the hand anyway with the open narrated in prose.
+New rule: a refused preflop leg (pack coherence, the no-pack
+continue-freq >= 50% gate, or artifact-material) drops the WHOLE hand
+-- every play-through starts with a preflop question, same as the
+postflop as-played gate already dropped mid-hand-divergent hands.
+`_filter_preflop_legs` returns None; BACKFILL keeps the batch full
+(balanced lengths -> the same-ending reserve; diversify -> the
+unselected remainder; plain mode shrinks, counted; band mode's scan
+pool self-heals). Counter `hands_dropped_preflop_incoherent`. The
+`--no-preflop-leg` mode is untouched (it asks for flop-start hands
+explicitly). CONSEQUENCE: marginal-open heroes (K4o-type) no longer
+appear in full-hand batches (still available standalone), and a
+3-bet-pot solve with NO matching pack now writes an EMPTY full-hand
+batch (counters explain) instead of postflop-only hands. Verified
+live: v7 6/6 hands all preflop-start (2 dropped, backfilled), v8
+(no-pack entry path) 5/5, re-verifier 0/0. Test:
+`test_coherence_gate_drops_the_whole_hand_no_flop_start` +
+`test_three_bet_pot_drops_incoherent_or_packless_hands`.
+
+**Flagged-phrase highlighting on Review (July 15 2026, user request).**
+Every Layer-7 flag quotes the EXACT offending phrase, so the Review cards
+(postflop/full-hand, preflop, PLO) now render a read-only copy of the
+shipped explanation with each flagged phrase wrapped in a `<mark>` right
+ABOVE the editor: the reviewer scans the marks, fixes/removes in the box
+below, and once saved a fixed phrase stops matching so its mark
+disappears. Pure logic in `admin_panel/review.py`
+(`flagged_claims_for_row` -- claim sources: the `claim_check` column,
+which by construction always describes the SHIPPED text, plus the meta
+record's issue lists per revise status; `highlight_claims_html` --
+HTML-escaped, exact then case-insensitive then whitespace/curly-quote-
+tolerant matching, unlocatable claims just aren't marked and the caption
+says so). Browserless tests in `tests/test_hand_level_review.py`; the
+Streamlit cards are thin shells (fix-durability rule).
+
+**River-heavy lengths = the production default (July 15 2026, user
+feedback).** The user's balanced full-hand batches shipped "mostly
+non-river" hands: the old `river_leaning` default (40/20/20/20)
+DEGENERATES at small batch sizes -- 40% of 4 hands quotas to 1.6, which
+largest-remainder rounds to a flat 1/1/1/1 -- and 40% was too mild for
+the intent anyway. New `LENGTH_PROFILES["river_heavy"]` =
+70/10/10/10 river/turn/flop/preflop, now the default in
+`full_hand_batch`/`run.py`/CLI `--length-profile`/the admin radio
+(river_leaning + equal remain selectable). River hands are the STRICT
+MAJORITY at every batch size (n=4 -> 3 river; n=10 -> 7), test-pinned
+by `test_river_heavy_profile_quotas`. Verified live on three real
+solves (SRP + 3BP): n=4 -> 3 river/1 turn, n=8 -> 5 river/1/1/1, with
+the no-flop-start backfill composing cleanly.
+
+**DATA-QUALITY CORRECTION (July 15 2026): the v7 exports are internally
+inconsistent -- strategies vs EVs.** The July 8 "all clean" audits
+checked structure, not equilibrium consistency. Forensic finding (user
+catch -> raw-blob reconstruction; adapter proven byte-faithful): the v7
+files' freq blobs and EV blobs describe two DIFFERENT profiles -- the
+EVs form a consistent equilibrium, while the exported strategies are
+bluff-light/over-calling (v7 barrel-river lines: implied-vs-exact equity
+bias median +5 to +7.4pts; a bluff replayed vs the exported response =
+a ~17bb blunder; metadata `solve_seconds=29.86` for a 200bb 3BP is the
+tell -- likely purified/late-iterate strategies exported with averaged
+EVs). v8 shows the same test at only ~1-3pts (near-clean). Treat v7
+RIVER-BARREL mixed answers as suspect pending the vendor re-export;
+details + follow-up (an EV-vs-strategy river check for
+`scripts/audit_postflop_db.py` at solve intake) in the
+v7-export-inconsistency memory.
 
 Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 

@@ -1113,22 +1113,26 @@ def _render_generate_page_postflop() -> None:
                 "difficulty band is set."
             ),
         )
-        pf_length_profile = "river_leaning"
+        pf_length_profile = "river_heavy"
         if pf_balanced_lengths:
             pf_length_profile = st.radio(
                 "Length profile",
-                ["river_leaning", "equal"],
-                format_func=lambda v: (
-                    "River-leaning — 40% river / 20% each (default)"
-                    if v == "river_leaning" else "Equal — 25% each"
-                ),
+                ["river_heavy", "river_leaning", "equal"],
+                format_func=lambda v: {
+                    "river_heavy": "River-heavy — 70% river (default)",
+                    "river_leaning": "River-leaning — 40% river / 20% each",
+                    "equal": "Equal — 25% each",
+                }.get(v, v),
                 horizontal=True,
                 key="postflop_length_profile",
                 help=(
                     "Share of the batch's HANDS ending on each street. "
-                    "River hands carry the most questions either way; "
-                    "20% per early street keeps fold/raise endings too "
-                    "common to discount."
+                    "River-heavy (July 2026 default, per the team): most "
+                    "hands play to the river, with a real minority of "
+                    "fold/raise early-enders so a user can never infer "
+                    "'the hand continues, so folding is wrong'. NB the "
+                    "older river-leaning profile rounds to a near-EQUAL "
+                    "mix on small batches (40% of 4 hands quotas to 1)."
                 ),
             )
         pf_diversify_hands = st.checkbox(
@@ -5092,6 +5096,34 @@ def render_review_page() -> None:
                 "**Answer Explanation** _(saves on any button click: "
                 "Save, Prev/Next, grade)_"
             )
+            # Flagged-phrase highlighting (July 2026, user request): every
+            # Layer-7 flag quotes the exact offending phrase, so show the
+            # SHIPPED explanation with those phrases marked -- the reviewer
+            # scans the marks, then fixes or deletes them in the editor
+            # below (a text_area cannot render inline highlights itself).
+            _flag_claims = review.flagged_claims_for_row(
+                _cell(row, "claim_check"), _qmeta
+            )
+            if _flag_claims:
+                _hl_html, _hl_n = review.highlight_claims_html(
+                    _cell(row, "Answer Explanation"), _flag_claims
+                )
+                if _hl_n:
+                    _hl_note = (
+                        f"🖍️ **{_hl_n} flagged phrase"
+                        + ("s" if _hl_n != 1 else "")
+                        + " highlighted below**: scan the marks, then fix or "
+                        "remove them in the editor underneath."
+                    )
+                    if _hl_n < len(_flag_claims):
+                        _hl_note += (
+                            f" ({len(_flag_claims) - _hl_n} more flag"
+                            + ("s" if len(_flag_claims) - _hl_n != 1 else "")
+                            + " couldn't be matched to an exact phrase: see "
+                            "the flag panels above.)"
+                        )
+                    st.markdown(_hl_note)
+                    st.markdown(_hl_html, unsafe_allow_html=True)
             _expl_key = f"review_expl::{csv_path.name}::{no}"
             st.text_area(
                 "Answer Explanation",
@@ -6542,6 +6574,15 @@ def _render_action_ev_bars(row: dict[str, str]) -> None:
         return
     best = max(bb for _, bb in actions)
     worst = min(bb for _, bb in actions)
+    # Crown a "best action" ONLY when it wins by a meaningful margin. On a
+    # mixed spot the solver is indifferent by construction (EVs equal up to
+    # convergence noise), and crowning a 0.05bb edge reads as "the correct
+    # answer is wrong" (user-reported July 2026: a 74%-call river showed
+    # Fold ✅ over a -0.05bb call). Below the tolerance every near-best
+    # action is marked tied instead.
+    _sorted_evs = sorted((bb for _, bb in actions), reverse=True)
+    _second = _sorted_evs[1] if len(_sorted_evs) > 1 else None
+    _decisive = _second is None or (best - _second) >= 0.10  # noqa: PLR2004
     # Symmetric scale floored at +-1bb so a genuinely tiny gap reads as tiny
     # rather than getting stretched to fill the bar.
     span = max(1.0, max(abs(bb) for _, bb in actions)) * 1.15
@@ -6555,7 +6596,10 @@ def _render_action_ev_bars(row: dict[str, str]) -> None:
             seg, color = f"left:50%;width:{half:.1f}%;", "#2CA02C"
         else:
             seg, color = f"left:{50.0 - half:.1f}%;width:{half:.1f}%;", "#D62728"
-        mark = " ✅" if abs(bb - best) < 1e-9 else ""
+        if _decisive:
+            mark = " ✅" if abs(bb - best) < 1e-9 else ""
+        else:
+            mark = " · ≈ tied" if (best - bb) < 0.10 else ""  # noqa: PLR2004
         html.append(
             f'<div style="font-size:0.8em;color:#444;margin:6px 0 1px;">'
             f"{label}{mark} · {bb:+.2f} bb</div>"
@@ -6572,18 +6616,20 @@ def _render_action_ev_bars(row: dict[str, str]) -> None:
     is_pure = "100%" in (row.get("action_frequencies") or "")
     if gap < 0.10 and is_pure:  # noqa: PLR2004
         tail = (
-            "The bars are nearly equal — the wrong action costs little "
-            "here, but the solver still always takes the marked one."
+            "The bars are nearly equal: the wrong action costs little "
+            "here, but the solver still always takes the same one."
         )
     elif gap < 0.10:  # noqa: PLR2004
         tail = (
-            "The bars are nearly equal, so the actions are about the same "
-            "EV — that's why the solver mixes."
+            "The bars are nearly equal, which is exactly WHY the solver "
+            "mixes: at an indifferent spot the mix percentages are the "
+            "strategy, and a hundredths-of-a-bb EV edge is convergence "
+            "noise, not a verdict."
         )
     else:
         tail = (
-            f"The gap between best and worst is about {gap:.2f} bb — what "
-            "picking the wrong action costs."
+            f"The gap between best and worst is about {gap:.2f} bb, which "
+            "is what picking the wrong action costs."
         )
     html.append(
         '<div style="font-size:0.75em;color:#888;margin-top:3px;">'
@@ -7556,10 +7602,63 @@ def _render_postflop_question_card(
             if neutral:
                 st.caption("✅ correct · 😐 neutral credit · ▫️ mistake")
 
+            # Resolve this row's meta question record BEFORE the editor: the
+            # flagged-phrase highlighter (below) and the Layer-7 panels
+            # (further down) both read it. Full-hand legs join on
+            # (hand_id, sequence_index) -- unique for every leg kind; the
+            # node/combo join is the standalone fallback (pack PREFLOP legs'
+            # solver_reference ends in the node id, not the combo).
+            _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
+            _meta_node_ids = {q.get("node_id") for q in _qrecs}
+            _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+            _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
+            _ref_combo = _ref_parts[-1] if _ref_parts else ""
+            _qrec = review.meta_question_for_leg(
+                meta, hand_id=_cell(row, "hand_id"),
+                sequence_index=_cell(row, "sequence_index"),
+            )
+            if _qrec is None:
+                _qrec = next(
+                    (
+                        q for q in _qrecs
+                        if q.get("node_id") == _ref_node
+                        and q.get("hero_combo") == _ref_combo
+                    ),
+                    None,
+                )
+
             st.markdown(
                 "**Answer Explanation** _(saves on any button click: "
                 "Save, Prev/Next, grade)_"
             )
+            # Flagged-phrase highlighting (July 2026, user request): every
+            # Layer-7 flag quotes the exact offending phrase, so show the
+            # SHIPPED explanation with those phrases marked -- the reviewer
+            # scans the marks, then fixes or deletes them in the editor
+            # below (a text_area cannot render inline highlights itself).
+            _flag_claims = review.flagged_claims_for_row(
+                _cell(row, "claim_check"), _qrec
+            )
+            if _flag_claims:
+                _hl_html, _hl_n = review.highlight_claims_html(
+                    _cell(row, "Answer Explanation"), _flag_claims
+                )
+                if _hl_n:
+                    _hl_note = (
+                        f"🖍️ **{_hl_n} flagged phrase"
+                        + ("s" if _hl_n != 1 else "")
+                        + " highlighted below**: scan the marks, then fix or "
+                        "remove them in the editor underneath."
+                    )
+                    if _hl_n < len(_flag_claims):
+                        _hl_note += (
+                            f" ({len(_flag_claims) - _hl_n} more flag"
+                            + ("s" if len(_flag_claims) - _hl_n != 1 else "")
+                            + " couldn't be matched to an exact phrase: see "
+                            "the flag panels below.)"
+                        )
+                    st.markdown(_hl_note)
+                    st.markdown(_hl_html, unsafe_allow_html=True)
             ekey = f"postflop_review_expl::{csv_path.name}::{no}"
             st.text_area(
                 "Answer Explanation",
@@ -7578,28 +7677,8 @@ def _render_postflop_question_card(
             _render_stat_panel(row)
 
             # --- Layer-7: auto-fix lifecycle + claim-checker flags + prompt inspector ---
-            _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
-            _meta_node_ids = {q.get("node_id") for q in _qrecs}
-            _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
-            _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
-            _ref_combo = _ref_parts[-1] if _ref_parts else ""
-            # Full-hand legs join on (hand_id, sequence_index) -- unique for
-            # every leg kind; the node/combo join below missed pack PREFLOP
-            # legs (their solver_reference ends in the node id, not the
-            # combo), which hid their Layer-7 panels entirely.
-            _qrec = review.meta_question_for_leg(
-                meta, hand_id=_cell(row, "hand_id"),
-                sequence_index=_cell(row, "sequence_index"),
-            )
-            if _qrec is None:
-                _qrec = next(
-                    (
-                        q for q in _qrecs
-                        if q.get("node_id") == _ref_node
-                        and q.get("hero_combo") == _ref_combo
-                    ),
-                    None,
-                )
+            # (_qrec was resolved above, before the explanation editor, so the
+            # flagged-phrase highlighter could use it too.)
             row_strs = {c: _cell(row, c) for c in df.columns}
             _render_audit_legend(meta, _qrec, row_strs)  # per-question QA map
             _render_revise_panel(_qrec)         # REWRITTEN vs ORIGINAL (if revise ran)
@@ -7895,6 +7974,21 @@ def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> 
             ):
                 review.remove_hand(csv_path, leg_nos)
                 st.rerun()
+            # Per-hand download (July 2026, user request): just THIS hand's
+            # legs in play order, with saved explanation edits applied --
+            # for shipping/reviewing one play-through at a time.
+            _dl_rows = [{c: _cell(r, c) for c in df.columns} for r in legs]
+            st.download_button(
+                "⬇️ Download this hand (CSV)",
+                review.hand_rows_to_csv(list(df.columns), _dl_rows, reviews),
+                file_name=f"hand_{_hid}.csv",
+                mime="text/csv",
+                key=f"hand_dl::{csv_path.name}::{_hid}",
+                help=(
+                    "Just this hand's legs, in play order, with your saved "
+                    "explanation edits applied."
+                ),
+            )
             for r in legs:
                 _render_postflop_question_card(
                     r, df=df, csv_path=csv_path, reviews=reviews, meta=meta,
@@ -8108,6 +8202,39 @@ def render_postflop_compare_page() -> None:
                 return
             if job.status is jobs.JobStatus.COMPLETED:
                 res = job.result if isinstance(job.result, dict) else None
+                if res and not res.get("dry_run"):
+                    # Spend-logger fix (July 2026): the Compare page showed
+                    # token counts in its success message but NEVER wrote the
+                    # lifetime ledger -- both sides' spend was invisible. Log
+                    # one entry per side (they can run different models), once
+                    # per job id (same idempotency set as the Generate pages).
+                    _logged = _logged_job_ids()
+                    if job.id not in _logged:
+                        _logged.add(job.id)
+                        for side in ("a", "b"):
+                            _mdl = str(res.get(f"model_{side}", "") or "")
+                            _in = int(res.get(f"{side}_in_tokens", 0) or 0)
+                            _out = int(res.get(f"{side}_out_tokens", 0) or 0)
+                            if _mdl.startswith("(") or not (_in or _out):
+                                continue
+                            usage.append_log_entry(
+                                USAGE_LOG_PATH,
+                                model=_mdl,
+                                input_tokens=_in,
+                                output_tokens=_out,
+                                cache_creation_tokens=0,
+                                cache_read_tokens=0,
+                                cost_usd=usage.compute_cost_usd(
+                                    model=_mdl, input_tokens=_in,
+                                    output_tokens=_out,
+                                ),
+                                questions_written=int(
+                                    res.get(f"{side}_written", 0) or 0
+                                ),
+                                output_filename=Path(
+                                    str(res.get(f"{side}_csv", ""))
+                                ).name,
+                            )
                 if res and res.get("a_written") and res.get("b_written"):
                     st.session_state[_STATE] = {
                         k: res[k] for k in ("a_csv", "b_csv", "a_name", "b_name")
@@ -9081,6 +9208,7 @@ _PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
     "plo_gen_model",
     "plo_gen_temperature",
     "plo_gen_compute_eq",
+    "plo_gen_claim_checker",
     "plo_gen_prompt_select",
 )
 
@@ -9173,6 +9301,7 @@ def _seed_plo_generate_settings() -> None:
             saved.get("plo_gen_temperature"), 0.0, 1.0, 0.6, float
         ),
         "plo_gen_compute_eq": _flag(saved.get("plo_gen_compute_eq"), False),
+        "plo_gen_claim_checker": _flag(saved.get("plo_gen_claim_checker"), False),
     }
     # The prompt picker validates itself at render (a stale slug falls back
     # to the active prompt), so the saved slug is seeded as-is.
@@ -9507,8 +9636,21 @@ def render_plo_generate_page() -> None:
         "equity is ~60x heavier than Hold'em). The preview is always "
         "equity-off regardless.",
     )
-    # Rough per-question estimates by model tier.
+    run_claim_checker = st.checkbox(
+        "🔍 Layer-7 claim checker (flag-only, +1 LLM call per question)",
+        key="plo_gen_claim_checker",
+        help="After each explanation is written, a second LLM pass audits it "
+        "against the SOLVER DATA facts and FLAGS confusing or wrong claims "
+        "(it never rewrites anything). Flags show on the PLO Review page and "
+        "set the row's validation_status to 'flagged'. The July 2026 port of "
+        "the NLHE claim checker; it fails open, so a checker error never "
+        "blocks a good explanation.",
+    )
+    # Rough per-question estimates by model tier (+~50% with the checker's
+    # extra smaller call).
     _cost_per_q = 0.15 if "opus" in model else 0.08
+    if run_claim_checker:
+        _cost_per_q *= 1.5
     st.info(
         f"**Estimated**: {int(count)} questions · "
         f"~${int(count) * _cost_per_q:.2f} · {_matching:,} nodes available"
@@ -9655,6 +9797,7 @@ def render_plo_generate_page() -> None:
                 explanation_model=model,
                 explanation_temperature=temperature,
                 explanation_system_prompt=plo_prompt_text,
+                run_claim_checker=run_claim_checker,
                 usage_callback=_usage_cb,
             )
         cost = usage.compute_cost_usd(
@@ -9872,6 +10015,40 @@ def render_plo_review_page() -> None:
             freqs = q.get("action_frequencies", "")
             if freqs:
                 st.caption(f"**Solver frequencies:** {freqs}")
+            # Layer-7 claim-checker verdict (July 2026): "" = the checker
+            # didn't run on this batch; "[]" = ran and came back clean (show
+            # the evidence, like the postflop card); else the issue list.
+            _cc_cell = q.get("claim_check", "")
+            if _cc_cell:
+                from pipeline.plo.claim_checker import parse_claim_check  # noqa: PLC0415
+
+                _cc_issues = parse_claim_check(_cc_cell)
+                if _cc_issues:
+                    st.error(
+                        "🔍 **Layer-7 claim check flagged this explanation** "
+                        "(flag-only, the prose was NOT changed):\n\n"
+                        + "\n".join(
+                            f"- “{d.get('claim', '')}”: {d.get('problem', '')}"
+                            for d in _cc_issues
+                        )
+                    )
+                else:
+                    st.success("🔍 Layer-7 claim check ran and came back CLEAN.")
+                # Flagged-phrase highlighting (July 2026): mark the exact
+                # quoted phrases inside the explanation so the reviewer can
+                # scan instead of hunting, then edit in the box below.
+                if _cc_issues:
+                    _hl_html, _hl_n = review.highlight_claims_html(
+                        q.get("Answer Explanation", ""),
+                        [str(d.get("claim", "")) for d in _cc_issues],
+                    )
+                    if _hl_n:
+                        st.markdown(
+                            f"🖍️ **{_hl_n} flagged phrase"
+                            + ("s" if _hl_n != 1 else "")
+                            + " highlighted below.**"
+                        )
+                        st.markdown(_hl_html, unsafe_allow_html=True)
             new_expl = st.text_area(
                 "Answer Explanation (auto-saves)",
                 value=q.get("Answer Explanation", ""),

@@ -168,3 +168,85 @@ def test_meta_question_for_leg_joins_preflop_legs() -> None:
     assert review.meta_question_for_leg(meta, hand_id="", sequence_index="1") is None
     assert review.meta_question_for_leg(None, hand_id="h1", sequence_index="1") is None
     assert review.meta_question_for_leg(meta, hand_id="h9", sequence_index="1") is None
+
+
+def test_flagged_claims_for_row_all_sources() -> None:
+    """Flagged-phrase highlighting (July 2026): claims come from the
+    claim_check CSV cell (always describes the SHIPPED prose) plus the meta
+    record's issue lists, deduped, tolerant of both the dict and the
+    'claim -- problem' string shapes."""
+    import json as _json
+
+    from admin_panel.review import flagged_claims_for_row
+
+    cell = _json.dumps([
+        {"claim": "you'll often be drawing thin", "problem": "misrepresents"},
+        {"claim": "monotone board", "problem": "not monotone"},
+    ])
+    qrec = {
+        "claim_check_issues": ["monotone board -- duplicate of the cell"],
+        "revise": {
+            "status": "fixed",
+            "final_audit_issues": ["the ace of clubs removes -- overreach"],
+        },
+    }
+    claims = flagged_claims_for_row(cell, qrec)
+    assert claims == [
+        "you'll often be drawing thin",
+        "monotone board",
+        "the ace of clubs removes",
+    ]
+    # Discarded rewrite: the gate issues describe the shipped ORIGINAL.
+    qrec2 = {"revise": {"status": "discarded",
+                        "gate_issues": ["bad phrase -- why"]}}
+    assert flagged_claims_for_row("", qrec2) == ["bad phrase"]
+    # Blank/malformed cell + no record: no claims, no crash.
+    assert flagged_claims_for_row("", None) == []
+    assert flagged_claims_for_row("not json", None) == []
+
+
+def test_highlight_claims_html_marks_and_escapes() -> None:
+    """The highlighter wraps located claims in <mark>, escapes ALL prose
+    (an explanation containing HTML must never inject), tolerates case +
+    curly-quote drift, and simply skips claims it can't locate."""
+    from admin_panel.review import highlight_claims_html
+
+    text = "BB is leading the turn on a monotone board. You'll often be <b>drawing thin</b>."
+    html, n = highlight_claims_html(
+        text,
+        [
+            "monotone board",
+            "you'll often be",     # case drift + curly apostrophe in prose? straight here
+            "phrase that is not present",
+        ],
+    )
+    assert n == 2
+    assert "<mark" in html and "monotone board</mark>" in html
+    assert "&lt;b&gt;" in html          # prose HTML is escaped
+    assert "<b>" not in html.replace("<br", "")  # no raw tags survive
+    # Curly-quote tolerance: prose uses a curly apostrophe, claim a straight one.
+    curly = "You’ll often be drawing thin on later streets."
+    html2, n2 = highlight_claims_html(curly, ["You'll often be drawing thin"])
+    assert n2 == 1 and "</mark>" in html2
+
+
+def test_hand_rows_to_csv_per_hand_download() -> None:
+    """Per-hand download (July 2026): one hand's legs serialize to a
+    standalone CSV in play order, with sidecar explanation edits applied."""
+    from admin_panel.review import hand_rows_to_csv
+
+    fields = ["No", "hand_id", "sequence_index", "Answer Explanation"]
+    legs = [
+        {"No": "4", "hand_id": "h1", "sequence_index": "1",
+         "Answer Explanation": "original preflop"},
+        {"No": "5", "hand_id": "h1", "sequence_index": "2",
+         "Answer Explanation": "original flop"},
+    ]
+    reviews = {"5": {"status": "approved", "note": "",
+                     "explanation": "EDITED flop"}}
+    out = hand_rows_to_csv(fields, legs, reviews)
+    lines = out.strip().splitlines()
+    assert lines[0].startswith("No,hand_id")
+    assert len(lines) == 3
+    assert "original preflop" in lines[1]
+    assert "EDITED flop" in lines[2] and "original flop" not in out
