@@ -169,12 +169,15 @@ def check_solver_data_sanity(
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 0.0,
+    usage_callback: Any = None,
 ) -> SanityCheckResult:
     """Audit one spot's SOLVER DATA block against basic poker knowledge.
 
     One LLM call; flag-only; fails open. Mirrors the claim checker's
     client handling (self-creates from ANTHROPIC_API_KEY when handed None,
-    the admin panel's pattern)."""
+    the admin panel's pattern). ``usage_callback`` is the preflop 5-arg
+    convention (spend-logger rule, July 2026: every LLM call site MUST
+    report usage or the lifetime ledger under-counts)."""
     if client is None:
         import os  # noqa: PLC0415
 
@@ -191,6 +194,12 @@ def check_solver_data_sanity(
             {"role": "user", "content": build_sanity_user_prompt(solver_data)}
         ],
     )
+    if usage_callback is not None:
+        from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+            _extract_usage,
+        )
+
+        usage_callback(model, *_extract_usage(response))
     return parse_sanity_response(_extract_text(response))
 
 

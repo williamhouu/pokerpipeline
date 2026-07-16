@@ -888,15 +888,20 @@ def _is_fatal_api_error(exc: Exception) -> bool:
 def _safe_claim_check(
     prose: str, facts: object, client: object, *,
     model: str, system_prompt: str, node_id: str,
+    usage_callback: object = None,
 ) -> object | None:
     """Run the claim checker, wrapped so a checker failure never drops a row.
 
     Returns the ``ClaimCheckResult`` or ``None`` on error. Shared by the
-    flag-only path and the revise pass (initial check + final audit)."""
+    flag-only path and the revise pass (initial check + final audit).
+    ``usage_callback`` MUST be threaded by callers (July 2026 spend-logger
+    fix): before it, every checker call burned tokens the lifetime ledger
+    never saw."""
     try:
         return check_explanation_claims(
             prose, _trim_facts_for_prompt(facts), client,
             model=model, system_prompt=system_prompt,
+            usage_callback=usage_callback,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("batch: claim checker failed for %s: %s", node_id, exc)
@@ -1349,7 +1354,7 @@ def generate_preflop_batch(
                 cc = _safe_claim_check(
                     explanation.answer_explanation, facts, client,
                     model=model, system_prompt=checker_prompt,
-                    node_id=spot.node.node_id,
+                    node_id=spot.node.node_id, usage_callback=_record_usage,
                 )
                 gate_issues = (
                     [f"{i.claim} -- {i.problem}" for i in cc.issues]
@@ -1388,6 +1393,7 @@ def generate_preflop_batch(
                                     explanation.answer_explanation, facts, client,
                                     model=model, system_prompt=checker_prompt,
                                     node_id=spot.node.node_id,
+                                    usage_callback=_record_usage,
                                 )
                                 if cc4 is not None:
                                     final_audit_issues = [
@@ -1459,11 +1465,13 @@ def generate_preflop_batch(
                     sanity_data = _trim_facts_for_prompt(facts)
                     first_pass = check_solver_data_sanity(
                         sanity_data, client, model=model,
+                        usage_callback=_record_usage,
                     )
                     kept = first_pass.issues
                     if kept:
                         second_pass = check_solver_data_sanity(
                             sanity_data, client, model=model,
+                            usage_callback=_record_usage,
                         )
                         kept = consensus_issues(first_pass, second_pass)
                     sanity_issues = [

@@ -46,12 +46,19 @@ _REVISE_GATE_PASSES = 2
 def _safe_claim_check(
     prose: str, solver_data_block: str, client: object, *,
     model: str, system_prompt: str, node_id: str, question: str = "",
+    usage_callback=None,
 ) -> ClaimCheckResult | None:
-    """Run the claim checker, wrapped so a checker failure never drops a row."""
+    """Run the claim checker, wrapped so a checker failure never drops a row.
+
+    ``usage_callback`` MUST be threaded (July 2026 spend-logger fix): before
+    it, every checker call here burned tokens the lifetime ledger never saw
+    (only generation + the reviser reported), so audited batches logged
+    roughly half their real spend."""
     try:
         return check_postflop_claims(
             prose, solver_data_block, client,
             question=question, model=model, system_prompt=system_prompt,
+            usage_callback=usage_callback,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("layer7: claim checker failed for %s: %s", node_id, exc)
@@ -61,6 +68,7 @@ def _safe_claim_check(
 def _gate_check_best_of(
     prose: str, solver_data_block: str, client: object, *,
     model: str, system_prompt: str, node_id: str, passes: int, question: str = "",
+    usage_callback=None,
 ) -> ClaimCheckResult | None:
     """Run the claim-check gate ``passes`` times and union the issues (deduped by
     claim text). ``passed`` is False if any pass flagged anything; ``None`` if
@@ -72,7 +80,7 @@ def _gate_check_best_of(
         cc = _safe_claim_check(
             prose, solver_data_block, client,
             model=model, system_prompt=system_prompt, node_id=node_id,
-            question=question,
+            question=question, usage_callback=usage_callback,
         )
         if cc is None:
             continue
@@ -139,12 +147,13 @@ def run_layer7_audit(
             explanation.answer_explanation, solver_data_block, client,
             model=model, system_prompt=checker_prompt, node_id=node_id,
             passes=_REVISE_GATE_PASSES, question=question_text,
+            usage_callback=usage_callback,
         )
         if revise_pass
         else _safe_claim_check(
             explanation.answer_explanation, solver_data_block, client,
             model=model, system_prompt=checker_prompt, node_id=node_id,
-            question=question_text,
+            question=question_text, usage_callback=usage_callback,
         )
     )
     gate_issues = [f"{i.claim} -- {i.problem}" for i in cc.issues] if cc is not None else []
@@ -179,6 +188,7 @@ def run_layer7_audit(
                         out.explanation.answer_explanation, solver_data_block,
                         client, model=model, system_prompt=checker_prompt,
                         node_id=node_id, question=question_text,
+                        usage_callback=usage_callback,
                     )
                     if cc4 is not None:
                         out.final_audit_issues = [

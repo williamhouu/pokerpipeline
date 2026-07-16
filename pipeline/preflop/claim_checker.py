@@ -164,6 +164,7 @@ def check_explanation_claims(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.0,
     system_prompt: str = CHECKER_SYSTEM_PROMPT,
+    usage_callback: Any = None,
 ) -> ClaimCheckResult:
     """Audit one explanation against its SOLVER DATA block via a checker LLM
     call. Returns a structured verdict (see module docstring). Fails open.
@@ -171,6 +172,13 @@ def check_explanation_claims(
     ``system_prompt`` defaults to :data:`CHECKER_SYSTEM_PROMPT` but the admin
     panel can pass an edited version so the checker prompt is tunable like the
     explanation prompts.
+
+    ``usage_callback`` (July 2026 spend-logger fix): the preflop 5-arg
+    convention ``(model, in, out, cache_creation, cache_read)``, same as the
+    reviser. Before this, every checker call (the gate, the best-of-2 passes,
+    the final audit) burned tokens INVISIBLY -- the lifetime-spend ledger
+    counted generation + reviser only, so audited batches under-reported by
+    roughly the checker's share. Any new LLM call site MUST report usage.
     """
     # The admin panel drives the batch with client=None (generation lazily
     # creates its own client; the checker must too, or it dies on a None
@@ -191,6 +199,12 @@ def check_explanation_claims(
         system=system_prompt or CHECKER_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user}],
     )
+    if usage_callback is not None:
+        from pipeline.preflop.explanation_generator import (  # noqa: PLC0415
+            _extract_usage,
+        )
+
+        usage_callback(model, *_extract_usage(response))
     return parse_checker_response(_extract_text(response))
 
 

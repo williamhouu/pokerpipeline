@@ -970,6 +970,7 @@ def build_pack_preflop_leg_row(
             explanation.answer_explanation, facts, client, model=model,
             system_prompt=CHECKER_SYSTEM_PROMPT,
             node_id=facts.spot.node.node_id,
+            usage_callback=pre_usage_cb,
         )
         gate_issues = (
             [f"{i.claim} -- {i.problem}" for i in cc.issues]
@@ -1006,6 +1007,7 @@ def build_pack_preflop_leg_row(
                             explanation.answer_explanation, facts, client,
                             model=model, system_prompt=CHECKER_SYSTEM_PROMPT,
                             node_id=facts.spot.node.node_id,
+                            usage_callback=pre_usage_cb,
                         )
                         if cc4 is not None:
                             revise_record["final_audit_issues"] = [

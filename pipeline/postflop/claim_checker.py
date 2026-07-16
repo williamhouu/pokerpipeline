@@ -220,6 +220,7 @@ def check_postflop_claims(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.0,
     system_prompt: str = POSTFLOP_CHECKER_SYSTEM_PROMPT,
+    usage_callback: object = None,
 ) -> ClaimCheckResult:
     """Audit one postflop explanation against its SOLVER DATA block via a
     checker LLM call. Returns a structured verdict (see module docstring). Fails
@@ -228,6 +229,12 @@ def check_postflop_claims(
     as invented. ``system_prompt`` defaults to
     :data:`POSTFLOP_CHECKER_SYSTEM_PROMPT` but the admin panel can pass an edited
     version so it is tunable.
+
+    ``usage_callback`` (July 2026 spend-logger fix): the postflop 1-object
+    convention ``usage_callback(response.usage)``, same as generation and the
+    reviser. Before this, every checker call (the gate's best-of-2, the
+    flag-only pass, the final audit) burned tokens the lifetime-spend ledger
+    never saw. Any new LLM call site MUST report usage.
     """
     if client is None:
         import os  # noqa: PLC0415
@@ -244,6 +251,8 @@ def check_postflop_claims(
         system=system_prompt or POSTFLOP_CHECKER_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user}],
     )
+    if usage_callback is not None and getattr(response, "usage", None) is not None:
+        usage_callback(response.usage)
     return parse_checker_response(_extract_text(response))
 
 

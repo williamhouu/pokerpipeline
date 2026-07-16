@@ -112,3 +112,42 @@ def test_none_client_lazily_builds_from_env(monkeypatch) -> None:
     assert result.passed is True
     # It actually constructed a client from the env (rather than dying on None).
     assert created["api_key"] == "test-key-123"
+
+
+def test_checker_reports_usage_to_callback():
+    """Spend-logger rule (July 2026): every LLM call site MUST report usage.
+    The checker used to burn tokens invisibly -- generation + reviser were
+    counted, the gate / best-of-2 / final-audit calls were not, so audited
+    batches logged roughly half their real spend."""
+    usage = SimpleNamespace(
+        input_tokens=1234, output_tokens=56,
+        cache_creation_input_tokens=7, cache_read_input_tokens=8,
+    )
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text='{"issues": []}')],
+        usage=usage,
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response))
+    calls: list[tuple] = []
+    check_explanation_claims(
+        "prose", {"k": "v"}, client, model="test-model",
+        usage_callback=lambda *a: calls.append(a),
+    )
+    assert calls == [("test-model", 1234, 56, 7, 8)]
+
+
+def test_sanity_checker_reports_usage_to_callback():
+    from pipeline.preflop.sanity_checker import check_solver_data_sanity
+
+    usage = SimpleNamespace(input_tokens=100, output_tokens=10)
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text='{"issues": []}')],
+        usage=usage,
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response))
+    calls: list[tuple] = []
+    check_solver_data_sanity(
+        {"k": "v"}, client, model="test-model",
+        usage_callback=lambda *a: calls.append(a),
+    )
+    assert calls == [("test-model", 100, 10, 0, 0)]
