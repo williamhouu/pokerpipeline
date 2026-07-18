@@ -23,6 +23,7 @@ from pipeline.explanation_generator import GeneratedExplanation
 from pipeline.format_writer import CSV_COLUMNS
 from pipeline.neutral_credit import format_neutral_credit, neutral_credit_options
 from pipeline.postflop.action_history import build_context_line, format_question
+from pipeline.provenance import build_notes
 from pipeline.postflop.animation_script import build_postflop_animation_script
 from pipeline.postflop.app_table_format import build_postflop_app_table_columns
 from pipeline.postflop.difficulty import PostflopDifficulty
@@ -374,8 +375,20 @@ def build_postflop_row(
         "easy_ev": f"{difficulty.easy_ev:.2f}" if difficulty.easy_ev is not None else "",
         "easy_concept": f"{difficulty.easy_concept:.2f}",
         "easy_hand": f"{difficulty.easy_hand:.2f}",
-        "Notes": _NOTES,
-        "solver_reference": f"{solve.source_reference}/{node.node_id}/{facts.spot.hero_combo}",
+        # Notes carries provenance + chart (the solve) + situation + node
+        # reference (the old solver_reference value, now the Node: field, still
+        # ".../<node_id>/<hero_combo>" so the postflop parsers are unaffected).
+        # July 2026.
+        "Notes": build_notes(
+            _NOTES,
+            chart=solve.source_reference,
+            situation=(
+                f"{facts.hero_position} vs {facts.villain_position}, "
+                f"{_PREFLOP_POT_TYPE.get(facts.preflop_raise_count, 'multi-raised pot').lower()}, "
+                f"{facts.archetype}, {facts.board_texture.get('composite', '')}"
+            ),
+            node_ref=f"{solve.source_reference}/{node.node_id}/{facts.spot.hero_combo}",
+        ),
         "validation_status": validation_status,
         "chat_context": _postflop_chat_context(
             facts, explanation, solve, difficulty,

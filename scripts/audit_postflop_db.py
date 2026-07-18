@@ -5,7 +5,10 @@ Pulls the REAL numbers from the file (never the metadata labels) and prints a
 prioritized PASS / WARN / FAIL report covering the things that killed prior
 vendor attempts: format integrity, range correctness (the dealbreaker), whether
 the SOLVE actually used the shipped range, board masking, geometry, coverage,
-and a strategy sanity pass (c-bet + OOP-lead frequencies).
+a strategy sanity pass (c-bet + OOP-lead frequencies), and -- July 2026 -- an
+EV-vs-strategy internal-consistency check on river facing-bet nodes (catches
+exports whose frequency tables and EV tables describe two different solutions,
+the defect that made the v7 river-barrel answers suspect).
 
     venv/bin/python scripts/audit_postflop_db.py /path/to/solve.db
 
@@ -20,8 +23,12 @@ from the ``preflop_line`` metadata (falling back to the spot name). See
 
 from __future__ import annotations
 
+import statistics
 import sys
 from collections import Counter, defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _connect(path: str):
@@ -62,6 +69,157 @@ def _preflop_raise_count(meta: dict) -> int:
     if "3BP" in spot or "3bet" in spot.lower():
         return 2
     return 1
+
+
+def _ev_vs_strategy_check(con, *, max_nodes: int = 24, max_combos_per_node: int = 60) -> int:
+    """[8] EV-vs-strategy consistency on river facing-bet nodes.
+
+    A river call is a pure showdown, so the file's own EV tables imply an exact
+    equity for every hero combo: ``(EV_call - EV_fold + to_call) / (pot + to_call)``.
+    That number must match the exact showdown equity of the same combo against
+    the betting range reconstructed from the file's own frequency tables
+    (preflop range x the conditional freq blobs along the line, board-masked).
+    A systematic gap means the strategy tables and the EV tables describe two
+    DIFFERENT solutions -- the July-2026 v7 defect (purified/late-iterate
+    strategies exported alongside averaged EVs; bluff-catchers looked ~5-7
+    equity points better than they really were, so mixed river calls were
+    ~14bb blunders against the file's own EVs). This check would have caught
+    that at intake.
+
+    Two hard checks (measured baselines: v8 clean ~1-2 pts; v7 defective
+    +5-7 pts on barrel lines, opposite-signed on check-check rivers):
+    the pooled median gap (> 3.0 pts = FAIL, > 2.0 = WARN) and the share of
+    nodes whose per-node median gap exceeds 3 pts (>= 3 nodes and >= 25% =
+    FAIL) - the latter catches a non-converged export whose oppositely-biased
+    lines net the pooled median to ~0.
+
+    Returns the number of hard failures (0-2).
+    """
+    from pipeline.fact_extractor.equity import rank_hand
+    from pipeline.postflop.adapters.sqlite_db import (
+        SqliteDbAdapter,
+        _node_street,
+        _Solve,
+        _split_cards,
+        _stride_sample,
+        derive_scenario,
+    )
+
+    s = _Solve(con)
+    adapter = SqliteDbAdapter("<audit>", **derive_scenario(s.meta))
+    bb = adapter._bb_chips(s)
+    flop = tuple(_split_cards(s.meta["flop"]))
+    board_set = set(flop)
+    start_pot = float(s.meta["pot"])
+    eff_flop = float(s.meta["eff_stack"])
+    pre = {adapter.oop: s.preflop_weights("BB"), adapter.ip: s.preflop_weights("BTN")}
+    base_reach = {
+        side: [
+            (pre[side].get(s.idx_to_hand[i], 0.0)
+             if not (set(_split_cards(s.idx_to_hand[i])) & board_set) else 0.0)
+            for i in range(s.n)
+        ]
+        for side in (adapter.oop, adapter.ip)
+    }
+
+    # Candidate nodes: river decision nodes offering a FOLD (i.e. facing a wager;
+    # the to_call > 0 guard below re-confirms from the betting state, since
+    # vendor action LABELS are unreliable).
+    fold_nodes = {r[0] for r in con.execute(
+        "SELECT DISTINCT node FROM gto_postflop WHERE action='FOLD'")}
+    candidates = sorted(n for n in fold_nodes if _node_street(n) == "river")
+    print("\n[8] EV-VS-STRATEGY CONSISTENCY (river facing-bet nodes)")
+    if not candidates:
+        print("    no river facing-bet nodes in this file - check skipped (flop/turn-only export)")
+        return 0
+
+    node_medians: list[tuple[str, float, int]] = []
+    pooled: list[float] = []
+    for nid in _stride_sample(candidates, max_nodes):
+        node = adapter._build_node(
+            s, nid, bb=bb, start_pot=start_pot, eff_flop=eff_flop,
+            base_reach=base_reach, flop=flop,
+        )
+        if node is None or node.to_call_bb <= 0:
+            continue
+        acts = {a.db_name: a for a in s.actions(nid)}
+        # The passive action facing a bet IS the call, whatever the vendor
+        # labelled it (v8 stores it as CHECK, v7 as CALL - labels are unreliable,
+        # the betting state above is the truth).
+        passive = [acts[k] for k in ("CALL", "CHECK") if k in acts]
+        if len(passive) != 1 or "FOLD" not in acts:
+            continue
+        call_act = passive[0]
+        hero_is_oop = node.actor == adapter.oop
+        call_ev = call_act.ev_oop if hero_is_oop else call_act.ev_ip
+        fold_ev = acts["FOLD"].ev_oop if hero_is_oop else acts["FOLD"].ev_ip
+        call_f, fold_f = call_act.freq, acts["FOLD"].freq
+        to_call = node.to_call_bb * bb
+        pot_now = node.pot_bb * bb  # includes the bet hero faces
+        board = list(node.board)
+
+        # Villain's betting range, ranked once per node.
+        villain = [
+            (set(_split_cards(h)), rank_hand(_split_cards(h) + board), w)
+            for h, w in node.villain_range.items() if w > 0
+        ]
+        if not villain:
+            continue
+
+        biases: list[float] = []
+        heroes = _stride_sample(
+            sorted(h for h, w in node.hero_range.items() if w > 0),
+            max_combos_per_node,
+        )
+        for h in heroes:
+            i = s.hand_to_idx[h]
+            if call_f[i] + fold_f[i] <= 0:
+                continue
+            cards = _split_cards(h)
+            hero_rank = rank_hand(cards + board)
+            blocked = set(cards)
+            win = tie = tot = 0.0
+            for vcards, vrank, w in villain:
+                if vcards & blocked:
+                    continue
+                tot += w
+                if hero_rank > vrank:
+                    win += w
+                elif hero_rank == vrank:
+                    tie += w
+            if tot <= 0:
+                continue
+            exact = (win + 0.5 * tie) / tot
+            implied = (call_ev[i] - fold_ev[i] + to_call) / (pot_now + to_call)
+            biases.append(implied - exact)
+        if biases:
+            node_medians.append((nid, statistics.median(biases), len(biases)))
+            pooled.extend(biases)
+
+    if not pooled:
+        print("    no scoreable (node, combo) samples - check skipped")
+        return 0
+
+    # Two prongs: a systematic one-direction bias shifts the POOLED median
+    # (v7 3BP: +5.3), while a non-converged export can bias different lines in
+    # OPPOSITE directions and net the pool to ~0 (v7 SRP Ts9s5d: +6 on barrel
+    # lines, -4 on check-check rivers) - the NODE-share prong catches that.
+    med = statistics.median(pooled)
+    bad_nodes = sum(1 for _n, m, _k in node_medians if abs(m) > 0.03)
+    pooled_ok = abs(med) <= 0.03
+    pooled_warn = 0.02 < abs(med) <= 0.03
+    share_ok = not (bad_nodes >= 3 and bad_nodes / len(node_medians) >= 0.25)
+    share_warn = share_ok and bad_nodes >= 2
+    print(f"    sampled {len(node_medians)} nodes / {len(pooled)} (node, combo) points")
+    print(f"    pooled median implied-minus-exact equity = {med * 100:+.1f} pts"
+          f"{_flag(pooled_ok, warn=pooled_warn)}  (FAIL > 3.0, WARN > 2.0)")
+    print(f"    nodes with |median gap| > 3 pts = {bad_nodes}/{len(node_medians)}"
+          f"{_flag(share_ok, warn=share_warn)}  (FAIL at >= 3 nodes and >= 25%;"
+          f" catches opposite-direction bias that nets the pool to ~0)")
+    worst = sorted(node_medians, key=lambda t: -abs(t[1]))[:5]
+    for nid, m, k in worst:
+        print(f"      {m * 100:+6.1f} pts  ({k:3d} combos)  {nid}")
+    return (not pooled_ok) + (not share_ok)
 
 
 def audit(path: str) -> int:  # noqa: C901 - a linear report
@@ -255,6 +413,9 @@ def audit(path: str) -> int:  # noqa: C901 - a linear report
         lead_warn = oop_bet_total > 0.30
         print(f"    BB OOP lead at r:0 = {oop_bet_total * 100:.0f}%{_flag(True, warn=lead_warn)}"
               f"  (textbook BTN-vs-BB SRP is ~0-15%; >30% = unusual, confirm with vendor)")
+
+    # -- EV vs strategy internal consistency (the July-2026 v7 defect) --
+    fails += _ev_vs_strategy_check(con)
 
     print("\n" + "=" * 72)
     verdict = "CLEAN" if fails == 0 else f"{fails} HARD CHECK(S) FAILED"

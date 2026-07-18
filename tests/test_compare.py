@@ -12,6 +12,13 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from admin_panel import app, compare  # noqa: E402
+from pipeline.provenance import build_notes, node_reference_from_notes  # noqa: E402
+
+
+def _notes(ref: str) -> str:
+    """A Notes value carrying `ref` in the Node: field (July 2026 -- the node
+    reference moved out of the dropped solver_reference column)."""
+    return build_notes("t.", node_ref=ref)
 
 
 def test_pack_display_framing_is_pack_aware() -> None:
@@ -33,7 +40,7 @@ def test_pack_display_framing_is_pack_aware() -> None:
 
 def _row(node: str, hand: str, expl: str) -> dict[str, str]:
     return {
-        "solver_reference": f"pack/CO/{node}",
+        "Notes": _notes(f"pack/CO/{node}"),
         "User Cards": hand,  # spot join keys on the hole cards (June 2026)
         "Answer Explanation": expl,
     }
@@ -67,7 +74,7 @@ def test_join_by_spot_custom_key_fn_avoids_postflop_collision() -> None:
     # combo decided at two different nodes. The postflop Compare page passes a
     # full-ref key_fn so the two nodes stay distinct.
     def pf(ref: str, expl: str) -> dict[str, str]:
-        return {"solver_reference": ref, "User Cards": "Q-spades, J-diamonds",
+        return {"Notes": _notes(ref), "User Cards": "Q-spades, J-diamonds",
                 "Answer Explanation": expl}
 
     rows_a = [pf("db/spot/QsJd9s/r:0:c/QsJd", "A1"),
@@ -80,7 +87,9 @@ def test_join_by_spot_custom_key_fn_avoids_postflop_collision() -> None:
     assert {k for k, _, _ in default_paired} == {"QsJd|Q-spades, J-diamonds"}
     assert all(rb["Answer Explanation"] == "B2" for _k, _ra, rb in default_paired)
     # Node-aware key pairs each node correctly.
-    paired = compare.join_by_spot(rows_a, rows_b, key_fn=lambda r: r["solver_reference"])
+    paired = compare.join_by_spot(
+        rows_a, rows_b, key_fn=lambda r: node_reference_from_notes(r["Notes"])
+    )
     assert [ra["Answer Explanation"] for _k, ra, _rb in paired] == ["A1", "A2"]
     assert [rb["Answer Explanation"] for _k, _ra, rb in paired] == ["B1", "B2"]
 

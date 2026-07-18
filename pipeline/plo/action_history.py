@@ -30,35 +30,60 @@ from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.node_enumerator import PloDecisionNode
 from pipeline.plo.pack import PloAction, PloActionType
 
-# The pack speaks Monker's full-ring dialect (LJ for the first seat, BU for
-# the button); every PLAYER-FACING surface uses the NLHE/app convention
+# The 6-max pack speaks Monker's full-ring dialect (LJ for its FIRST seat, BU
+# for the button); every PLAYER-FACING surface uses the NLHE/app convention
 # instead (UTG, BTN) so both games read the same. Pack internals -- filenames,
 # node ids, solver_reference -- keep the Monker codes untouched.
+# The 9-max pack's seats are already the app names (UTG, UTG+1, ..., BTN, and
+# a REAL Lojack), so its remap is the identity -- which is exactly why every
+# lookup here is table-size aware: 6-max LJ means UTG, 9-max LJ means Lojack.
 DISPLAY_SEAT = {"LJ": "UTG", "BU": "BTN"}
 
 
-def display_seat(seat: str) -> str:
-    """Player-facing seat code for a pack seat code (LJ -> UTG, BU -> BTN)."""
-    return DISPLAY_SEAT.get(seat, seat)
+def display_seat(seat: str, *, table_size: int = 6) -> str:
+    """Player-facing seat code for a pack seat code.
+
+    6-max: the Monker-dialect remap (LJ -> UTG, BU -> BTN). Other table
+    sizes: identity (their pack seats are already the app names).
+    """
+    if table_size == 6:  # noqa: PLR2004
+        return DISPLAY_SEAT.get(seat, seat)
+    return seat
 
 
-# Position phrases mirror the NLHE table exactly (UTG takes no article).
+# Position phrases mirror the shared NLHE table exactly (UTG-family seats
+# take no article), keyed by DISPLAY seat name; look up via _hero_phrase /
+# _villain_ref so the 6-max dialect is remapped first.
 _HERO_PHRASE = {
-    "LJ": "UTG",
+    "UTG": "UTG",
+    "UTG+1": "UTG+1",
+    "UTG+2": "UTG+2",
+    "LJ": "in the Lojack",
     "HJ": "in the Hijack",
     "CO": "in the Cutoff",
-    "BU": "on the Button",
+    "BTN": "on the Button",
     "SB": "in the Small Blind",
     "BB": "in the Big Blind",
 }
 _VILLAIN_REF = {
-    "LJ": "UTG",
+    "UTG": "UTG",
+    "UTG+1": "UTG+1",
+    "UTG+2": "UTG+2",
+    "LJ": "The Lojack",
     "HJ": "The Hijack",
     "CO": "The Cutoff",
-    "BU": "The Button",
+    "BTN": "The Button",
     "SB": "The Small Blind",
     "BB": "The Big Blind",
 }
+
+
+def _hero_phrase(seat: str, *, table_size: int) -> str:
+    return _HERO_PHRASE[display_seat(seat, table_size=table_size)]
+
+
+def _villain_ref(seat: str, *, table_size: int) -> str:
+    return _VILLAIN_REF[display_seat(seat, table_size=table_size)]
 _RAISE_LEVEL = {1: "open", 2: "3-bet", 3: "4-bet", 4: "5-bet"}
 _RAISE_VERBS = frozenset({"open", "3-bet", "4-bet", "5-bet", "raise"})
 _AGGRESSIVE = {PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN}
@@ -153,9 +178,11 @@ def _hole_cards(cards: tuple[str, ...]) -> str:
     return " ".join(format_card(c) for c in cards)
 
 
-def _sentence(act: ResolvedAction, hero: str, *, render_bb: bool) -> str:
+def _sentence(
+    act: ResolvedAction, hero: str, *, render_bb: bool, table_size: int
+) -> str:
     is_hero = act.seat == hero
-    subject = "You" if is_hero else _VILLAIN_REF[act.seat]
+    subject = "You" if is_hero else _villain_ref(act.seat, table_size=table_size)
     if act.verb in _RAISE_VERBS:
         amount = _money(act.to_bb or 0.0, render_bb=render_bb)
         return f"{subject} {_conjugate(act.verb, is_hero=is_hero)} to {amount}."
@@ -199,9 +226,13 @@ def format_plo_action_history(
         facts.spot.node.history_before, stack_bb=stack_bb
     )
     hero = facts.spot.node.actor
-    sentences = [f"You're {_HERO_PHRASE[hero]} with {_hole_cards(facts.spot.hero_cards)}."]
+    table_size = facts.spot.node.table_size
+    sentences = [
+        f"You're {_hero_phrase(hero, table_size=table_size)} "
+        f"with {_hole_cards(facts.spot.hero_cards)}."
+    ]
     sentences += [
-        _sentence(act, hero, render_bb=render_bb)
+        _sentence(act, hero, render_bb=render_bb, table_size=table_size)
         for act in actions
         if include_folds or act.verb != "fold"
     ]
@@ -215,13 +246,22 @@ def format_plo_context(
     game_format: str = "cash",
     display_in_bb: bool = False,
     live_or_online: str = "Online",
+    table_size: int = 6,
 ) -> str:
     """The context line: stakes + effective stacks.
 
     Table size is intentionally NOT shown -- the dedicated Table Size column
     already carries it, so repeating it here was redundant (dropped June 2026
     per the team's feedback).
+
+    9-max pack questions (July 2026, team ask): the Context carries ONLY the
+    effective stack size -- no stakes, venue, or game-type framing. The
+    6-max format is unchanged.
     """
+    if table_size == 9:  # noqa: PLR2004
+        if display_in_bb or game_format != "cash":
+            return f"{_fmt_num(stack_bb)}bb effective stacks."
+        return f"${_fmt_num(stack_bb * stakes_bb_dollars)} effective stacks."
     if game_format != "cash":
         return f"PLO tournament. {_fmt_num(stack_bb)}bb effective stacks."
     venue = live_or_online.capitalize()
@@ -241,8 +281,66 @@ def pot_bb(node: PloDecisionNode, *, stack_bb: float = 100.0) -> float:
     return pot
 
 
+def call_price(
+    history: tuple[PloAction, ...], hero_seat: str, *, stack_bb: float = 100.0
+) -> tuple[float, float]:
+    """``(pot_bb, to_call_bb)`` at hero's decision -- the raw pot-odds inputs.
+
+    Runs the SAME walk as :func:`resolve_pot_limit` (blinds posted, pot-limit
+    raise sizes, per-seat commitments) and reads off what hero must add to
+    call: the current high bet minus hero's own committed chips (a blind
+    counts). ``to_call`` is 0 when hero is first in unraised (the BB option).
+    Break-even equity = ``to_call / (pot + to_call)`` -- the "show the math"
+    numbers for the SOLVER DATA block and the stat_notes column.
+    """
+    committed: dict[str, float] = {"SB": _SB_BB, "BB": _BB}
+    high_bet = _BB
+    pot = _SB_BB + _BB
+    for action in history:
+        seat = action.seat
+        prev = committed.get(seat, 0.0)
+        if action.action is PloActionType.FOLD:
+            pass
+        elif action.action is PloActionType.CALL:
+            pot += high_bet - prev
+            committed[seat] = high_bet
+        elif action.action is PloActionType.ALL_IN:
+            pot += stack_bb - prev
+            committed[seat] = stack_bb
+            high_bet = max(high_bet, stack_bb)
+        else:  # RAISE / MIN_RAISE
+            to_call = high_bet - prev
+            pct = (action.raise_pct or 100) / 100.0
+            raise_to = high_bet + pct * (pot + to_call)
+            pot += raise_to - prev
+            committed[seat] = raise_to
+            high_bet = raise_to
+    return pot, max(0.0, high_bet - committed.get(hero_seat, 0.0))
+
+
+def price_is_live(history: tuple[PloAction, ...], hero_seat: str) -> bool:
+    """Whether pot-odds price facts APPLY at hero's decision.
+
+    True when hero faces a raise/jam, or is the SB deciding whether to
+    complete first-in (a genuine priced call). False for every other open
+    decision: a non-SB seat technically "owes" the 1bb blind, but the tree
+    offers no first-in call, so a price there would push pot-odds framing
+    onto a pure open/fold choice. ONE rule shared by the SOLVER DATA block
+    and the CSV writer (pot_odds / stat_notes), so they can never disagree.
+    """
+    facing_aggression = any(
+        a.action in (
+            PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN
+        )
+        for a in history
+    )
+    return facing_aggression or (not facing_aggression and hero_seat == "SB")
+
+
 __all__ = [
     "ResolvedAction",
+    "call_price",
+    "display_seat",
     "format_plo_action_history",
     "format_plo_context",
     "pot_bb",

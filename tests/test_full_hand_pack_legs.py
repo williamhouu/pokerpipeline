@@ -153,8 +153,12 @@ def test_pack_legs_upgrade_the_preflop_question(tmp_path, monkeypatch) -> None:
         if "_vs_" in r["Position Matchup"]:
             assert r["stat_notes"], "defender pack leg must carry the math"
         assert r["ranges"], "pack leg must carry the ranges JSON"
-        assert pack.pack_id in r["solver_reference"]
+        # The node reference (pack-relative) lives in Notes' Node: field, and
+        # the provenance sentence names the source pack. Both check pack_id.
         assert pack.pack_id in r["Notes"]
+        from pipeline.provenance import node_reference_from_notes
+
+        assert pack.pack_id in node_reference_from_notes(r["Notes"])
         assert r["Cards on Table"] == ""
     for r in rows:
         assert r["hand_difficulty"], "every full-hand row carries hand_difficulty"

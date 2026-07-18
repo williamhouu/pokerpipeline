@@ -70,8 +70,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("batch_csv", type=Path)
     ap.add_argument(
-        "--pack-dir", default="plo_ranges",
-        help="Folder holding the pack's .rng files (default: plo_ranges)",
+        "--pack-dir", default=None,
+        help="Folder holding the pack's .rng files. Default: resolved from "
+        "the batch meta's pack_id via the registry (KNOWN_PLO_PACKS); "
+        "pre-multi-pack metas fall back to plo_ranges.",
     )
     args = ap.parse_args()
 
@@ -82,7 +84,21 @@ def main() -> int:
         print(f"row/record count mismatch: {len(rows)} CSV vs {len(questions)} meta")
         return 1
 
-    pack = discover_plo_pack(Path(args.pack_dir))
+    # Resolve WHICH pack this batch generated from (July 2026 multi-pack era):
+    # the meta's pack_id maps to its registered extraction folder. An explicit
+    # --pack-dir always wins (e.g. a pack extracted somewhere unusual).
+    pack_dir = args.pack_dir
+    if pack_dir is None:
+        from pipeline.plo.pack import KNOWN_PLO_PACKS  # noqa: PLC0415
+
+        pack_id = meta.get("pack_id") or meta.get("pack_label")
+        pack_dir = next(
+            (s.default_base for s in KNOWN_PLO_PACKS if s.pack_id == pack_id),
+            "plo_ranges",
+        )
+        print(f"pack: {pack_id or 'unknown (legacy meta)'} -> {pack_dir}/")
+
+    pack = discover_plo_pack(Path(pack_dir))
     nodes_by_id = {n.node_id: n for n in enumerate_plo_nodes(pack)}
     seed = rs["seed"]
     stack_bb = float(rs["stack_bb"])
@@ -122,6 +138,7 @@ def main() -> int:
             explanation=row.get("Answer Explanation", ""),
             number=int(q["number"]),
             pack_label=meta["pack_label"],
+            pack=pack,
             stakes_bb_dollars=float(rs["stakes_bb_dollars"]),
             game_format=rs["game_format"],
             display_in_bb=bool(rs["display_in_bb"]),

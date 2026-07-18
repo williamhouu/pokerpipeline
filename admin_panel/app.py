@@ -4109,7 +4109,7 @@ def _render_review_failures(
                 row = f.get("row")
                 row_dict = row if isinstance(row, dict) else {}
                 row_key = (
-                    str(row_dict.get("solver_reference", "")),
+                    _node_ref(row_dict),
                     str(row_dict.get("User Cards", "")),
                 )
                 if not row_dict:
@@ -4673,6 +4673,18 @@ def _cell(row: pd.Series, col: str) -> str:
     return str(val)
 
 
+def _node_ref(row: pd.Series) -> str:
+    """The row's machine node reference (the old ``solver_reference`` value).
+
+    Folded into the Notes ``Node:`` field July 2026; this is the one seam the
+    Compare/Review/range consumers use in place of the removed column. The
+    string is byte-identical, so their node-id / combo parsing is unchanged.
+    """
+    from pipeline.provenance import node_reference_from_notes  # noqa: PLC0415
+
+    return node_reference_from_notes(_cell(row, "Notes"))
+
+
 def _md_lines(text: str) -> str:
     """Render multi-line CSV text in Markdown with line breaks preserved
     (Markdown collapses single newlines otherwise).
@@ -4926,7 +4938,7 @@ def render_review_page() -> None:
     # promote that keeps the rejected explanation. present_keys lets an
     # already-added spot read as added instead of offering the button again.
     _present_keys = {
-        (_cell(r, "solver_reference"), _cell(r, "User Cards"))
+        (_node_ref(r), _cell(r, "User Cards"))
         for _, r in df.iterrows()
     }
     _render_review_failures(csv_path, _present_keys)
@@ -5000,13 +5012,13 @@ def render_review_page() -> None:
                     + _REVIEW_STATUS_LABEL.get(existing["status"], existing["status"])
                 )
 
-            # Per-question meta record (join on user_cards + solver_reference);
+            # Per-question meta record (join on user_cards + node reference);
             # used for the soft-flag text and the revise-pass lifecycle panel.
             _qmeta = (
                 review.meta_question_for(
                     _meta,
                     user_cards=_cell(row, "User Cards"),
-                    solver_reference=_cell(row, "solver_reference"),
+                    node_reference=_node_ref(row),
                 )
                 if _meta
                 else None
@@ -5191,7 +5203,7 @@ def render_review_page() -> None:
 
             # Ranges: shown INLINE in a dropdown (like the postflop Review) instead
             # of navigating to a separate Range-viewer tab. Resolve the pack from
-            # the batch meta's pack_id and the node from the solver_reference.
+            # the batch meta's pack_id and the node from the Notes node reference.
             ranges_val = _cell(row, "ranges")
             n_players = review.range_player_count(ranges_val)
             with st.expander("📊  Ranges for this spot"):
@@ -5201,9 +5213,7 @@ def render_review_page() -> None:
                     _rng_pack = {p.pack_id: p for p in _cached_preflop_packs()}.get(_pid)
                 _rng_node = None
                 if _rng_pack is not None:
-                    _nid = range_view.node_id_from_solver_reference(
-                        _cell(row, "solver_reference")
-                    )
+                    _nid = range_view.node_id_from_notes(_cell(row, "Notes"))
                     _rng_node = _cached_ranges_index(_rng_pack.pack_id)[0].get(_nid)
                 if _rng_node is not None:
                     _render_inline_spot_ranges(
@@ -5231,7 +5241,7 @@ def render_review_page() -> None:
                     _q = review.meta_question_for(
                         _meta,
                         user_cards=_cell(row, "User Cards"),
-                        solver_reference=_cell(row, "solver_reference"),
+                        node_reference=_node_ref(row),
                     )
                 if _meta is None or _q is None:
                     st.caption(
@@ -5958,8 +5968,9 @@ def _render_equity_bar(row: dict[str, str]) -> None:
     """A small visual of hero's hand equity and range equity vs villain's
     range, with the break-even-to-call threshold marked. Reads the
     deterministic decision-math columns (hero_equity / range_equity /
-    pot_odds); no-ops when they're blank (open/first-in spots, PLO, postflop,
-    or batches generated before those columns existed). Shows the numbers
+    pot_odds); no-ops when they're blank (open/first-in spots, postflop,
+    or batches generated before those columns existed -- PLO ships them
+    since July 2026). Shows the numbers
     only -- never a "you have the price" verdict, since implied odds can make
     a sub-threshold call correct (the answer explanation owns the decision).
     """
@@ -5972,19 +5983,24 @@ def _render_equity_bar(row: dict[str, str]) -> None:
     parsed_notes = parse_stat_notes(row.get("stat_notes", ""))
     sn_values = {sn.get("key"): (sn.get("value", "") or "") for sn in parsed_notes}
 
+    import re  # noqa: PLC0415
+
     def _pct(key: str) -> float | None:
         raw = (row.get(key) or "").strip().rstrip("%")
         if not raw:
             raw = sn_values.get(key, "").strip().rstrip("%")
-        try:
-            v = float(raw)
-        except ValueError:
+        # stat_notes values carry prose ("need 25%") -- extract the number,
+        # since BOTH games now read from stat_notes (the flat columns were
+        # dropped from the NLHE CSV in June and the PLO CSV in July).
+        m = re.search(r"(\d+(?:\.\d+)?)", raw)
+        if not m:
             return None
+        v = float(m.group(1))
         return v if 0.0 <= v <= 100.0 else None
 
-    # range_equity was dropped entirely from the NLHE CSV and never had a
-    # stat_notes row, so it resolves to None there (the range bar is omitted);
-    # PLO still carries the column.
+    # The flat columns are gone from both CSVs (NLHE June, PLO July 2026);
+    # everything resolves via the stat_notes fallback. range_equity has a
+    # stat_notes row on PLO only (NLHE dropped the value entirely).
     hand_eq, range_eq, be = _pct("hero_equity"), _pct("range_equity"), _pct("pot_odds")
 
     # Multi-way all-in: the hero_equity number is the HEADS-UP value (vs one
@@ -6295,6 +6311,31 @@ def _load_postflop_claim_checker_prompt() -> str:
 
 def _save_postflop_claim_checker_prompt(text: str) -> None:
     path = _postflop_claim_checker_prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _plo_claim_checker_prompt_path() -> Path:
+    """File backing the editable PLO claim-checker system prompt (its own
+    file -- the PLO checker targets four-card failure modes, distinct from
+    the NLHE ones). Gitignored like the other prompts."""
+    return (
+        Path(__file__).resolve().parent / "prompts" / "plo_claim_checker_system.txt"
+    )
+
+
+def _load_plo_claim_checker_prompt() -> str:
+    """The saved editable PLO claim-checker prompt, or the built-in default."""
+    from pipeline.plo.claim_checker import PLO_CHECKER_SYSTEM_PROMPT  # noqa: PLC0415
+
+    path = _plo_claim_checker_prompt_path()
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return PLO_CHECKER_SYSTEM_PROMPT
+
+
+def _save_plo_claim_checker_prompt(text: str) -> None:
+    path = _plo_claim_checker_prompt_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
@@ -6650,8 +6691,10 @@ def _render_stat_panel(row: dict[str, str]) -> None:
     carry per-action solver EVs, and the EV chart is real math, so the
     panel renders whenever EITHER exists (July 2026; the old
     stat_notes-only gate silently hid the panel on every open spot).
-    No-ops only when there is nothing at all to show: PLO, postflop, or
-    batches generated before the columns existed.
+    No-ops only when there is nothing at all to show: postflop rows, or
+    batches generated before the columns existed. PLO ships the same
+    cells since July 2026 (pipeline/plo/format_writer.py), so the panel
+    serves both games.
     """
     from pipeline.preflop.stat_notes import parse_stat_notes  # noqa: PLC0415
 
@@ -6677,6 +6720,44 @@ def _render_stat_panel(row: dict[str, str]) -> None:
                 "On a multi-way all-in we use the multi-way number, since you "
                 "have to beat them all to win the pot."
             )
+
+
+def _render_range_breakdown_panel(row: dict[str, str]) -> None:
+    """A collapsible "Range breakdown by hand type" strip (PLO only).
+
+    The GTO-Wizard-"Categories" equivalent: hero's whole range by pair x suit
+    shape (with the fold/call/raise split per shape) plus every still-active
+    opponent's range composition, all deterministic from the solver. Reads the
+    ``range_breakdown`` cell; the parse/format is
+    :func:`admin_panel.review.range_breakdown_panel` (pure, browserless-tested)
+    so this is a thin shell. No-ops when the cell is empty (non-PLO rows, or
+    batches generated before July 2026).
+    """
+    data = review.range_breakdown_panel(row.get("range_breakdown", ""))
+    if data is None:
+        return
+    with st.expander("🃏 Range breakdown by hand type"):
+        if data["copy"]:
+            st.caption(data["copy"])
+        for player in data["players"]:
+            st.markdown(f"**{player['heading']}**")
+            if player["summary"]:
+                st.caption(player["summary"])
+            rows = player["rows"]
+            if not rows:
+                continue
+            if player["hero"]:
+                table = {
+                    "Hand type": [r["category"] for r in rows],
+                    "% of range": [f"{r['pct']:.0f}%" for r in rows],
+                    "How it plays": [r["detail"] for r in rows],
+                }
+            else:
+                table = {
+                    "Hand type": [r["category"] for r in rows],
+                    "% of range": [f"{r['pct']:.0f}%" for r in rows],
+                }
+            st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
 
 
 # --- page: Compare (head-to-head prompt A/B) --------------------------------
@@ -7322,7 +7403,7 @@ def _render_postflop_ranges_panel(
     _qrecs = qrecs
     # --- visual ranges: every player, preflop + current street ---
     _meta_nodes = {q.get("node_id") for q in _qrecs}
-    _parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+    _parts = [p for p in _node_ref(row).split("/") if p]
     _ref_node2 = next((p for p in reversed(_parts) if p in _meta_nodes), "")
     _street_ranges = next(
         (q.get("street_ranges") for q in _qrecs if q.get("node_id") == _ref_node2),
@@ -7607,10 +7688,10 @@ def _render_postflop_question_card(
             # (further down) both read it. Full-hand legs join on
             # (hand_id, sequence_index) -- unique for every leg kind; the
             # node/combo join is the standalone fallback (pack PREFLOP legs'
-            # solver_reference ends in the node id, not the combo).
+            # node reference ends in the node id, not the combo).
             _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
             _meta_node_ids = {q.get("node_id") for q in _qrecs}
-            _ref_parts = [p for p in _cell(row, "solver_reference").split("/") if p]
+            _ref_parts = [p for p in _node_ref(row).split("/") if p]
             _ref_node = next((p for p in reversed(_ref_parts) if p in _meta_node_ids), "")
             _ref_combo = _ref_parts[-1] if _ref_parts else ""
             _qrec = review.meta_question_for_leg(
@@ -8455,10 +8536,13 @@ def render_postflop_compare_page() -> None:
     df_b = _read_csv_cached(str(b_csv), b_csv.stat().st_mtime, as_str=True)
     rows_a = [{str(k): str(v) for k, v in r.items()} for r in df_a.to_dict("records")]
     rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
-    # Postflop solver_reference is ".../<node_id>/<combo>" — its LAST segment is
+    # Postflop node reference is ".../<node_id>/<combo>" — its LAST segment is
     # the combo, so the default (node_id, cards) key would collide across nodes.
-    # Key on the FULL ref instead (node+combo unique).
-    pf_key = lambda r: r.get("solver_reference", "")  # noqa: E731
+    # Key on the FULL ref instead (node+combo unique). The ref is now in the
+    # Notes `Node:` field (was the solver_reference column, July 2026).
+    from pipeline.provenance import node_reference_from_notes  # noqa: PLC0415
+
+    pf_key = lambda r: node_reference_from_notes(r.get("Notes", ""))  # noqa: E731
     pairs = compare.join_by_spot(rows_a, rows_b, key_fn=pf_key)
     verdicts = compare.load_verdicts(a_csv)
     counts = compare.tally(verdicts)
@@ -9181,7 +9265,10 @@ _PLO_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6"]
 # switches or panel restarts) the Generate tab still shows exactly the setup
 # that batch ran with -- regenerating is one click.
 _PLO_GEN_SETTINGS_PATH = _PLO_BATCH_DIR / ".plo_generate_settings.json"
-_PLO_SEATS = ["LJ", "HJ", "CO", "BU", "SB", "BB"]
+# Union of both packs' seat codes -- ONLY for sanitizing persisted settings
+# (the widgets themselves take the selected pack's own seats at render).
+_PLO_SEATS = ["LJ", "HJ", "CO", "BU", "SB", "BB",
+              "UTG", "UTG+1", "UTG+2", "BTN"]
 _PLO_STYLE_LABELS = {
     "Basic (Fold / Call / 3-bet)": "basic",
     "GTO (Always / Mostly spectrum)": "gto",
@@ -9190,13 +9277,16 @@ _PLO_STYLE_LABELS = {
 _PLO_AMOUNT_LABELS = ["Dollars", "Big blinds"]
 #: Every persisted widget key on the PLO Generate page.
 _PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
+    "plo_pack_select",
     "plo_clean_only",
+    "plo_gen_diversify",
     "plo_gen_positions",
     "plo_gen_contexts",
     "plo_gen_player_counts",
     "plo_difficulty_preset",
     "plo_gen_custom_band",
-    "plo_worthiness_slider",
+    "plo_worthy_min",
+    "plo_worthy_max",
     "plo_exclude_ambiguous",
     "plo_min_ev_gap",
     "plo_answer_style",
@@ -9208,9 +9298,13 @@ _PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
     "plo_gen_model",
     "plo_gen_temperature",
     "plo_gen_compute_eq",
-    "plo_gen_claim_checker",
+    "plo_layer7_mode",
+    "plo_final_audit",
     "plo_gen_prompt_select",
 )
+
+#: Layer-7 mode vocabulary for the PLO Generate radio (mirrors NLHE).
+_PLO_LAYER7_MODES = ["Off", "Flag only", "Audit & auto-fix"]
 
 
 def _seed_plo_generate_settings() -> None:
@@ -9263,7 +9357,7 @@ def _seed_plo_generate_settings() -> None:
             ["Opening", "Facing single raise", "Facing 3-bet"],
         ),
         "plo_gen_player_counts": _subset(
-            saved.get("plo_gen_player_counts"), [1, 2, 3, 4, 5, 6], [1, 2, 3]
+            saved.get("plo_gen_player_counts"), list(range(1, 10)), [1, 2, 3]
         ),
         "plo_difficulty_preset": _choice(
             saved.get("plo_difficulty_preset"),
@@ -9273,10 +9367,27 @@ def _seed_plo_generate_settings() -> None:
         "plo_gen_custom_band": _rng(
             saved.get("plo_gen_custom_band"), 400, 3200, (400, 3200)
         ),
-        "plo_worthiness_slider": _rng(
-            saved.get("plo_worthiness_slider"), 50, 100, (65, 99)
+        # July 2026 widget swap: seed the two worthiness number inputs,
+        # migrating a legacy saved range-slider list so the last-used
+        # window survives (gen_settings.worthiness_bounds, pure + tested).
+        **dict(
+            zip(
+                ("plo_worthy_min", "plo_worthy_max"),
+                gen_settings.worthiness_bounds(
+                    saved,
+                    min_key="plo_worthy_min",
+                    max_key="plo_worthy_max",
+                    legacy_key="plo_worthiness_slider",
+                ),
+                strict=True,
+            )
         ),
-        "plo_exclude_ambiguous": _flag(saved.get("plo_exclude_ambiguous"), True),
+        # Default OFF (July 2026, user ask): the 90-95% band is included
+        # unless the user opts to exclude it.
+        "plo_exclude_ambiguous": _flag(saved.get("plo_exclude_ambiguous"), False),
+        # Balanced action mix (July 2026): ON by default -- the raw draw on
+        # the 9-max pack is ~all facing-3-bet spots.
+        "plo_gen_diversify": _flag(saved.get("plo_gen_diversify"), True),
         "plo_min_ev_gap": _num(saved.get("plo_min_ev_gap"), 0.0, 3.0, 0.0, float),
         "plo_answer_style": _choice(
             saved.get("plo_answer_style"),
@@ -9301,12 +9412,23 @@ def _seed_plo_generate_settings() -> None:
             saved.get("plo_gen_temperature"), 0.0, 1.0, 0.6, float
         ),
         "plo_gen_compute_eq": _flag(saved.get("plo_gen_compute_eq"), False),
-        "plo_gen_claim_checker": _flag(saved.get("plo_gen_claim_checker"), False),
+        # Layer-7 defaults to the MAXIMUM audit (July 2026, per the user's
+        # request): claim-check gate + auto-fix + final audit, like NLHE.
+        # Legacy snapshots that only have the old plo_gen_claim_checker bool
+        # still get the new default (max), not a silent downgrade.
+        "plo_layer7_mode": _choice(
+            saved.get("plo_layer7_mode"), _PLO_LAYER7_MODES, "Audit & auto-fix"
+        ),
+        "plo_final_audit": _flag(saved.get("plo_final_audit"), True),
     }
     # The prompt picker validates itself at render (a stale slug falls back
     # to the active prompt), so the saved slug is seeded as-is.
     if isinstance(saved.get("plo_gen_prompt_select"), str):
         restored["plo_gen_prompt_select"] = saved["plo_gen_prompt_select"]
+    # The pack selector validates itself at render (a missing folder falls
+    # back to the first available pack), so the saved dir is seeded as-is.
+    if isinstance(saved.get("plo_pack_select"), str):
+        restored["plo_pack_select"] = saved["plo_pack_select"]
     for key, value in restored.items():
         if key not in st.session_state:
             st.session_state[key] = value
@@ -9316,19 +9438,136 @@ _PLO_MODEL_NAMES = {
 }
 
 
-def _render_plo_pack_loader() -> tuple[PloPack, tuple[PloDecisionNode, ...]] | None:
-    pack_dir = st.text_input(
-        "PLO pack folder", value="plo_ranges", help="Folder holding the `.rng` files."
-    )
+#: Conventional extraction folders scanned for PLO packs (repo-root relative;
+#: each holds one extracted Monker export, gitignored). ORDER MATTERS: the
+#: first available pack is the DEFAULT selection -- 9-max first (July 2026,
+#: the team's ask: most PLO production runs on the 9-max pack going forward).
+_PLO_PACK_BASES: tuple[str, ...] = ("plo9_ranges", "plo_ranges")
+
+
+def _available_plo_pack_dirs() -> list[str]:
+    """The base folders that actually contain a pack right now."""
+    from pipeline.plo.pack import discover_plo_pack  # noqa: PLC0415
+
+    out = []
+    for base in _PLO_PACK_BASES:
+        try:
+            discover_plo_pack(Path(base))
+            out.append(base)
+        except FileNotFoundError:
+            continue
+    return out
+
+
+def _plo_pack_dir_label(base: str) -> str:
+    """Selector label: the registered pack's display name + its folder."""
+    from pipeline.plo.pack import discover_plo_pack  # noqa: PLC0415
+
     try:
-        return _plo_pack_and_nodes(pack_dir)
+        pack = discover_plo_pack(Path(base))
     except FileNotFoundError:
+        return base
+    return f"{pack.spec.display_label}  ({base}/)"
+
+
+def _render_plo_pack_loader() -> tuple[PloPack, tuple[PloDecisionNode, ...]] | None:
+    """The PLO pack SELECTOR (July 2026, multi-pack era): a picker over the
+    registered packs found on disk. One shared widget key, so Generate /
+    Compare / Ranges all act on the same chosen pack."""
+    available = _available_plo_pack_dirs()
+    if not available:
         st.error(
-            f"No PLO pack (`.rng` files) found under `{pack_dir}/`. The 3.8 GB "
-            "pack is gitignored, so point this at the extracted `plo_ranges/` "
-            "folder on this machine."
+            "No PLO pack (`.rng` files) found under "
+            + " or ".join(f"`{b}/`" for b in _PLO_PACK_BASES)
+            + ". The packs are gitignored -- extract a pack archive into one "
+            "of those folders on this machine."
         )
         return None
+    if st.session_state.get("plo_pack_select") not in available:
+        st.session_state["plo_pack_select"] = available[0]
+    pack_dir = st.selectbox(
+        "Range pack",
+        options=available,
+        format_func=_plo_pack_dir_label,
+        key="plo_pack_select",
+        help="Which extracted PLO pack this page reads. Every question in a "
+        "batch comes from ONE pack; the batch records which "
+        "(meta `pack_id`, used by the re-verifier and Review provenance).",
+    )
+    return _plo_pack_and_nodes(pack_dir)
+
+
+def _render_plo_pack_loader_nonblocking() -> (
+    tuple[
+        PloPack,
+        tuple[PloDecisionNode, ...] | None,
+        tuple[tuple[str, str, int], ...] | None,
+    ]
+    | None
+):
+    """The Generate page's pack loader: NEVER blocks the render (July 2026).
+
+    Same selector widget (shared ``plo_pack_select`` key) as
+    :func:`_render_plo_pack_loader`, but the 15-25s node enumeration runs in
+    a background thread (:func:`plo_preview.request_pack_load`). Returns
+    ``(pack, nodes, filter_meta)`` where ``nodes``/``filter_meta`` are
+    ``None`` while the walk is still running -- the page renders every
+    filter widget immediately (seats come from the cheap
+    ``discover_plo_pack``) and mounts a small auto-refreshing fragment that
+    reruns the page once the pack is ready. INVARIANT: any control that
+    NEEDS nodes (Preview / Generate / the live node count) must gate on
+    ``nodes is not None``, never assume readiness.
+    """
+    from admin_panel import plo_preview  # noqa: PLC0415
+    from pipeline.plo.pack import discover_plo_pack  # noqa: PLC0415
+
+    available = _available_plo_pack_dirs()
+    if not available:
+        st.error(
+            "No PLO pack (`.rng` files) found under "
+            + " or ".join(f"`{b}/`" for b in _PLO_PACK_BASES)
+            + ". The packs are gitignored -- extract a pack archive into one "
+            "of those folders on this machine."
+        )
+        return None
+    if st.session_state.get("plo_pack_select") not in available:
+        st.session_state["plo_pack_select"] = available[0]
+    pack_dir = st.selectbox(
+        "Range pack",
+        options=available,
+        format_func=_plo_pack_dir_label,
+        key="plo_pack_select",
+        help="Which extracted PLO pack this page reads. Every question in a "
+        "batch comes from ONE pack; the batch records which "
+        "(meta `pack_id`, used by the re-verifier and Review provenance).",
+    )
+    pack = discover_plo_pack(Path(pack_dir))  # memoized, ~1ms
+    try:
+        loaded = plo_preview.request_pack_load(pack_dir)
+    except Exception as exc:  # noqa: BLE001 -- surface the background failure
+        st.error(f"Pack load failed: {exc}")
+        return None
+    if loaded is None:
+        st.info(
+            f"📦 Loading **{pack.spec.display_label}** in the background "
+            "(~15-25s the first time after a panel start). Set up your "
+            "filters now -- the node count and the Preview/Generate buttons "
+            "unlock by themselves when it finishes."
+        )
+
+        @st.fragment(run_every=2.0)
+        def _plo_pack_load_watcher() -> None:
+            try:
+                ready = plo_preview.request_pack_load(pack_dir) is not None
+            except Exception:  # noqa: BLE001 -- full rerun shows the error
+                ready = True
+            if ready:
+                st.rerun(scope="app")
+            st.caption("⏳ still walking the pack files…")
+
+        _plo_pack_load_watcher()
+        return pack, None, None
+    return loaded
 
 
 def _render_plo_difficulty_explainer() -> None:
@@ -9394,16 +9633,15 @@ def render_plo_generate_page() -> None:
     # always shows the setup the last batch ran with.
     _seed_plo_generate_settings()
 
-    loaded = _render_plo_pack_loader()
+    loaded = _render_plo_pack_loader_nonblocking()
     if loaded is None:
         return
-    pack, nodes = loaded
-    st.success(f"Loaded **{len(nodes):,}** decision nodes from `{pack.label}`.")
+    pack, nodes, filter_meta = loaded
+    if nodes is not None:
+        st.success(f"Loaded **{len(nodes):,}** decision nodes from `{pack.label}`.")
 
     from pipeline.plo.node_enumerator import (  # noqa: PLC0415
         PLO_ACTION_CONTEXTS,
-        plo_active_player_count,
-        plo_node_action_context,
     )
 
     # --- 1. Hero context: position + action faced + players in pot ---
@@ -9417,17 +9655,36 @@ def render_plo_generate_page() -> None:
         "which is largely UNCONVERGED (absurd EV gaps, inverted ranges like AA "
         "folding a jam). Leave ON unless you specifically want the wild lines.",
     )
+    diversify = st.checkbox(
+        "🎨 Balanced action mix (recommended)",
+        key="plo_gen_diversify",
+        help="Spread the batch across the action situations (opens, "
+        "single-raise defends, 3-bet defends, squeezes) by drawing from them "
+        "round-robin. OFF = a raw draw, which on the 9-max pack lands almost "
+        "entirely on facing-3-bet spots because they dominate the tree. Your "
+        "'Action faced' filter below still applies on top.",
+    )
     hc1, hc2 = st.columns(2)
     with hc1:
+        # Seat options come from the SELECTED pack (6-max vs 9-max). A saved
+        # selection from the other pack would crash the widget (value not in
+        # options), so sanitize the session value first.
+        from pipeline.plo.action_history import display_seat as _dseat  # noqa: PLC0415
+
+        _seat_opts = list(pack.seats)
+        if "plo_gen_positions" in st.session_state:
+            st.session_state["plo_gen_positions"] = [
+                s for s in st.session_state["plo_gen_positions"] if s in _seat_opts
+            ]
         positions = st.multiselect(
             "Hero positions (blank = any)",
-            options=_PLO_SEATS,
+            options=_seat_opts,
             key="plo_gen_positions",
-            # Display the NLHE/app seat names (the pack's internal codes are
-            # LJ/BU; everything player-facing says UTG/BTN).
-            format_func=lambda s: {"LJ": "UTG", "BU": "BTN"}.get(s, s),
-            help="Which seats hero is in. Empty = all positions. "
-            "UTG is the pack's 'Lojack' seat (same chair, two names).",
+            # Display the NLHE/app seat names (the 6-max pack's internal codes
+            # are LJ/BU; everything player-facing says UTG/BTN. The 9-max
+            # pack's seats already ARE the app names).
+            format_func=lambda s: _dseat(s, table_size=pack.table_size),
+            help="Which seats hero is in. Empty = all positions.",
         )
     with hc2:
         action_contexts = st.multiselect(
@@ -9437,42 +9694,57 @@ def render_plo_generate_page() -> None:
             help=ACTION_FACED_HELP + " (With 'Clean lines only' on, the 4-bet+ "
             "tail stays excluded even if selected.)",
         )
+        _pc_opts = list(range(1, pack.table_size + 1))
+        if "plo_gen_player_counts" in st.session_state:
+            st.session_state["plo_gen_player_counts"] = [
+                n for n in st.session_state["plo_gen_player_counts"] if n in _pc_opts
+            ]
         player_counts = st.multiselect(
             "Players in the pot",
-            options=[1, 2, 3, 4, 5, 6],
+            options=_pc_opts,
             key="plo_gen_player_counts",
             format_func=lambda n: (
                 "1 (open)" if n == 1 else "2 (heads-up)" if n == 2 else f"{n}-way"
             ),
-            help="How many players are still in at hero's decision. (With "
-            "'Clean lines only' on, 4+ way stays excluded even if selected.)",
+            help="Counts EVERYONE who voluntarily put chips in the pot, "
+            "including players who later folded (their calls still bloat "
+            "the pot and the action line). So a squeeze pot where four "
+            "players called before the 3-bet is 6-way here, even if they "
+            "all folded back to you. (With 'Clean lines only' on, 4+ "
+            "entrants stay excluded even if selected.)",
         )
 
-    # Live count of matching nodes (filenames only -- cheap), like Hold'em.
-    # The clean-lines toggle caps raises (<=2, i.e. not 'Facing 4-bet+') and
+    # Live count of matching nodes, read from the PRECOMPUTED filter meta
+    # (July 2026 perf fix: re-deriving context + player count for ~160k nodes
+    # cost ~0.3s on EVERY widget change; the meta scan is ~4ms). The
+    # clean-lines toggle caps raises (<=2, i.e. not 'Facing 4-bet+') and
     # players (<=3), matching the max_prior_raises / max_active_players the
     # batch + preview apply below.
     _ctx = set(action_contexts) if action_contexts else None
     _pc = set(player_counts) if player_counts else None
     _pos = set(positions) if positions else None
-    _matching = sum(
-        1
-        for n in nodes
-        if (_pos is None or n.actor in _pos)
-        and (_ctx is None or plo_node_action_context(n) in _ctx)
-        and (_pc is None or plo_active_player_count(n) in _pc)
-        and (
-            not clean_only
-            or (
-                plo_node_action_context(n) != "Facing 4-bet+"
-                and plo_active_player_count(n) <= 3  # noqa: PLR2004
+    if filter_meta is None:
+        _matching = 0
+        st.caption("⏳ Node count appears when the pack finishes loading.")
+    else:
+        _matching = sum(
+            1
+            for _actor, _context, _players in filter_meta
+            if (_pos is None or _actor in _pos)
+            and (_ctx is None or _context in _ctx)
+            and (_pc is None or _players in _pc)
+            and (
+                not clean_only
+                or (
+                    _context != "Facing 4-bet+"
+                    and _players <= 3  # noqa: PLR2004
+                )
             )
         )
-    )
-    st.caption(
-        f"**{_matching:,}** decision nodes match these filters "
-        f"(of {len(nodes):,} total)."
-    )
+        st.caption(
+            f"**{_matching:,}** decision nodes match these filters "
+            f"(of {len(filter_meta):,} total)."
+        )
     if not clean_only:
         st.warning(
             "Clean lines OFF: this includes Monker's largely UNCONVERGED "
@@ -9507,19 +9779,44 @@ def render_plo_generate_page() -> None:
             "The frequency window gates whether a decision is teachable at all "
             "(the 55-95% sweet spot). The EV-gap gate drops near-coinflip spots."
         )
-        freq_low, freq_high = st.slider(
-            "Solver frequency worthiness window (%)",
-            min_value=50,
-            max_value=100,
-            key="plo_worthiness_slider",
-            help="Below 65% = no clear best answer; 100% = trivial.",
+        # Two NUMBER INPUTS, not a range slider (July 16 2026): with both
+        # slider thumbs dragged to 100 (a legitimate "pure spots only"
+        # window) they stack on the track's right edge and can barely be
+        # separated again -- the window was effectively locked at 100/100.
+        # Typed bounds have no such trap and are precise.
+        wq1, wq2 = st.columns(2)
+        freq_low = int(
+            wq1.number_input(
+                "Worthiness window minimum (%)",
+                min_value=50,
+                max_value=100,
+                step=1,
+                key="plo_worthy_min",
+                help="Below 65% = no clear best answer.",
+            )
         )
+        freq_high = int(
+            wq2.number_input(
+                "Worthiness window maximum (%)",
+                min_value=50,
+                max_value=100,
+                step=1,
+                key="plo_worthy_max",
+                help="100 = include pure always-spots.",
+            )
+        )
+        if freq_low > freq_high:
+            freq_low, freq_high = freq_high, freq_low
+            st.caption(
+                f"↔️ Min was above max; using the swapped window "
+                f"{freq_low}-{freq_high}%."
+            )
         exclude_ambiguous = st.checkbox(
-            "Exclude ambiguous 90-95% band (recommended)",
+            "Exclude ambiguous 90-95% band",
             key="plo_exclude_ambiguous",
             help="Spots at 90-95% read as 'mostly' but sit just under the 95% "
             "'always' line, so the right read can still be marked wrong. "
-            "On = caps the effective ceiling at 90%.",
+            "On = caps the effective ceiling at 90%. Off by default.",
         )
         min_ev_gap = st.slider(
             "Minimum EV gap (bb) — 0 = off",
@@ -9602,9 +9899,12 @@ def render_plo_generate_page() -> None:
         == "Big blinds"
     )
     out_prefix = st.text_input(
-        "Output filename (prefix)",
+        "Optional label (added to the auto-named file)",
         key="plo_gen_out_prefix",
-        help="A timestamp is appended; every batch lands in its own file.",
+        help="Filenames are AUTO-GENERATED from the batch settings, starting "
+        "with the time of day: e.g. `21.47.32 · 9max · Hard · 12q · CO+BTN · "
+        "vs 3-bet.csv`. Anything you type here is inserted right after the "
+        "time. Leave blank for the pure auto name.",
     )
 
     st.divider()
@@ -9636,24 +9936,72 @@ def render_plo_generate_page() -> None:
         "equity is ~60x heavier than Hold'em). The preview is always "
         "equity-off regardless.",
     )
-    run_claim_checker = st.checkbox(
-        "🔍 Layer-7 claim checker (flag-only, +1 LLM call per question)",
-        key="plo_gen_claim_checker",
-        help="After each explanation is written, a second LLM pass audits it "
-        "against the SOLVER DATA facts and FLAGS confusing or wrong claims "
-        "(it never rewrites anything). Flags show on the PLO Review page and "
-        "set the row's validation_status to 'flagged'. The July 2026 port of "
-        "the NLHE claim checker; it fails open, so a checker error never "
-        "blocks a good explanation.",
+    # --- Layer-7 LLM audit (mirrors the NLHE Generate page; July 2026) ------
+    # ONE mutually-exclusive choice; defaults to the MAXIMUM audit per the
+    # user's standing request. The auto-fix runs the claim check ITSELF as
+    # its gate (best-of-2), so "flag only" on top of it would do nothing --
+    # a radio makes the do-nothing combination impossible to set.
+    layer7_mode = st.radio(
+        "Layer 7 mode",
+        options=_PLO_LAYER7_MODES,
+        horizontal=True,
+        key="plo_layer7_mode",
+        help="Off = no AI audit. Flag only = one extra LLM call per question "
+        "that FLAGS suspect claims (never rewrites); flags show on the PLO "
+        "Review page. Audit & auto-fix = the gate runs the claim check TWICE "
+        "(unioning the flags, so a flaky miss can't slip through); when a "
+        "question is flagged, a further LLM pass rewrites the prose "
+        "(minimal-edit, one corrective retry), re-checked by the "
+        "deterministic hard validators -- a rewrite that breaks a rule is "
+        "discarded and the original ships flagged. Only the prose changes; "
+        "the action, numbers, and four options stay solver-locked. The PLO "
+        "checker's first live calibration flagged 4/6 with ALL genuine "
+        "catches, so keep this on for PLO batches.",
     )
-    # Rough per-question estimates by model tier (+~50% with the checker's
-    # extra smaller call).
+    run_claim_checker = layer7_mode == "Flag only"
+    revise_pass = layer7_mode == "Audit & auto-fix"
+    final_audit = False
+    if revise_pass:
+        final_audit = st.checkbox(
+            "Final audit after the fix",
+            key="plo_final_audit",
+            help="Re-runs the claim checker on the rewritten explanation as a "
+            "last check -- it only flags for review, it never triggers "
+            "another rewrite.",
+        )
+    claim_checker_prompt: str | None = None
+    if run_claim_checker or revise_pass:  # the auto-fix uses the checker as its gate
+        _plo_ck_key = "plo_claim_checker_prompt"
+        if _plo_ck_key not in st.session_state:
+            st.session_state[_plo_ck_key] = _load_plo_claim_checker_prompt()
+        with st.expander("Claim-checker prompt (editable)"):
+            _plo_ck_edited = st.text_area(
+                "System prompt the PLO claim checker runs with",
+                height=320,
+                key=_plo_ck_key,
+            )
+            if (
+                _plo_ck_edited.strip()
+                and _plo_ck_edited != _load_plo_claim_checker_prompt()
+            ):
+                _save_plo_claim_checker_prompt(_plo_ck_edited)
+                st.caption("Saved.")
+        claim_checker_prompt = st.session_state[_plo_ck_key]
+    # Rough per-question estimates by model tier (+~50% for the flag-only
+    # checker call; ~2x for the auto-fix gate+rewrite+final-audit stack).
     _cost_per_q = 0.15 if "opus" in model else 0.08
-    if run_claim_checker:
+    if revise_pass:
+        _cost_per_q *= 2.0
+    elif run_claim_checker:
         _cost_per_q *= 1.5
+    _avail_txt = (
+        f"{_matching:,} nodes available"
+        if filter_meta is not None
+        else "node count loading…"
+    )
     st.info(
         f"**Estimated**: {int(count)} questions · "
-        f"~${int(count) * _cost_per_q:.2f} · {_matching:,} nodes available"
+        f"~${int(count) * _cost_per_q:.2f} · {_avail_txt}"
     )
 
     st.divider()
@@ -9694,8 +10042,19 @@ def render_plo_generate_page() -> None:
 
     st.divider()
     g1, g2 = st.columns(2)
-    preview_clicked = g1.button("🎲 Preview spots (no API, free)")
-    generate_clicked = g2.button("✍️ Generate with explanations (uses API)", type="primary")
+    # INVARIANT: both buttons need the enumerated nodes -- they stay disabled
+    # until the background pack load lands (the watcher fragment reruns the
+    # page by itself, so they unlock without any user action).
+    _pack_loading = nodes is None
+    preview_clicked = g1.button(
+        "🎲 Preview spots (no API, free)", disabled=_pack_loading
+    )
+    generate_clicked = g2.button(
+        "✍️ Generate with explanations (uses API)",
+        type="primary",
+        disabled=_pack_loading,
+        help="Unlocks when the pack finishes loading." if _pack_loading else None,
+    )
 
     # Last completed batch, re-rendered after the post-generate rerun (the rerun
     # lets the sidebar lifetime-spend pick up the new log entry).
@@ -9711,6 +10070,26 @@ def render_plo_generate_page() -> None:
             f"({_done['out_tokens']:,} output tokens). Tallied in the sidebar "
             "lifetime spend."
         )
+        _l7c = _done.get("counters") or {}
+        _l7m = _done.get("layer7_mode", "")
+        if _l7m == "Audit & auto-fix":
+            st.info(
+                f"🛠️ **Layer-7 audit & auto-fix ran**: "
+                f"{_l7c.get('revise_flagged', 0)} flagged by the gate · "
+                f"{_l7c.get('revise_fixed', 0)} auto-fixed · "
+                f"{_l7c.get('revise_discarded', 0)} discarded (original shipped, "
+                f"flagged) · {_l7c.get('revise_unchanged', 0)} unchanged. "
+                f"{_l7c.get('soft_flagged_rows', 0)} row(s) soft-flagged by the "
+                "deterministic validators. Lifecycle per question on the "
+                "**PLO Review** page."
+            )
+        elif _l7m == "Flag only":
+            st.info(
+                f"🔍 **Layer-7 claim checker ran (flag-only)**: "
+                f"{_l7c.get('claim_flagged_rows', 0)} row(s) flagged · "
+                f"{_l7c.get('soft_flagged_rows', 0)} soft-flagged. Details on "
+                "the **PLO Review** page."
+            )
         if _done["failed"]:
             st.warning(
                 f"{_done['failed']} explanation(s) failed — those questions "
@@ -9761,8 +10140,29 @@ def render_plo_generate_page() -> None:
             {k: st.session_state.get(k) for k in _PLO_GEN_SAVED_KEYS},
         )
         _PLO_BATCH_DIR.mkdir(parents=True, exist_ok=True)
-        _stem = (out_prefix or "plo_batch").removesuffix(".csv").strip() or "plo_batch"
-        out_path = _PLO_BATCH_DIR / f"{_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # Self-describing filename (July 2026 user ask): time of day first,
+        # then the settings this batch actually ran with. dedupe_path guards
+        # the date-less stamp against a same-second collision on another day
+        # (which would otherwise overwrite a kept batch).
+        from admin_panel.batch_naming import (  # noqa: PLC0415
+            auto_plo_batch_name,
+            dedupe_path,
+        )
+        from pipeline.plo.action_history import display_seat as _dseat2  # noqa: PLC0415
+
+        _stem = auto_plo_batch_name(
+            now=datetime.now(),
+            table_size=pack.table_size,
+            difficulty_label=(preset if preset != "Custom" else f"{lo}-{hi}"),
+            count=int(count),
+            positions=[
+                _dseat2(s, table_size=pack.table_size) for s in positions
+            ],
+            action_contexts=action_contexts,
+            player_counts=[int(n) for n in player_counts],
+            custom_label=(out_prefix or "").removesuffix(".csv"),
+        )
+        out_path = dedupe_path(_PLO_BATCH_DIR, _stem)
         acc = {"in": 0, "out": 0, "cc": 0, "cr": 0}
         model_seen = [model]
 
@@ -9772,6 +10172,20 @@ def render_plo_generate_page() -> None:
             acc["cc"] += cc
             acc["cr"] += cr
             model_seen[0] = mdl
+
+        # Live progress bar (July 2026): PLO generation runs INLINE (not a
+        # background job like NLHE), so we drive a st.progress bar from a
+        # per-question callback. Streamlit flushes the updates during the long
+        # synchronous call, so "12 / 20" ticks up as questions land.
+        _total = int(count)
+        _prog = st.progress(0.0, text=f"Starting… 0 / {_total} questions")
+
+        def _progress_cb(done: int, total: int) -> None:
+            total = max(total, 1)
+            _prog.progress(
+                min(1.0, done / total),
+                text=f"Generated {done} / {total} questions…",
+            )
 
         with st.spinner(f"Generating {int(count)} PLO questions with {model}…"):
             result = generate_plo_batch(
@@ -9788,6 +10202,7 @@ def render_plo_generate_page() -> None:
                 max_frequency=_max_freq,
                 exclude_ambiguous_band=exclude_ambiguous,
                 min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+                diversify=diversify,
                 min_difficulty=lo,
                 max_difficulty=hi,
                 compute_equity=compute_eq,
@@ -9798,8 +10213,13 @@ def render_plo_generate_page() -> None:
                 explanation_temperature=temperature,
                 explanation_system_prompt=plo_prompt_text,
                 run_claim_checker=run_claim_checker,
+                revise_pass=revise_pass,
+                final_audit=final_audit,
+                claim_checker_prompt=claim_checker_prompt,
                 usage_callback=_usage_cb,
+                progress_callback=_progress_cb,
             )
+        _prog.empty()
         cost = usage.compute_cost_usd(
             model=model_seen[0],
             input_tokens=acc["in"],
@@ -9818,6 +10238,16 @@ def render_plo_generate_page() -> None:
             questions_written=result.questions_written,
             output_filename=out_path.name,
         )
+        # Layer-7 lifecycle tallies for the done panel (from the meta sidecar
+        # the batch just wrote -- the result object stays lean).
+        _l7_counters: dict[str, int] = {}
+        if result.meta_path and Path(result.meta_path).is_file():
+            try:
+                _l7_counters = json.loads(
+                    Path(result.meta_path).read_text(encoding="utf-8")
+                ).get("counters", {})
+            except (OSError, ValueError):
+                _l7_counters = {}
         st.session_state["plo_gen_done"] = {
             "path": str(out_path),
             "cost": cost,
@@ -9830,6 +10260,8 @@ def render_plo_generate_page() -> None:
             "shortfall": result.shortfall,
             "difficulty_filtered": result.difficulty_filtered_out,
             "ev_filtered": result.ev_gap_filtered_out,
+            "layer7_mode": layer7_mode,
+            "counters": _l7_counters,
         }
         # So the PLO Review page auto-selects this batch when you switch to it.
         st.session_state["_plo_review_jump"] = out_path.name
@@ -9901,29 +10333,16 @@ def render_plo_generate_page() -> None:
 
 
 def _plo_batch_label(name: str) -> str:
-    """A readable picker label for a PLO batch file: ``<prefix> · <date time>``.
+    """A readable picker label for a PLO batch file.
 
-    Batches are saved as ``<prefix>_YYYYMMDD_HHMMSS.csv`` (see the PLO Generate
-    page), so the creation timestamp is in the filename -- surface it so batches
-    are easy to tell apart. Falls back to the file's modified time if the name
-    has no parseable stamp.
+    Delegates to :func:`admin_panel.batch_naming.plo_batch_display_label`:
+    legacy ``<prefix>_YYYYMMDD_HHMMSS`` names keep their date+time label;
+    July-2026 auto-names already start with the time of day, so only the
+    creation DATE is appended.
     """
-    import re  # noqa: PLC0415
+    from admin_panel.batch_naming import plo_batch_display_label  # noqa: PLC0415
 
-    stem = name[:-4] if name.endswith(".csv") else name
-    m = re.search(r"_(\d{8})_(\d{6})$", stem)
-    if m:
-        try:
-            when = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
-            prefix = stem[: m.start()] or stem
-            return f"{prefix} · {when:%Y-%m-%d %H:%M:%S}"
-        except ValueError:
-            pass
-    try:
-        mtime = (_PLO_BATCH_DIR / name).stat().st_mtime
-        return f"{name} · {datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M}"
-    except OSError:
-        return name
+    return plo_batch_display_label(_PLO_BATCH_DIR / name)
 
 
 def render_plo_review_page() -> None:
@@ -9939,6 +10358,12 @@ def render_plo_review_page() -> None:
     # first -- but NOT the Compare A/B artifacts (compare_*.csv), which are
     # graded on the Compare page. Globbing "plo_*.csv" used to hide any batch
     # the user named with a custom prefix.
+    # INVARIANT: sort by CREATION time (batch_creation_dt), never mtime --
+    # mtime bumps on every inline edit / claim-check write / refresh script
+    # run, which used to shove old batches above a freshly generated one
+    # (the "my new batch doesn't show up first" glitch, July 2026).
+    from admin_panel.batch_naming import batch_creation_dt  # noqa: PLC0415
+
     csvs = (
         sorted(
             (
@@ -9946,7 +10371,7 @@ def render_plo_review_page() -> None:
                 for p in _PLO_BATCH_DIR.glob("*.csv")
                 if not p.name.startswith("compare_")
             ),
-            key=lambda p: p.stat().st_mtime,
+            key=batch_creation_dt,
             reverse=True,
         )
         if _PLO_BATCH_DIR.exists()
@@ -9976,6 +10401,31 @@ def render_plo_review_page() -> None:
         st.warning("That batch is empty.")
         return
 
+    # Meta sidecar (.meta.json, July 2026): per-question Layer-7 lifecycle
+    # records -- the auto-fix `revise` record and the deterministic
+    # soft-validator warnings -- keyed by question number.
+    _meta: dict[str, object] = {}
+    _meta_path = csv_path.with_suffix(".meta.json")
+    if _meta_path.is_file():
+        try:
+            _meta = json.loads(_meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _meta = {}
+    _qrecords: dict[str, dict[str, object]] = {
+        str(r.get("number")): r
+        for r in (_meta.get("questions") or [])
+        if isinstance(r, dict)
+    }
+    # Pack provenance (multi-pack era): which range pack this batch generated
+    # from. Older metas carry only pack_label; both name the same pack.
+    _pack_line = _meta.get("pack_id") or _meta.get("pack_label")
+    if _pack_line:
+        _tsz = _meta.get("table_size")
+        st.caption(
+            f"📦 Pack: **{_pack_line}**"
+            + (f" · {_tsz}-max" if _tsz else "")
+        )
+
     reviews = review.load_reviews(csv_path)
     summary = review.summarize([q.get("No") for q in questions], reviews)
     s1, s2, s3, s4 = st.columns(4)
@@ -9983,6 +10433,18 @@ def render_plo_review_page() -> None:
     s2.metric("Approved", summary.approved)
     s3.metric("Needs review", summary.needs_review)
     s4.metric("Rejected", summary.rejected)
+
+    # Prominent banner for an Audit & Auto-fix batch (same as NLHE Review):
+    # a reviewer instantly sees this batch ran the 4-call pipeline and how the
+    # auto-fix resolved what it flagged.
+    _revise_line = review.revise_summary_line(_meta)
+    if _revise_line is not None:
+        st.info(
+            "🔬 **Audit & Auto-fix batch (up to 4 LLM calls per question).** "
+            "Pipeline: 1) generate → 2) claim-check gate (best-of-2) → "
+            "3) rewrite if flagged → 4) final audit. You see only the final "
+            "version below.\n\n" + _revise_line
+        )
     if summary.quality_pct is not None:
         st.caption(f"Approved share of decided grades: **{summary.quality_pct:.0f}%**.")
     st.caption(
@@ -10002,8 +10464,11 @@ def render_plo_review_page() -> None:
             f"{q.get('archetype', '')}  ·  diff {q.get('Difficulty Rating', '')}"
         )
         with st.expander(label, expanded=True):
-            st.markdown(f"**Context:** {q.get('Context', '')}")
-            st.markdown(f"**Question:** {q.get('Question', '')}")
+            # _md_lines escapes $: st.markdown treats "$3.50 ... $21" as
+            # inline LaTeX and swallows both amounts (the NLHE cards use the
+            # same helper for the same reason).
+            st.markdown(f"**Context:** {_md_lines(q.get('Context', ''))}")
+            st.markdown(f"**Question:** {_md_lines(q.get('Question', ''))}")
             opts = [q.get(f"option {i}", "") for i in range(1, 5)]
             st.markdown(
                 "Options:  "
@@ -10015,6 +10480,30 @@ def render_plo_review_page() -> None:
             freqs = q.get("action_frequencies", "")
             if freqs:
                 st.caption(f"**Solver frequencies:** {freqs}")
+            # The deterministic "Show the math" strip (pot odds equation,
+            # hand/range equity bar, per-action EV chart). PLO fills the same
+            # stat_notes/pot_odds/hero_equity/range_equity/action_ev_bb cells
+            # as NLHE (July 2026), so the generic panel renders unchanged;
+            # it no-ops on pre-July batches whose cells are blank.
+            _render_stat_panel(q)
+            # PLO range hand-type breakdown (hero + every still-active
+            # opponent, by shape) -- the GTO-Wizard-"Categories" equivalent.
+            # No-ops on batches generated before the column existed.
+            _render_range_breakdown_panel(q)
+            # Audit & auto-fix lifecycle (revise_pass batches): how this
+            # question's prose got here -- rewritten / clean / discarded /
+            # unchanged -- reusing the generic NLHE panel.
+            _qrec = _qrecords.get(no)
+            _render_revise_panel(_qrec)
+            # Deterministic soft-validator warnings (flag-only; v1 = the
+            # position-wording check, the PLO checker's #1 live catch).
+            _soft_warns = [str(w) for w in ((_qrec or {}).get("validator_warnings") or [])]
+            if _soft_warns:
+                st.warning(
+                    "🟠 **Flagged by a deterministic soft validator** (never "
+                    "auto-rejected -- review the wording):\n\n"
+                    + "\n".join(f"- {w}" for w in _soft_warns)
+                )
             # Layer-7 claim-checker verdict (July 2026): "" = the checker
             # didn't run on this batch; "[]" = ran and came back clean (show
             # the evidence, like the postflop card); else the issue list.
@@ -10461,7 +10950,10 @@ def render_plo_prompt_page() -> None:
             "to write about. Only #1 is saved/edited here; #2 is built "
             "automatically from the solver for each hand."
         )
-        sample = _plo_preview_sample_spot()
+        sample = _plo_preview_sample_spot(
+            st.session_state.get("plo_pack_select")
+            or next(iter(_available_plo_pack_dirs()), "plo_ranges")
+        )
         if sample is None:
             st.caption(
                 "(Couldn't build a sample spot -- is the PLO pack present under "
@@ -10693,10 +11185,18 @@ def render_plo_compare_page() -> None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             st.error("ANTHROPIC_API_KEY is not set. Add it to `.env`, then retry.")
             return
+        # The pack chosen in the shared selector (defaults to the first
+        # available); Compare's two sides always run on the SAME pack.
+        _cmp_pack_dir = st.session_state.get("plo_pack_select") or next(
+            iter(_available_plo_pack_dirs()), "plo_ranges"
+        )
         try:
-            pack, _nodes = _plo_pack_and_nodes("plo_ranges")
+            pack, _nodes = _plo_pack_and_nodes(_cmp_pack_dir)
         except FileNotFoundError:
-            st.error("No PLO pack under `plo_ranges/`. Load it on PLO Generate first.")
+            st.error(
+                f"No PLO pack under `{_cmp_pack_dir}/`. Load one on the "
+                "PLO Generate page first."
+            )
             return
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         _PLO_BATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -11159,6 +11659,63 @@ def render_skills_page() -> None:
 
 
 # --- main router ------------------------------------------------------------
+# One warm per process: reruns must not stack timers (the load itself is
+# also idempotent, this just keeps the timer population at one).
+_PLO_WARM_SCHEDULED = False
+# Boot renders first, THEN the walk starts: the 15-25s enumeration is a
+# tight pure-Python loop, and running it concurrently with the very first
+# page render starved the main thread via the GIL (the sidebar sat
+# half-rendered for the whole walk). The first render itself takes several
+# seconds cold (the NLHE cache fills + pack status globs), so give it a
+# clear runway; a user who beats the warm to a PLO page just sees the
+# loading banner and the page unlocks by itself.
+_PLO_WARM_DELAY_S = 10.0
+
+
+def _warm_plo_pack_in_background() -> None:
+    """Kick the PLO pack walk shortly after panel start, off the render path.
+
+    Fire-and-forget: schedules (once per process) the same background load
+    the PLO Generate page polls, for the pack the user last selected
+    (falling back to the first available). By the time anyone clicks a PLO
+    tab the walk is usually done; if they beat it, the Generate page shows
+    its loading banner and unlocks by itself. Never raises -- a
+    missing/broken pack surfaces on the PLO pages themselves, not at boot.
+    INVARIANT: the timer callback must not touch st.* / session_state (no
+    Streamlit context in that thread) -- the target dir is resolved here.
+    """
+    import threading  # noqa: PLC0415
+
+    from admin_panel import plo_preview  # noqa: PLC0415
+
+    global _PLO_WARM_SCHEDULED  # noqa: PLW0603
+    if _PLO_WARM_SCHEDULED:
+        return
+    try:
+        target = st.session_state.get("plo_pack_select")
+        if not target:
+            saved = gen_settings.load_settings(_PLO_GEN_SETTINGS_PATH)
+            target = saved.get("plo_pack_select")
+        available = _available_plo_pack_dirs()
+        if target not in available:
+            target = available[0] if available else None
+        if not target:
+            return
+        _PLO_WARM_SCHEDULED = True
+
+        def _kick(pack_dir: str = str(target)) -> None:
+            try:
+                plo_preview.request_pack_load(pack_dir)
+            except Exception:  # noqa: BLE001, S110 -- surfaced on the PLO pages
+                pass
+
+        timer = threading.Timer(_PLO_WARM_DELAY_S, _kick)
+        timer.daemon = True
+        timer.start()
+    except Exception:  # noqa: BLE001 -- warming must never break the panel
+        return
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Poker Pipeline Admin",
@@ -11168,6 +11725,7 @@ def main() -> None:
 
     st.sidebar.title("🎰 Poker Pipeline")
     st.sidebar.caption("Preflop pipeline · Phase 3 (skill tagging)")
+    _warm_plo_pack_in_background()
     # Apply any pending programmatic navigation (e.g. the Review page's
     # "View ranges" button) BEFORE the nav widget is created -- a widget's
     # session value can't be set after it's instantiated in the same run.

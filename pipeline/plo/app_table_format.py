@@ -32,7 +32,13 @@ from pipeline.plo.action_history import display_seat, resolve_pot_limit
 from pipeline.plo.fact_extractor import PloFacts
 
 _SUIT_WORD = {"s": "spades", "h": "hearts", "d": "diamonds", "c": "clubs"}
-_POSITIONS: tuple[str, ...] = ("LJ", "HJ", "CO", "BU", "SB", "BB")
+# Seat layouts in preflop acting order, per table size (pack-internal codes;
+# mirrors pack.SEATS / pack.SEATS_9MAX -- kept literal here so this module
+# stays a formatting leaf).
+_POSITIONS_BY_TABLE: dict[int, tuple[str, ...]] = {
+    6: ("LJ", "HJ", "CO", "BU", "SB", "BB"),
+    9: ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN", "SB", "BB"),
+}
 _RAISE_VERBS = frozenset({"open", "3-bet", "4-bet", "5-bet", "raise"})
 _SB_BB = 0.5
 _BB = 1.0
@@ -90,6 +96,7 @@ def build_plo_app_table_columns(
     mult = 1.0 if render_bb else stakes_bb_dollars  # bb -> display unit
     actions, _pot = resolve_pot_limit(facts.spot.node.history_before, stack_bb=stack_bb)
     hero_pos = facts.spot.node.actor
+    positions = _POSITIONS_BY_TABLE[table_size]
 
     sb_amt = _SB_BB * mult
     bb_amt = _BB * mult
@@ -134,7 +141,10 @@ def build_plo_app_table_columns(
     # --- hero seat (User Seat) ------------------------------------------
     # Tokens carry the NLHE/app seat codes (UTG/BTN), not the pack's LJ/BU.
     hero_info = info.get(hero_pos)
-    user_seat = f"{display_seat(hero_pos)}-{_remaining(money_in.get(hero_pos, 0.0))}"
+    user_seat = (
+        f"{display_seat(hero_pos, table_size=table_size)}"
+        f"-{_remaining(money_in.get(hero_pos, 0.0))}"
+    )
     if hero_info is not None and not hero_info["folded"] and hero_info["amount"] > 0:
         user_seat += "-" + _fmt(hero_info["amount"]) + "-" + hero_info["action"]
     elif hero_pos == "SB":
@@ -143,9 +153,9 @@ def build_plo_app_table_columns(
         user_seat += "-" + _fmt(bb_amt)
 
     # --- other seats (Seats) --------------------------------------------
-    hero_idx = _POSITIONS.index(hero_pos)
+    hero_idx = positions.index(hero_pos)
     entries: list[tuple[float, str]] = []
-    for pos in _POSITIONS:
+    for pos in positions:
         if pos == hero_pos:
             continue
         is_blind = pos in ("SB", "BB")
@@ -153,11 +163,14 @@ def build_plo_app_table_columns(
         silently_folded = pos_info is not None and pos_info["action"] == "FOLD"
         if silently_folded and not is_blind:
             continue
-        is_behind_hero = _POSITIONS.index(pos) > hero_idx
+        is_behind_hero = positions.index(pos) > hero_idx
         if pos_info is None and not is_blind and not is_behind_hero:
             continue
 
-        seat_str = f"{display_seat(pos)}-{_remaining(money_in.get(pos, 0.0))}"
+        seat_str = (
+            f"{display_seat(pos, table_size=table_size)}"
+            f"-{_remaining(money_in.get(pos, 0.0))}"
+        )
         sort_amt = 0.0
         if pos_info is not None:
             if pos_info["action"] == "FOLD":

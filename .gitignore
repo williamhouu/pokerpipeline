@@ -17,6 +17,11 @@ ranges/
 # here once purchased; the pipeline.plo parser reads it.
 plo_ranges/
 
+# PLO 9-max 100bb Monker pack (July 2026) — 327k .rng files, ~102GB
+# extracted (rake 5%/2bb cap; archive kept in ~/Downloads). Local-only
+# like every pack; NOT yet integrated — audit first.
+plo9_ranges/
+
 # NLHE 9-max Monker pack (June 2026) — MonkerViewer export, 93k .rng files
 # (~428MB extracted), local-only like the other packs. The canonical full
 # solve (the 3.4GB .mkr) stays in the team Dropbox.

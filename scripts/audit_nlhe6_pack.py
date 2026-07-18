@@ -318,7 +318,7 @@ def render_spots(pack: PreflopPack, nodes: tuple[PreflopDecisionNode, ...]) -> N
             "Position Matchup",
             "skills",
             "concept_tags",
-            "solver_reference",
+            "Notes",
             "Difficulty Rating",
             "ev_gap_bb",
         ):

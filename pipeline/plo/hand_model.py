@@ -388,6 +388,10 @@ def classify_plo_hand(hand: object) -> PloHandClass:
 
 # --- flush nut-ranking (deterministic; feeds the Layer 6 SOLVER DATA) ------
 _SUIT_CHAR_WORD = {"c": "clubs", "d": "diamonds", "h": "hearts", "s": "spades"}
+# Plain text suit symbols for the Show-the-math labels ("A♦ 8♦"). Deliberately
+# NOT the emoji-variant forms the Question prose uses -- panel labels render
+# in Streamlit markdown and the CSV, where the bare glyphs are cleaner.
+_SUIT_CHAR_SYMBOL = {"c": "♣", "d": "♦", "h": "♥", "s": "♠"}
 # Label for a flush whose HIGHEST card is this rank. Ace = the nut flush, king =
 # second-nut (it becomes the nut when the ace of that suit is on the board),
 # queen = third, jack = fourth; anything lower is a weak (non-nut) flush.
@@ -525,6 +529,171 @@ def describe_card_redundancy(hand: object) -> str | None:
                 f"remains in the deck -- this hand can never flop a set."
             )
     return None
+
+
+def flush_ceiling_stat_entries(hand: object) -> list[dict[str, str]]:
+    """Show-the-math rows: one per suit hero can flush in, plus a no-flush row.
+
+    The panel form of :func:`describe_flush_potential` (idea 1 of the July-16
+    panel proposal): each suit hero holds 2+ cards in gets its own
+    ``{key, label, value, note}`` entry stating the hard ceiling of any flush
+    that suit can make. Vocabulary comes from the SAME :func:`flush_suits`
+    rows that build the SOLVER DATA ``flush_potential`` line, so the panel
+    and the data block can never disagree.
+
+    Accuracy rules (each pinned by tests):
+
+    * Every claim is about HERO'S OWN CEILING ("the best diamond flush this
+      hand can make is K-high"), never about unbeatability -- a straight
+      flush outranks even the nut flush, so "no one can beat it" style
+      wording is deliberately absent.
+    * A hand with no two cards of one suit (rainbow, and every trips/quads
+      hand without a suited side card) emits the single "no flush possible"
+      row: a PLO flush must use exactly two hole cards of the suit.
+    * A three-suited/monotone suit shows only its TWO HIGHEST cards in the
+      label -- the pair the best flush actually uses; the extra card is the
+      dead-weight row's story (:func:`dead_weight_stat_entries`).
+    """
+    cards = _normalize(hand)
+    suits = flush_suits(cards)
+    if not suits:
+        return [
+            {
+                "key": "flush_ceiling",
+                "label": "Flush ceiling",
+                "value": "no flush possible",
+                "note": (
+                    "No two of your four cards share a suit, and a flush "
+                    "must use exactly two hole cards of the same suit, so "
+                    "this hand can never make a flush."
+                ),
+            }
+        ]
+    entries: list[dict[str, str]] = []
+    for f in suits:
+        held = sorted(
+            (c for c in cards if card_suit(c) == f.suit),
+            key=rank_value,
+            reverse=True,
+        )[:2]
+        shown = " ".join(
+            card_rank(c) + _SUIT_CHAR_SYMBOL[f.suit] for c in held
+        )
+        sym = _SUIT_CHAR_SYMBOL[f.suit]
+        if f.is_nut:
+            value = "nut flush possible"
+            note = (
+                f"You hold the A{sym}, so the best {f.suit_word} flush this "
+                "hand can make is ace-high: the nut flush."
+            )
+        elif f.nut_label == "second-nut":
+            value = "second-nut flush at best"
+            note = (
+                f"You do not hold the A{sym}, so the best {f.suit_word} "
+                "flush this hand can make is K-high: the second-nut flush."
+            )
+        elif f.nut_label == "third-nut":
+            value = "third-nut flush at best"
+            note = (
+                f"Your highest {f.suit_word[:-1]} is the Q{sym}, so the "
+                f"best {f.suit_word} flush this hand can make is Q-high: "
+                "the third-nut flush."
+            )
+        else:
+            value = f"{f.high_rank}-high flush at best (weak)"
+            note = (
+                f"The best {f.suit_word} flush this hand can make is "
+                f"{f.high_rank}-high, well below the nut flush. This is "
+                "second-best-flush territory, the classic spot where "
+                "non-nut suits lose a big pot."
+            )
+        entries.append(
+            {
+                "key": f"flush_ceiling_{f.suit_word}",
+                "label": f"Flush ceiling: {f.suit_word} ({shown})",
+                "value": value,
+                "note": note,
+            }
+        )
+    return entries
+
+
+def dead_weight_stat_entries(hand: object) -> list[dict[str, str]]:
+    """Show-the-math row for redundant cards: at most ONE entry, often none.
+
+    The panel form of :func:`describe_card_redundancy` /
+    :func:`describe_suit_redundancy` (idea 2 of the July-16 panel proposal).
+    The note reuses the EXACT describe_* sentence already shipped in SOLVER
+    DATA and validated in prose, single source of truth for the wording.
+
+    Accuracy rules (each pinned by tests):
+
+    * Rank and suit redundancy are mutually exclusive BY CONSTRUCTION
+      (trips occupy three different suits, quads four), so this never
+      emits two rows.
+    * A plain pair (or two pair) emits NOTHING: a pair is fully playable
+      (sets, full houses), not dead weight.
+    * No specific card is named as "the dead one". For trips the three
+      same-rank cards are interchangeable rank-wise but NOT suit-wise (a
+      Q♥ sharing hearts with a 4th heart carries flush value its siblings
+      don't), and a suit's lowest card can still hold rank value (it may
+      pair the 4th card) -- naming one card would be false precision, so
+      the row counts the redundancy instead.
+    """
+    cards = _normalize(hand)
+    rank_counts = Counter(rank_value(c) for c in cards)
+    trip_rank = next((r for r, n in rank_counts.items() if n >= 3), None)  # noqa: PLR2004
+    if trip_rank is not None:
+        note = describe_card_redundancy(cards)
+        if note is None:  # pragma: no cover -- unreachable, defensive only
+            return []
+        # Panel captions stand alone, so sentence-case the reused SOLVER
+        # DATA wording (which follows a field name there) at display time.
+        note = note[:1].upper() + note[1:]
+        count = rank_counts[trip_rank]
+        word = _RANK_WORD_PLURAL[trip_rank]
+        return [
+            {
+                "key": "dead_weight",
+                "label": (
+                    f"Dead weight: three {word}"
+                    if count == 3  # noqa: PLR2004
+                    else f"Dead weight: four {word}"
+                ),
+                "value": (
+                    "one card is redundant"
+                    if count == 3  # noqa: PLR2004
+                    else "two cards are redundant, no set possible"
+                ),
+                "note": note,
+            }
+        ]
+    suit_counts = Counter(card_suit(c) for c in cards)
+    heavy_suit = next((s for s, n in suit_counts.items() if n >= 3), None)  # noqa: PLR2004
+    if heavy_suit is not None:
+        note = describe_suit_redundancy(cards)
+        if note is None:  # pragma: no cover -- unreachable, defensive only
+            return []
+        note = note[:1].upper() + note[1:]
+        count = suit_counts[heavy_suit]
+        word = _SUIT_CHAR_WORD[heavy_suit]
+        return [
+            {
+                "key": "dead_weight",
+                "label": (
+                    f"Dead weight: three {word}"
+                    if count == 3  # noqa: PLR2004
+                    else f"Dead weight: four {word}"
+                ),
+                "value": (
+                    "one card adds no flush value"
+                    if count == 3  # noqa: PLR2004
+                    else "two cards add no flush value"
+                ),
+                "note": note,
+            }
+        ]
+    return []
 
 
 def describe_suit_redundancy(hand: object) -> str | None:

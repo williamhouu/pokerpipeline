@@ -53,6 +53,20 @@ def test_batch_writes_a_complete_csv(tmp_path):
     assert "ranges" not in rows[0]
 
 
+def test_progress_callback_reports_each_question(tmp_path):
+    # The admin PLO Generate page drives its live progress bar from this
+    # callback (PLO generation runs inline, so this is how "12 / 20" ticks up).
+    pack = _clean_hj_pack(tmp_path)
+    calls: list[tuple[int, int]] = []
+    result = generate_plo_batch(
+        pack, output_path=tmp_path / "b.csv", total_questions=4, seed=0,
+        compute_equity=False, progress_callback=lambda d, t: calls.append((d, t)),
+    )
+    assert result.questions_written == 4  # noqa: PLR2004
+    # One call per committed question, monotonically increasing, total constant.
+    assert calls == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
 def test_single_node_contributes_multiple_distinct_hands(tmp_path):
     # A node is no longer capped at one question per batch: when the batch is
     # bigger than the node pool, repeat passes draw NEW hands from the same
@@ -91,7 +105,11 @@ def test_round_robin_spreads_across_nodes_before_repeating(tmp_path):
     assert result.questions_written == 2  # noqa: PLR2004
     with out.open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    node_refs = {r["solver_reference"].rsplit("/", 1)[-1] for r in rows}
+    from pipeline.provenance import node_reference_from_notes
+
+    node_refs = {
+        node_reference_from_notes(r["Notes"]).rsplit("/", 1)[-1] for r in rows
+    }
     assert len(node_refs) == 2  # noqa: PLR2004  # one question per node
 
 

@@ -58,6 +58,12 @@ class PloSkillContext:
     n_prior_raises: int
     n_calls_after_open: int  # calls between the open and the next raise
     multiple_raise_sizes: bool  # node offers >1 raise size (a sizing choice)
+    # Hero's REAL postflop standing vs the villain, from
+    # pipeline.plo.position.hero_relative_position -- the same fact the CSV
+    # Relative Position column and the SOLVER DATA block carry. The In/Out of
+    # Position Play skills key off THIS (July 2026 fix): the old "late seat =
+    # in position" heuristic mis-tagged e.g. a CO caller facing a BTN 3-bet.
+    hero_in_position: bool = False
 
 
 def from_plo_facts(facts: PloFacts) -> PloSkillContext:
@@ -82,6 +88,8 @@ def from_plo_facts(facts: PloFacts) -> PloSkillContext:
         if a.action.action in _RAISE_SIZED
     }
     dom = facts.spot.dominant_action
+    from pipeline.plo.position import hero_relative_position  # noqa: PLC0415
+
     return PloSkillContext(
         tags=frozenset(compute_plo_concept_tags(facts)),
         archetype=facts.archetype,
@@ -91,6 +99,7 @@ def from_plo_facts(facts: PloFacts) -> PloSkillContext:
         n_prior_raises=n_prior_raises,
         n_calls_after_open=n_calls_after_open,
         multiple_raise_sizes=len(raise_sizes) > 1,
+        hero_in_position=hero_relative_position(facts) == "In Position",
     )
 
 
@@ -107,7 +116,10 @@ _SQUEEZE = frozenset({"squeeze_for_value", "squeeze_as_bluff"})
 _CALL = frozenset({"call_for_value", "call_for_implied_odds", "call_allin"})
 _FOLD = frozenset({"fold_dominated", "fold_pot_odds"})
 _BLIND_TAGS = frozenset({"small_blind", "big_blind"})
-_LATE = frozenset({"CO", "BU"})
+# Late seats in either pack dialect (6-max BU / 9-max BTN never co-occur; CO
+# is late at both sizes, so one combined set is correct -- unlike the early/
+# middle buckets, which are table-size aware in pipeline.plo.position).
+_LATE = frozenset({"CO", "BU", "BTN"})
 
 
 def _facing_squeeze(c: PloSkillContext) -> bool:
@@ -139,17 +151,15 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     ),
     "Blind vs. Blind Play": lambda c: "bvb_spot" in c.tags,
     "Pot Odds": lambda c: c.archetype in _CALL or c.archetype in _FOLD,
-    # BvB: at a ring table the SB acts FIRST postflop, so the BB is the seat
-    # in position (July 2026 bugfix -- was backwards; "SB is the dealer" is
-    # true only at a 2-player table). Mirrors pipeline.plo.position.
-    "In Position Play": lambda c: (
-        (c.hero_position in _LATE and c.n_prior_raises >= 1)
-        or (c.hero_position == "BB" and "bvb_spot" in c.tags and c.n_prior_raises >= 1)
-    ),
+    # In/Out of Position Play key off the COMPUTED hero_in_position fact
+    # (pipeline.plo.position -- the same source as the CSV Relative Position
+    # column and the SOLVER DATA block, so the skill can never contradict the
+    # prose). July 2026 fix: the old "late seat facing a raise = IP" heuristic
+    # mis-tagged a CO caller facing a BTN 3-bet as In Position. The ring-table
+    # BvB rule (BB is IP, SB is OOP) comes along for free from the same source.
+    "In Position Play": lambda c: c.n_prior_raises >= 1 and c.hero_in_position,
     "Out of Position Play": lambda c: (
-        bool(c.tags & _BLIND_TAGS)
-        and c.n_prior_raises >= 1
-        and not (c.hero_position == "BB" and "bvb_spot" in c.tags)
+        c.n_prior_raises >= 1 and not c.hero_in_position
     ),
     "Multiway Pot Strategy": lambda c: "multiway_pot" in c.tags,
 

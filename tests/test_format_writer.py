@@ -82,7 +82,7 @@ def test_column_structure():
              last column -- ordered events the app plays to animate the
              hand up to the question's decision).
     """
-    assert len(CSV_COLUMNS) == 52
+    assert len(CSV_COLUMNS) == 51  # solver_reference folded into Notes (July 2026)
     assert CSV_COLUMNS[CSV_COLUMNS.index("Correct Answer") + 1] == "neutral_credit"
     # animation_script closes the schema (July 2026); chat_context before it.
     assert CSV_COLUMNS[-1] == "animation_script"
@@ -105,13 +105,15 @@ def test_column_structure():
         "skills", "action_frequencies", "ev_gap_bb", "concept_tags"]
     # Notes sits right after concept_tags (June 2026), then Position Matchup,
     # then ranges. The QA/provenance cluster follows the strategic frame:
-    # archetype -> board_texture -> solver_reference -> validation_status.
+    # archetype -> board_texture -> validation_status (solver_reference folded
+    # into Notes, July 2026).
     assert CSV_COLUMNS[CSV_COLUMNS.index("concept_tags") + 1] == "Notes"
     assert CSV_COLUMNS[CSV_COLUMNS.index("Notes") + 1] == "Position Matchup"
     assert CSV_COLUMNS[CSV_COLUMNS.index("Position Matchup") + 1] == "ranges"
+    assert "solver_reference" not in CSV_COLUMNS
     arch_i = CSV_COLUMNS.index("archetype")
-    assert CSV_COLUMNS[arch_i:arch_i + 4] == [
-        "archetype", "board_texture", "solver_reference", "validation_status"]
+    assert CSV_COLUMNS[arch_i:arch_i + 3] == [
+        "archetype", "board_texture", "validation_status"]
     # The four difficulty diagnostic axes, followed by the six decision-math
     # columns that now close out the row (June 2026).
     assert CSV_COLUMNS[-15:-11] == [
@@ -126,7 +128,7 @@ def test_column_structure():
     assert ["option 1", "option 2", "option 3", "option 4"] == CSV_COLUMNS[12:16]
     assert "Live or Online" in CSV_COLUMNS and "Live/Online" not in CSV_COLUMNS
     row = build_row(_spot(), 1500, 1)
-    assert set(row) == set(CSV_COLUMNS) and len(row) == 52
+    assert set(row) == set(CSV_COLUMNS) and len(row) == 51
     # Postflop rows always have empty archetype (the column is only
     # populated by the preflop writer).
     assert row["archetype"] == ""
@@ -146,8 +148,12 @@ def test_new_pipeline_columns():
     assert row["concept_tags"] == "single_raised_pot, range_advantage_hero"
     # board_texture is the 3-axis string, not the composite word.
     assert row["board_texture"] == "two_tone_disconnected_middling"
-    # solver_reference is a descriptive cache path, not a Pio node id.
-    assert row["solver_reference"] == (
+    # The node reference (old solver_reference value) now lives in Notes'
+    # Node: field, byte-identical (July 2026).
+    from pipeline.provenance import node_reference_from_notes
+
+    assert "solver_reference" not in row
+    assert node_reference_from_notes(row["Notes"]) == (
         "PioSolver_Cash_100bb/BB_vs_BTN/single_raised_pot/flop_2cJs7s/AhKh")
     assert row["ev_gap_bb"] == "1.37"
 

@@ -91,8 +91,9 @@ def test_batch_wiring_populates_claim_check_and_flags(tmp_path: Path) -> None:
     row = next(csv.DictReader(out.open(encoding="utf-8-sig")))
     issues = parse_claim_check(row["claim_check"])
     assert issues and issues[0]["claim"] == "bad claim"
-    assert row["validation_status"] == "flagged"
     meta = json.loads(res.meta_path.read_text())
+    # validation_status moved from the CSV to the meta record (July 16).
+    assert meta["questions"][0]["validation_status"] == "flagged"
     assert meta["counters"]["claim_flagged_rows"] == 1
     assert meta["questions"][0]["claim_check_issues"][0]["claim"] == "bad claim"
     assert meta["run_settings"]["run_claim_checker"] is True

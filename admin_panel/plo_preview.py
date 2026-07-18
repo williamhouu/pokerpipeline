@@ -13,6 +13,7 @@ deliberately absent here -- this is a sanity-check surface, not the output path.
 from __future__ import annotations
 
 import random
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,8 +24,8 @@ from pipeline.plo.hand_order import HAND_COUNT
 from pipeline.plo.node_enumerator import (
     PloDecisionNode,
     enumerate_plo_nodes,
-    plo_active_player_count,
     plo_node_action_context,
+    plo_pot_entrant_count,
 )
 from pipeline.plo.options import build_options, canonicalize_strategy
 from pipeline.plo.pack import PloActionType, PloPack, discover_plo_pack
@@ -71,10 +72,83 @@ class PloPreviewRow:
     skills: tuple[str, ...]
 
 
+# Serializes the heavy node walk: enumerate_plo_nodes is lru_cached but NOT
+# locked, so a page visit racing the background warmer would compute the
+# 15-25s walk twice (double CPU + a transient double copy in RAM). The
+# second caller waits here, then hits the warm cache instantly.
+_ENUM_LOCK = threading.Lock()
+
+
 def load_pack_and_nodes(pack_dir: Path) -> tuple[PloPack, tuple[PloDecisionNode, ...]]:
     """Discover the PLO pack under ``pack_dir`` and enumerate its nodes."""
     pack = discover_plo_pack(pack_dir)
-    return pack, enumerate_plo_nodes(pack)
+    with _ENUM_LOCK:
+        return pack, enumerate_plo_nodes(pack)
+
+
+# --- non-blocking pack loading (July 2026 perf fix) --------------------------
+# Enumerating the 9-max pack (327k files -> 160k nodes) takes ~15-25s cold,
+# and it used to run INSIDE the Generate page's render, freezing the whole
+# panel on the first visit after every restart. These helpers move the walk
+# to a daemon thread: the page renders immediately (filters editable, seats
+# come from the cheap discover_plo_pack), and the result -- nodes plus the
+# precomputed filter meta -- appears when ready. INVARIANT: nothing in here
+# may touch Streamlit (st.*) from the worker thread; the thread computes,
+# the render loop polls via request_pack_load.
+PloPackLoad = tuple[
+    PloPack,
+    tuple[PloDecisionNode, ...],
+    tuple[tuple[str, str, int], ...],  # plo_filter_meta triples
+]
+_BG_LOCK = threading.Lock()
+_BG_RESULTS: dict[str, "PloPackLoad | Exception"] = {}
+_BG_THREADS: dict[str, threading.Thread] = {}
+
+
+def _bg_load(key: str, pack_dir: Path) -> None:
+    from pipeline.plo.node_enumerator import plo_filter_meta  # noqa: PLC0415
+
+    result: PloPackLoad | Exception
+    try:
+        pack, nodes = load_pack_and_nodes(pack_dir)
+        result = (pack, nodes, plo_filter_meta(nodes))
+    except Exception as exc:  # noqa: BLE001 -- surfaced to the page via request_pack_load
+        result = exc
+    with _BG_LOCK:
+        _BG_RESULTS[key] = result
+        _BG_THREADS.pop(key, None)
+
+
+def request_pack_load(pack_dir: Path | str) -> PloPackLoad | None:
+    """Non-blocking pack load: the result when ready, else ``None``.
+
+    First call for a pack dir starts a daemon thread and returns ``None``
+    immediately; later calls return ``None`` until the walk finishes, then
+    the ``(pack, nodes, filter_meta)`` tuple forever after (the underlying
+    ``enumerate_plo_nodes`` lru_cache holds the data, so this adds no second
+    copy). A failed load raises its exception ONCE and clears the slot, so
+    the next call retries (e.g. after the user extracts a missing pack).
+    Also the boot-time warmer: call it at panel startup and the pack is
+    usually ready before anyone opens a PLO page.
+    """
+    key = str(pack_dir)
+    with _BG_LOCK:
+        got = _BG_RESULTS.get(key)
+        if isinstance(got, Exception):
+            del _BG_RESULTS[key]
+            raise got
+        if got is not None:
+            return got
+        if key not in _BG_THREADS:
+            worker = threading.Thread(
+                target=_bg_load,
+                args=(key, Path(pack_dir)),
+                daemon=True,
+                name=f"plo-pack-load:{key}",
+            )
+            _BG_THREADS[key] = worker
+            worker.start()
+    return None
 
 
 def _first_worthy_spot(
@@ -146,12 +220,13 @@ def build_preview_rows(
             max_prior_raises is None
             or sum(1 for a in n.history_before if a.action in _AGGRESSIVE) <= max_prior_raises
         )
+        # Entrant counting, matching generate_plo_batch (July 16 2026 fix).
         and (
             max_active_players is None
-            or plo_active_player_count(n) <= max_active_players
+            or plo_pot_entrant_count(n) <= max_active_players
         )
         and (ctx_set is None or plo_node_action_context(n) in ctx_set)
-        and (pc_set is None or plo_active_player_count(n) in pc_set)
+        and (pc_set is None or plo_pot_entrant_count(n) in pc_set)
     ]
     rng.shuffle(candidates)
 

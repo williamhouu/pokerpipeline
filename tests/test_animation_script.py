@@ -200,7 +200,11 @@ def test_plo_writer_animation_uses_display_seats() -> None:
         PloAction("SB", PloActionType.FOLD),
     )
     facts = SimpleNamespace(
-        spot=SimpleNamespace(node=SimpleNamespace(history_before=history, actor="BB")),
+        spot=SimpleNamespace(
+            node=SimpleNamespace(
+                history_before=history, actor="BB", table_size=6,
+            )
+        ),
     )
     script = _plo_animation_script(
         facts, stack_bb=100.0, stakes_bb_dollars=1.0, game_format="cash",

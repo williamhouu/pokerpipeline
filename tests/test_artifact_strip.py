@@ -429,7 +429,7 @@ def test_plo_batch_meta_sidecar_and_reverify_roundtrip(tmp_path) -> None:
         rebuilt = build_plo_row(
             facts, difficulty=difficulty, options=options, correct_answer=correct,
             explanation=row.get("Answer Explanation", ""), number=int(q["number"]),
-            pack_label=meta["pack_label"],
+            pack_label=meta["pack_label"], pack=pack,
             stakes_bb_dollars=float(rs["stakes_bb_dollars"]),
             game_format=rs["game_format"], display_in_bb=bool(rs["display_in_bb"]),
             stack_bb=float(rs["stack_bb"]),

@@ -59,7 +59,7 @@ from pipeline.preflop.spot_sampler import (  # noqa: E402
 EXACT_COLS = (
     "Question", "Context", "User Seat", "User Cards", "Cards on Table",
     "Table Size", "Default Stack", "Seats", "POT", "Relative Position",
-    "Position Matchup", "action_frequencies", "solver_reference",
+    "Position Matchup", "action_frequencies", "Notes",
     "archetype", "board_texture", "Cash/Tourney", "Live or Online",
     "Preflop Pot Type", "Pot Participant", "Stack Depth",
 )

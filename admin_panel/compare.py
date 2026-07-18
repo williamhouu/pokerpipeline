@@ -15,6 +15,8 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline.provenance import node_reference_from_notes
+
 # Verdict vocabulary: which prompt's output was better for a spot.
 VERDICTS = ("A", "B", "tie")
 
@@ -36,7 +38,12 @@ def spot_key(solver_reference: str, user_cards: str) -> str:
 
 
 def _default_key(row: dict[str, str]) -> str:
-    return spot_key(row.get("solver_reference", ""), row.get("User Cards", ""))
+    # The node reference moved from the solver_reference column into the Notes
+    # `Node:` field (July 2026); the value is byte-identical, so the spot key
+    # is unchanged.
+    return spot_key(
+        node_reference_from_notes(row.get("Notes", "")), row.get("User Cards", "")
+    )
 
 
 def join_by_spot(

@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 
 from pipeline.plo.pack import (
@@ -129,6 +129,11 @@ class PloDecisionNode:
     history_before: tuple[PloAction, ...]
     actions: tuple[PloActionOption, ...]
     history_stem: str
+    # Table size of the pack this node came from (stamped by the enumerator).
+    # Rides on the node so every downstream consumer -- seat display names,
+    # position phrases, the app table tokens -- knows the seat dialect without
+    # threading the pack itself. Default 6 = the pre-registry behavior.
+    table_size: int = 6
 
     @cached_property
     def node_id(self) -> str:
@@ -158,12 +163,19 @@ def _history_stem(stem: str) -> str:
     return stem.rsplit(".", 1)[0] if "." in stem else ""
 
 
+@lru_cache(maxsize=4)
 def enumerate_plo_nodes(pack: PloPack) -> tuple[PloDecisionNode, ...]:
     """Walk a pack's `.rng` files and group siblings into decision nodes.
 
     A node = a unique ``(actor, history_before)`` pair; the files with that
     pair become its ``actions``. Only filenames are parsed -- no file contents
-    are read, so this is cheap even on the full 12k-file pack.
+    are read -- but the 9-max pack has 327k of them (~13s per walk), so the
+    result is memoized per pack (July 2026): the admin page enumerates once
+    and every batch generation in the same process starts instantly instead
+    of re-walking. The value is an immutable tuple; ``PloPack`` is a frozen
+    dataclass, so equal packs share the entry. Caveat (same as the admin's
+    ``cache_resource``): re-extracting a pack IN PLACE needs a process
+    restart to be seen.
 
     Malformed filenames are logged at WARNING level and skipped (one bad file
     can't abort the run). Nodes are returned sorted by ``(actor, node_id)`` for
@@ -179,7 +191,7 @@ def enumerate_plo_nodes(pack: PloPack) -> tuple[PloDecisionNode, ...]:
     for rng_path in sorted(pack.root.glob("*.rng")):
         file_count += 1
         try:
-            actions = parse_node_path(rng_path.stem)
+            actions = parse_node_path(rng_path.stem, seats=pack.seats)
         except ValueError as exc:
             skip_count += 1
             logger.warning("node_enumerator: skipping %s: %s", rng_path.name, exc)
@@ -200,6 +212,7 @@ def enumerate_plo_nodes(pack: PloPack) -> tuple[PloDecisionNode, ...]:
                 history_before=history_before,
                 actions=options,
                 history_stem=_history_stem(options[0].stem),
+                table_size=pack.table_size,
             )
         )
 
@@ -292,6 +305,67 @@ def plo_node_action_context(node: PloDecisionNode) -> str:
     return "Facing single raise"
 
 
+def plo_pending_after_hero(node: PloDecisionNode) -> tuple[tuple[str, ...], bool]:
+    """``(still_to_act, closes_action)`` for a decision node.
+
+    ``still_to_act`` = the seats that have NOT yet responded to the current
+    bet and act after hero this round (in order); ``closes_action`` is True
+    when a hero call/fold ends the preflop betting (nobody pending, and the
+    aggressor can't raise their own bet). Computed by replaying the SAME
+    seat-queue walk :func:`pipeline.plo.pack.parse_node_path` uses -- after
+    the history, the queue front is hero, the seats behind hero up to the
+    last aggressor are the pending ones (the aggressor and anyone behind them
+    only re-act if someone raises).
+
+    This is the PLO port of the NLHE multiway-awareness facts (the SOLVER
+    DATA lines that stop the LLM inventing "UTG still to act behind you"
+    about a seat that already folded -- the exact residual error in the first
+    live 9-max batch).
+    """
+    from pipeline.plo.pack import SEATS, SEATS_9MAX  # noqa: PLC0415
+
+    seats = SEATS_9MAX if node.table_size == 9 else SEATS  # noqa: PLR2004
+    queue = list(seats)
+    last_aggressor: str | None = None
+    for a in node.history_before:
+        seat = queue.pop(0)
+        if seat != a.seat:  # malformed history; fail safe (no pending info)
+            return (), False
+        if a.action in (PloActionType.CALL, PloActionType.RAISE, PloActionType.MIN_RAISE):
+            queue.append(seat)
+        if a.action in (
+            PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN
+        ):
+            last_aggressor = seat
+    if not queue or queue[0] != node.actor:
+        return (), False
+    behind = queue[1:]
+    if last_aggressor in behind:
+        behind = behind[: behind.index(last_aggressor)]
+    return tuple(behind), not behind
+
+
+def plo_filter_meta(
+    nodes: tuple[PloDecisionNode, ...],
+) -> tuple[tuple[str, str, int], ...]:
+    """Per-node ``(actor, action_context, pot_entrant_count)`` triples.
+
+    The admin Generate page's live "N nodes match your filters" recount used
+    to re-derive context + player count for all ~160k nodes on EVERY
+    Streamlit rerun (i.e. every widget change, ~0.3s each). This one 0.5s
+    pass -- built once alongside enumeration, in the background loader --
+    turns that recount into a ~4ms scan of plain tuples. Same functions,
+    same values: a filter over this meta MUST equal a filter over the nodes
+    (pinned by a test), so the count can never drift from what generation
+    actually selects. The player element is the ENTRANT count (the filter
+    semantics -- see :func:`plo_pot_entrant_count`), not the live count.
+    """
+    return tuple(
+        (n.actor, plo_node_action_context(n), plo_pot_entrant_count(n))
+        for n in nodes
+    )
+
+
 def plo_active_player_count(node: PloDecisionNode) -> int:
     """Players still in the pot at this decision (incl. hero).
 
@@ -310,5 +384,35 @@ def plo_active_player_count(node: PloDecisionNode) -> int:
         for seat, action in last_action.items()
         if action is not PloActionType.FOLD
     }
+    seats.add(node.actor)
+    return len(seats)
+
+
+# Actions that put chips in the pot voluntarily (blind posts are not in the
+# history; a FOLD commits nothing).
+_VOLUNTARY = {
+    PloActionType.CALL,
+    PloActionType.RAISE,
+    PloActionType.MIN_RAISE,
+    PloActionType.ALL_IN,
+}
+
+
+def plo_pot_entrant_count(node: PloDecisionNode) -> int:
+    """Players who have VOLUNTARILY put chips in the pot (incl. hero).
+
+    A seat counts once it calls or raises anywhere in the history, EVEN IF
+    it later folds -- its dead money still shapes the pot and its call still
+    clutters the action line. Hero always counts. This is the counting the
+    "Players in the pot" filter and the clean-lines player cap use (July 16
+    2026 fix): the old live-seat counting
+    (:func:`plo_active_player_count`) read a COLLAPSED squeeze pot as
+    "heads-up" -- LJ opens, four players call, BB squeezes, everyone folds
+    back = 6 entrants but only 2 live -- so caller-heavy monsters sailed
+    through a "1-2 players" filter. Prose facts about who is STILL in the
+    hand keep using the live count; this one answers "how multiway is this
+    pot really".
+    """
+    seats = {a.seat for a in node.history_before if a.action in _VOLUNTARY}
     seats.add(node.actor)
     return len(seats)

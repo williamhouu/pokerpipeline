@@ -1106,6 +1106,50 @@ Rule stated in the file header: a failure there means the CODE is wrong —
 never adjust an assertion to match the code without independently
 confirming the poker fact.
 
+**PLO is MULTI-PACK (July 16 2026): the 9-max 100bb pack is integrated.**
+Two registered packs in `pipeline/plo/pack.py:KNOWN_PLO_PACKS`, matched at
+discovery by path signature (`Omaha/6-way` / `Omaha/9-way`; unknown layouts
+fall back to the legacy 6-max spec):
+
+- **`plo_6max_100bb`** — the original pack (`plo_ranges/`, 12,164 files,
+  rake 5%/1bb, Monker dialect seats LJ..BU displayed as UTG..BTN).
+- **`plo_9max_100bb`** — `plo9_ranges/` (gitignored, 327,825 files, ~103GB
+  extracted; archive in ~/Downloads, a 60bb sibling stays unextracted).
+  Rake 5%/2bb → tighter ranges (UTG RFI 10.3%). Intake audit CLEAN via
+  `scripts/audit_plo9_pack.py` (re-runnable; checks format, label-vs-
+  hand_order alignment, EV units = milli-sb like 6-max, unambiguous-hand
+  sanity, and the QQ-fold-bug EV-vs-frequency inversion scan — zero hits,
+  unlike the NLHE 9-max). Grammar differs: tokens are only `0/1/2/3` with
+  bare `2` = the pot raise (`_decode_token` maps it globally; the 6-max
+  pack encodes the same action as `40100`). Seats `UTG, UTG+1, UTG+2, LJ,
+  HJ, CO, BTN, SB, BB` (NLHE convention, already display names — so
+  `display_seat`/phrase lookups are TABLE-SIZE AWARE: the 6-max LJ→UTG
+  remap must never touch the 9-max's REAL Lojack). Only ~1.9% of the tree
+  (6,096 nodes) is clean-line (<=2 raises, <=3 players) — the default
+  clean-lines caps handle the unconverged multiway tail; that pool is
+  still ~half the 6-max pack's node count. Enumeration of 327k files ~25s,
+  absorbed by the admin `cache_resource` (a node cache like NLHE's is a
+  possible future optimization).
+
+Integration seams: `PloDecisionNode.table_size` (stamped by the
+enumerator) rides to every consumer; `parse_node_path(stem, seats=)`;
+one combined postflop-rank dict in `position.py` (relative order only;
+BU/BTN share a rank, never co-occur) + `position_bucket(seat,
+table_size)` (6-max LJ=early, 9-max LJ=middle) shared by both taggers;
+`app_table_format._POSITIONS_BY_TABLE`; batch meta records `pack_id` +
+`table_size` (pack_label defaults to pack_id) and
+`scripts/audit_plo_batch.py` resolves the pack folder from it (explicit
+`--pack-dir` wins). Admin: the PLO folder text-input is now a **pack
+selector** (`_render_plo_pack_loader`, shared session key across
+Generate/Compare/prompt-preview; Review shows a "📦 Pack:" provenance
+caption); hero-position + players-in-pot widgets take the SELECTED
+pack's seats (session values sanitized per pack so switching can't
+crash a saved multiselect). Verified: full suite green (6-max
+byte-compat intact), 9-max dry batch re-verifies 0/0, real-API 9-max
+batch with the full Layer-7 stack 0/0 (gate flagged+fixed 1/2, correct
+Lojack/UTG+1 prose, pot-limit sizes exact). Tests:
+`tests/test_plo_9max_pack.py`.
+
 **PLO drops the EV axis (June 2026).** `pipeline/plo/difficulty.py` is
 3-axis — `easy = 0.57 * easy_freq + 0.29 * easy_concept + 0.14 *
 easy_hand` (the old freq/concept/hand 4:2:1 split renormalised). A
@@ -1158,21 +1202,332 @@ to PLO ahead of the next PLO production push:
   bucket wording). Batch flag `run_claim_checker` -> `claim_check`
   column ("" not run / "[]" clean / issue list) + `validation_status`
   "flagged" + `counters.claim_flagged_rows` + meta `claim_check_issues`;
-  admin PLO Generate checkbox "🔍 Layer-7 claim checker" (persisted) and
   a flagged/clean panel on the PLO Review card. First live calibration
   (6 real questions): 4 flags, ALL genuine (two position reversals, one
   equity-vs-verdict contradiction, one garbled sentence) -- PLO prose
-  has a real position-claim failure mode, so run the checker ON for PLO
-  batches. Reviser (auto-fix) NOT ported yet -- flags are for human
-  review.
-- **Deliberate non-ports**: trap-aware difficulty (needs equity-vs-price;
+  has a real position-claim failure mode, so run Layer-7 ON for PLO
+  batches.
+- **Layer-7 auto-fix parity DONE (July 15 2026, later session -- PLO now
+  matches NLHE's maximum audit).** New `pipeline/plo/validators.py`
+  (hard stack `run_plo_audit_validators` = the SAME checks generation
+  retries on -- banned phrases, list formatting, fabricated cards,
+  shape claims -- re-exposed for rewrite re-validation, single source of
+  truth in explanation_generator; plus `run_plo_soft_validators`, v1 =
+  the position-wording flag ported to PLO seats, ALWAYS on) and
+  `pipeline/plo/reviser.py` (`revise_plo_explanation`: minimal-edit
+  mandate + ONE corrective retry fed the validator error, options/
+  correct re-attached verbatim, both July-15 NLHE upgrades from day
+  one). `generate_plo_batch` gained `revise_pass`/`final_audit`: gate =
+  best-of-2 checker passes UNIONed, lifecycle statuses clean/fixed/
+  discarded/unchanged in the meta `revise` record + `revise_*`/
+  `soft_flagged_rows` counters, ONE client resolved up front (the
+  NLHE client=None lesson), `validate_no_list_formatting` also added to
+  the PLO GENERATION retry loop. Admin PLO Generate: the checkbox is
+  now the NLHE-style **Layer 7 mode radio, DEFAULT "Audit & auto-fix"
+  + final audit ON** (per the user's ask), editable PLO checker prompt
+  (`admin_panel/prompts/plo_claim_checker_system.txt` override), done-
+  panel lifecycle summary; PLO Review renders the batch banner +
+  per-question `_render_revise_panel` + soft-validator flags from the
+  meta sidecar. PLO Compare deliberately stays auto-fix-free (a rewrite
+  pass would mask the prompt differences being A/B tested). Live-
+  verified (2 real Opus questions): gate flagged 2/2 with genuine
+  catches (wrong players-behind count, fold-case certainty, single-card
+  blocker overstatement), 2/2 auto-fixed, re-verifier 0/0 on the
+  revise-pass batch. Tests: `tests/test_plo_validators.py` +
+  `tests/test_plo_reviser.py` (incl. batch lifecycle + gate-union).
+- **First deep 9-max audit wave (July 16 2026)** -- a 12-question real-API
+  batch was line-audited (every equity number matched the recomputed truth;
+  archetypes/tags all consistent with their rules); its findings produced:
+  (1) **In/Out of Position Play skills now key off
+  `hero_relative_position`** (the old "late seat = IP" heuristic tagged a
+  CO caller facing a BTN 3-bet as In Position -- skills can no longer
+  contradict the Relative Position column); (2) **terminology hard
+  validator v1** (`_terminology_errors` in explanation_generator +
+  `validate_terminology` in the audit stack: "limp" language is rejected
+  when every call followed a raise -- two live explanations called a flat
+  of an open "limping in"); (3) **multiway-awareness facts in the SOLVER
+  DATA** (`still_to_act_behind_you` / `players_still_in_the_hand` /
+  `your_call_or_fold_closes_the_action` via
+  `node_enumerator.plo_pending_after_hero`, the seat-queue walk -- kills
+  the "UTG still to act behind" invention about a folded seat); (4) **PLO
+  SHOWS THE MATH**: `action_history.call_price` (pot-limit walk) feeds a
+  `price` block in the SOLVER DATA (pot/to_call/break-even + an
+  ABOVE/BELOW-break-even line, only when a call is actually on the menu)
+  AND fills the previously-blank CSV columns `pot_odds` / `hero_equity` /
+  `range_equity` / `action_ev_bb` (per-action EVs in bb, from-hand-start
+  basis -> the Review EV panel works) / `stat_notes` (same
+  {key,label,value,note} JSON shape as NLHE -> the Show-the-math panel +
+  equity bar work unchanged); (5) soft position validator skips
+  counterfactual sentences ("if you were ... in position"); checker prompt
+  told to never emit 'no real issue' entries. blocker_combos/
+  top_villain_combos/exploit_notes stay blank by design (2-card-class
+  helpers). Post-fix live batch: prose now cites the price arithmetic
+  correctly ("18.5 to win 55.5 = 25%"), skills match position 4/4,
+  re-verifier 0/0. Tests: `tests/test_plo_show_math.py`.
+
+**Second audit wave (July 16 2026, same session -- diversify + perf +
+the SECOND deep batch audit):**
+
+- **Diversify (balanced action mix).** `generate_plo_batch(diversify=)`
+  interleaves the seeded-shuffled candidates round-robin across the
+  `PLO_ACTION_CONTEXTS` buckets. Measured: a raw 12-question 9-max draw =
+  12/12 Facing 3-bet; diversified = 3/3/3/3 across Opening / Facing
+  single raise / Facing 3-bet / After one call. Admin checkbox "🎨
+  Balanced action mix" DEFAULT ON (persisted `plo_gen_diversify`);
+  recorded in run_settings; selection-only, so re-verification is
+  unaffected. PLO Compare deliberately unchanged.
+- **Perf (the panel is now responsive).** `discover_plo_pack` sorted the
+  FULL 327k-file rglob per call (~3.3s, several calls per render) -> now
+  an early-exit scandir walk + `lru_cache` = ~1ms cold / ~0 memoized
+  (failures NOT cached, so dropping a pack in is seen immediately).
+  `enumerate_plo_nodes` is `lru_cache(maxsize=4)` -- one ~13s cold walk
+  per process, then instant; batch generation went ~14s+ -> 0.5s
+  (12-question dry). Caveat (same as the admin cache_resource):
+  re-extracting a pack IN PLACE needs a process restart. A DISK node
+  cache was considered and rejected: rebuilding 160k node objects costs
+  ~the same as re-parsing (the NLHE node_cache lesson).
+- **Two writer bugs found by the second deep audit, fixed + test-pinned**:
+  `action_ev_bb` dropped every RAISE EV (canonical "3-bet" label didn't
+  match the raw "Raise 100%" EV key -- now mapped via
+  `canonicalize_action_label`, frequency-weighted on collisions, epsilon
+  keeps zero-frequency counterfactual EVs); `pot_odds`/stat_notes filled
+  40% (the posted blind) on open spots where the SOLVER DATA correctly
+  suppresses price -- now ONE shared rule `action_history.price_is_live`
+  gates the data block AND the writer.
+- **Second deep audit verdict (12-question diversified real batch,
+  line-audited like the first)**: every pot/price/equity number in prose
+  exact; the new still-to-act facts used correctly ("five players still
+  to act behind you" == ground truth); position skills correct 12/12
+  incl. LJ-OOP-vs-BTN and ring BvB; archetypes all rule-consistent; zero
+  generation failures; residual final-audit flags fell 9 -> 5 (richer
+  data block = fewer errors at the source) and all 5 were legitimate
+  review-worthy notes (best: "position on a caller" on a CO open --
+  hero would be OOP vs the BTN caller).
+- **Kept batches were refreshed in place** (deterministic columns rebuilt
+  through the current writer, LLM prose/claim_check/status preserved;
+  answers asserted unchanged) so Review shows current-code output:
+  plo9_audit_batch, plo9_audit_batch2, plo9_first_real,
+  plo9_postfix_check, plo_parity_smoke -- ALL re-verify 0/0. Pre-meta
+  (June) batches untouched.
+- **9-max Context = effective stacks ONLY (July 16, team ask).**
+  `format_plo_context(table_size=9)` returns just "$100 effective
+  stacks." (bb display: "100bb effective stacks.") -- no stakes, venue,
+  or game-type framing; the 6-max format is byte-identical to before.
+  Pinned by `test_nine_max_context_is_effective_stacks_only`; kept 9-max
+  batches refreshed + 0/0.
+- **9-max is the DEFAULT pack** (July 16, team ask): `_PLO_PACK_BASES`
+  lists `plo9_ranges` first, and the first available pack is the
+  selector default (a saved `plo_pack_select` still wins).
+- **PLO Review shows the math (July 16).** The PLO Review card now calls
+  the generic `_render_stat_panel` (equity bar + per-action EV chart +
+  the written-out stat_notes equations) -- the data columns existed
+  since the show-the-math wave but only the NLHE cards rendered them.
+  Also fixed there: Context/Question render through `_md_lines` (two $
+  amounts in one st.markdown string triggered KaTeX and swallowed them
+  -- the same escape the NLHE cards already used).
+- **PLO CSV declutter (July 16, team ask -- the PLO analog of the June
+  NLHE trim).** `_PLO_DROPPED_COLUMNS` in `pipeline/plo/format_writer.py`
+  drops 10 columns from the PLO CSV: `validation_status` (the lifecycle
+  status now lives in the meta question record -- the Review flags render
+  from there anyway), the four `easy_*` difficulty diagnostics,
+  `pot_odds`/`hero_equity`/`range_equity` (values still inside the kept
+  `stat_notes`; the admin equity bar's `_pct` now regex-extracts numbers
+  so the stat_notes fallback works for BOTH games), and the always-blank
+  `blocker_combos`/`top_villain_combos`. PLO_CSV_COLUMNS is now 42.
+  CONTRACT: `build_plo_row` returns a SUPERSET dict (dropped values kept
+  for the batch layer/meta/tests); `write_plo_csv` trims via
+  `extrasaction="ignore"`. All kept batches refreshed in place + 0/0.
+- **Pot-odds Show-the-math value is the bare percentage (July 17, team
+  ask).** The PLO writer's pot-odds stat_notes row read `"need 41%"`; now
+  just `"41%"` so the panel renders "Pot odds · 41%" (the preflop +
+  postflop `_pot_odds_note` already emit the bare `_pct` value -- this
+  aligns PLO with them). Whether THIS hand should call at that price is
+  the explanation's job (implied odds can justify a sub-threshold call),
+  so the panel never frames it as "equity needed". `build_plo_row` line;
+  the written-out equation NOTE is unchanged. All 20 meta-bearing PLO
+  batches refreshed in place + re-verify 0/0; pinned by the value
+  assertion in `tests/test_plo_show_math.py:test_row_shows_the_math`.
+- **Show the math: flush-ceiling + dead-weight rows (July 16 evening --
+  panel ideas 1+2 SHIPPED).** `pipeline/plo/hand_model.py:
+  flush_ceiling_stat_entries` (one Show-the-math row per suit hero can
+  flush in, nut/second-nut/third-nut/weak vocabulary straight from
+  `flush_suits`; ALWAYS >= 1 row -- a rainbow/trips-no-suited-pair hand
+  emits "no flush possible"; every note is a CEILING claim, never
+  "unbeatable") and `dead_weight_stat_entries` (at most ONE row: trips/
+  quads rank redundancy OR 3-/4-of-suit, mutually exclusive by
+  construction; plain pairs never fire; deliberately names NO specific
+  card -- a trips sibling can carry flush value and a low suited card can
+  carry pair value, so the row counts instead). Notes reuse the EXACT
+  `describe_*` SOLVER DATA sentences (sentence-cased at the panel
+  boundary), single wording source. Appended in `build_plo_row`'s
+  stat_entries -> auto-render in the Review "📊 Show the math" panel and
+  ride into chat_context via the generation block; PLO `stat_notes` is
+  now never empty. NEW `scripts/refresh_plo_batch.py` (rebuild
+  deterministic columns through the current writer, preserve the LLM
+  passthrough columns, REFUSE if any answer/option drifts) refreshed all
+  18 meta-bearing kept batches -- every one re-verifies 0/0. Tests:
+  the flush-ceiling/dead-weight block in `tests/test_plo_show_math.py`.
+- **PLO Generate never blocks on the pack walk (July 16 evening).** The
+  15-25s 9-max enumeration ran INSIDE the page render (first visit per
+  panel process = frozen UI), and the live node recount re-derived
+  context/players for all 160k nodes on EVERY widget change (~0.3s per
+  filter click). Now: `admin_panel/plo_preview.request_pack_load`
+  (daemon-thread load; `_ENUM_LOCK` serializes the walk so a page visit
+  racing the warmer can't double-compute), a boot-time warm
+  (`app._warm_plo_pack_in_background`, one 10s-delayed Timer per process
+  -- running the walk during the first render starved it via the GIL, so
+  boot renders first), and `node_enumerator.plo_filter_meta` precomputed
+  (actor, context, players) triples (recount 0.31s -> 4ms). While
+  loading the page shows a banner, every filter stays editable, Preview/
+  Generate are disabled, and a `run_every=2s` fragment reruns the page
+  by itself when the pack lands. Compare/Ranges keep the blocking
+  cache_resource loader (warm by then). Generation itself still runs
+  inline on the Generate click (the accepted spinner). Tests:
+  `tests/test_plo_pack_background_load.py`.
+- **PLO Generate: live progress bar + exclude-ambiguous default OFF
+  (July 18, user asks).** (1) PLO generation runs INLINE (a spinner),
+  unlike NLHE's background job, so it showed no per-question progress.
+  `generate_plo_batch` gained a `progress_callback(done, total)` (called
+  after each committed question); the admin page drives a `st.progress`
+  bar from it ("Generated 12 / 20 questions…"), emptied when done.
+  Streamlit flushes the bar updates during the synchronous call, so it
+  ticks live. Test: `test_plo_batch.py::test_progress_callback_reports_
+  each_question` (calls == [(1,4)..(4,4)]); verified live in the browser.
+  (2) The "Exclude ambiguous 90-95% band" checkbox now defaults OFF
+  (`_seed_plo_generate_settings` default False + "(recommended)" dropped
+  from the label); the 90-95% band is included unless the user opts out.
+  AppTest-pinned.
+- **PLO range hand-type breakdown column (July 17, the "GTO Wizard
+  Categories" equivalent).** `pipeline/plo/range_breakdown.py:
+  build_range_breakdown(facts, pack)` aggregates EACH still-active
+  player's preflop range into structural hand-type buckets (pair pattern
+  x suit pattern, e.g. "Unpaired Double-Suited") -- HERO with the fold/
+  call/raise action split per bucket ("how your whole range plays this
+  spot, by shape"), each VILLAIN as the composition of the range they
+  took to reach hero ("what that player's range looks like now") via the
+  sanctioned `villain_range_stem` + `range_at` seam. Shares are
+  combo-weighted (combo_multiplicity) to match the app's combo counts.
+  Deterministic COPY (fact-bound, house phrasing via `_villain_ref`,
+  UTG family takes no article) per player + an overall read tying it to
+  hero's hand. Total/edge-safe: open spots have no villains, an
+  unresolvable villain node is dropped (never a false summary), a rare
+  hero shape gets an honest "rare shape" placement, monotone/three-suited
+  handled. Emitted as ONE JSON cell **`range_breakdown`, the last PLO
+  column, right after `animation_script`** (the team's requested slot;
+  PLO-only -- the pair x suit axes are a PLO construct, NLHE has the
+  grid). `build_plo_row` gained a `pack` param (needed to resolve the
+  opponents' ranges; empty cell when omitted); threaded from the batch +
+  both re-verifiers. `PLO_CSV_COLUMNS` is now 42 (the +1 offsets the
+  solver_reference removal below). Tests:
+  `tests/test_plo_range_breakdown.py`. **PLO Review panel (July 17):** a
+  "🃏 Range breakdown by hand type" expander renders right below "📊 Show
+  the math" on the PLO Review card -- the overall read, then hero's range
+  as a 3-column table (Hand type / % of range / How it plays with the
+  fold/call/raise split) and each still-active opponent as a 2-column
+  composition table. Pure formatter `admin_panel/review.py:
+  range_breakdown_panel(cell)` (browserless-tested) -> the Streamlit
+  `_render_range_breakdown_panel` is a thin shell (fix-durability rule).
+  No-ops on non-PLO / pre-column batches.
+- **solver_reference column folded into Notes (July 17, ALL 5 writers).**
+  The cryptic `solver_reference` column is REMOVED from the shared
+  `CSV_COLUMNS` (propagates to every schema); its exact value now rides
+  in the enriched `Notes` column's `Node:` field, alongside provenance +
+  `Chart:` (pack/solve id) + `Situation:` (positions, pot type,
+  archetype). NEW shared leaf `pipeline/provenance.py`:
+  `build_notes(provenance, chart=, situation=, node_ref=)` +
+  `node_reference_from_notes(notes)` (extracts the `Node:` value,
+  byte-identical to the old solver_reference so every downstream parser
+  is unaffected) + `parse_notes`. The ~12 consumers that used to parse
+  `row["solver_reference"]` (Compare spot-join in all 3 Compare pages,
+  the Review range-chart resolver via `range_view.node_id_from_notes`,
+  cross-batch dedup + promote-idempotency + `meta_question_for` in
+  review.py, the postflop ranges panel + fallback join) now go through
+  ONE tested seam reading Notes. Old batches (no `Node:` field) degrade
+  to "" exactly as a missing solver_reference did. `audit_preflop_batch`
+  now EXACT-checks `Notes` (was unchecked); postflop/full-hand already
+  did; the stale `solver_reference` entries were dropped from all three
+  EXACT_COLS. VERIFIED: fresh preflop/postflop/full-hand dry-runs +
+  their re-verifiers 0/0; all 20 PLO batches refreshed + 0/0; full suite
+  green; both Review pages load clean. HISTORICAL preflop/postflop
+  batches predate this and drift on Notes -- regenerate, don't refresh
+  (the documented convention). Tests: `tests/test_provenance.py` +
+  updated compare/review/format-writer tests.
+- **"Players in the pot" filter counts POT ENTRANTS, not live seats
+  (July 16 late evening -- user-reported filter audit).** THE BUG: with
+  players [1,2] + clean lines selected, batches shipped caller-heavy
+  squeeze monsters (LJ opens, four call, BB squeezes, field folds back)
+  because `plo_active_player_count` counts CURRENTLY-LIVE seats -- a
+  collapsed 6-entrant pot reads "2 live" and sailed through the player
+  filter AND the clean-lines <=3 cap. Measured on the user's exact
+  filter set: 423 matching nodes under live-counting, only 82 under the
+  new `node_enumerator.plo_pot_entrant_count` (anyone who voluntarily
+  put chips in, folded-since or not; hero always counts). Entrant
+  counting now drives the batch filters, the preview filters, and the
+  Generate page count (`plo_filter_meta`'s third element -- all three
+  MUST share one function or the page count lies); prose facts about
+  who is STILL in the hand (`players_still_in_the_hand`, Pot
+  Participant, multiway tags) deliberately keep the live count. The
+  Hard band amplified the bug (701/707 nodes difficulty-filtered, so
+  ONLY the junk tail survived); post-fix, Hard + tight filters may run
+  slow/short on the 82-node clean pool -- that is the filter working.
+  Every other Generate filter audited clean (positions, contexts,
+  raise cap, worthiness, band, diversify -- all applied, AND-combined).
+  Tests: `tests/test_plo_player_filters.py` (incl. the exact collapsed
+  squeeze shape + a fake-pack batch-level exclusion proof).
+- **Self-naming PLO batch files + creation-time Review ordering (July 16
+  late evening, user asks).** NEW pure module `admin_panel/batch_naming.py`
+  (no streamlit; tests in `tests/test_plo_batch_naming.py`). (1) PLO batch
+  filenames are AUTO-GENERATED from the run's settings, TIME OF DAY first
+  (user: no date, "so I can organize by what time of day"):
+  `21.47.32 · 9max · Hard · 12q · CO+BTN · vs 3-bet.csv` -- blank filters
+  omitted, >3 selections collapse to a count, the old "Output filename
+  (prefix)" box is now an optional label inserted after the time;
+  `dedupe_path` appends " (2)" on collision (the date-less stamp could
+  otherwise overwrite a same-second batch from another day). (2) THE
+  GLITCH: the PLO Review picker sorted by MTIME, so any edit /
+  claim-check write / refresh-script run shoved an old batch above a
+  freshly generated one (same-prefix names made the swap invisible).
+  Now sorted by `batch_creation_dt` -- legacy `_YYYYMMDD_HHMMSS` name
+  stamp, else `st_birthtime` (survives in-place rewrites), else mtime --
+  and labels come from `plo_batch_display_label` (legacy names keep
+  `prefix · date time`; auto-names get the creation DATE appended).
+  KNOWN FOLLOW-UP: the NLHE Review + Postflop Review pickers still sort
+  by mtime (same latent glitch; flagged as a spawn task).
+- **Factor-list prompts vs the no-list validator (July 16).** The no-list
+  hard rule (July 15) silently broke every FACTOR-LIST prompt in BOTH
+  games: it rejected the "- " lines those prompts request, so generation
+  retried and dropped every question. Fix: the shared leaf's
+  `prompt_sanctions_lists(system_prompt)` (True when the prompt says
+  "factor list" -- the documented contract for list-style prompts) is
+  checked at all four enforcement points (PLO + NLHE generation loops,
+  both revisers' re-validation via `run_*_audit_validators(...,
+  allow_list_formatting=)`). The PLO factor-list prompt ALREADY EXISTED
+  ("In-Depth PLO (factor list + range examples)" in the plo_library --
+  it is the ORIGINAL the NLHE SHORTISH prompt was ported from; it lives
+  on the PLO Prompt page, a separate library from the NLHE Prompt page);
+  July 16 it gained rules 19-20 binding pot-odds prose to the price
+  block and players-behind prose to still_to_act_behind_you. Live proof:
+  4/4 factor-list questions, 3 auto-fix rewrites all KEPT the format,
+  re-verifier 0/0.
+- **made-set-preflop hard rule (July 16, from the user's live review).**
+  A user batch shipped "Your hand is a set of threes" about a PAIR:
+  the first draft had it, BOTH best-of-2 gate passes missed it, the
+  minimal-edit reviser correctly preserved the unflagged sentence, and
+  the final audit caught it (shipped flagged + highlighted -- the
+  designed safety net). The class is now deterministic:
+  `made_set_preflop` in `_SHAPE_CLAIMS` rejects possession-verb
+  set/trips/three-of-a-kind claims preflop (like made_flush_preflop);
+  "set-mining", "flop a set", "your set outs", "a set of outs" stay
+  legal. Generation retries on it and rewrites bounce on it.
   PLO equity is optional/off by default and the pack is multiway-heavy,
   the exact case NLHE excludes), razor's-edge (no 13x13 grid-neighbor
   concept for 16,432 4-card classes), sanity audit (still awaiting NLHE
   recalibration), stat_notes/exploit_notes (4-card math doesn't map;
   columns stay deliberately blank), preflop-style deterministic
   cross-check (subsumed by the byte-exact re-verifier for meta-bearing
-  batches).
+  batches). (The reviser + soft position validator, listed here as
+  follow-ups until July 15, ARE now ported -- see the auto-fix parity
+  bullet above.)
 - Tests: `tests/test_plo_claim_checker.py` + the PLO cases in
   `tests/test_artifact_strip.py` (strip unit + meta/re-verify roundtrip).
 
@@ -1293,10 +1648,20 @@ bias median +5 to +7.4pts; a bluff replayed vs the exported response =
 a ~17bb blunder; metadata `solve_seconds=29.86` for a 200bb 3BP is the
 tell -- likely purified/late-iterate strategies exported with averaged
 EVs). v8 shows the same test at only ~1-3pts (near-clean). Treat v7
-RIVER-BARREL mixed answers as suspect pending the vendor re-export;
-details + follow-up (an EV-vs-strategy river check for
-`scripts/audit_postflop_db.py` at solve intake) in the
-v7-export-inconsistency memory.
+RIVER-BARREL mixed answers as suspect pending the vendor re-export.
+The EV-vs-strategy INTAKE CHECK IS BUILT (July 15): section [8] of
+`scripts/audit_postflop_db.py` compares EV-implied river-call equity
+(`(EV_call - EV_fold + to_call) / (pot + to_call)` -- exact on a river,
+a call is pure showdown) vs exact showdown equity against the file's
+own reconstructed betting range, on ~24 sampled facing-bet river
+nodes. Two hard prongs: |pooled median| > 3pts, and >= 3 nodes & >=
+25% with |per-node median| > 3pts (the v7 SRP files bias OPPOSITE
+directions per line -- +6 barrels, -4 to -15 check-check rivers -- and
+net the pool to ~0, so the pooled prong alone misses them). Calibrated
+on all six files: all five v7 files hard-fail, v8 CLEAN with WARNs.
+Vendor-label gotcha inside: the facing-bet passive action is CHECK in
+v8 / CALL in v7 -- resolved by betting state, never label. Details in
+the v7-export-inconsistency memory.
 
 Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 

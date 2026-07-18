@@ -37,11 +37,6 @@ _AGGRESSIVE = {
 }
 _AGGRESSIVE_LABELS = ("Raise", "Min-raise", "All-in")
 
-# 6-max seat -> position bucket. LJ (lojack) is first to act (UTG-equivalent).
-_EARLY = frozenset({"LJ"})
-_MIDDLE = frozenset({"HJ"})
-_LATE = frozenset({"CO", "BU"})
-
 _MIN_MULTIWAY = 3
 
 
@@ -70,19 +65,29 @@ def _active_count(facts: PloFacts) -> int:
 
 
 # --- Position context (5) --------------------------------------------------
+# Buckets come from pipeline.plo.position.position_bucket (table-size aware:
+# the 6-max pack's LJ is its UTG-equivalent, the 9-max LJ is a middle seat).
+def _bucket(facts: PloFacts) -> str:
+    from pipeline.plo.position import position_bucket  # noqa: PLC0415
+
+    return position_bucket(
+        facts.spot.node.actor, table_size=facts.spot.node.table_size
+    )
+
+
 def early_position(facts: PloFacts) -> bool:
-    """Hero is UTG (the pack's LJ seat, first to act)."""
-    return facts.spot.node.actor in _EARLY
+    """Hero is in an early (UTG-family) seat."""
+    return _bucket(facts) == "early"
 
 
 def middle_position(facts: PloFacts) -> bool:
-    """Hero is in the Hijack."""
-    return facts.spot.node.actor in _MIDDLE
+    """Hero is in a middle seat (6-max: the Hijack; 9-max: Lojack/Hijack)."""
+    return _bucket(facts) == "middle"
 
 
 def late_position(facts: PloFacts) -> bool:
     """Hero is in the Cutoff or on the Button."""
-    return facts.spot.node.actor in _LATE
+    return _bucket(facts) == "late"
 
 
 def small_blind(facts: PloFacts) -> bool:

@@ -52,9 +52,21 @@ def range_pct(weights: dict[str, float]) -> float:
 
 
 def node_id_from_solver_reference(solver_reference: str) -> str:
-    """The node id is the last ``/``-segment of a ``solver_reference``
+    """The node id is the last ``/``-segment of a node reference
     (``<pack>/<actor>/<node_id>``). Empty string for a blank reference."""
     return solver_reference.rsplit("/", 1)[-1] if solver_reference else ""
+
+
+def node_id_from_notes(notes: str) -> str:
+    """The node id parsed from a row's ``Notes`` column (July 2026).
+
+    The node reference lives in the Notes ``Node:`` field now (was the
+    dropped ``solver_reference`` column); this is the one-call replacement
+    for ``node_id_from_solver_reference(row["solver_reference"])``.
+    """
+    from pipeline.provenance import node_reference_from_notes  # noqa: PLC0415
+
+    return node_id_from_solver_reference(node_reference_from_notes(notes))
 
 
 # GTO-Wizard-style action colours for the strategy grid.
@@ -287,6 +299,7 @@ __all__ = [
     "grid_matrix",
     "gw_cells",
     "hand_at",
+    "node_id_from_notes",
     "node_id_from_solver_reference",
     "range_pct",
 ]

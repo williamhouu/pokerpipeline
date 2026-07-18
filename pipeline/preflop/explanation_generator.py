@@ -66,6 +66,7 @@ from pipeline.explanation_generator import (
     call_messages_create,
     frequency_to_verb_prefix,
     parse_response,
+    prompt_sanctions_lists,
 )
 from pipeline.preflop.domination import dominating_map
 from pipeline.preflop.fact_extractor import PreflopFacts
@@ -1562,7 +1563,16 @@ def generate_preflop_answer_explanation(
             last_candidate = candidate
             # Structural check passed; now Layer 7 audit. On failure,
             # the validator's error message becomes the retry prompt.
-            audit_result = run_preflop_audit_validators(candidate, facts)
+            # Factor-list prompts sanction "- " lines (the no-list rule
+            # would otherwise reject the requested format itself).
+            audit_result = run_preflop_audit_validators(
+                candidate, facts,
+                allow_list_formatting=prompt_sanctions_lists(
+                    system_prompt
+                    if system_prompt is not None
+                    else load_preflop_system_prompt()
+                ),
+            )
             if audit_result.is_valid:
                 return candidate
             last_error = audit_result.error_message

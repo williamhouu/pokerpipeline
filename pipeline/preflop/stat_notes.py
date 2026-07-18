@@ -44,7 +44,7 @@ class StatNote:
 
     key: str  # stable id, e.g. "pot_odds" (the app keys render order on this)
     label: str  # the row label, e.g. "Pot odds"
-    value: str  # the terse number, e.g. "need 31%"
+    value: str  # the terse number, e.g. "31%"
     note: str  # the deterministic one-line phrase
 
 

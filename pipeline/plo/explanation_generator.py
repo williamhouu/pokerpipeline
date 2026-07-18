@@ -39,14 +39,21 @@ from pipeline.explanation_generator import (
     ExplanationValidationError,
     GeneratedExplanation,
     call_messages_create,
+    prompt_sanctions_lists,
 )
 from pipeline.plo.action_history import (
+    call_price,
     display_seat,
     format_plo_action_history,
+    price_is_live,
     resolve_pot_limit,
 )
 from pipeline.plo.fact_extractor import PloFacts
 from pipeline.plo.gold_examples import load_plo_gold_examples
+from pipeline.plo.node_enumerator import (
+    plo_active_player_count,
+    plo_pending_after_hero,
+)
 from pipeline.plo.hand_model import (
     PloHandClass,
     describe_card_redundancy,
@@ -376,6 +383,47 @@ def build_solver_data(
         ),
         "concept_tags": compute_plo_concept_tags(facts),
     }
+    # Multiway awareness (July 2026, ported from the NLHE SOLVER DATA): who is
+    # still in, who still acts behind hero, and whether hero's call/fold ends
+    # the betting. Deterministic from the seat-queue walk -- the first live
+    # 9-max batch shipped "UTG still to act behind" about a seat that had
+    # already folded, exactly the failure mode these lines kill.
+    still_to_act, closes = plo_pending_after_hero(facts.spot.node)
+    ts = facts.spot.node.table_size
+    data["players_still_in_the_hand"] = plo_active_player_count(facts.spot.node)
+    data["still_to_act_behind_you"] = (
+        [display_seat(s, table_size=ts) for s in still_to_act]
+        if still_to_act else "nobody"
+    )
+    data["your_call_or_fold_closes_the_action"] = closes
+    # The raw pot-odds math (the "show the math" facts): pot, price, and the
+    # break-even equity, so price claims in the prose trace to real numbers.
+    pot_now, to_call = call_price(
+        facts.spot.node.history_before, facts.spot.node.actor
+    )
+    # Only when a call is actually on the menu (facing a raise/jam, or the SB
+    # completing first-in) -- the shared price_is_live rule, so this block and
+    # the CSV pot_odds/stat_notes columns can never disagree.
+    if to_call > 0 and price_is_live(
+        facts.spot.node.history_before, facts.spot.node.actor
+    ):
+        break_even = to_call / (pot_now + to_call)
+        price: dict[str, Any] = {
+            "pot_bb": round(pot_now, 1),
+            "to_call_bb": round(to_call, 1),
+            "break_even_equity_pct": round(break_even * _PERCENT),
+        }
+        eq_now = facts.hero_equity_vs_villain
+        if eq_now is not None:
+            # Raw comparison only (never a verdict): whether hero's equity
+            # clears the naked price. When it clears and the answer is still
+            # fold, the honest frame is realization/domination, not price.
+            price["your_equity_vs_break_even"] = (
+                f"your {round(eq_now * _PERCENT)}% is "
+                + ("ABOVE" if eq_now >= break_even else "BELOW")
+                + f" the {round(break_even * _PERCENT)}% break-even"
+            )
+        data["price"] = price
     ev_note = _ev_note(facts)
     if ev_note is not None:
         data["ev_note"] = ev_note
@@ -400,7 +448,9 @@ def build_solver_data(
         data["your_range_equity_vs_villain_range_pct"] = range_eq
     if villain is not None:
         data["villain"] = {
-            "seat": display_seat(villain.seat),
+            "seat": display_seat(
+                villain.seat, table_size=facts.spot.node.table_size
+            ),
             "action": _villain_action_phrase(facts),
             "range_pct_of_all_hands": round(villain.pct_of_dealt_hands),
         }
@@ -459,6 +509,24 @@ def _normalize(text: str) -> str:
 def _banned_present(text: str) -> list[str]:
     low = text.lower()
     return [p for p in _BANNED_PHRASES if p.lower() in low]
+
+
+# Markdown-style list formatting: a line opening with a bullet or a numbered
+# item. The gold voice is 2-5 sentences of flowing coaching prose, never a
+# list. Caught live July 2026 on an NLHE reviser rewrite; guarded on every
+# pipeline (inline hyphens like "3-to-1" or "A6-type" never match).
+_LIST_LINE_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", re.MULTILINE)
+
+
+def _list_formatting_error(text: str) -> str | None:
+    """A rejection message when the prose uses bulleted/numbered lines."""
+    if _LIST_LINE_RE.search(text or ""):
+        return (
+            "explanation uses bulleted or numbered list formatting. The team's "
+            "voice is flowing coaching prose (2-5 sentences), never a list. "
+            "Rewrite the same content as normal sentences."
+        )
+    return None
 
 
 # A specific card named in prose (rank + suit emoji) that isn't one of hero's
@@ -523,6 +591,19 @@ _SHAPE_CLAIMS: tuple[tuple[str, str, str], ...] = (
         "made_flush_preflop",
         "made flush stated preflop",
     ),
+    # A made set/trips stated preflop (July 2026, caught live: "Your hand is
+    # a set of threes" about a PAIR of threes -- both gate passes missed it,
+    # the final audit flagged it; now it's deterministic). Preflop a pair is
+    # a pair; even three-of-a-rank in hand is redundancy, never "a set".
+    # "set-mining", "flop a set", "your set outs" stay legal (no possession
+    # verb); "a set of outs/options" is excluded by the lookahead.
+    (
+        r"(?:your hand is|makes?|made|have|having|holds?|holding|gives? you|"
+        r"you've got)\s+(?:a|the)\s+(?:set\b(?!\s+of\s+(?:outs|cards|"
+        r"blockers|options))|trips\b|three of a kind\b)",
+        "made_set_preflop",
+        "a made set/trips stated preflop",
+    ),
 )
 _NEGATION_RE = (
     r"(?:no|not|never|without|cannot|can't|don't|doesn't|won't|wouldn't|"
@@ -553,6 +634,8 @@ def _claim_is_true(hand: PloHandClass, key: str) -> bool:
         return hand.suited_ace
     if key == "made_flush_preflop":
         return False  # preflop, a made flush is false for every hand
+    if key == "made_set_preflop":
+        return False  # preflop, "a set"/"trips" is false for every hand
     return hand.suit_pattern == key
 
 
@@ -589,6 +672,40 @@ def _shape_claim_errors(
             if mentions > negated and label not in errors:
                 errors.append(label)
     return errors
+
+
+# --- terminology audit (July 2026, from the first 9-max live batch) ---------
+# "Limp" misuse is deterministic to catch: a limp is a CALL made before any
+# raise (incl. the SB completing first-in). Two live 9-max explanations called
+# hero's flat of an open "limping in" -- the NLHE pipeline rejects this class
+# via validate_terminology; this is the PLO port, v1 = the limp rule.
+_LIMP_RE = re.compile(r"\blimp\w*", re.IGNORECASE)
+
+
+def _terminology_errors(prose: str, facts: PloFacts) -> list[str]:
+    """Preflop-terminology misuse the action history can refute (v1: limp)."""
+    if not _LIMP_RE.search(prose):
+        return []
+    seen_raise = False
+    real_limp = False
+    for a in facts.spot.node.history_before:
+        if a.action in (
+            PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN
+        ):
+            seen_raise = True
+        elif a.action is PloActionType.CALL and not seen_raise:
+            real_limp = True
+    if not seen_raise:
+        # No raise yet: limp talk is coherent (a limped pot, the SB deciding
+        # whether to complete, the BB checking behind limpers).
+        real_limp = True
+    if real_limp:
+        return []
+    return [
+        "uses 'limp' language, but nobody limped in this hand: every call in "
+        "the action came after a raise. Calling a raise is a call (a "
+        "cold-call when the caller has no money in), never a limp."
+    ]
 
 
 def _parse(text: str) -> str:
@@ -724,6 +841,12 @@ def generate_plo_answer_explanation(
             if banned:
                 msg = f"used banned phrase(s): {banned}"
                 raise ExplanationValidationError(msg)
+            # Skipped for factor-list prompts, where "- " lines ARE the
+            # requested voice (prompt_sanctions_lists in the shared leaf).
+            if not prompt_sanctions_lists(system):
+                list_error = _list_formatting_error(prose)
+                if list_error:
+                    raise ExplanationValidationError(list_error)
             fabricated = _fabricated_cards(prose, facts.spot.hero_cards)
             if fabricated:
                 hand = " ".join(format_card(c) for c in facts.spot.hero_cards)
@@ -733,6 +856,11 @@ def generate_plo_answer_explanation(
                     "and prefer describing the shape over reciting cards."
                 )
                 raise ExplanationValidationError(msg)
+            term_errors = _terminology_errors(prose, facts)
+            if term_errors:
+                raise ExplanationValidationError(
+                    f"the explanation {term_errors[0]}"
+                )
             shape_errors = _shape_claim_errors(
                 prose, facts.hand_class, exempt_phrases=exempt
             )

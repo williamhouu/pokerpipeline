@@ -65,13 +65,13 @@ def test_hand_level_keep_button_grades_all_legs() -> None:
     csv_path = batch_dir / "zz_apptest_hand_review.csv"
     cols = ["No", "hand_id", "sequence_index", "Question", "Correct Answer",
             "Answer Explanation", "User Cards", "Cards on Table", "Context",
-            "Difficulty Rating", "solver_reference"]
+            "Difficulty Rating", "Notes"]
     rows = [
         {"No": str(i), "hand_id": hid, "sequence_index": seq,
          "Question": f"q{i}", "Correct Answer": "Call",
          "Answer Explanation": f"e{i}", "User Cards": "As Ks",
          "Cards on Table": "", "Context": "test", "Difficulty Rating": "1000",
-         "solver_reference": f"ref/{i}"}
+         "Notes": f"Auto. Node: ref/{i}"}
         for i, (hid, seq) in enumerate(
             [("hA", "1"), ("hA", "2"), ("hB", "1"), ("hB", "2")], start=1
         )

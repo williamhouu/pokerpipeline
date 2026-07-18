@@ -20,8 +20,19 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline.provenance import node_reference_from_notes
+
 # Grade vocabulary (a subset of the CSV's validation_status values).
 REVIEW_STATUSES = ("approved", "needs_review", "rejected")
+
+
+def _node_ref(row: dict) -> str:
+    """The row's machine node reference (the old ``solver_reference`` value).
+
+    Lives in the Notes ``Node:`` field since July 2026; this is the single
+    seam Review uses to key spots (cross-batch dedup, promote idempotency).
+    """
+    return node_reference_from_notes(str(row.get("Notes", "")))
 
 
 def review_sidecar_path(csv_path: Path) -> Path:
@@ -90,6 +101,108 @@ def save_review(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         json.dump(reviews, fh, indent=2, ensure_ascii=False)
+
+
+# --- PLO range hand-type breakdown panel (July 2026) -----------------------
+# Pure formatter for the `range_breakdown` CSV cell -> display-ready rows, so
+# the Streamlit expander is a thin shell (fix-durability rule: the logic is
+# browserless-tested, the UI card just renders what this returns).
+_VERB_PAST = {
+    "Fold": "folds", "Call": "calls", "Check": "checks", "Raise": "raises",
+    "3-bet": "3-bets", "4-bet": "4-bets", "5-bet": "5-bets", "All-in": "jams",
+}
+_ROLE_LABEL = {
+    "open": "opening range", "3-bet": "3-betting range",
+    "4-bet": "4-betting range", "5-bet": "5-betting range",
+    "call": "calling range", "raise": "raising range",
+    "decision": "range",
+}
+
+
+def _fmt_actions(actions: dict) -> str:
+    """"calls 38%, folds 33%, 4-bets 29%" from a bucket's action split."""
+    if not isinstance(actions, dict) or not actions:
+        return ""
+    ordered = sorted(actions.items(), key=lambda kv: -_as_num(kv[1]))
+    return ", ".join(
+        f"{_VERB_PAST.get(lbl, str(lbl).lower())} {_as_num(v):.0f}%"
+        for lbl, v in ordered
+    )
+
+
+def _as_num(v: object) -> float:
+    try:
+        return float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def range_breakdown_panel(cell: str) -> dict | None:
+    """Parse the ``range_breakdown`` cell into display-ready sections.
+
+    Returns ``None`` for an empty / malformed / non-PLO cell (so the panel
+    no-ops). Otherwise::
+
+        {"copy": "<overall read>",
+         "players": [
+            {"heading": "Your range · Small Blind",
+             "summary": "<sentence>",
+             "hero": True,
+             "rows": [{"category": "One Pair Single-Suited",
+                       "pct": 36.0, "detail": "calls 38%, folds 33%, ..."}]},
+            {"heading": "The Big Blind · 3-betting range", "hero": False, ...},
+         ]}
+
+    Hero rows carry the fold/call/raise split in ``detail``; villain rows
+    leave ``detail`` empty (they have already acted -- composition only).
+    """
+    if not cell or not cell.strip():
+        return None
+    try:
+        data = json.loads(cell)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or "hero" not in data:
+        return None
+
+    def _rows(buckets: object) -> list[dict]:
+        out: list[dict] = []
+        if not isinstance(buckets, list):
+            return out
+        for b in buckets:
+            if not isinstance(b, dict):
+                continue
+            out.append({
+                "category": str(b.get("category", "")),
+                "pct": _as_num(b.get("pct")),
+                "detail": _fmt_actions(b.get("actions", {})),
+            })
+        return out
+
+    players: list[dict] = []
+    hero = data.get("hero")
+    if isinstance(hero, dict):
+        pos = str(hero.get("position", ""))
+        players.append({
+            "heading": f"Your range · {pos}" if pos else "Your range",
+            "summary": str(hero.get("summary", "")),
+            "hero": True,
+            "rows": _rows(hero.get("buckets")),
+        })
+    for v in data.get("villains", []) or []:
+        if not isinstance(v, dict):
+            continue
+        ref = str(v.get("position", ""))
+        role = _ROLE_LABEL.get(str(v.get("role", "")), "range")
+        players.append({
+            "heading": f"{ref} · {role}" if ref else role,
+            "summary": str(v.get("summary", "")),
+            "hero": False,
+            "rows": _rows(v.get("buckets")),
+        })
+    if not any(p["rows"] for p in players):
+        return None
+    return {"copy": str(data.get("copy", "")), "players": players}
 
 
 @dataclass(frozen=True)
@@ -280,7 +393,7 @@ def _scan_approved(
             grade = reviews.get(no)
             if not grade or grade.get("status") != "approved":
                 continue
-            key = (row.get("solver_reference", ""), row.get("User Cards", ""))
+            key = (_node_ref(row), row.get("User Cards", ""))
             if key in seen:
                 continue
             seen.add(key)
@@ -573,19 +686,21 @@ def meta_question_for(
     meta: dict[str, object],
     *,
     user_cards: str,
-    solver_reference: str,
+    node_reference: str,
 ) -> dict[str, object] | None:
     """Find the meta question record matching one CSV row.
 
     Matches on (node_id, User Cards) -- a spot's unique key -- rather than
     the ``No`` column, so the join survives the Review page's
     remove-question feature (which leaves gaps in ``No``). ``node_id`` is
-    matched as a substring of the row's ``solver_reference``
-    (``<pack>/<actor>/<node_id>``), which is robust to path-format changes.
-    Keyed on the hero hole cards (``user_cards``) rather than the old
-    ``hand_class`` label, which was dropped from the CSV June 2026; batches
-    generated before that change have no ``user_cards`` in their meta and so
-    won't match (the inspector shows "no metadata", which is graceful).
+    matched as a substring of the row's node reference
+    (``<pack>/<actor>/<node_id>``), which now lives in the Notes ``Node:``
+    field (was the dropped ``solver_reference`` column, July 2026) -- the
+    value is byte-identical, so the substring match is unchanged. Keyed on
+    the hero hole cards (``user_cards``) rather than the old ``hand_class``
+    label, which was dropped from the CSV June 2026; batches generated before
+    that change have no ``user_cards`` in their meta and so won't match (the
+    inspector shows "no metadata", which is graceful).
     """
     questions = meta.get("questions")
     if not isinstance(questions, list):
@@ -596,7 +711,7 @@ def meta_question_for(
         q_node = str(q.get("node_id", ""))
         if (
             q_node
-            and q_node in solver_reference
+            and q_node in node_reference
             and str(q.get("user_cards", "")) == user_cards
         ):
             return q
@@ -803,13 +918,10 @@ def promote_failure(csv_path: Path, failure: dict[str, object]) -> tuple[bool, s
         rows = list(reader)
     if not fieldnames:
         return False, "batch CSV has no header row"
-    # Idempotency: same spot (solver_reference + User Cards) already present?
-    key = (str(row.get("solver_reference", "")), str(row.get("User Cards", "")))
+    # Idempotency: same spot (node reference + User Cards) already present?
+    key = (_node_ref(row), str(row.get("User Cards", "")))
     for existing in rows:
-        if (
-            str(existing.get("solver_reference", "")),
-            str(existing.get("User Cards", "")),
-        ) == key:
+        if (_node_ref(existing), str(existing.get("User Cards", ""))) == key:
             return False, "this spot is already in the batch"
     # Next No = max existing integer No + 1 (fall back to count+1). Gaps from
     # removed questions are fine; we only need a fresh, unused id.

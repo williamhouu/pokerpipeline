@@ -347,6 +347,22 @@ _FREQ_PREFIX_BRACKETS = (
 )
 
 
+def prompt_sanctions_lists(system_prompt: str | None) -> bool:
+    """Whether a Layer-6 system prompt explicitly asks for list-formatted
+    output (the "factor list" prompt family: verdict, "Here's why:", then
+    lines starting with "- ").
+
+    The no-list-formatting hard validator exists to catch a model DRIFTING
+    into bullets when the prompt wants flowing prose -- but the prompt
+    library also contains factor-list prompts where bullets ARE the requested
+    voice, and the validator must not reject the very format the prompt
+    demands (July 2026: it briefly did, in both games). Contract: a library
+    prompt that wants bulleted output must say "factor list" (all the
+    existing ones do); prose prompts never mention it.
+    """
+    return bool(system_prompt) and "factor list" in system_prompt.lower()
+
+
 def frequency_to_verb_prefix(freq: float) -> str:
     """Map a Pio frequency to its deterministic option-label prefix.
 

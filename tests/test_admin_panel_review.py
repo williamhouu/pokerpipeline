@@ -16,6 +16,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from admin_panel import review  # noqa: E402
+from pipeline.provenance import build_notes  # noqa: E402
+
+
+def _notes(ref: str) -> str:
+    """Notes carrying `ref` in the Node: field -- the July-2026 home of the
+    node reference (was the dropped solver_reference column)."""
+    return build_notes("t.", node_ref=ref)
 
 
 def test_sidecar_path_is_next_to_csv(tmp_path: Path) -> None:
@@ -263,7 +270,7 @@ def test_meta_question_for_matches_on_node_and_hand() -> None:
         ],
     }
     q = review.meta_question_for(
-        meta, user_cards="Qh, Qd", solver_reference="pack/BTN/NODE_B"
+        meta, user_cards="Qh, Qd", node_reference="pack/BTN/NODE_B"
     )
     assert q is not None
     assert q["live_block"] == "LB"
@@ -276,14 +283,14 @@ def test_meta_question_for_no_match_returns_none() -> None:
     # Right hand, wrong node.
     assert (
         review.meta_question_for(
-            meta, user_cards="Ah, Ks", solver_reference="pack/BTN/NODE_Z"
+            meta, user_cards="Ah, Ks", node_reference="pack/BTN/NODE_Z"
         )
         is None
     )
     # Right node, wrong hand.
     assert (
         review.meta_question_for(
-            meta, user_cards="Qh, Qd", solver_reference="pack/BTN/NODE_A"
+            meta, user_cards="Qh, Qd", node_reference="pack/BTN/NODE_A"
         )
         is None
     )
@@ -292,7 +299,7 @@ def test_meta_question_for_no_match_returns_none() -> None:
 def test_meta_question_for_handles_missing_questions() -> None:
     assert (
         review.meta_question_for(
-            {}, user_cards="Ah, Ks", solver_reference="pack/BTN/NODE_A"
+            {}, user_cards="Ah, Ks", node_reference="pack/BTN/NODE_A"
         )
         is None
     )
@@ -307,7 +314,7 @@ def test_assembled_prompt_orders_system_gold_then_live() -> None:
 
 
 # --- collect_approved_rows / approved_rows_to_csv --------------------------
-_COLS = ["No", "User Cards", "solver_reference", "Correct Answer"]
+_COLS = ["No", "User Cards", "Notes", "Correct Answer"]
 
 
 def _write_batch(path: Path, rows: list[dict[str, str]]) -> None:
@@ -327,9 +334,9 @@ def test_collect_approved_only_approved_rows(tmp_path: Path) -> None:
     _write_batch(
         b,
         [
-            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"},
-            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2", "Correct Answer": "Fold"},
-            {"No": "3", "User Cards": "Q,Q", "solver_reference": "p/BB/n3", "Correct Answer": "Call"},
+            {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"},
+            {"No": "2", "User Cards": "K,K", "Notes": _notes("p/BB/n2"), "Correct Answer": "Fold"},
+            {"No": "3", "User Cards": "Q,Q", "Notes": _notes("p/BB/n3"), "Correct Answer": "Call"},
         ],
     )
     review.save_review(b, 1, "approved", "")
@@ -341,7 +348,7 @@ def test_collect_approved_only_approved_rows(tmp_path: Path) -> None:
 
 
 def test_collect_approved_dedupes_across_batches(tmp_path: Path) -> None:
-    spot = {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+    spot = {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"}
     older = tmp_path / "plo_20260601_120000.csv"
     newer = tmp_path / "plo_20260602_120000.csv"
     _write_batch(older, [spot])
@@ -357,7 +364,7 @@ def test_collect_approved_includes_compare_when_approved(tmp_path: Path) -> None
     # SAME pool as Review-page approvals.
     cmp = tmp_path / "compare_20260601_A.csv"
     _write_batch(cmp, [
-        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+        {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"}
     ])
     review.save_review(cmp, 1, "approved", "")
     _, rows = review.collect_approved_rows(tmp_path)
@@ -367,7 +374,7 @@ def test_collect_approved_includes_compare_when_approved(tmp_path: Path) -> None
 def test_collect_approved_can_exclude_by_prefix(tmp_path: Path) -> None:
     cmp = tmp_path / "compare_20260601_A.csv"
     _write_batch(cmp, [
-        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+        {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"}
     ])
     review.save_review(cmp, 1, "approved", "")
     _, rows = review.collect_approved_rows(tmp_path, exclude_prefix="compare_")
@@ -377,7 +384,7 @@ def test_collect_approved_can_exclude_by_prefix(tmp_path: Path) -> None:
 def test_save_review_with_explanation_round_trip(tmp_path: Path) -> None:
     b = tmp_path / "compare_20260610_A.csv"
     _write_batch(b, [
-        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Call"}
+        {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Call"}
     ])
     review.save_review(b, 1, "approved", "finalized", explanation="Edited prose.")
     assert review.load_reviews(b)["1"]["explanation"] == "Edited prose."
@@ -393,9 +400,9 @@ def test_collect_approved_applies_explanation_override(tmp_path: Path) -> None:
         writer = csv.DictWriter(fh, fieldnames=cols)
         writer.writeheader()
         writer.writerows([
-            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1",
+            {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"),
              "Correct Answer": "Call", "Answer Explanation": "Generated."},
-            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2",
+            {"No": "2", "User Cards": "K,K", "Notes": _notes("p/BB/n2"),
              "Correct Answer": "Fold", "Answer Explanation": "Generated."},
         ])
     review.save_review(b, 1, "approved", "", explanation="Edited.")
@@ -415,8 +422,8 @@ def test_collect_approved_sources_returns_provenance(tmp_path: Path) -> None:
     _write_batch(
         b,
         [
-            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"},
-            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2", "Correct Answer": "Fold"},
+            {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"},
+            {"No": "2", "User Cards": "K,K", "Notes": _notes("p/BB/n2"), "Correct Answer": "Fold"},
         ],
     )
     review.save_review(b, 1, "approved", "")
@@ -433,8 +440,8 @@ def test_clear_all_approved_removes_approved_only(tmp_path: Path) -> None:
     _write_batch(
         b,
         [
-            {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"},
-            {"No": "2", "User Cards": "K,K", "solver_reference": "p/BB/n2", "Correct Answer": "Fold"},
+            {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"},
+            {"No": "2", "User Cards": "K,K", "Notes": _notes("p/BB/n2"), "Correct Answer": "Fold"},
         ],
     )
     review.save_review(b, 1, "approved", "")
@@ -449,7 +456,7 @@ def test_clear_all_approved_removes_approved_only(tmp_path: Path) -> None:
 def test_clear_all_approved_clears_duplicate_spots_in_every_batch(tmp_path: Path) -> None:
     # A spot approved in two batches dedupes to one in the pool, but clear-all
     # must un-approve BOTH so it can't reappear.
-    spot = {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check"}
+    spot = {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check"}
     older = tmp_path / "plo_20260601_120000.csv"
     newer = tmp_path / "plo_20260602_120000.csv"
     _write_batch(older, [spot])
@@ -462,7 +469,7 @@ def test_clear_all_approved_clears_duplicate_spots_in_every_batch(tmp_path: Path
 
 def test_approved_rows_to_csv_round_trips(tmp_path: Path) -> None:
     rows = [
-        {"No": "1", "User Cards": "A,A", "solver_reference": "p/BB/n1", "Correct Answer": "Check", "extra": "ignored"},
+        {"No": "1", "User Cards": "A,A", "Notes": _notes("p/BB/n1"), "Correct Answer": "Check", "extra": "ignored"},
     ]
     text = review.approved_rows_to_csv(_COLS, rows)
     parsed = list(csv.DictReader(text.splitlines()))
@@ -472,7 +479,7 @@ def test_approved_rows_to_csv_round_trips(tmp_path: Path) -> None:
 
 # --- load_failures / promote_failure (routed-to-human-review recovery) -----
 _FAIL_COLS = [
-    "No", "User Cards", "solver_reference", "Correct Answer",
+    "No", "User Cards", "Notes", "Correct Answer",
     "validation_status", "Answer Explanation",
 ]
 
@@ -524,12 +531,12 @@ def test_load_failures_reads_meta(tmp_path: Path) -> None:
 def test_promote_failure_appends_row_and_approves(tmp_path: Path) -> None:
     csv_path = tmp_path / "b.csv"
     _write_fail_csv(csv_path, [{
-        "No": "1", "User Cards": "A,A", "solver_reference": "p/CO/n0",
+        "No": "1", "User Cards": "A,A", "Notes": _notes("p/CO/n0"),
         "Correct Answer": "Call", "validation_status": "auto_approved",
         "Answer Explanation": "good",
     }])
     row = {
-        "No": "0", "User Cards": "Q,Q", "solver_reference": "p/CO/qq",
+        "No": "0", "User Cards": "Q,Q", "Notes": _notes("p/CO/qq"),
         "Correct Answer": "Mostly Call", "validation_status": "needs_review",
         "Answer Explanation": "Mostly call: the price clears.",
     }
@@ -555,7 +562,7 @@ def test_promote_failure_is_idempotent(tmp_path: Path) -> None:
     csv_path = tmp_path / "b.csv"
     _write_fail_csv(csv_path, [])
     row = {
-        "No": "0", "User Cards": "Q,Q", "solver_reference": "p/CO/qq",
+        "No": "0", "User Cards": "Q,Q", "Notes": _notes("p/CO/qq"),
         "Correct Answer": "Mostly Call", "validation_status": "needs_review",
         "Answer Explanation": "Mostly call.",
     }

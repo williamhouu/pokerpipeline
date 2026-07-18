@@ -54,20 +54,31 @@ def _facts(
     return PloFacts(spot=spot, hand_class=classify_plo_hand(AAKK), archetype=archetype, villain_stats=vstats)
 
 
-def test_schema_has_50_columns_and_no_ranges():
+def test_schema_shape_and_dropped_columns():
     assert "ranges" not in PLO_CSV_COLUMNS
-    # 52-col shared template (51 + animation_script, July 2026) minus
-    # `ranges` (51) plus the PLO-only `hand_shape`.
-    assert len(PLO_CSV_COLUMNS) == 52  # noqa: PLR2004
+    # 52-col shared template minus `ranges` minus the July-16 declutter
+    # (validation_status, the four easy_* diagnostics, pot_odds/hero_equity/
+    # range_equity flats, blocker_combos/top_villain_combos) minus
+    # solver_reference (July 2026, folded into Notes), plus the PLO-only
+    # `hand_shape` and `range_breakdown` columns.
+    assert len(PLO_CSV_COLUMNS) == 42  # noqa: PLR2004
+    from pipeline.plo.format_writer import _PLO_DROPPED_COLUMNS
+
+    for col in _PLO_DROPPED_COLUMNS:
+        assert col not in PLO_CSV_COLUMNS, col
+    assert "solver_reference" not in PLO_CSV_COLUMNS
     # hand_shape sits right after archetype.
     i = PLO_CSV_COLUMNS.index("archetype")
     assert PLO_CSV_COLUMNS[i + 1] == "hand_shape"
     # neutral_credit sits right after Correct Answer (the 20-point rule column).
     j = PLO_CSV_COLUMNS.index("Correct Answer")
     assert PLO_CSV_COLUMNS[j + 1] == "neutral_credit"
+    # range_breakdown is the LAST column, right after animation_script.
+    assert PLO_CSV_COLUMNS[-1] == "range_breakdown"
+    assert PLO_CSV_COLUMNS[PLO_CSV_COLUMNS.index("animation_script") + 1] == "range_breakdown"
 
 
-def test_row_covers_full_schema_exactly():
+def test_row_covers_full_schema():
     facts = _facts()
     row = build_plo_row(
         facts,
@@ -76,7 +87,10 @@ def test_row_covers_full_schema_exactly():
         correct_answer="Call",
         number=7,
     )
-    assert set(row) == set(PLO_CSV_COLUMNS)
+    # The row dict is a SUPERSET of the schema: the dropped columns stay in
+    # the dict (batch layer, meta sidecar, stat panels, tests read them);
+    # write_plo_csv trims to PLO_CSV_COLUMNS via extrasaction="ignore".
+    assert set(PLO_CSV_COLUMNS) <= set(row)
 
 
 def test_row_field_mapping():

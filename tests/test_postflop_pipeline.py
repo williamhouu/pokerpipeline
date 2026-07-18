@@ -1030,10 +1030,16 @@ def test_compare_mechanism_two_batches_share_identical_spots(tmp_path: Path) -> 
               for r in _csv.DictReader(a.open(encoding="utf-8-sig"))]
     rows_b = [{str(k): str(v) for k, v in r.items()}
               for r in _csv.DictReader(b.open(encoding="utf-8-sig"))]
+    # The node reference (old solver_reference value) lives in Notes' Node:
+    # field now; the postflop join keys on the full ref (node+combo unique).
+    from pipeline.provenance import node_reference_from_notes
+
+    _ref = lambda r: node_reference_from_notes(r["Notes"])  # noqa: E731
     # Identical spot set, in the same order.
-    assert [r["solver_reference"] for r in rows_a] == [r["solver_reference"] for r in rows_b]
-    # The node-aware join (full solver_reference) pairs every spot.
-    pairs = _cmp.join_by_spot(rows_a, rows_b, key_fn=lambda r: r["solver_reference"])
+    assert [_ref(r) for r in rows_a] == [_ref(r) for r in rows_b]
+    assert all(_ref(r) for r in rows_a)  # refs are present, not blank
+    # The node-aware join pairs every spot.
+    pairs = _cmp.join_by_spot(rows_a, rows_b, key_fn=_ref)
     assert len(pairs) == len(rows_a) > 0
 
 

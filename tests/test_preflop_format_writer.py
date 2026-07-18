@@ -728,7 +728,7 @@ def test_phase_b_columns_populated_when_data_available() -> None:
     assert "action_ev_bb" in row
 
 
-def test_solver_reference_is_pack_relative_path() -> None:
+def test_node_reference_is_pack_relative_path_in_notes() -> None:
     row = build_preflop_row(
         _facing_open_facts(),
         _explanation(),
@@ -736,10 +736,16 @@ def test_solver_reference_is_pack_relative_path() -> None:
         difficulty=_difficulty(1500),
         number=1,
     )
-    # pack_id / actor / node_id
-    assert row["solver_reference"].startswith("ryan_preflop_tree_6max_100bb/SB/")
+    # The node reference (pack_id / actor / node_id) moved from the dropped
+    # solver_reference column into Notes' Node: field (July 2026); the value
+    # is byte-identical.
+    from pipeline.provenance import node_reference_from_notes
+
+    assert "solver_reference" not in row
+    ref = node_reference_from_notes(row["Notes"])
+    assert ref.startswith("ryan_preflop_tree_6max_100bb/SB/")
     # Node id encodes the action history of the node.
-    assert "BTN_60%" in row["solver_reference"]
+    assert "BTN_60%" in ref
 
 
 def test_llm_columns_pass_through_from_explanation() -> None:

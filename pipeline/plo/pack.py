@@ -21,14 +21,26 @@ do not occur here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 
 from pipeline.plo.hand_order import HAND_COUNT, hand_order
 
 # Preflop acting order, 6-max. LJ (lojack) acts first; SB/BB have posted.
+# (Kept as the module-level default so 6-max callers/tests are untouched;
+# multi-pack code paths use each pack's ``spec.seats`` instead.)
 SEATS: tuple[str, ...] = ("LJ", "HJ", "CO", "BU", "SB", "BB")
+
+# Preflop acting order, 9-max (the July-2026 pack). Seat names follow the
+# NLHE 9-max convention (UTG, UTG+1, UTG+2, LJ, HJ, CO, BTN, SB, BB) so both
+# games read the same in the app; they are already display names, so the
+# 6-max LJ->UTG / BU->BTN remap must NOT apply to them (display_seat is
+# table-size aware).
+SEATS_9MAX: tuple[str, ...] = (
+    "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN", "SB", "BB",
+)
 
 
 # --- reading a node's range ----------------------------------------------
@@ -117,7 +129,14 @@ def _decode_token(token: str) -> tuple[PloActionType, int | None]:
     special = _SPECIAL_TOKENS.get(token)
     if special is not None:
         return special, None
-    # Otherwise a raise; Monker encodes the size as <2-char code><pct>.
+    # The 9-max export's generic raise token: pot-limit's one raise is the
+    # pot, so bare "2" = a 100%-pot raise (the 6-max pack encodes the same
+    # action as "40100"; "2" never occurs in it, so this mapping is safe
+    # globally). Confirmed at intake (scripts/audit_plo9_pack.py): the pack's
+    # only tokens are 0/1/2/3 and its EV geometry matches pot-sized opens.
+    if token == "2":
+        return PloActionType.RAISE, 100
+    # Otherwise a sized raise; Monker encodes it as <2-char code><pct>.
     try:
         return PloActionType.RAISE, int(token[2:])
     except ValueError as exc:
@@ -125,14 +144,17 @@ def _decode_token(token: str) -> tuple[PloActionType, int | None]:
         raise ValueError(msg) from exc
 
 
-def parse_node_path(stem: str) -> tuple[PloAction, ...]:
+def parse_node_path(
+    stem: str, seats: tuple[str, ...] = SEATS
+) -> tuple[PloAction, ...]:
     """Decode a `.rng` filename stem (no extension) into its action sequence.
 
-    ``"40100.0"`` -> (LJ raise 100%, HJ fold). Seats act in :data:`SEATS`
-    order; a caller/raiser rotates to the back (acts again on a re-raise), a
+    ``"40100.0"`` -> (LJ raise 100%, HJ fold). Seats act in ``seats`` order
+    (default: the 6-max :data:`SEATS`; pass a pack's ``spec.seats`` for other
+    tables); a caller/raiser rotates to the back (acts again on a re-raise), a
     folder/all-in leaves the action.
     """
-    queue = list(SEATS)
+    queue = list(seats)
     actions: list[PloAction] = []
     for token in stem.split("."):
         if not queue:
@@ -154,6 +176,57 @@ def node_actor(actions: tuple[PloAction, ...]) -> str:
     return actions[-1].seat
 
 
+# --- pack registry ---------------------------------------------------------
+@dataclass(frozen=True)
+class PloPackSpec:
+    """Static description of one known PLO pack (the NLHE
+    ``KNOWN_PACK_SIGNATURES`` idea, sized for PLO's two-pack reality).
+
+    ``dir_signature`` is the path fragment that identifies the pack inside an
+    extracted Monker export (``.../ranges/Omaha/<N>-way/...``); discovery
+    matches it against the `.rng` root's path.
+    """
+
+    pack_id: str            # stable id, recorded in batch meta (re-verifier key)
+    display_label: str      # human label for the admin pack selector
+    seats: tuple[str, ...]  # preflop acting order (pack-internal seat codes)
+    table_size: int
+    stack_bb: float
+    rake_note: str          # e.g. "5% up to 2bb" -- documentation only
+    dir_signature: str      # e.g. "Omaha/9-way"
+    default_base: str       # conventional extraction folder in the repo root
+
+
+PLO_PACK_6MAX_100BB = PloPackSpec(
+    pack_id="plo_6max_100bb",
+    display_label="PLO 6-max · 100bb · rake 5%/1bb",
+    seats=SEATS,
+    table_size=6,
+    stack_bb=100.0,
+    rake_note="5% up to 1bb",
+    dir_signature="Omaha/6-way",
+    default_base="plo_ranges",
+)
+
+PLO_PACK_9MAX_100BB = PloPackSpec(
+    pack_id="plo_9max_100bb",
+    display_label="PLO 9-max · 100bb · rake 5%/2bb",
+    seats=SEATS_9MAX,
+    table_size=9,
+    stack_bb=100.0,
+    rake_note="5% up to 2bb",
+    dir_signature="Omaha/9-way",
+    default_base="plo9_ranges",
+)
+
+#: Every integrated PLO pack. Audit a new export first
+#: (``scripts/audit_plo9_pack.py`` is the template), then register it here.
+KNOWN_PLO_PACKS: tuple[PloPackSpec, ...] = (
+    PLO_PACK_6MAX_100BB,
+    PLO_PACK_9MAX_100BB,
+)
+
+
 # --- pack discovery ------------------------------------------------------
 @dataclass(frozen=True)
 class PloPack:
@@ -161,16 +234,93 @@ class PloPack:
 
     root: Path  # the directory directly containing the .rng files
     label: str  # e.g. "Omaha/6-way/100bb(5p-1bb)"
+    # Which registered pack this is. Defaults to the 6-max spec so every
+    # pre-registry construction site (tests build PloPack(root, label))
+    # behaves exactly as before.
+    spec: PloPackSpec = field(default=PLO_PACK_6MAX_100BB)
+
+    @property
+    def seats(self) -> tuple[str, ...]:
+        return self.spec.seats
+
+    @property
+    def table_size(self) -> int:
+        return self.spec.table_size
+
+    @property
+    def pack_id(self) -> str:
+        return self.spec.pack_id
 
 
+def _spec_for_root(root: Path) -> PloPackSpec:
+    """Match an `.rng` root directory to a registered spec by path fragment.
+
+    Unknown layouts fall back to the 6-max spec -- the pre-registry behavior,
+    so a renamed 6-max extraction keeps working. A NEW table size must be
+    registered (and audited) explicitly to be recognized.
+    """
+    posix = root.as_posix()
+    for spec in KNOWN_PLO_PACKS:
+        if spec.dir_signature in posix:
+            return spec
+    return PLO_PACK_6MAX_100BB
+
+
+def _rng_root(base: Path) -> Path | None:
+    """The first directory (depth-first, subdirectories in name order)
+    containing a `.rng` file. Early-exit on purpose: the old
+    ``sorted(base.rglob(...))`` materialized and sorted the ENTIRE listing --
+    ~3.3s on the 327k-file 9-max pack, and the admin calls discovery several
+    times per render. Files are NOT sorted (any `.rng` hit identifies its
+    directory as the root; which file it is doesn't matter), only the
+    directory traversal order is deterministic."""
+    import os  # noqa: PLC0415
+
+    stack = [base]
+    while stack:
+        current = stack.pop()
+        subdirs: list[Path] = []
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name.endswith(".rng"):
+                        return current
+                    if entry.is_dir():
+                        subdirs.append(Path(entry.path))
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            continue
+        stack.extend(sorted(subdirs, reverse=True))  # depth-first, name order
+    return None
+
+
+@lru_cache(maxsize=8)
 def discover_plo_pack(base: Path) -> PloPack:
-    """Find the `.rng` directory under ``base`` (e.g. ``plo_ranges/``)."""
-    for rng in sorted(base.rglob("*.rng")):
-        root = rng.parent
-        label = str(root.relative_to(base)) if root != base else root.name
-        return PloPack(root=root, label=label)
-    msg = f"no .rng files found under {base}"
-    raise FileNotFoundError(msg)
+    """Find the `.rng` directory under ``base`` (e.g. ``plo_ranges/``).
+
+    Memoized per base path (July 2026): the admin selector labels + pack
+    loaders call this on every render. Failures (no pack yet) are NOT cached,
+    so dropping a pack in is picked up immediately; replacing a pack's
+    CONTENTS in place needs a process restart (same caveat as the node
+    caches).
+    """
+    root = _rng_root(base)
+    if root is None:
+        msg = f"no .rng files found under {base}"
+        raise FileNotFoundError(msg)
+    label = str(root.relative_to(base)) if root != base else root.name
+    return PloPack(root=root, label=label, spec=_spec_for_root(root))
+
+
+def discover_plo_packs(bases: tuple[Path, ...]) -> tuple[PloPack, ...]:
+    """Every pack found across candidate base folders (missing/empty folders
+    are skipped). The admin pack selector's data source."""
+    packs: list[PloPack] = []
+    for base in bases:
+        try:
+            packs.append(discover_plo_pack(base))
+        except FileNotFoundError:
+            continue
+    return tuple(packs)
 
 
 def range_at(pack: PloPack, stem: str) -> list[RngEntry]:

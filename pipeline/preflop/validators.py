@@ -1456,6 +1456,8 @@ def validate_no_list_formatting(
 def run_preflop_audit_validators(
     generated: GeneratedExplanation,
     facts: PreflopFacts,
+    *,
+    allow_list_formatting: bool = False,
 ) -> PreflopValidationResult:
     """Run every hard validator in series; return the first failure or ok.
 
@@ -1466,11 +1468,17 @@ def run_preflop_audit_validators(
     returned ``error_message`` as the corrective LLM feedback for the
     retry round.
 
+    ``allow_list_formatting``: pass True when the batch's system prompt is a
+    factor-list prompt (``pipeline.explanation_generator.
+    prompt_sanctions_lists``) -- there "- " lines ARE the requested voice,
+    and the no-list rule must not reject the very format the prompt demands
+    (July 2026: it briefly did, silently breaking every factor-list batch).
+
     Order matters: cheaper / more-likely-to-fire checks first so a
     catastrophic failure (e.g. inventing an option) short-circuits
     before we re-scan the prose for banned punctuation.
     """
-    for check in (
+    checks = [
         validate_option_set,
         validate_no_standalone_sometimes,
         validate_composite_label_frequencies,
@@ -1481,7 +1489,10 @@ def run_preflop_audit_validators(
         validate_blocker_claims,
         validate_terminology,
         validate_equity_vs_price_direction,
-    ):
+    ]
+    if allow_list_formatting:
+        checks.remove(validate_no_list_formatting)
+    for check in checks:
         result = check(generated, facts)
         if not result.is_valid:
             return result

@@ -60,7 +60,7 @@ EXACT_COLS = (
     "Hand Stage", "Context", "User Seat", "User Cards", "Cards on Table",
     "Table Size", "Default Stack", "Seats", "POT", "Question", "Question Type",
     "Relative Position", "Position Matchup", "Cash/Tourney", "Live or Online",
-    "action_frequencies", "action_ev_bb", "solver_reference", "archetype",
+    "action_frequencies", "action_ev_bb", "archetype",
     "board_texture", "neutral_credit", "Notes", "ranges",
     # Shared-schema classification columns (deterministic; no MC equity).
     "Preflop Pot Type", "Pot Participant", "Stack Depth",
