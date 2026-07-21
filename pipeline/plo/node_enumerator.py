@@ -134,6 +134,18 @@ class PloDecisionNode:
     # position phrases, the app table tokens -- knows the seat dialect without
     # threading the pack itself. Default 6 = the pre-registry behavior.
     table_size: int = 6
+    # EV unit scale to SB-units (stamped by the enumerator from the pack
+    # spec): 1.0 for the cash packs (files already in milli-sb), 2.0 for the
+    # MTT bb-ante packs (files in milli-BB; x2 converts bb -> sb so every
+    # downstream EV consumer stays unit-safe). See PloPackSpec.ev_in_bb.
+    ev_scale: float = 1.0
+    # Effective stack of the pack this node came from (stamped by the
+    # enumerator, like table_size/ev_scale) -- so stack-depth FACTS (the
+    # short/standard/deep concept tags, their difficulty modifiers) never
+    # need the pack threaded to them. The tags were hardcoded "always
+    # standard" from the single-100bb-pack era, so every 10-25bb MTT /
+    # short-stack question shipped a wrong standard_stack tag (July 2026).
+    stack_bb: float = 100.0
 
     @cached_property
     def node_id(self) -> str:
@@ -213,6 +225,8 @@ def enumerate_plo_nodes(pack: PloPack) -> tuple[PloDecisionNode, ...]:
                 actions=options,
                 history_stem=_history_stem(options[0].stem),
                 table_size=pack.table_size,
+                ev_scale=2.0 if pack.spec.ev_in_bb else 1.0,
+                stack_bb=pack.spec.stack_bb,
             )
         )
 

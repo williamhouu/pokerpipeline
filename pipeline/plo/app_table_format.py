@@ -86,6 +86,7 @@ def build_plo_app_table_columns(
     display_in_bb: bool = False,
     stack_bb: float = 100.0,
     table_size: int = 6,
+    ante_bb: float = 0.0,
 ) -> dict[str, str]:
     """Build the seven table-state columns for one PLO spot.
 
@@ -94,7 +95,9 @@ def build_plo_app_table_columns(
     """
     render_bb = display_in_bb or game_format != "cash"
     mult = 1.0 if render_bb else stakes_bb_dollars  # bb -> display unit
-    actions, _pot = resolve_pot_limit(facts.spot.node.history_before, stack_bb=stack_bb)
+    actions, _pot = resolve_pot_limit(
+        facts.spot.node.history_before, stack_bb=stack_bb, ante_bb=ante_bb
+    )
     hero_pos = facts.spot.node.actor
     positions = _POSITIONS_BY_TABLE[table_size]
 
@@ -133,17 +136,20 @@ def build_plo_app_table_columns(
     def _fmt(chips: float) -> str:
         return _fmt_chips(chips, render_bb=render_bb)
 
-    def _remaining(invested: float) -> str:
+    def _remaining(invested: float, pos: str) -> str:
+        # The BB's ante (MTT packs) is dead money: not in money_in (it is
+        # not callable) but gone from the BB's stack all the same.
+        dead = ante_bb * mult if pos == "BB" else 0.0
         if render_bb:
-            return _fmt_bb(stack_chips - invested, allow_zero=True)
-        return "$" + str(_round_half_up(stack_chips - invested))
+            return _fmt_bb(stack_chips - invested - dead, allow_zero=True)
+        return "$" + str(_round_half_up(stack_chips - invested - dead))
 
     # --- hero seat (User Seat) ------------------------------------------
     # Tokens carry the NLHE/app seat codes (UTG/BTN), not the pack's LJ/BU.
     hero_info = info.get(hero_pos)
     user_seat = (
         f"{display_seat(hero_pos, table_size=table_size)}"
-        f"-{_remaining(money_in.get(hero_pos, 0.0))}"
+        f"-{_remaining(money_in.get(hero_pos, 0.0), hero_pos)}"
     )
     if hero_info is not None and not hero_info["folded"] and hero_info["amount"] > 0:
         user_seat += "-" + _fmt(hero_info["amount"]) + "-" + hero_info["action"]
@@ -169,7 +175,7 @@ def build_plo_app_table_columns(
 
         seat_str = (
             f"{display_seat(pos, table_size=table_size)}"
-            f"-{_remaining(money_in.get(pos, 0.0))}"
+            f"-{_remaining(money_in.get(pos, 0.0), pos)}"
         )
         sort_amt = 0.0
         if pos_info is not None:
@@ -197,7 +203,7 @@ def build_plo_app_table_columns(
     entries.sort(key=lambda e: e[0])
     seats = ", ".join(seat_str for _amt, seat_str in entries)
 
-    pot_chips = sum(money_in.values())
+    pot_chips = sum(money_in.values()) + ante_bb * mult
     pot = _fmt_bb(pot_chips, allow_zero=True) if render_bb else "$" + _trim_num(pot_chips)
     default_stack = (
         _fmt_bb(stack_chips, allow_zero=True) if render_bb else "$" + _trim_num(stack_chips)

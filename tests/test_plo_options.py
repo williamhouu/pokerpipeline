@@ -59,8 +59,22 @@ def test_basic_is_fold_first_with_canonical_dominant():
         _facts({"Call": 0.7, "Fold": 0.0, "Raise 100%": 0.3}), style="basic"
     )
     assert correct == "Call"
-    assert opts[0] == "Fold"  # least-aggressive first
-    assert set(opts) == {"Fold", "Call", "Raise"}
+    assert opts == ["Fold", "Call", "Raise"]  # the aggression ladder
+
+
+def test_basic_option_order_is_always_the_aggression_ladder():
+    """STANDING RULE (July 2026, user): the option row always reads least ->
+    most aggressive, never frequency order. The exact live catch: UTG+1's
+    AA92 facing a 3-bet showed "Fold · 4-bet · Call" because the 93% 4-bet
+    outranked the 7% call by frequency."""
+    facts = _facts(
+        {"Raise 100%": 0.93, "Call": 0.07, "Fold": 0.0},
+        # Two raises before hero -> hero's raise is a 4-bet.
+        history=(PloAction("LJ", R, 100), PloAction("SB", R, 100)),
+    )
+    opts, correct = build_options(facts, style="basic")
+    assert opts == ["Fold", "Call", "4-bet"]
+    assert correct == "4-bet"
 
 
 def test_gto_spectrum_orders_by_aggression():
@@ -165,3 +179,23 @@ def test_non_bb_no_raise_still_calls():
     canon = canonicalize_strategy(_facts({"Call": 0.9, "Raise 100%": 0.1}, actor="SB"))
     assert "Call" in canon
     assert "Check" not in canon
+
+
+def test_integer_percentages_shared_by_csv_and_solver_data():
+    """One allocation for every percentage surface (July 2026): the CSV
+    action_frequencies column and the SOLVER DATA action_strategy previously
+    used different rounding (largest-remainder vs naive round), which
+    disagree on exact-.5 boundaries -- the player saw "Call: 99%" while the
+    LLM read "Call: 98%" for the same node."""
+    from pipeline.plo.options import integer_percentages
+
+    # The observed boundary case: naive round() gives 98/2 (banker's), the
+    # column's largest-remainder gives 99/1. Both surfaces must say 99/1.
+    ints = integer_percentages({"Call": 0.985, "Fold": 0.015})
+    assert ints == {"Call": 99, "Fold": 1}
+    assert sum(ints.values()) == 100
+    # Sums to exactly 100 on an awkward three-way split too.
+    ints3 = integer_percentages({"Call": 1 / 3, "Fold": 1 / 3, "3-bet": 1 / 3})
+    assert sum(ints3.values()) == 100
+    # Labels come back highest-frequency first (the column's display order).
+    assert list(integer_percentages({"Fold": 0.2, "Call": 0.8})) == ["Call", "Fold"]

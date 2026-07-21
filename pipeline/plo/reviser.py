@@ -142,6 +142,8 @@ def revise_plo_explanation(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     system_prompt: str | None = None,
     include_skills: bool = False,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
     usage_callback: UsageCallback | None = None,
 ) -> PloReviseResult:
     """One LLM pass that rewrites a flagged explanation, then re-validates it.
@@ -173,7 +175,8 @@ def revise_plo_explanation(
     )
     options = [o for o in explanation.options() if o]  # the fixed answer set
     solver_data = build_solver_data(
-        facts, options, explanation.correct_answer, include_skills=include_skills
+        facts, options, explanation.correct_answer,
+        include_skills=include_skills, stack_bb=stack_bb, ante_bb=ante_bb,
     )
     user = (
         "SOLVER DATA:\n"

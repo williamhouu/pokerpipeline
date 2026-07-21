@@ -122,6 +122,31 @@ def canonicalize_action_label(
     return label  # Fold / Call / All-in
 
 
+def integer_percentages(strategy: dict[str, float]) -> dict[str, int]:
+    """Largest-remainder integer percents summing to exactly 100.
+
+    THE single allocation for every percentage surface of a strategy (the CSV
+    ``action_frequencies`` column AND the SOLVER DATA ``action_strategy``
+    block). They previously used two rounding paths (largest-remainder vs
+    naive ``round()``), which disagree on exact-.5 boundaries -- a Call
+    98.5/Fold 1.5 mix showed the player "Call: 99%" while the LLM (and the
+    claim checker judging its prose) read "Call: 98%". Same fact, one number.
+    Ties in remainder go to the higher-frequency action (stable sort), which
+    preserves the CSV column's historical byte-exact output.
+    """
+    by_freq = sorted(strategy.items(), key=lambda kv: -kv[1])
+    floors = [(label, int(v * 100), (v * 100) % 1) for label, v in by_freq]
+    deficit = 100 - sum(floor for _, floor, _ in floors)
+    bumps = {
+        i
+        for i, _ in sorted(enumerate(floors), key=lambda kv: -kv[1][2])[: max(deficit, 0)]
+    }
+    return {
+        label: floor + (1 if i in bumps else 0)
+        for i, (label, floor, _) in enumerate(floors)
+    }
+
+
 def canonicalize_strategy(facts: PloFacts) -> dict[str, float]:
     """``{canonical_label: freq}`` summing duplicate labels (e.g. two raise
     sizes collapsing into one ``"3-bet"`` entry)."""
@@ -175,7 +200,15 @@ def _meaningful_canonical_actions(facts: PloFacts) -> list[tuple[str, float]]:
 
 def build_options_basic(facts: PloFacts) -> tuple[list[str], str]:
     """Bare action labels, one per meaningfully-played action (<= 4),
-    Fold first. ``correct_answer`` is the canonical dominant action."""
+    displayed least-aggressive first. ``correct_answer`` is the canonical
+    dominant action.
+
+    Selection (WHICH actions make the cut when there are 5+) is by solver
+    frequency; the DISPLAY order is always the aggression ladder
+    (Fold < Check < Call < Raise < 3-bet < ... < All-in) -- team standing
+    rule (July 2026): an option row must read least -> most aggressive, so
+    "Fold · 4-bet · Call" (frequency order) can never ship.
+    """
     canonical = canonicalize_strategy(facts)
     canonical_correct = _canonical_dominant(facts)
     if not canonical:
@@ -193,18 +226,19 @@ def build_options_basic(facts: PloFacts) -> tuple[list[str], str]:
         kept_non_fold = [lbl for lbl, _ in ordered if lbl != "Fold"][:_MAX_NON_FOLD]
         kept = {"Fold", *kept_non_fold}
 
-    if "Fold" in kept:
-        remaining = [lbl for lbl, _ in ordered if lbl in kept and lbl != "Fold"]
-        ordered_options = ["Fold", *remaining]
-    else:
-        ordered_options = [lbl for lbl, _ in ordered if lbl in kept]
+    # The correct answer always makes the cut (displaces the least-frequent
+    # kept alternative when the menu is full).
+    if canonical_correct not in kept:
+        if len(kept) >= _MAX_OPTIONS:
+            drop = next(
+                lbl for lbl, _ in reversed(ordered) if lbl in kept and lbl != "Fold"
+            )
+            kept.discard(drop)
+        kept.add(canonical_correct)
 
-    if canonical_correct not in ordered_options:
-        ordered_options = [
-            canonical_correct,
-            *(o for o in ordered_options if o != canonical_correct),
-        ][:_MAX_OPTIONS]
-
+    # Display order: the aggression ladder, never frequency (label as the
+    # tie-break keeps unknown labels deterministic).
+    ordered_options = sorted(kept, key=lambda lbl: (_action_aggression(lbl), lbl))
     return ordered_options, canonical_correct
 
 

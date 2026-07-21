@@ -105,9 +105,19 @@ def run_spec(spec_path: str) -> int:
         except Exception:  # noqa: BLE001
             pass
 
+    # Graceful stop (July 2026): when the spec names a stop kwarg, inject a
+    # callable that reports True once the parent touches the sentinel file.
+    # The target checks it between units of work (e.g. between questions)
+    # and returns normally with everything committed so far.
+    injected: dict[str, Any] = {progress_kwarg: _progress}
+    stop_kwarg = spec.get("stop_check_kwarg")
+    stop_path = spec.get("stop_path")
+    if stop_kwarg and stop_path:
+        injected[stop_kwarg] = lambda: os.path.exists(stop_path)
+
     try:
         fn = _resolve_fn(spec["fn_module"], spec["fn_qualname"])
-        result = fn(**{progress_kwarg: _progress, **spec["kwargs"]})
+        result = fn(**{**injected, **spec["kwargs"]})
         _write_result(result_path, {"ok": True, "result": result})
         return 0
     except BaseException:  # noqa: BLE001 -- capture EVERYTHING for the parent
@@ -144,6 +154,28 @@ def _echo_job(
     if fail:
         raise RuntimeError("echo job asked to fail")
     return value
+
+
+def _stoppable_job(
+    *,
+    progress_callback: Callable[[str, int, int], None],
+    stop_check: Callable[[], bool] | None = None,
+    steps: int = 100,
+    sleep_s: float = 0.1,
+) -> int:
+    """Self-test target for the graceful-stop path: loops ``steps`` times,
+    breaking early the moment ``stop_check`` reports True. Returns the
+    number of completed steps."""
+    import time as _time
+
+    done = 0
+    for i in range(steps):
+        if stop_check is not None and stop_check():
+            break
+        _time.sleep(sleep_s)
+        done = i + 1
+        progress_callback(f"step {done}", done, steps)
+    return done
 
 
 if __name__ == "__main__":

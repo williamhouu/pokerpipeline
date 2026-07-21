@@ -28,8 +28,12 @@ def _reset_registry() -> None:
     of state -- the tests own the slot.
     """
     jobs._CURRENT_JOB = None  # noqa: SLF001
+    jobs._PENDING.clear()  # noqa: SLF001
+    jobs._HISTORY.clear()  # noqa: SLF001
     yield
     jobs._CURRENT_JOB = None  # noqa: SLF001
+    jobs._PENDING.clear()  # noqa: SLF001
+    jobs._HISTORY.clear()  # noqa: SLF001
 
 
 def _wait_for_done(job: jobs.Job[object], timeout: float = 2.0) -> None:
@@ -172,3 +176,128 @@ def test_no_job_state() -> None:
     # clear is a no-op when empty.
     jobs.clear_current_job()
     assert jobs.get_current_job() is None
+
+
+# --- FIFO queue + history (July 2026) ---------------------------------------
+# PLO generation queues batches behind the active job; when a job reaches a
+# terminal state the next queued one starts automatically, and every finished
+# job lands in the bounded history (the UI's per-session batch log).
+
+def _wait_until(cond, timeout: float = 20.0, what: str = "condition") -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"{what} not met within {timeout}s")
+
+
+def test_enqueue_starts_immediately_when_idle() -> None:
+    from admin_panel.job_worker import _echo_job
+
+    job, queued, pos = jobs.enqueue_subprocess_job(
+        _echo_job, label="q1", meta={"kind": "test"}, value="first", steps=1
+    )
+    assert queued is None and pos == 0
+    assert job is not None and job.meta == {"kind": "test"}
+    _wait_for_done(job, timeout=20.0)
+    assert job.status is jobs.JobStatus.COMPLETED
+    assert job.result == "first"
+    _wait_until(
+        lambda: len(jobs.job_history()) == 1, what="history entry"
+    )
+    assert jobs.job_history()[0].id == job.id
+
+
+def test_enqueue_queues_behind_active_and_auto_advances() -> None:
+    from admin_panel.job_worker import _echo_job
+
+    gate = threading.Event()
+
+    def blocker(*, progress_callback) -> str:
+        progress_callback("blocking", 0, 1)
+        gate.wait(timeout=20.0)
+        return "blocker done"
+
+    first = jobs.start_job(blocker, label="blocker")
+    job, queued, pos = jobs.enqueue_subprocess_job(
+        _echo_job, label="queued echo", meta={"kind": "test"}, value="second"
+    )
+    assert job is None and queued is not None and pos == 1
+    assert [r.id for r in jobs.pending_jobs()] == [queued.id]
+
+    gate.set()
+    _wait_for_done(first)
+    # The queued job auto-starts and completes; history records both in order.
+    _wait_until(
+        lambda: len(jobs.job_history()) == 2, what="both jobs in history"
+    )
+    hist = jobs.job_history()
+    assert hist[0].label == "blocker"
+    assert hist[1].label == "queued echo"
+    assert hist[1].status is jobs.JobStatus.COMPLETED
+    assert hist[1].result == "second"
+    assert jobs.pending_jobs() == []
+
+
+def test_remove_queued_drops_only_that_request() -> None:
+    from admin_panel.job_worker import _echo_job
+
+    gate = threading.Event()
+
+    def blocker(*, progress_callback) -> str:
+        gate.wait(timeout=20.0)
+        return "done"
+
+    first = jobs.start_job(blocker, label="blocker")
+    _, q1, _ = jobs.enqueue_subprocess_job(_echo_job, label="a", value="a")
+    _, q2, _ = jobs.enqueue_subprocess_job(_echo_job, label="b", value="b")
+    assert jobs.remove_queued(q1.id) is True
+    assert jobs.remove_queued("nonexistent") is False
+    assert [r.id for r in jobs.pending_jobs()] == [q2.id]
+
+    gate.set()
+    _wait_for_done(first)
+    _wait_until(
+        lambda: len(jobs.job_history()) == 2, what="blocker + b in history"
+    )
+    labels = [j.label for j in jobs.job_history()]
+    assert labels == ["blocker", "b"]  # "a" was removed, never ran
+
+
+# --- graceful stop (July 2026) -----------------------------------------------
+
+def test_graceful_stop_completes_early_with_work_kept() -> None:
+    from admin_panel.job_worker import _stoppable_job
+
+    job = jobs.start_subprocess_job(
+        _stoppable_job,
+        label="stoppable",
+        stop_check_kwarg="stop_check",
+        steps=100,
+        sleep_s=0.1,
+    )
+    assert job.graceful_stoppable is True
+    # Wait until it has done at least one step, then ask it to stop.
+    _wait_until(
+        lambda: job.progress.current >= 1, what="first step of progress"
+    )
+    assert jobs.request_graceful_stop_current_job() is True
+    assert job.stop_requested is True
+    _wait_for_done(job, timeout=20.0)
+    # COMPLETED (not cancelled), well short of the 100 steps = ~10s of work.
+    assert job.status is jobs.JobStatus.COMPLETED
+    assert isinstance(job.result, int)
+    assert 1 <= job.result < 100
+
+
+def test_graceful_stop_refused_without_support() -> None:
+    # No job at all -> refused.
+    assert jobs.request_graceful_stop_current_job() is False
+    # A job started WITHOUT stop_check_kwarg -> refused (hard Cancel only).
+    from admin_panel.job_worker import _echo_job
+
+    job = jobs.start_subprocess_job(_echo_job, label="plain", steps=1)
+    assert job.graceful_stoppable is False
+    assert jobs.request_graceful_stop_current_job() is False
+    _wait_for_done(job, timeout=20.0)

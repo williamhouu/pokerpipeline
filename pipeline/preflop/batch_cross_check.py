@@ -195,7 +195,51 @@ def cross_check_row(
     #    legitimately go either way.
     issues.extend(_check_gto_secondary_by_ev(row))
 
+    # 10. Option order = the aggression ladder (standing user rule, July
+    #     2026: the option row reads least -> most aggressive; frequency
+    #     order once shipped "Fold · 4-bet · Call"). Deliberately its own
+    #     ladder map, not an import from the options module -- independence
+    #     is this file's point.
+    issues.extend(_check_option_aggression_order(row))
+
     return issues
+
+
+# Independent aggression ladder for check 10 (mirrors, but does not import,
+# the options modules' _ACTION_AGGRESSION). "Always X" / "Mostly X" GTO
+# labels rank by their action word.
+_AGGRESSION_LADDER: dict[str, int] = {
+    "fold": 0, "check": 1, "call": 2, "raise": 3,
+    "3-bet": 4, "4-bet": 5, "5-bet": 6, "all-in": 7,
+}
+
+
+def _option_aggression(label: str) -> int | None:
+    words = label.strip().lower().split()
+    if not words:
+        return None
+    if words[0] in ("always", "mostly") and len(words) > 1:
+        words = words[1:]
+    return _AGGRESSION_LADDER.get(words[0].strip(".,;:!?\"'()[]"))
+
+
+def _check_option_aggression_order(row: dict) -> list[str]:
+    """Options in the written row must be non-decreasing in aggression."""
+    labels = [
+        (row.get(f"option {i}") or "").strip()
+        for i in (1, 2, 3, 4)
+    ]
+    ranks = [
+        (lbl, _option_aggression(lbl)) for lbl in labels if lbl
+    ]
+    known = [(lbl, r) for lbl, r in ranks if r is not None]
+    for (a_lbl, a), (b_lbl, b) in zip(known, known[1:], strict=False):
+        if a > b:
+            return [
+                f"options out of aggression order: {a_lbl!r} before {b_lbl!r} "
+                "(the row must read least -> most aggressive)"
+            ]
+    return []
 
 
 def _parse_labeled_floats(cell: str) -> dict[str, float]:

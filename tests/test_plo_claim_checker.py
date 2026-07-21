@@ -53,6 +53,25 @@ def test_parse_flags_and_fail_open() -> None:
     )
 
 
+def test_parse_drops_self_retracted_issues() -> None:
+    """An entry whose problem text talks itself out of the flag ("...Not a
+    real issue.") is checker noise, not a finding (July 2026: one shipped on
+    a live MTT batch and flagged a clean row). Genuine findings that merely
+    QUOTE soft language ("says the price is fine but...") must survive."""
+    retracted = parse_checker_response(
+        '{"issues": [{"claim": "UTG had limped in front", '
+        '"problem": "misorders the action, but the phrasing is acceptable. '
+        'Not a real issue."}]}'
+    )
+    assert retracted.passed and retracted.issues == ()
+    kept = parse_checker_response(
+        '{"issues": [{"claim": "the price is fine", '
+        '"problem": "says the price is fine but 28% equity is below the '
+        '33% break-even"}]}'
+    )
+    assert not kept.passed and len(kept.issues) == 1
+
+
 def test_checker_call_binds_data_block_and_prose() -> None:
     client = _MockClient('{"issues": []}')
     res = check_plo_explanation_claims(

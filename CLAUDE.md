@@ -1106,10 +1106,11 @@ Rule stated in the file header: a failure there means the CODE is wrong —
 never adjust an assertion to match the code without independently
 confirming the poker fact.
 
-**PLO is MULTI-PACK (July 16 2026): the 9-max 100bb pack is integrated.**
-Two registered packs in `pipeline/plo/pack.py:KNOWN_PLO_PACKS`, matched at
+**PLO is MULTI-PACK (July 16 2026; short-stack + MTT packs July 20-21).**
+Registered packs in `pipeline/plo/pack.py:KNOWN_PLO_PACKS`, matched at
 discovery by path signature (`Omaha/6-way` / `Omaha/9-way`; unknown layouts
-fall back to the legacy 6-max spec):
+fall back to the legacy 6-max spec; ORDER MATTERS — more-specific stack
+signatures before the bare `Omaha/6-way` 100bb spec):
 
 - **`plo_6max_100bb`** — the original pack (`plo_ranges/`, 12,164 files,
   rake 5%/1bb, Monker dialect seats LJ..BU displayed as UTG..BTN).
@@ -1130,6 +1131,68 @@ fall back to the legacy 6-max spec):
   still ~half the 6-max pack's node count. Enumeration of 327k files ~25s,
   absorbed by the admin `cache_resource` (a node cache like NLHE's is a
   possible future optimization).
+- **`plo_6max_12bb` / `plo_6max_20bb`** — short-stack CASH packs
+  (`plo12_ranges/` / `plo20_ranges/`, rake 5%/1bb), audited via
+  `scripts/audit_plo6_pack.py` (the 6-max intake-audit analogue of the
+  9-max script; 12bb clean, 20bb clean HU + tiny 3-way residual).
+  `stack_bb` derives from `pack.spec` everywhere (was hardcoded 100 —
+  would have stripped realistic short-stack jams as artifacts).
+  Tournament-realism caveat: these are rake-cash solves, no ICM.
+- **`plo_mtt_6max_{10,15,20,25,30,40}bb`** — the "PLO MTT (BB ANTE)
+  10bb-100bb 3.5x Open" MonkerViewer export (July 2026, $499; 9.79GB .7z
+  in ~/Downloads), one spec per extracted depth under
+  `plo_mtt{10..40}_ranges/` (gitignored; dir names are QUIRKY:
+  `10bb`/`15b`/`20bb`/`25bb`/`30b`/`40` + `(bb-ante)3.5x`; the 50/75/100bb
+  depths stay unextracted — ~47GB, near-cash play; the `.mkr` files are
+  Monker NATIVE Java saves, never parse them). `PloPackSpec` gained
+  `ante_bb` (1.0) / `game_format` ("tournament") / `ev_in_bb` (True):
+  **EV units are milli-BB** (cash packs are milli-SB!) normalized at read
+  via `PloDecisionNode.ev_scale` (the ONE unit seam, in `spot_sampler`);
+  the **1bb BB ante is IN the pot** (first-in pot 2.5bb, so the `40072`
+  open token renders ~3.5bb — the pack name's "3.5x") and **SUNK in the
+  EV baseline** (BB fold EV = blind only); BB all-in totals = stack −
+  ante. Ante threaded through `action_history` (resolve_pot_limit /
+  call_price / context: "PLO tournament. Xbb effective stacks. Big blind
+  ante 1bb."), `animation.py` (one `post` event with `ante: true`),
+  `app_table_format`, the SOLVER DATA (which also FIXED a pre-existing
+  bug: the villain-action phrase + price block ignored `stack_bb`, so a
+  12bb jam read "all-in for 100bb" on the short-stack cash packs),
+  `format_writer` (**Live or Online = "" for tournament**; Cash/Tourney =
+  Tournament), batch meta (`run_settings.ante_bb`), and both re-verifier
+  scripts. No rake; **chip-EV, NOT ICM** — honest scope is early/deep-
+  field tournament play. Intake audits (`scripts/audit_plo6_pack.py`,
+  sections [5] auto-token RFI + [5b] ante calibration) CLEAN on all six
+  depths; the [6] EV/freq-inversion decomposition shows clean-line HU =
+  0% with hits confined to the 4-way+ limped multiway tail the default
+  clean-lines caps exclude. Tests: `tests/test_plo_mtt_pack.py`.
+
+  **First real tournament batches + the July 21 audit fixes.** Two
+  12-question real-Opus batches (15bb + 25bb, full Layer-7) were deep
+  line-audited; re-verifier 0/0, every pot/price/equity number in prose
+  exact. Four root-cause fixes came out of it, all test-pinned:
+  (1) **SOLVER DATA situation line now gets stack_bb + ante_bb**
+  (`build_solver_data` + the admin preview left the 100bb/no-ante
+  defaults, so the LLM read "opens to 3bb" while the Question said 3.5bb
+  and jams read "all-in for 100bb" on a 15bb stack — and the claim
+  checker then "corrected" TRUE prose toward the wrong number; the
+  standing invariant is at the call site);
+  (2) **stack-depth concept tags are real** (`PloDecisionNode.stack_bb`
+  stamped by the enumerator like ev_scale; short/standard/deep read it —
+  they were hardcoded "always standard_stack" from the 100bb-only era, so
+  short-stack questions shipped a wrong tag and the short_stack
+  difficulty modifier never fired);
+  (3) **`open_limp` archetype** (a non-blind CALL with no raise faced
+  fell through to `open_fold`, handing the LLM a fold frame for a limp
+  answer — matters at MTT depths where limping is 16-22% of RFI; frame in
+  PLO_ARCHETYPE_GUIDANCE + all prompt snapshots, ease 0.75);
+  (4) **one integer-percentage allocation for every surface**
+  (`options.integer_percentages`, largest-remainder): the CSV
+  `action_frequencies` column and the SOLVER DATA `action_strategy` used
+  different rounding and disagreed on exact-.5 boundaries (player saw
+  "Call: 99%", LLM saw "Call: 98%"). Also: the PLO claim checker's parser
+  now drops SELF-RETRACTED issue entries ("...Not a real issue.") —
+  explicit retraction markers only, so genuine findings quoting soft
+  language survive.
 
 Integration seams: `PloDecisionNode.table_size` (stamped by the
 enumerator) rides to every consumer; `parse_node_path(stem, seats=)`;
@@ -1385,18 +1448,79 @@ the SECOND deep batch audit):**
   inline on the Generate click (the accepted spinner). Tests:
   `tests/test_plo_pack_background_load.py`.
 - **PLO Generate: live progress bar + exclude-ambiguous default OFF
-  (July 18, user asks).** (1) PLO generation runs INLINE (a spinner),
-  unlike NLHE's background job, so it showed no per-question progress.
-  `generate_plo_batch` gained a `progress_callback(done, total)` (called
-  after each committed question); the admin page drives a `st.progress`
-  bar from it ("Generated 12 / 20 questions…"), emptied when done.
-  Streamlit flushes the bar updates during the synchronous call, so it
-  ticks live. Test: `test_plo_batch.py::test_progress_callback_reports_
-  each_question` (calls == [(1,4)..(4,4)]); verified live in the browser.
+  (July 18, user asks).** (1) PLO generation gained a
+  `progress_callback(done, total)` on `generate_plo_batch` (called after
+  each committed question). Test: `test_plo_batch.py::test_progress_
+  callback_reports_each_question` (calls == [(1,4)..(4,4)]).
   (2) The "Exclude ambiguous 90-95% band" checkbox now defaults OFF
   (`_seed_plo_generate_settings` default False + "(recommended)" dropped
   from the label); the 90-95% band is included unless the user opts out.
   AppTest-pinned.
+- **Option order = the aggression ladder (July 20 2026, team standing
+  rule).** Answer options ALWAYS display least -> most aggressive (Fold <
+  Check < Call < Raise < 3-bet < 4-bet < 5-bet < All-in), never in solver
+  frequency order (which shipped "Fold · 4-bet · Call" on a 93% 4-bet
+  spot). Frequency still selects WHICH actions make the 4-option cut;
+  aggression orders the display. Fixed in BOTH basic builders
+  (`pipeline/plo/options.py` + `pipeline/preflop/options.py`; the GTO and
+  postflop builders were already ladder-ordered); rule tests in both
+  option test files; batch cross-check #10 audits the written option
+  columns with an independent ladder map. Batches generated before this
+  change drift on option columns -> regenerate (refresh REFUSES on option
+  drift by design).
+- **PLO generation = background subprocess job + FIFO QUEUE (July 20,
+  user-reported bug).** The July-18 INLINE run (spinner + st.progress in
+  the script thread) died on ANY interaction: Streamlit kills the running
+  script at its next `st.*` call when a new event arrives, so switching
+  pages / clicking a widget cancelled the batch mid-flight -- losing the
+  whole CSV while the already-made API calls' spend never reached the
+  ledger. Now the Generate click goes through
+  `jobs.enqueue_subprocess_job(run_plo_generate_job, ...)`:
+  `pipeline/plo/run.py` is the picklable child entry (adapts the job
+  worker's 3-arg progress protocol to the batch's 2-arg one),
+  `admin_panel/jobs.py` gained a FIFO queue + bounded history
+  (`enqueue_subprocess_job` / `pending_jobs` / `remove_queued` /
+  `job_history`; on a job's terminal state the next queued one
+  auto-starts) and a `Job.meta` dict (kind/output_name breadcrumbs).
+  `PloBatchResult` now carries `model_used` + token totals (accumulated
+  INTERNALLY around any caller usage_callback -- the USAGE RULE holds)
+  so spend crosses the process boundary; the page's
+  `_sweep_finished_plo_jobs` logs each finished batch to the ledger
+  exactly once (module-level logged-ids set) and feeds the existing
+  done-panel + Review-jump. The panel shows active progress (ticking
+  fragment), the queue (per-item remove), failures with tracebacks, and
+  a session batch log. `dedupe_path` gained a `taken` set so two
+  same-second queued clicks can't share a filename; the NLHE job panel
+  skips finished PLO jobs (they render on the PLO page from history).
+  INVARIANT at the click site: PLO generation MUST go through the job
+  queue, never inline. Tests: queue/advance/remove in
+  `test_admin_panel_jobs.py`, usage-totals + pickle + progress-adapter in
+  `test_plo_batch.py`, reserved-names in `test_plo_batch_naming.py`;
+  verified end-to-end with two real queued subprocess batches. PLO
+  Compare still runs inline (its A/B needs the shared selector; known
+  gap).
+- **PLO incremental commit + graceful stop (July 20, user ask -- long
+  Hard batches must never be all-or-nothing).** `generate_plo_batch` now
+  (re)writes the CSV + meta atomically (tmp + replace) after EVERY
+  committed question -- a crash/kill loses at most the in-flight
+  question -- and takes `stop_check: Callable[[], bool] | None`, checked
+  BETWEEN spots (never mid-question): True -> the batch ends early and
+  ships everything committed, as a clean COMPLETED run.
+  `meta["complete"]` False while writing / after a crash, True on the
+  final flush (graceful stop included); `counters.stopped_early` +
+  `PloBatchResult.stopped_early` say why a batch is short. Plumbing:
+  jobs specs carry a `stop.requested` sentinel path;
+  `jobs.request_graceful_stop_current_job()` touches it;
+  `start/enqueue_subprocess_job(stop_check_kwarg=)` opt in
+  (`Job.graceful_stoppable` / `.stop_requested`); the worker injects the
+  file-exists callable; `run_plo_generate_job` passes it through. UI:
+  the ticking job panel gains "🛑 Stop after current question (keeps
+  finished work)" next to Cancel; the PLO Review page banners
+  incomplete (complete=False) and stopped-early batches. Full-run
+  output is byte-identical to the old single write (test-pinned);
+  `audit_plo_batch.py` re-verifies stopped-early batches 0/0 (proven
+  live on a real subprocess stop). NLHE/postflop batches still write at
+  the end -- porting the same pattern is a known follow-up.
 - **PLO range hand-type breakdown column (July 17, the "GTO Wizard
   Categories" equivalent).** `pipeline/plo/range_breakdown.py:
   build_range_breakdown(facts, pack)` aggregates EACH still-active

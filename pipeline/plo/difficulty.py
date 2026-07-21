@@ -67,6 +67,7 @@ ARCHETYPE_BASE_EASE: dict[str, float] = {
     "open_fold": 1.00,
     "bb_check": 0.95,  # checking the option in a limped pot -- near-trivial
     "sb_complete": 0.85,  # completing the half bet first-in -- easy, not trivial
+    "open_limp": 0.75,  # limping at ante depths -- cheap, but a real choice
     "fold_dominated": 0.95,
     "fold_pot_odds": 0.60,
     "call_for_value": 0.60,

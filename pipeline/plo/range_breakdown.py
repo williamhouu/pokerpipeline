@@ -178,7 +178,50 @@ def _hero_buckets(
     return _finalize(combo, action_combo), hero_cat
 
 
+def hero_range_action_shares(facts: PloFacts) -> tuple[dict[str, float], float]:
+    """Combo-weighted frequency of each canonical action across hero's WHOLE
+    reaching range at this node -- the app's "what percent of hands are played"
+    (range width) number.
+
+    Returns ``({canonical_label: share_of_reaching_range}, total_reach_combos)``.
+    Each share is the fraction of the hands hero can hold at this spot that take
+    that action, combo-weighted (a rainbow hand is 24 combos, quads 1) so it
+    matches the app's combo counts. At an opening (first-in) node hero's whole
+    deal reaches, so the top action's share is the classic RFI/range width
+    ("UTG opens 18% of hands"); at a facing node it reads "of the hands you get
+    here with, X% take this line". Pure frequency read from the pack node
+    values -- no equity sim, deterministic. ``({}, 0.0)`` if the node is
+    unreachable/empty (never invents a number)."""
+    node = facts.spot.node
+    raise_level = _hero_raise_level(facts)
+    check_spot = is_check_spot(facts)
+    per_action: dict[str, tuple[tuple[float, float], ...]] = {}
+    canon_of: dict[str, str] = {}
+    for opt in node.actions:
+        per_action[opt.label] = _cached_node_values(str(opt.path))
+        canon_of[opt.label] = canonicalize_action_label(
+            opt.label, raise_level=raise_level, check_spot=check_spot
+        )
+    action_combo: dict[str, float] = defaultdict(float)
+    total_reach = 0.0
+    hand_count = len(next(iter(per_action.values()))) if per_action else 0
+    for i in range(hand_count):
+        reach = sum(per_action[lbl][i][0] for lbl in per_action)
+        if reach <= 0:
+            continue
+        mult = combo_multiplicity(i)
+        total_reach += reach * mult
+        for lbl, vals in per_action.items():
+            w = vals[i][0] * mult
+            if w > 0:
+                action_combo[canon_of[lbl]] += w
+    if total_reach <= 0:
+        return {}, 0.0
+    return {k: v / total_reach for k, v in action_combo.items()}, total_reach
+
+
 # --- villain: the range that took the line to reach hero -------------------
+@lru_cache(maxsize=256)
 @lru_cache(maxsize=256)
 def _villain_buckets_by_stem(pack: PloPack, stem: str) -> tuple[_Bucket, ...]:
     """Combo-weighted hand-type composition of the range at ``stem``.

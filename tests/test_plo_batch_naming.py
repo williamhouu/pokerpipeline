@@ -149,3 +149,20 @@ def test_display_label_legacy_and_new(tmp_path):
     label = plo_batch_display_label(new)
     assert label.startswith("21.47.32 · 9max · Hard · 12q · ")
     assert str(datetime.now().day) in label  # date context appended
+
+
+def test_dedupe_path_respects_reserved_names(tmp_path):
+    """Queued batches haven't written their CSV yet; their names come in via
+    ``taken`` so two same-second Generate clicks can't share a file."""
+    from admin_panel.batch_naming import dedupe_path
+
+    # Nothing on disk, nothing reserved -> the plain name.
+    assert dedupe_path(tmp_path, "stem").name == "stem.csv"
+    # Reserved (queued) but not on disk -> bumps to (2).
+    assert dedupe_path(tmp_path, "stem", taken={"stem.csv"}).name == "stem (2).csv"
+    # On disk AND (2) reserved -> bumps past both.
+    (tmp_path / "stem.csv").write_text("x")
+    assert (
+        dedupe_path(tmp_path, "stem", taken={"stem (2).csv"}).name
+        == "stem (3).csv"
+    )

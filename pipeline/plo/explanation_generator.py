@@ -63,6 +63,7 @@ from pipeline.plo.hand_model import (
 from pipeline.plo.options import (
     canonicalize_action_label,
     canonicalize_strategy,
+    integer_percentages,
     is_check_spot,
 )
 from pipeline.plo.pack import PloActionType
@@ -183,6 +184,7 @@ PLO_ARCHETYPE_GUIDANCE: dict[str, str] = {
     "open_fold": "First in with a hand below the opening threshold; frame around position discipline.",
     "bb_check": "In the big blind with the pot limped to you and no raise to face, so there is nothing to call -- the choice is to check or raise. Checking takes the free option; the raise is reserved for hands that genuinely want to build the pot out of position. Frame around why this hand prefers to check rather than raise, and say CHECK, never call.",
     "sb_complete": "First in from the small blind, completing the half bet rather than raising or open-folding. Frame around the discounted price and why this hand prefers seeing a cheap flop to raising out of position -- it is a call of half a blind, not a fold and not a check.",
+    "open_limp": "Limping in (calling the big blind with no raise to face, first in or behind other limpers) rather than raising or folding. Common at tournament stack depths with an ante. Frame around why this hand wants a cheap multiway flop instead of building a pot -- it is a call of one big blind, not a fold and not a check, and never call it 'completing'.",
     "fold_dominated": "Facing aggression with a hand too weak or non-nut to continue; frame around the missing equity and playability.",
     "fold_pot_odds": "A playable hand that is still priced out; frame around pot odds and how much of its equity the hand actually realizes. Bring in reverse implied odds ONLY when the concept tags show non-nut components (bare_ace, low_cards, has_dangler, or a suited hand without nut_flush_potential); a hand folding purely on price and position is not a reverse-implied-odds story.",
     "call_for_value": "Calling with a strong hand that prefers a controlled pot to a re-raise; frame around strength and position.",
@@ -254,13 +256,17 @@ def _pct(value: float | None) -> int | None:
 _VILLAIN_RAISE_VERBS = frozenset({"open", "3-bet", "4-bet", "5-bet", "raise"})
 
 
-def _villain_action_phrase(facts: PloFacts) -> str:
+def _villain_action_phrase(
+    facts: PloFacts, *, stack_bb: float = 100.0, ante_bb: float = 0.0
+) -> str:
     """Villain's action in plain bb terms ('3-bets to 12bb', 'moves all-in for
     100bb') -- so the LLM never reads the internal 'Raise 100%' label (a
     pot-sized raise) as a frequency."""
     if facts.villain_stats is None:
         return ""
-    actions, _pot = resolve_pot_limit(facts.spot.node.history_before)
+    actions, _pot = resolve_pot_limit(
+        facts.spot.node.history_before, stack_bb=stack_bb, ante_bb=ante_bb
+    )
     seat = facts.villain_stats.seat
     for act in reversed(actions):
         if act.seat != seat:
@@ -340,6 +346,8 @@ def build_solver_data(
     correct_answer: str,
     *,
     include_skills: bool = False,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
 ) -> dict[str, Any]:
     """The SOLVER DATA block fed to the LLM -- the facts behind the decision.
 
@@ -361,8 +369,16 @@ def build_solver_data(
         # render), the LLM sees ONLY this prose -- without the folds it cannot
         # tell "facing a squeeze after the opener folded" (heads-up) from
         # "opener still in" (multiway), and those siblings play differently.
+        # INVARIANT (July 2026): EVERY renderer of history amounts MUST get
+        # stack_bb + ante_bb (from the pack spec). Leaving the 100bb/no-ante
+        # defaults here made this line contradict the Question prose, the
+        # villain block, and the price block on MTT/short-stack packs ("opens
+        # to 3bb" vs the real ante-inflated 3.5bb; "all-in for 100bb" on a
+        # 15bb stack) -- and the claim checker then "corrected" true prose
+        # toward the wrong number. Pinned by test_plo_mtt_pack.py.
         "situation": format_plo_action_history(
-            facts, display_in_bb=True, include_folds=True
+            facts, display_in_bb=True, include_folds=True,
+            stack_bb=stack_bb, ante_bb=ante_bb,
         ),
         "your_hand": " ".join(format_card(c) for c in facts.spot.hero_cards),
         "your_hand_shape": f"{hand.descriptor} ({hand.strength})",
@@ -373,9 +389,15 @@ def build_solver_data(
         "your_position": hero_relative_position(facts).lower(),
         "options": options,
         "correct_action": correct_answer,
+        # Same integer allocation as the CSV action_frequencies column
+        # (options.integer_percentages) -- naive round() disagreed with it on
+        # exact-.5 boundaries, showing the LLM "Call: 98%" while the player's
+        # column said "Call: 99%" for the same node (July 2026).
         "action_strategy": {
-            label: f"{round(freq * _PERCENT)}%"
-            for label, freq in canonicalize_strategy(facts).items()
+            label: f"{pct}%"
+            for label, pct in integer_percentages(
+                canonicalize_strategy(facts)
+            ).items()
         },
         "strategic_frame": (
             f"{facts.archetype}: "
@@ -399,7 +421,8 @@ def build_solver_data(
     # The raw pot-odds math (the "show the math" facts): pot, price, and the
     # break-even equity, so price claims in the prose trace to real numbers.
     pot_now, to_call = call_price(
-        facts.spot.node.history_before, facts.spot.node.actor
+        facts.spot.node.history_before, facts.spot.node.actor,
+        stack_bb=stack_bb, ante_bb=ante_bb,
     )
     # Only when a call is actually on the menu (facing a raise/jam, or the SB
     # completing first-in) -- the shared price_is_live rule, so this block and
@@ -451,7 +474,7 @@ def build_solver_data(
             "seat": display_seat(
                 villain.seat, table_size=facts.spot.node.table_size
             ),
-            "action": _villain_action_phrase(facts),
+            "action": _villain_action_phrase(facts, stack_bb=stack_bb, ante_bb=ante_bb),
             "range_pct_of_all_hands": round(villain.pct_of_dealt_hands),
         }
     if include_skills:
@@ -465,6 +488,8 @@ def build_plo_user_prompt(
     correct_answer: str,
     *,
     include_skills: bool = False,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
 ) -> str:
     """The per-question USER message: the SOLVER DATA block + the ask.
 
@@ -474,7 +499,10 @@ def build_plo_user_prompt(
     ``include_skills`` adds the tagged skills to the data (Compare A/B seam).
     """
     block = json.dumps(
-        build_solver_data(facts, options, correct_answer, include_skills=include_skills),
+        build_solver_data(
+            facts, options, correct_answer, include_skills=include_skills,
+            stack_bb=stack_bb, ante_bb=ante_bb,
+        ),
         indent=2,
     )
     return (
@@ -768,6 +796,8 @@ def generate_plo_answer_explanation(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 1,
     include_skills: bool = False,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
     usage_callback: UsageCallback | None = None,
 ) -> GeneratedExplanation:
     """Generate the answer_explanation prose for one PLO spot.
@@ -804,7 +834,8 @@ def generate_plo_answer_explanation(
         {
             "role": "user",
             "content": build_plo_user_prompt(
-                facts, options, correct_answer, include_skills=include_skills
+                facts, options, correct_answer, include_skills=include_skills,
+                stack_bb=stack_bb, ante_bb=ante_bb,
             ),
         }
     ]

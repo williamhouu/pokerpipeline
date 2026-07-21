@@ -156,10 +156,9 @@ def test_basic_includes_low_freq_actions_when_room() -> None:
         {"Fold": 0.30, "Raise 60%": 0.65, "Call": 0.005, "AllIn": 0.045}
     )
     options, correct = build_options_basic(facts)
-    # All 4 canonical actions present (no frequency filter).
-    assert set(options) == {"Fold", "Raise", "Call", "All-in"}
-    assert options[0] == "Fold"  # Fold first
-    assert options[1] == "Raise"  # then dominant
+    # All 4 canonical actions present (no frequency filter), displayed up
+    # the aggression ladder (July 2026 standing rule).
+    assert options == ["Fold", "Call", "Raise", "All-in"]
     assert correct == "Raise"
 
 
@@ -175,8 +174,8 @@ def test_basic_pure_action_still_shows_alternatives() -> None:
 
 def test_basic_canonicalisation_collapses_then_orders() -> None:
     """5 raw raise sizes -> 1 canonical 'Raise' (sum of frequencies).
-    Result has Fold first, then Raise (now 60% after collapse), then
-    the remaining actions by descending frequency."""
+    Result displays up the aggression ladder (Fold, Call, Raise, All-in)
+    regardless of the frequencies -- July 2026 standing rule."""
     facts = _facts_with_strategy(
         {
             "Fold": 0.10,
@@ -188,11 +187,26 @@ def test_basic_canonicalisation_collapses_then_orders() -> None:
     )
     options, correct = build_options_basic(facts)
     # 4 canonical actions after collapsing the two raise sizes -- all fit.
-    assert set(options) == {"Fold", "Raise", "Call", "All-in"}
-    assert options[0] == "Fold"
-    assert options[1] == "Raise"  # dominant after collapse (60%)
+    assert options == ["Fold", "Call", "Raise", "All-in"]
     # Dominant raw label was "Raise 60%" -> canonical "Raise".
     assert correct == "Raise"
+
+
+def test_basic_option_order_is_always_the_aggression_ladder() -> None:
+    """STANDING RULE (July 2026, user): the option row always reads least ->
+    most aggressive. A dominant raise must NEVER sit between Fold and Call
+    (the old frequency order shipped "Fold · 4-bet · Call")."""
+    facts = _facts_with_strategy(
+        {"Fold": 0.0, "Call": 0.07, "Raise 100%": 0.93},
+        # Facing a 3-bet (two raises before hero) -> hero's raise is a 4-bet.
+        history=(
+            ParsedAction("BTN", PreflopActionType.RAISE, 60.0),
+            ParsedAction("SB", PreflopActionType.RAISE, 100.0),
+        ),
+    )
+    options, correct = build_options_basic(facts)
+    assert options == ["Fold", "Call", "4-bet"]
+    assert correct == "4-bet"
 
 
 def test_basic_drops_fold_only_when_zero_and_crowded() -> None:

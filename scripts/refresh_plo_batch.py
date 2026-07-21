@@ -106,6 +106,7 @@ def main() -> int:
             pack=pack,
             stakes_bb_dollars=float(rs["stakes_bb_dollars"]),
             game_format=rs["game_format"],
+            ante_bb=float(rs.get("ante_bb", 0.0)),
             display_in_bb=bool(rs["display_in_bb"]),
             stack_bb=stack_bb,
         )

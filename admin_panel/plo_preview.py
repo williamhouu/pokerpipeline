@@ -265,8 +265,12 @@ def build_preview_rows(
                 cards=format_cards(spot.hero_cards),
                 position=node.actor,
                 relative_position=hero_relative_position(facts),
+                # INVARIANT (July 2026): history amounts MUST get stack_bb +
+                # ante_bb from the pack spec, or MTT/short-stack previews show
+                # ante-blind sizes and 100bb jams (the build_solver_data bug).
                 action_line=format_plo_action_history(
-                    facts, display_in_bb=display_in_bb
+                    facts, display_in_bb=display_in_bb,
+                    stack_bb=pack.spec.stack_bb, ante_bb=pack.spec.ante_bb,
                 ),
                 options=tuple(options),
                 correct_answer=correct,

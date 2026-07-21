@@ -49,11 +49,15 @@ from pipeline.plo.options import (
     _hero_raise_level,
     canonicalize_action_label,
     canonicalize_strategy,
+    integer_percentages,
     is_check_spot,
 )
 from pipeline.plo.pack import PloActionType, PloPack
 from pipeline.plo.position import hero_relative_position
-from pipeline.plo.range_breakdown import build_range_breakdown
+from pipeline.plo.range_breakdown import (
+    build_range_breakdown,
+    hero_range_action_shares,
+)
 from pipeline.plo.skill_tagger import compute_plo_skills
 from pipeline.plo.spot_tags import compute_plo_concept_tags
 
@@ -123,17 +127,11 @@ def _format_action_frequencies(strategy: dict[str, float]) -> str:
     """
     if not strategy or sum(strategy.values()) <= 0:
         return ""
-    by_freq = sorted(strategy.items(), key=lambda kv: -kv[1])
-    floors = [(label, int(v * _PERCENT), (v * _PERCENT) % 1) for label, v in by_freq]
-    deficit = _PERCENT - sum(floor for _, floor, _ in floors)
-    bumps = {
-        i
-        for i, _ in sorted(enumerate(floors), key=lambda kv: -kv[1][2])[: max(deficit, 0)]
-    }
-    return ", ".join(
-        f"{label}: {floor + (1 if i in bumps else 0)}%"
-        for i, (label, floor, _) in enumerate(floors)
-    )
+    # Shared allocation with the SOLVER DATA action_strategy block (July
+    # 2026): integer_percentages returns labels already in -freq order, and
+    # its tie-break preserves this column's historical byte-exact output.
+    ints = integer_percentages(strategy)
+    return ", ".join(f"{label}: {pct}%" for label, pct in ints.items())
 
 
 def _active_count(facts: PloFacts) -> int:
@@ -183,7 +181,7 @@ def _plo_notes(facts: PloFacts, pack_label: str) -> str:
 
 def _plo_animation_script(
     facts: PloFacts, *, stack_bb: float, stakes_bb_dollars: float,
-    game_format: str,
+    game_format: str, ante_bb: float = 0.0,
 ) -> str:
     """The app's animation timeline for a PLO preflop question.
 
@@ -196,7 +194,9 @@ def _plo_animation_script(
 
     node = facts.spot.node
     ts = node.table_size
-    resolved, _pot = resolve_pot_limit(node.history_before, stack_bb=stack_bb)
+    resolved, _pot = resolve_pot_limit(
+        node.history_before, stack_bb=stack_bb, ante_bb=ante_bb
+    )
     actions: list[tuple[str, str, float | None, bool]] = []
     for ra in resolved:
         seat = display_seat(ra.seat, table_size=ts)
@@ -211,6 +211,7 @@ def _plo_animation_script(
     table = AnimationTable(
         table_size=ts,
         starting_stack_bb=float(stack_bb),
+        ante_bb=float(ante_bb),
         bb_in_dollars=(
             float(stakes_bb_dollars) if game_format != "tournament" else None
         ),
@@ -224,6 +225,8 @@ def _plo_animation_script(
 def _plo_chat_context(
     facts: PloFacts,
     *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
     options: list[str],
     correct_answer: str,
     explanation: str,
@@ -237,7 +240,10 @@ def _plo_chat_context(
     (flush potential, nut ranking, card redundancy). See :mod:`pipeline.chat_context`."""
     from pipeline.plo.explanation_generator import build_solver_data  # noqa: PLC0415
 
-    sd = build_solver_data(facts, options, correct_answer, include_skills=False)
+    sd = build_solver_data(
+        facts, options, correct_answer, include_skills=False,
+        stack_bb=stack_bb, ante_bb=ante_bb,
+    )
     # Keys mapped to dedicated top-level fields -- everything else in the rich
     # generation block becomes key_facts (flush potential, redundancy, ev note,
     # equity, leaning examples, ...).
@@ -283,6 +289,7 @@ def build_plo_row(
     game_format: str = "cash",
     display_in_bb: bool = False,
     stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
     validation_status: str = "draft",
     pack: PloPack | None = None,
 ) -> dict[str, str]:
@@ -299,6 +306,7 @@ def build_plo_row(
     """
     table = build_plo_app_table_columns(
         facts,
+        ante_bb=ante_bb,
         stakes_bb_dollars=stakes_bb_dollars,
         game_format=game_format,
         display_in_bb=display_in_bb,
@@ -310,6 +318,7 @@ def build_plo_row(
     # Computed once, reused by their CSV column AND the chatbot context blob.
     question_text = format_plo_action_history(
         facts,
+        ante_bb=ante_bb,
         stakes_bb_dollars=stakes_bb_dollars,
         game_format=game_format,
         display_in_bb=display_in_bb,
@@ -326,7 +335,8 @@ def build_plo_row(
     # pipeline.preflop.stat_notes, so the generic panel/equity-bar readers
     # work unchanged).
     pot_now, to_call = call_price(
-        facts.spot.node.history_before, facts.spot.node.actor, stack_bb=stack_bb
+        facts.spot.node.history_before, facts.spot.node.actor,
+        stack_bb=stack_bb, ante_bb=ante_bb,
     )
     # Same gate as the SOLVER DATA price block (price_is_live): an open
     # decision has no call on the menu, so no pot-odds cells there.
@@ -375,6 +385,33 @@ def build_plo_row(
                 f"{to_call:.1f}) = {break_even * 100:.0f}%."
             ),
         })
+    # Range width (July 2026, user feedback): "what percent of hands are
+    # played" -- the combo-weighted frequency of the recommended (dominant)
+    # action across hero's WHOLE range at this node. Inserted right after Pot
+    # odds so the two range/price stats read together. At an opening node this
+    # is the classic RFI width ("opens 18% of hands"); at a facing node it is
+    # "of the hands you get here, X% take this line". Pure frequency read (no
+    # equity sim), so it costs nothing and stays byte-deterministic.
+    _shares, _ = hero_range_action_shares(facts)
+    _featured = max(strategy, key=strategy.get) if strategy else None
+    if _featured and _featured in _shares:
+        _width = _shares[_featured]
+        _first_in = all(
+            a.action is PloActionType.FOLD
+            for a in facts.spot.node.history_before
+        )
+        _denom = "all starting hands" if _first_in else "the hands you reach this spot with"
+        _verb = _featured.lower()  # "opens"/"3-bets"/"calls": base form reads fine after a %
+        stat_entries.append({
+            "key": "range_width",
+            "label": "Range width",
+            "value": f"{_width * 100:.0f}%",
+            "note": (
+                f"Of {_denom}, {_width * 100:.0f}% {_verb} here "
+                f"(combo-weighted across your range). This is how wide your "
+                f"{_featured} range is at this spot."
+            ),
+        })
     if hero_eq is not None and facts.villain_stats is not None:
         stat_entries.append({
             "key": "hero_equity",
@@ -420,6 +457,7 @@ def build_plo_row(
             display_in_bb=display_in_bb,
             live_or_online=live_or_online,
             table_size=facts.spot.node.table_size,
+            ante_bb=ante_bb,
         ),
         "Question": question_text,
         "Question Type": "Hand scenario question",  # sentence case, no period (July 2026)
@@ -434,7 +472,15 @@ def build_plo_row(
         "neutral_credit": format_neutral_credit(neutral_list),
         "Answer Explanation": explanation,
         "Cash/Tourney": _GAME_FORMAT_PROSE.get(game_format, game_format.capitalize()),
-        "Live or Online": live_or_online,
+        # 9-max is labelled Live (team ask, July 2026): full-ring PLO is a
+        # live-casino format (online PLO is 6-max-dominant), and the pack's
+        # rake (5%/2bb cap) + pot-sized opens fit a live low-stakes game. The
+        # 9-max Context still omits the venue (separate team rule); this only
+        # sets the CSV's Live/Online column. 6-max keeps its resolved venue.
+        "Live or Online": (
+            "" if game_format == "tournament"
+            else ("Live" if facts.spot.node.table_size == 9 else live_or_online)
+        ),
         "Relative Position": hero_relative_position(facts),
         "Preflop Pot Type": _pot_type(facts),
         "Pot Participant": "Heads-Up" if _active_count(facts) <= _HEADS_UP_MAX else "Multi-Way",
@@ -477,10 +523,12 @@ def build_plo_row(
         # reusing PLO's rich generation block for the PLO-specific facts.
         "animation_script": _plo_animation_script(
             facts, stack_bb=stack_bb, stakes_bb_dollars=stakes_bb_dollars,
-            game_format=game_format,
+            game_format=game_format, ante_bb=ante_bb,
         ),
         "chat_context": _plo_chat_context(
             facts,
+            stack_bb=stack_bb,
+            ante_bb=ante_bb,
             options=options,
             correct_answer=correct_answer,
             explanation=explanation,

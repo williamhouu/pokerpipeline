@@ -320,11 +320,15 @@ def build_options_basic(
 ) -> tuple[list[str], str]:
     """Bare action labels, one option per meaningfully-played action.
 
-    Returns up to 4 options ordered by descending frequency. Labels are
-    canonicalised: ``"Raise 60%"`` -> ``"Raise"`` (or ``"3-bet"`` /
-    ``"4-bet"`` / ``"5-bet"`` depending on prior-raise count); ``"AllIn"``
-    -> ``"All-in"``. The ``correct_answer`` is the canonical label of
-    the dominant action.
+    Returns up to 4 options displayed least-aggressive first (Fold < Call <
+    Raise/3-bet/... < All-in) -- team standing rule (July 2026): the option
+    row always reads up the aggression ladder, never in frequency order
+    (which put "4-bet" between "Fold" and "Call" whenever the raise was the
+    dominant action). Frequency still decides WHICH actions make the cut
+    when there are 5+. Labels are canonicalised: ``"Raise 60%"`` ->
+    ``"Raise"`` (or ``"3-bet"`` / ``"4-bet"`` / ``"5-bet"`` depending on
+    prior-raise count); ``"AllIn"`` -> ``"All-in"``. The ``correct_answer``
+    is the canonical label of the dominant action.
 
     Empty / degenerate strategies fall through to a 1-option set
     containing the canonical dominant action, so the row stays valid.
@@ -353,24 +357,20 @@ def build_options_basic(
             kept_non_fold = [label for label, _ in ordered if label != "Fold"][:3]
             kept = {"Fold", *kept_non_fold}
 
-    # Step 3: Fold first when present, remaining by descending frequency.
-    if "Fold" in kept:
-        remaining_by_freq = [
-            label for label, _ in ordered if label in kept and label != "Fold"
-        ]
-        ordered_options = ["Fold", *remaining_by_freq]
-    else:
-        ordered_options = [label for label, _ in ordered if label in kept]
-
     # Defensive: dominant must be in options. The cap rule only drops Fold
     # or low-frequency actions, never the dominant (which has rank 1 by
     # frequency), so this is belt-and-suspenders.
-    if canonical_correct not in ordered_options:
-        ordered_options = [
-            canonical_correct,
-            *(opt for opt in ordered_options if opt != canonical_correct),
-        ][:4]
+    if canonical_correct not in kept:
+        if len(kept) >= 4:  # noqa: PLR2004
+            drop = next(
+                lbl for lbl, _ in reversed(ordered) if lbl in kept and lbl != "Fold"
+            )
+            kept.discard(drop)
+        kept.add(canonical_correct)
 
+    # Step 3: display order = the aggression ladder, least-aggressive first
+    # (label as tie-break so unknown labels stay deterministic).
+    ordered_options = sorted(kept, key=lambda lbl: (_action_aggression(lbl), lbl))
     return ordered_options, canonical_correct
 
 

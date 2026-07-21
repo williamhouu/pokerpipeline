@@ -152,7 +152,13 @@ def sample_plo_spot(node: PloDecisionNode, hero_index: int) -> PloSpot:
         # Hand never reaches this node. Keep zeros so the dict structurally
         # matches the action set; the worthiness filter drops it on presence.
         action_freqs = {label: 0.0 for label in raw}
-    ev_by_action = {label: ev for label, (_, ev) in raw.items()}
+    # Normalise EVs to SB-units at the ONE read seam (July 2026): the MTT
+    # bb-ante exports store milli-BB (node.ev_scale == 2.0), the cash packs
+    # milli-SB (1.0). Everything downstream -- ev_gap, difficulty's easy_ev,
+    # the writer's /2 sb->bb conversion -- assumes sb-units.
+    ev_by_action = {
+        label: ev * node.ev_scale for label, (_, ev) in raw.items()
+    }
 
     return PloSpot(
         node=node,

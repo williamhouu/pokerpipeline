@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -342,3 +345,213 @@ def test_seed_none_draws_fresh_spots_without_crashing(tmp_path):
         compute_equity=False,
     )
     assert result.questions_written == 1
+
+
+# --- usage totals ride the result (July 2026, background jobs) ---------------
+# PLO generation runs as a subprocess job, so the admin's spend logger can no
+# longer accumulate usage via an in-process callback: generate_plo_batch now
+# accumulates internally and the totals cross the process boundary on the
+# (picklable) PloBatchResult. A caller-supplied callback still sees every event.
+
+
+class _UsageResp(_Resp):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.usage = type(
+            "U",
+            (),
+            {
+                "input_tokens": 100,
+                "output_tokens": 40,
+                "cache_creation_input_tokens": 7,
+                "cache_read_input_tokens": 3,
+            },
+        )()
+
+
+class _UsageClient:
+    def __init__(self) -> None:
+        self.messages = type(
+            "M",
+            (),
+            {
+                "create": lambda _self, **_kw: _UsageResp(
+                    '{"answer_explanation": "Call here. It plays well in position."}'
+                )
+            },
+        )()
+
+
+def test_result_carries_usage_totals_and_forwards_callback(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    seen: list[tuple] = []
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+        generate_explanations=True,
+        explanation_client=_UsageClient(),
+        usage_callback=lambda *a: seen.append(a),
+    )
+    assert result.explanations_written == 1
+    # One LLM call -> its usage lands on the result...
+    assert result.model_used  # the generation model
+    assert result.total_input_tokens == 100
+    assert result.total_output_tokens == 40
+    assert result.total_cache_creation_tokens == 7
+    assert result.total_cache_read_tokens == 3
+    # ...AND the caller's callback still saw the same event (unchanged contract).
+    assert len(seen) == 1
+    assert seen[0][1:] == (100, 40, 7, 3)
+
+
+def test_result_usage_zero_without_llm(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    result = generate_plo_batch(
+        pack,
+        output_path=tmp_path / "b.csv",
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+    )
+    assert result.model_used == ""
+    assert result.total_input_tokens == 0
+    assert result.total_output_tokens == 0
+
+
+def test_result_pickles_across_a_process_boundary(tmp_path):
+    import pickle
+
+    pack = _clean_hj_pack(tmp_path)
+    result = generate_plo_batch(
+        pack,
+        output_path=tmp_path / "b.csv",
+        total_questions=1,
+        seed=0,
+        compute_equity=False,
+    )
+    clone = pickle.loads(pickle.dumps(result))
+    assert clone.questions_written == result.questions_written
+    assert clone.output_path == result.output_path
+
+
+def test_run_plo_generate_job_adapts_the_progress_protocol(tmp_path, monkeypatch):
+    """The subprocess wrapper: job-worker (message, current, total) callbacks
+    out; generate_plo_batch's (done, total) callback in; result passed back."""
+    import pipeline.plo.run as plo_run
+
+    captured: dict = {}
+
+    def _fake_generate(*, progress_callback=None, **kwargs):
+        captured["kwargs"] = kwargs
+        progress_callback(2, 4)  # the batch's 2-arg convention
+        return "RESULT"
+
+    monkeypatch.setattr(plo_run, "generate_plo_batch", _fake_generate)
+    events: list[tuple] = []
+    out = plo_run.run_plo_generate_job(
+        progress_callback=lambda m, c, t: events.append((m, c, t)),
+        total_questions=4,
+        seed=1,
+    )
+    assert out == "RESULT"
+    # stop_check passes through (None when the parent doesn't support it).
+    assert captured["kwargs"] == {
+        "total_questions": 4, "seed": 1, "stop_check": None,
+    }
+    # Initial "loading" tick + the adapted per-question tick, both 3-arg.
+    assert events[0] == ("Loading pack + sampling spots…", 0, 4)
+    assert events[1] == ("Generated 2 / 4 questions…", 2, 4)
+
+
+# --- graceful stop + incremental commit (July 2026) --------------------------
+# The CSV/meta are (re)written after every committed question, so a crash
+# loses at most the in-flight question; stop_check ends the batch cleanly
+# between questions ("finish current question, keep everything").
+
+
+def test_graceful_stop_keeps_committed_questions(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    committed: list[int] = []
+    result = generate_plo_batch(
+        pack,
+        output_path=out,
+        total_questions=3,
+        seed=0,
+        compute_equity=False,
+        progress_callback=lambda done, total: committed.append(done),
+        # True as soon as one question has committed -> stop before the next.
+        stop_check=lambda: bool(committed),
+    )
+    assert result.stopped_early is True
+    assert result.questions_written == 1
+    with out.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    meta = json.loads(out.with_suffix(".meta.json").read_text())
+    # A gracefully-stopped batch is COMPLETE (clean early finish)...
+    assert meta["complete"] is True
+    # ...and says so in the counters.
+    assert meta["counters"]["stopped_early"] is True
+    assert meta["counters"]["questions_written"] == 1
+
+
+def test_stop_check_false_is_byte_identical_no_op(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    a, b = tmp_path / "a.csv", tmp_path / "b.csv"
+    generate_plo_batch(pack, output_path=a, total_questions=2, seed=0,
+                       compute_equity=False)
+    generate_plo_batch(pack, output_path=b, total_questions=2, seed=0,
+                       compute_equity=False, stop_check=lambda: False)
+    assert a.read_bytes() == b.read_bytes()
+    meta_a = json.loads(a.with_suffix(".meta.json").read_text())
+    meta_b = json.loads(b.with_suffix(".meta.json").read_text())
+    assert meta_a["questions"] == meta_b["questions"]
+    assert meta_a["complete"] is True and meta_a["counters"]["stopped_early"] is False
+
+
+class _CrashSecondCallClient:
+    """First explanation call succeeds; the second raises hard (a crash the
+    batch does NOT absorb) -- simulates dying mid-run."""
+
+    def __init__(self) -> None:
+        outer = self
+
+        class _M:
+            def create(self, **_kw: object) -> _Resp:
+                outer.calls = getattr(outer, "calls", 0) + 1
+                if outer.calls > 1:
+                    raise RuntimeError("simulated mid-batch crash")
+                return _Resp(
+                    '{"answer_explanation": "Call here. It plays well in position."}'
+                )
+
+        self.messages = _M()
+
+
+def test_crash_mid_batch_leaves_committed_rows_on_disk(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    with pytest.raises(RuntimeError, match="simulated mid-batch crash"):
+        generate_plo_batch(
+            pack,
+            output_path=out,
+            total_questions=2,
+            seed=0,
+            compute_equity=False,
+            generate_explanations=True,
+            explanation_client=_CrashSecondCallClient(),
+        )
+    # The first committed question survived the crash on disk...
+    with out.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["Answer Explanation"]
+    # ...and the meta marks the batch as NOT cleanly finished.
+    meta = json.loads(out.with_suffix(".meta.json").read_text())
+    assert meta["complete"] is False
+    assert meta["counters"]["questions_written"] == 1

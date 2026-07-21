@@ -243,20 +243,24 @@ def blocks_villain_nut_flush(facts: PloFacts) -> bool:
 
 
 # --- Stack depth (3) -------------------------------------------------------
-# This pack is 100bb; stack depth would come from pack metadata for other packs.
+# Real since July 2026: the enumerator stamps the pack's effective stack on
+# every node (PloDecisionNode.stack_bb), so these read it directly. They were
+# hardcoded to "always standard" from the single-100bb-pack era, which shipped
+# a wrong standard_stack tag (and silenced the short_stack difficulty
+# modifier) on every 10-25bb MTT / short-stack question.
 def short_stack(facts: PloFacts) -> bool:
-    """Effective stack < 40bb. v1: always False (100bb pack)."""
-    return False
+    """Effective stack < 40bb."""
+    return facts.spot.node.stack_bb < 40  # noqa: PLR2004
 
 
 def standard_stack(facts: PloFacts) -> bool:
-    """Effective stack 40-150bb. v1: always True (100bb pack)."""
-    return True
+    """Effective stack 40-150bb."""
+    return 40 <= facts.spot.node.stack_bb <= 150  # noqa: PLR2004
 
 
 def deep_stack(facts: PloFacts) -> bool:
-    """Effective stack > 150bb. v1: always False (100bb pack)."""
-    return False
+    """Effective stack > 150bb."""
+    return facts.spot.node.stack_bb > 150  # noqa: PLR2004
 
 
 # --- registry + aggregator -------------------------------------------------

@@ -99,17 +99,24 @@ def auto_plo_batch_name(
     return _SEP.join(parts)
 
 
-def dedupe_path(directory: Path, stem: str, suffix: str = ".csv") -> Path:
-    """First non-existing ``<stem>.csv`` / ``<stem> (2).csv`` / ... path.
+def dedupe_path(
+    directory: Path,
+    stem: str,
+    suffix: str = ".csv",
+    taken: frozenset[str] | set[str] = frozenset(),
+) -> Path:
+    """First non-colliding ``<stem>.csv`` / ``<stem> (2).csv`` / ... path.
 
     The time-only stamp means a same-second, same-settings batch on a
     DIFFERENT day would collide -- and a collision would silently
     overwrite a kept batch, so uniqueness is enforced here instead of by
-    the name.
+    the name. ``taken`` adds filenames that are RESERVED but not yet on
+    disk (July 2026: queued background batches haven't written their CSV
+    yet -- two same-second Generate clicks must not share a name).
     """
     path = directory / f"{stem}{suffix}"
     n = 2
-    while path.exists():
+    while path.exists() or path.name in taken:
         path = directory / f"{stem} ({n}){suffix}"
         n += 1
     return path

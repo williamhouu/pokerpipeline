@@ -195,6 +195,19 @@ class PloPackSpec:
     rake_note: str          # e.g. "5% up to 2bb" -- documentation only
     dir_signature: str      # e.g. "Omaha/9-way"
     default_base: str       # conventional extraction folder in the repo root
+    # MTT bb-ante packs (July 2026). ante_bb: the BB's dead ante, IN the pot
+    # from the first action (the pot-limit sizes only resolve correctly with
+    # it) but NOT part of the BB's callable commitment, and SUNK in the
+    # pack's EV baseline (a BB fold's forced EV is the blind alone).
+    ante_bb: float = 0.0
+    # "cash" | "tournament" -- drives the Context line, the Cash/Tourney
+    # column, and the bb-display default at generation time.
+    game_format: str = "cash"
+    # EV units in the .rng files: False = milli-SMALL-blind (the cash packs),
+    # True = milli-BIG-blind (the MTT exports; SB open-fold EV reads -500).
+    # The spot sampler normalises to sb-units at read time so every
+    # downstream consumer (EV gap, difficulty, action_ev_bb) is unit-safe.
+    ev_in_bb: bool = False
 
 
 PLO_PACK_6MAX_100BB = PloPackSpec(
@@ -219,9 +232,79 @@ PLO_PACK_9MAX_100BB = PloPackSpec(
     default_base="plo9_ranges",
 )
 
+# Short-stack 6-max packs (July 2026): same provider/grammar/rake as the 100bb
+# 6-max pack, but shallow trees for short-stack (tournament-flavoured) play.
+# Their dir_signatures include the STACK folder so a 6-way root resolves to the
+# right depth -- and they are listed BEFORE the 100bb spec (whose signature is
+# the bare "Omaha/6-way") so the more-specific match wins. Intake-audited via
+# scripts/audit_plo6_pack.py: 12bb fully clean; 20bb clean heads-up, with a
+# tiny 3-way strategy/EV residual (0.04% of hands, <2.2sb) that is normal
+# 3-way-PLO solve noise. NOTE: solved as cEV CASH (with rake), not ICM -- see
+# the plo-shortstack-packs memory before framing these as "tournament".
+PLO_PACK_6MAX_12BB = PloPackSpec(
+    pack_id="plo_6max_12bb",
+    display_label="PLO 6-max · 12bb · rake 5%/1bb",
+    seats=SEATS,
+    table_size=6,
+    stack_bb=12.0,
+    rake_note="5% up to 1bb",
+    dir_signature="Omaha/6-way/12bb[5p-1bb]",
+    default_base="plo12_ranges",
+)
+
+PLO_PACK_6MAX_20BB = PloPackSpec(
+    pack_id="plo_6max_20bb",
+    display_label="PLO 6-max · 20bb · rake 5%/1bb",
+    seats=SEATS,
+    table_size=6,
+    stack_bb=20.0,
+    rake_note="5% up to 1bb",
+    dir_signature="Omaha/6-way/20bb[5p-1bb]",
+    default_base="plo20_ranges",
+)
+
+# MTT bb-ante 6-max packs (July 2026): the "PLO MTT (BB ANTE) 3.5x Open"
+# MonkerViewer export, one spec per extracted depth. No rake (tournament),
+# 1bb BB ante, fixed ~3.5bb opens encoded as node-relative pot-% tokens
+# (40072 first-in, 40083 SB first-in, ...), limp branches included. EV units
+# are milli-BB with the ante sunk in the baseline -- both verified by
+# scripts/audit_plo6_pack.py section [5b]. Chip-EV, NOT ICM: honest scope is
+# early/deep-field tournament play. The 50/75/100bb depths exist in the
+# archive but are unextracted (disk); register them here when pulled.
+def _mtt_spec(stack: float, dir_name: str, base: str) -> PloPackSpec:
+    return PloPackSpec(
+        pack_id=f"plo_mtt_6max_{stack:g}bb",
+        display_label=f"PLO MTT 6-max · {stack:g}bb · bb ante · chip-EV",
+        seats=SEATS,
+        table_size=6,
+        stack_bb=stack,
+        rake_note="no rake (MTT)",
+        dir_signature=f"Omaha/6-way/{dir_name}",
+        default_base=base,
+        ante_bb=1.0,
+        game_format="tournament",
+        ev_in_bb=True,
+    )
+
+
+PLO_MTT_PACKS: tuple[PloPackSpec, ...] = (
+    _mtt_spec(10, "10bb(bb-ante)3.5x", "plo_mtt10_ranges"),
+    _mtt_spec(15, "15b(bb-ante)3.5x", "plo_mtt15_ranges"),
+    _mtt_spec(20, "20bb(bb-ante)3.5x", "plo_mtt20_ranges"),
+    _mtt_spec(25, "25bb(bb-ante)3.5x", "plo_mtt25_ranges"),
+    _mtt_spec(30, "30b(bb-ante)3.5x", "plo_mtt30_ranges"),
+    _mtt_spec(40, "40(bb-ante)3.5x", "plo_mtt40_ranges"),
+)
+
 #: Every integrated PLO pack. Audit a new export first
-#: (``scripts/audit_plo9_pack.py`` is the template), then register it here.
+#: (``scripts/audit_plo9_pack.py`` / ``scripts/audit_plo6_pack.py`` are the
+#: templates), then register it here. ORDER MATTERS: specs whose dir_signature
+#: is a prefix of another's (the bare ``Omaha/6-way`` 100bb spec) must come
+#: LAST so the more-specific stack signatures match first in _spec_for_root.
 KNOWN_PLO_PACKS: tuple[PloPackSpec, ...] = (
+    PLO_PACK_6MAX_12BB,
+    PLO_PACK_6MAX_20BB,
+    *PLO_MTT_PACKS,
     PLO_PACK_6MAX_100BB,
     PLO_PACK_9MAX_100BB,
 )

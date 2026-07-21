@@ -7,10 +7,14 @@ jobs (today: preflop batch generation) in the background so they survive
 across reruns. The UI polls a small thread-safe state object each rerun
 and renders progress + result.
 
-Scope: single concurrent job per admin-panel process. The admin panel
-is single-user, the batch is the only long-running operation, and
-queuing isn't needed yet. If multiple parallel jobs become real later,
-swap the single slot for a dict keyed by id.
+Scope: ONE job runs at a time per admin-panel process (the admin panel is
+single-user and batches contend for the same API budget), plus a FIFO
+queue of pending jobs (July 2026): :func:`enqueue_subprocess_job` starts
+the job immediately when the slot is idle, otherwise appends it to the
+queue; when the running job reaches a terminal state the next queued job
+starts automatically. Finished jobs are appended to a bounded history
+(:func:`job_history`) so the UI can show every batch's outcome even after
+the slot has moved on to the next one.
 
 Two runners share one registry slot:
 
@@ -82,6 +86,18 @@ class Job[T]:
     # True for subprocess jobs, which can be terminated. Threaded jobs
     # have no kill path, so the UI hides the Cancel button for them.
     cancellable: bool = False
+    # True when the job's target accepts a graceful-stop check (July 2026):
+    # the UI can offer "finish the current unit of work, keep what's done"
+    # in addition to the hard Cancel.
+    graceful_stoppable: bool = False
+    # Set by request_graceful_stop_current_job so the UI can show
+    # "stopping..." while the job wraps up its current unit of work.
+    stop_requested: bool = False
+    # Caller-supplied breadcrumbs (e.g. {"kind": "plo_generate",
+    # "output_name": ...}). Lets each admin page recognise ITS jobs in the
+    # shared slot/queue/history and carry click-time context (layer-7 mode,
+    # requested count) to the completion renderer. Never read by this module.
+    meta: dict[str, Any] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
 
@@ -110,11 +126,39 @@ class Job[T]:
 _LOCK = threading.Lock()
 _CURRENT_JOB: Job[Any] | None = None
 
+
+@dataclass
+class QueuedRequest:
+    """One not-yet-started job waiting in the FIFO queue."""
+
+    id: str
+    label: str
+    fn: Callable[..., Any]
+    kwargs: dict[str, Any]
+    progress_callback_kwarg: str = "progress_callback"
+    meta: dict[str, Any] = field(default_factory=dict)
+    stop_check_kwarg: str | None = None
+    queued_at: float = field(default_factory=time.time)
+
+
+# FIFO of pending jobs + bounded history of finished ones (July 2026).
+# Both live at module level for the same reason as _CURRENT_JOB, guarded
+# by the same lock. History exists because the queue auto-advances: a
+# finished job is evicted from the slot the moment the next one starts,
+# so the UI needs somewhere durable (per-process) to read its outcome.
+_PENDING: list[QueuedRequest] = []
+_HISTORY: list[Job[Any]] = []
+_HISTORY_MAX = 30
+
 # Subprocess-job state (single slot, like _CURRENT_JOB): the running child
 # process and a cancel flag, both guarded by _LOCK. Only one job runs at a
 # time, so a single proc handle + flag suffice.
 _CURRENT_PROC: subprocess.Popen[bytes] | None = None
 _CANCEL_REQUESTED: bool = False
+# Sentinel file the CURRENT job's child polls for a graceful stop (set only
+# for jobs started with stop_check_kwarg). Touching it asks the child to
+# finish its current unit of work and return normally.
+_CURRENT_STOP_PATH: Path | None = None
 
 # How often the supervisor thread mirrors the child's progress file into
 # Job.progress. Sub-second so the 1s UI fragment always has fresh data;
@@ -136,6 +180,103 @@ def has_active_job() -> bool:
     """True iff a job is pending or running."""
     job = get_current_job()
     return job is not None and job.is_active
+
+
+def pending_jobs() -> list[QueuedRequest]:
+    """Snapshot of the FIFO queue (next-to-run first)."""
+    with _LOCK:
+        return list(_PENDING)
+
+
+def job_history() -> list[Job[Any]]:
+    """Snapshot of finished jobs, oldest first (bounded at _HISTORY_MAX)."""
+    with _LOCK:
+        return list(_HISTORY)
+
+
+def remove_queued(request_id: str) -> bool:
+    """Drop one not-yet-started request from the queue. True iff removed."""
+    with _LOCK:
+        for i, req in enumerate(_PENDING):
+            if req.id == request_id:
+                del _PENDING[i]
+                return True
+    return False
+
+
+def _on_job_finished(job: Job[Any]) -> None:
+    """Record a terminal job in history, then start the next queued job.
+
+    Called by BOTH runners exactly once, after the job's terminal state is
+    set and (for subprocess jobs) after the supervisor has released its
+    process handle -- starting the successor earlier would let the old
+    supervisor's cleanup clobber the new job's _CURRENT_PROC.
+    """
+    nxt: QueuedRequest | None = None
+    with _LOCK:
+        _HISTORY.append(job)
+        del _HISTORY[:-_HISTORY_MAX]
+        if _PENDING:
+            nxt = _PENDING.pop(0)
+    if nxt is None:
+        return
+    try:
+        start_subprocess_job(
+            nxt.fn,
+            label=nxt.label,
+            progress_callback_kwarg=nxt.progress_callback_kwarg,
+            meta=nxt.meta,
+            stop_check_kwarg=nxt.stop_check_kwarg,
+            **nxt.kwargs,
+        )
+    except RuntimeError:
+        # Slot got taken in the gap (e.g. the user started a job manually).
+        # Put the request back at the front; the taker's completion will
+        # advance the queue again.
+        with _LOCK:
+            _PENDING.insert(0, nxt)
+
+
+def enqueue_subprocess_job[T](
+    fn: Callable[..., T],
+    *,
+    label: str,
+    progress_callback_kwarg: str = "progress_callback",
+    meta: dict[str, Any] | None = None,
+    stop_check_kwarg: str | None = None,
+    **kwargs: Any,
+) -> tuple[Job[T] | None, QueuedRequest | None, int]:
+    """Start ``fn`` as a subprocess job now, or queue it behind the active one.
+
+    Returns ``(job, None, 0)`` when the job started immediately, or
+    ``(None, request, position)`` when it was queued (``position`` is
+    1-based: 1 = next to run). Same picklability constraints as
+    :func:`start_subprocess_job`.
+    """
+    try:
+        job = start_subprocess_job(
+            fn,
+            label=label,
+            progress_callback_kwarg=progress_callback_kwarg,
+            meta=meta,
+            stop_check_kwarg=stop_check_kwarg,
+            **kwargs,
+        )
+    except RuntimeError:
+        req = QueuedRequest(
+            id=uuid.uuid4().hex[:12],
+            label=label,
+            fn=fn,
+            kwargs=kwargs,
+            progress_callback_kwarg=progress_callback_kwarg,
+            meta=dict(meta or {}),
+            stop_check_kwarg=stop_check_kwarg,
+        )
+        with _LOCK:
+            _PENDING.append(req)
+            position = len(_PENDING)
+        return None, req, position
+    return job, None, 0
 
 
 def clear_current_job() -> None:
@@ -160,6 +301,7 @@ def start_job[T](
     *,
     label: str,
     progress_callback_kwarg: str = "progress_callback",
+    meta: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Job[T]:
     """Start ``fn(**kwargs)`` on a background thread, return the Job handle.
@@ -194,7 +336,9 @@ def start_job[T](
                 f"status={_CURRENT_JOB.status.value}). "
                 "Wait for it to finish (or clear it) before starting a new one."
             )
-        job: Job[T] = Job(id=uuid.uuid4().hex[:12], label=label)
+        job: Job[T] = Job(
+            id=uuid.uuid4().hex[:12], label=label, meta=dict(meta or {})
+        )
         _CURRENT_JOB = job
 
     def _progress(msg: str, current: int, total: int) -> None:
@@ -220,6 +364,7 @@ def start_job[T](
                 job.error = traceback.format_exc()
                 job.status = JobStatus.FAILED
                 job.finished_at = time.time()
+        _on_job_finished(job)
 
     # daemon=True so Ctrl+C on the streamlit server actually exits. If
     # the user closes the browser tab, the job keeps running -- the
@@ -234,6 +379,8 @@ def start_subprocess_job[T](
     *,
     label: str,
     progress_callback_kwarg: str = "progress_callback",
+    meta: dict[str, Any] | None = None,
+    stop_check_kwarg: str | None = None,
     **kwargs: Any,
 ) -> Job[T]:
     """Run ``fn(**kwargs)`` in a SEPARATE PROCESS; return the Job handle.
@@ -268,7 +415,11 @@ def start_subprocess_job[T](
                 "Wait for it to finish (or clear it) before starting a new one."
             )
         job: Job[T] = Job(
-            id=uuid.uuid4().hex[:12], label=label, cancellable=True
+            id=uuid.uuid4().hex[:12],
+            label=label,
+            cancellable=True,
+            graceful_stoppable=stop_check_kwarg is not None,
+            meta=dict(meta or {}),
         )
         _CURRENT_JOB = job
         _CURRENT_PROC = None
@@ -278,6 +429,7 @@ def start_subprocess_job[T](
     spec_path = work_dir / "spec.pkl"
     progress_path = work_dir / "progress.json"
     result_path = work_dir / "result.pkl"
+    stop_path = work_dir / "stop.requested"
     spec_path.write_bytes(
         pickle.dumps(
             {
@@ -287,15 +439,25 @@ def start_subprocess_job[T](
                 "progress_callback_kwarg": progress_callback_kwarg,
                 "progress_path": str(progress_path),
                 "result_path": str(result_path),
+                # Graceful stop (July 2026): when set, the worker injects a
+                # callable under this kwarg that returns True once the
+                # sentinel file exists (touched by request_graceful_stop).
+                "stop_check_kwarg": stop_check_kwarg,
+                "stop_path": str(stop_path),
             },
             protocol=pickle.HIGHEST_PROTOCOL,
         )
     )
+    if stop_check_kwarg is not None:
+        global _CURRENT_STOP_PATH
+        with _LOCK:
+            _CURRENT_STOP_PATH = stop_path
 
     def _supervise() -> None:
         global _CURRENT_PROC
+        proc: subprocess.Popen[bytes] | None = None
         try:
-            proc: subprocess.Popen[bytes] = subprocess.Popen(
+            proc = subprocess.Popen(
                 [sys.executable, "-m", "admin_panel.job_worker", str(spec_path)],
                 cwd=str(_PROJECT_ROOT),
                 env=os.environ.copy(),
@@ -318,9 +480,18 @@ def start_subprocess_job[T](
                 job.status = JobStatus.FAILED
                 job.finished_at = time.time()
         finally:
+            global _CURRENT_STOP_PATH
             with _LOCK:
-                _CURRENT_PROC = None
+                # Only clear OUR handles: _on_job_finished may auto-start the
+                # next queued job, whose supervisor sets a NEW _CURRENT_PROC /
+                # stop path; an unconditional None here would break its
+                # cancel + graceful-stop paths.
+                if _CURRENT_PROC is proc:
+                    _CURRENT_PROC = None
+                if _CURRENT_STOP_PATH == stop_path:
+                    _CURRENT_STOP_PATH = None
             shutil.rmtree(work_dir, ignore_errors=True)
+        _on_job_finished(job)
 
     thread = threading.Thread(
         target=_supervise, daemon=True, name=f"job-{job.id}"
@@ -381,6 +552,33 @@ def _finish_subprocess_job(
         job.finished_at = time.time()
 
 
+def request_graceful_stop_current_job() -> bool:
+    """Ask the active job to finish its current unit of work, then stop.
+
+    Touches the job's stop-sentinel file; the child's injected stop_check
+    sees it between units (e.g. between questions) and returns normally
+    with everything committed so far -- the job completes (not cancels).
+    Returns True iff a stop was accepted. No-op (False) when there is no
+    active job or the job wasn't started with ``stop_check_kwarg``.
+    """
+    with _LOCK:
+        job = _CURRENT_JOB
+        stop_path = _CURRENT_STOP_PATH
+        if (
+            job is None
+            or not job.is_active
+            or not job.graceful_stoppable
+            or stop_path is None
+        ):
+            return False
+        job.stop_requested = True
+    try:
+        stop_path.touch()
+    except OSError:
+        return False
+    return True
+
+
 def request_cancel_current_job() -> bool:
     """Ask the active subprocess job to stop. Returns True iff a cancel was
     accepted.
@@ -406,10 +604,16 @@ __all__ = [
     "Job",
     "JobProgress",
     "JobStatus",
+    "QueuedRequest",
     "clear_current_job",
+    "enqueue_subprocess_job",
     "get_current_job",
     "has_active_job",
+    "job_history",
+    "pending_jobs",
+    "remove_queued",
     "request_cancel_current_job",
+    "request_graceful_stop_current_job",
     "start_job",
     "start_subprocess_job",
 ]

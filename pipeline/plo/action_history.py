@@ -102,7 +102,10 @@ class ResolvedAction:
 
 
 def resolve_pot_limit(
-    history: tuple[PloAction, ...], *, stack_bb: float = 100.0
+    history: tuple[PloAction, ...],
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
 ) -> tuple[tuple[ResolvedAction, ...], float]:
     """Resolve a prior-action sequence into per-action bb sizes + the pot (bb).
 
@@ -110,12 +113,21 @@ def resolve_pot_limit(
     the current high bet, and the pot, computing each raise's ``raise_to`` via
     the pot-limit rule. Raise levels (open / 3-bet / ...) count every aggressive
     action, including all-ins.
+
+    ``ante_bb`` (MTT bb-ante packs, July 2026): the BB's dead ante joins the
+    pot before any action -- the packs' sized-raise tokens only resolve to
+    their advertised sizes with it -- but it is NOT part of the BB's callable
+    commitment, and it comes off the BB's stack, so the BB's all-in total is
+    ``stack_bb - ante_bb``.
     """
     committed: dict[str, float] = {"SB": _SB_BB, "BB": _BB}
     high_bet = _BB
-    pot = _SB_BB + _BB
+    pot = _SB_BB + _BB + ante_bb
     raise_level = 0
     out: list[ResolvedAction] = []
+
+    def _allin_total(seat: str) -> float:
+        return stack_bb - ante_bb if seat == "BB" else stack_bb
 
     for action in history:
         seat = action.seat
@@ -128,10 +140,11 @@ def resolve_pot_limit(
             out.append(ResolvedAction(seat, "call", None))
         elif action.action is PloActionType.ALL_IN:
             raise_level += 1
-            pot += stack_bb - prev
-            committed[seat] = stack_bb
-            high_bet = max(high_bet, stack_bb)
-            out.append(ResolvedAction(seat, "all-in", stack_bb))
+            total = _allin_total(seat)
+            pot += total - prev
+            committed[seat] = total
+            high_bet = max(high_bet, total)
+            out.append(ResolvedAction(seat, "all-in", total))
         else:  # RAISE / MIN_RAISE
             raise_level += 1
             to_call = high_bet - prev
@@ -205,6 +218,7 @@ def format_plo_action_history(
     game_format: str = "cash",
     display_in_bb: bool = False,
     stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
     include_folds: bool = False,
 ) -> str:
     """The action-history ("Question") block for a PLO spot.
@@ -223,7 +237,7 @@ def format_plo_action_history(
     """
     render_bb = display_in_bb or game_format != "cash"
     actions, _pot = resolve_pot_limit(
-        facts.spot.node.history_before, stack_bb=stack_bb
+        facts.spot.node.history_before, stack_bb=stack_bb, ante_bb=ante_bb
     )
     hero = facts.spot.node.actor
     table_size = facts.spot.node.table_size
@@ -247,6 +261,7 @@ def format_plo_context(
     display_in_bb: bool = False,
     live_or_online: str = "Online",
     table_size: int = 6,
+    ante_bb: float = 0.0,
 ) -> str:
     """The context line: stakes + effective stacks.
 
@@ -263,7 +278,8 @@ def format_plo_context(
             return f"{_fmt_num(stack_bb)}bb effective stacks."
         return f"${_fmt_num(stack_bb * stakes_bb_dollars)} effective stacks."
     if game_format != "cash":
-        return f"PLO tournament. {_fmt_num(stack_bb)}bb effective stacks."
+        ante = f" Big blind ante {_fmt_num(ante_bb)}bb." if ante_bb else ""
+        return f"PLO tournament. {_fmt_num(stack_bb)}bb effective stacks.{ante}"
     venue = live_or_online.capitalize()
     if display_in_bb:
         return f"{venue} PLO cash. {_fmt_num(stack_bb)}bb effective stacks."
@@ -275,27 +291,37 @@ def format_plo_context(
     )
 
 
-def pot_bb(node: PloDecisionNode, *, stack_bb: float = 100.0) -> float:
+def pot_bb(
+    node: PloDecisionNode, *, stack_bb: float = 100.0, ante_bb: float = 0.0
+) -> float:
     """The pot (in bb) at the moment hero must act."""
-    _actions, pot = resolve_pot_limit(node.history_before, stack_bb=stack_bb)
+    _actions, pot = resolve_pot_limit(
+        node.history_before, stack_bb=stack_bb, ante_bb=ante_bb
+    )
     return pot
 
 
 def call_price(
-    history: tuple[PloAction, ...], hero_seat: str, *, stack_bb: float = 100.0
+    history: tuple[PloAction, ...],
+    hero_seat: str,
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
 ) -> tuple[float, float]:
     """``(pot_bb, to_call_bb)`` at hero's decision -- the raw pot-odds inputs.
 
-    Runs the SAME walk as :func:`resolve_pot_limit` (blinds posted, pot-limit
-    raise sizes, per-seat commitments) and reads off what hero must add to
-    call: the current high bet minus hero's own committed chips (a blind
-    counts). ``to_call`` is 0 when hero is first in unraised (the BB option).
-    Break-even equity = ``to_call / (pot + to_call)`` -- the "show the math"
-    numbers for the SOLVER DATA block and the stat_notes column.
+    Runs the SAME walk as :func:`resolve_pot_limit` (blinds + any bb ante
+    posted, pot-limit raise sizes, per-seat commitments) and reads off what
+    hero must add to call: the current high bet minus hero's own committed
+    chips (a blind counts; an ante does NOT -- it is dead money hero is
+    priced to win, not part of anyone's bet). ``to_call`` is 0 when hero is
+    first in unraised (the BB option). Break-even equity =
+    ``to_call / (pot + to_call)`` -- the "show the math" numbers for the
+    SOLVER DATA block and the stat_notes column.
     """
     committed: dict[str, float] = {"SB": _SB_BB, "BB": _BB}
     high_bet = _BB
-    pot = _SB_BB + _BB
+    pot = _SB_BB + _BB + ante_bb
     for action in history:
         seat = action.seat
         prev = committed.get(seat, 0.0)
@@ -305,9 +331,10 @@ def call_price(
             pot += high_bet - prev
             committed[seat] = high_bet
         elif action.action is PloActionType.ALL_IN:
-            pot += stack_bb - prev
-            committed[seat] = stack_bb
-            high_bet = max(high_bet, stack_bb)
+            total = stack_bb - ante_bb if seat == "BB" else stack_bb
+            pot += total - prev
+            committed[seat] = total
+            high_bet = max(high_bet, total)
         else:  # RAISE / MIN_RAISE
             to_call = high_bet - prev
             pct = (action.raise_pct or 100) / 100.0

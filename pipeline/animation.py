@@ -44,10 +44,12 @@ class AnimationTable:
     def __init__(
         self, *, table_size: int, starting_stack_bb: float,
         bb_in_dollars: float | None = None, seats: list[str] | None = None,
+        ante_bb: float = 0.0,
     ):
         self.table_size = table_size
         self.seats = list(seats) if seats is not None else preflop_order(table_size)
         self.starting_stack_bb = float(starting_stack_bb)
+        self.ante_bb = float(ante_bb)
         self.dollars = bb_in_dollars
         self.stacks = {s: self.starting_stack_bb for s in self.seats}
         self.committed = {s: 0.0 for s in self.seats}  # this street's chips
@@ -69,6 +71,20 @@ class AnimationTable:
     def post_blinds(self) -> None:
         self.wager_to("SB", "post", SB_BB)
         self.wager_to("BB", "post", BB_BB)
+        if self.ante_bb > 0:
+            self.post_ante()
+
+    def post_ante(self) -> None:
+        """The big-blind ante (MTT bb-ante formats, July 2026): DEAD money --
+        it joins the pot and leaves the BB's stack, but is NOT part of the
+        BB's callable street commitment. Additive event shape: type "post"
+        with an ``ante: true`` marker, so a renderer that predates antes
+        just shows another post."""
+        self.pot += self.ante_bb
+        self.stacks["BB"] -= self.ante_bb
+        event = self.emit("post", seat="BB", ante=True)
+        self.money(event, amount_bb=self.ante_bb, pot_bb=self.pot,
+                    stack_bb=self.stacks["BB"])
 
     def wager_to(
         self, seat: str, type_: str, to_bb: float, *, all_in: bool = False,
@@ -109,6 +125,8 @@ class AnimationTable:
             "starting_stack_bb": _r2(self.starting_stack_bb),
             "events": self.events,
         }
+        if self.ante_bb > 0:
+            payload["ante_bb"] = _r2(self.ante_bb)
         if self.dollars is not None:
             payload["bb_dollars"] = _r2(self.dollars)
         return json.dumps(payload, separators=(",", ":"))

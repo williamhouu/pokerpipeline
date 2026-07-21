@@ -624,3 +624,123 @@ def test_revise_summary_old_batch_without_counters() -> None:
             "counters": {"questions_written": 4}}
     line = review.revise_summary_line(meta)
     assert line is not None and "after this feature update" in line
+
+
+# --- one-click "approve all fully-clean" (bulk approve) --------------------
+
+def test_row_is_fully_clean_requires_audit_to_have_run() -> None:
+    # Blank claim_check cell = the audit never ran -> NOT eligible, even with
+    # a spotless meta record. (A never-audited row must not be auto-approved.)
+    assert review.row_is_fully_clean("", {}) is False
+    assert review.row_is_fully_clean("   ", None) is False
+
+
+def test_row_is_fully_clean_true_when_ran_and_all_green() -> None:
+    assert review.row_is_fully_clean("[]", {}) is True
+    assert review.row_is_fully_clean("[]", None) is True
+    # Absent flag fields read as clean (a pipeline without cross-check/sanity).
+    assert review.row_is_fully_clean("[]", {"revise": {"status": "clean"}}) is True
+
+
+def test_row_is_fully_clean_false_when_claim_checker_flagged() -> None:
+    cell = json.dumps([{"claim": "you block the nut flush", "problem": "reversed"}])
+    assert review.row_is_fully_clean(cell, {}) is False
+
+
+def test_row_is_fully_clean_false_on_any_other_flag_source() -> None:
+    for field in (
+        "validator_warnings",
+        "sanity_check_issues",
+        "cross_check_issues",
+    ):
+        assert review.row_is_fully_clean("[]", {field: ["something"]}) is False, field
+
+
+def test_row_is_fully_clean_claim_check_issues_alone_do_not_disqualify() -> None:
+    # In auto-fix mode claim_check_issues holds the PRE-rewrite gate flags, so a
+    # fixed-then-clean row still carries them; they must NOT disqualify on their
+    # own when the shipped verdict (column or revise) is clean.
+    assert review.row_is_fully_clean("[]", {"claim_check_issues": ["old flag"]}) is True
+
+
+def test_row_is_fully_clean_false_on_malformed_cell() -> None:
+    assert review.row_is_fully_clean("not json", {}) is False
+    assert review.row_is_fully_clean("{}", {}) is False  # dict, not empty list
+
+
+# --- auto-fix (revise_pass) awareness: the shipped verdict lives in `revise` ---
+
+def test_row_is_fully_clean_revise_clean_with_empty_column() -> None:
+    # THE REGRESSION: a "clean" revise row leaves claim_check BLANK (the gate ran
+    # but its result isn't written to the column in revise mode). It is green.
+    assert review.row_is_fully_clean("", {"revise": {"status": "clean"}}) is True
+
+
+def test_row_is_fully_clean_revise_fixed_final_audit_clean() -> None:
+    # Rewritten and the 4th-call audit found nothing -> green.
+    assert review.row_is_fully_clean(
+        "[]", {"revise": {"status": "fixed", "final_audit_issues": []}}
+    ) is True
+
+
+def test_row_is_fully_clean_revise_fixed_with_final_audit_flags_is_not_green() -> None:
+    # Rewritten but the 4th-call audit still flagged something (the blue box).
+    assert review.row_is_fully_clean(
+        "[]", {"revise": {"status": "fixed", "final_audit_issues": ["still off"]}}
+    ) is False
+
+
+def test_row_is_fully_clean_revise_discarded_or_unchanged_is_not_green() -> None:
+    for status in ("discarded", "unchanged"):
+        assert review.row_is_fully_clean(
+            "[]", {"revise": {"status": status}}
+        ) is False, status
+
+
+def test_fully_clean_ungraded_counts_both_clean_and_fixed_rows() -> None:
+    # Mirrors the real 12q auto-fix batch: a "clean" row (blank column) and a
+    # "fixed→final-audit-clean" row are BOTH eligible; "fixed-with-flags" is not.
+    rows = [
+        {"No": "2", "claim_check": "[]"},   # fixed, final audit clean
+        {"No": "8", "claim_check": ""},     # clean, blank column
+        {"No": "1", "claim_check": "[{}]"}, # fixed but final audit still flags
+    ]
+    qrecs = {
+        "2": {"revise": {"status": "fixed", "final_audit_issues": []}},
+        "8": {"revise": {"status": "clean"}},
+        "1": {"revise": {"status": "fixed", "final_audit_issues": ["x", "y"]}},
+    }
+    nos = review.fully_clean_ungraded_nos(
+        rows, {}, qrec_for=lambda r: qrecs.get(str(r["No"]))
+    )
+    assert nos == ["2", "8"]
+
+
+def test_fully_clean_ungraded_skips_graded_and_flagged() -> None:
+    rows = [
+        {"No": "1", "claim_check": "[]"},                       # clean, ungraded -> IN
+        {"No": "2", "claim_check": ""},                          # not audited -> out
+        {"No": "3", "claim_check": "[]"},                        # clean but graded -> out
+        {"No": "4", "claim_check": json.dumps([{"claim": "x"}])},# flagged -> out
+        {"No": "5", "claim_check": "[]"},                        # clean but soft-flagged -> out
+        {"No": "6", "claim_check": "[]"},                        # clean, ungraded -> IN
+    ]
+    reviews = {"3": {"status": "approved", "note": ""}}
+    qrecs = {"5": {"validator_warnings": ["position wording"]}}
+    nos = review.fully_clean_ungraded_nos(
+        rows, reviews, qrec_for=lambda r: qrecs.get(str(r["No"]))
+    )
+    assert nos == ["1", "6"]
+
+
+def test_bulk_approve_writes_and_is_idempotent(tmp_path: Path) -> None:
+    csv = tmp_path / "b.csv"
+    review.save_review(csv, "3", "rejected", "human said no")
+    added = review.bulk_approve(csv, ["1", "6", "3"])  # 3 already graded -> skipped
+    assert added == 2
+    saved = review.load_reviews(csv)
+    assert saved["1"]["status"] == "approved"
+    assert saved["6"]["status"] == "approved"
+    assert saved["3"]["status"] == "rejected"  # human decision untouched
+    # Re-running approves nothing new.
+    assert review.bulk_approve(csv, ["1", "6"]) == 0

@@ -141,7 +141,30 @@ def parse_checker_response(text: str) -> PloClaimCheckResult:
         for d in raw_issues
         if isinstance(d, dict) and (d.get("claim") or d.get("problem"))
     )
+    # Deterministic guard (July 2026): the prompt forbids 'no real issue'
+    # entries, but the model still occasionally narrates one ("...but the
+    # phrasing is acceptable. Not a real issue."). A self-retracted entry is
+    # NOT a finding -- shipping it flags a clean row and highlights a
+    # non-problem on Review -- so drop it here where the rule is enforceable.
+    issues = tuple(i for i in issues if not _self_retracted(i.problem))
     return PloClaimCheckResult(passed=not issues, issues=issues, raw=text)
+
+
+#: Explicit self-retractions only -- softer phrases ("is acceptable",
+#: "is fine") also appear inside GENUINE findings that quote the prose they
+#: are refuting, so matching them would drop real flags.
+_RETRACTION_MARKERS = (
+    "not a real issue",
+    "no real issue",
+    "not an issue",
+    "not a genuine issue",
+)
+
+
+def _self_retracted(problem: str) -> bool:
+    """True when the issue's own problem text talks itself out of the flag."""
+    low = problem.lower()
+    return any(m in low for m in _RETRACTION_MARKERS)
 
 
 def check_plo_explanation_claims(

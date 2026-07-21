@@ -167,6 +167,36 @@ def test_non_bb_no_raise_is_not_bb_check():
     assert _classify(spot, None) != "bb_check"
 
 
+def test_non_blind_limp_is_open_limp_not_open_fold():
+    """A non-blind CALL with no raise faced is a LIMP (July 2026). The MTT
+    bb-ante packs limp 16-22% of RFI hands at 25-40bb; falling through to
+    "open_fold" handed the LLM a fold frame for a Call answer (the same bug
+    the SB completing case fixed for the blinds)."""
+    first_in = _spot(
+        history=(),
+        options=((F, None), (C, None), (R, 72)),
+        dominant=(C, None),
+        hero_cards=TRASH_CARDS,
+        actor="UTG",
+    )
+    assert _classify(first_in, None) == "open_limp"
+    behind_limpers = _spot(
+        history=(_act("UTG", C),),
+        options=((F, None), (C, None), (R, 72)),
+        dominant=(C, None),
+        hero_cards=TRASH_CARDS,
+        actor="CO",
+    )
+    assert _classify(behind_limpers, None) == "open_limp"
+    # The frame + ease tables must know the label (a missing entry renders an
+    # empty strategic_frame / falls to the 0.50 default silently).
+    from pipeline.plo.difficulty import ARCHETYPE_BASE_EASE
+    from pipeline.plo.explanation_generator import PLO_ARCHETYPE_GUIDANCE
+
+    assert "open_limp" in PLO_ARCHETYPE_GUIDANCE
+    assert "open_limp" in ARCHETYPE_BASE_EASE
+
+
 def test_sb_completing_first_in_is_sb_complete_not_open_fold():
     # The SB first-in calling is COMPLETING the half bet (a limp), neither an
     # open nor a fold -- "open_fold" handed the LLM a fold frame for a Call

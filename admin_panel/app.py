@@ -3817,7 +3817,28 @@ def _render_active_job_progress() -> None:
         f"job id `{job.id}` · elapsed {job.elapsed_seconds:.0f}s · "
         "this keeps running if you switch tabs."
     )
-    if job.cancellable and st.button(
+    if job.stop_requested:
+        st.info(
+            "🛑 Stopping after the current question… everything already "
+            "generated will be saved."
+        )
+    c1, c2 = st.columns(2)
+    # Graceful stop (July 2026): finish the in-flight question, write the
+    # CSV/meta with everything committed, and end the job as COMPLETED.
+    # Preferred over Cancel for generation batches -- Cancel discards the
+    # child's in-memory state (though incremental commit still leaves the
+    # already-committed questions on disk).
+    if (
+        job.graceful_stoppable
+        and not job.stop_requested
+        and c1.button(
+            "🛑 Stop after current question (keeps finished work)",
+            key=f"gstop_job_{job.id}",
+        )
+        and jobs.request_graceful_stop_current_job()
+    ):
+        st.rerun(scope="fragment")
+    if job.cancellable and c2.button(
         "⛔ Cancel batch", key=f"cancel_job_{job.id}"
     ):
         if jobs.request_cancel_current_job():
@@ -3841,6 +3862,12 @@ def _render_preflop_job_panel() -> None:
     """
     job = jobs.get_current_job()
     if job is None:
+        return
+    # A finished PLO job in the shared slot belongs to the PLO page's panel
+    # (which reads it from job history); rendering it here produced a
+    # confusing "no BatchResult" warning. While ACTIVE it still shows below --
+    # it explains why this page's GENERATE button is disabled.
+    if job.meta.get("kind") == "plo_generate" and not job.is_active:
         return
 
     with st.container(border=True):
@@ -4679,10 +4706,12 @@ def _node_ref(row: pd.Series) -> str:
     Folded into the Notes ``Node:`` field July 2026; this is the one seam the
     Compare/Review/range consumers use in place of the removed column. The
     string is byte-identical, so their node-id / combo parsing is unchanged.
+    Pre-July-2026 batches (no ``Node:`` field) resolve via their legacy
+    ``solver_reference`` column inside ``node_reference_from_row``.
     """
-    from pipeline.provenance import node_reference_from_notes  # noqa: PLC0415
+    from pipeline.provenance import node_reference_from_row  # noqa: PLC0415
 
-    return node_reference_from_notes(_cell(row, "Notes"))
+    return node_reference_from_row(row)
 
 
 def _md_lines(text: str) -> str:
@@ -4829,6 +4858,54 @@ def _render_inline_spot_ranges(node, pack, *, key_prefix: str) -> None:
         st.html(range_view.grid_html(_mix(vnode)))
 
 
+def _render_bulk_approve_clean(
+    csv_path: Path,
+    rows: list,
+    reviews: dict,
+    qrec_for,
+    *,
+    key: str,
+) -> None:
+    """One-click "approve every fully-clean question" button.
+
+    "Fully clean" = the Layer-7 claim checker RAN on the row and came back empty
+    AND no other flag source fired (deterministic soft validator, deterministic
+    cross-check, or AI sanity audit) -- see :func:`review.row_is_fully_clean`.
+    Only rows the reviewer hasn't graded are eligible, so the sweep can only add
+    approvals, never overturn a manual decision. All eligibility + the sidecar
+    write live in :mod:`admin_panel.review` (browserless-tested); this is the
+    thin Streamlit shell (fix-durability rule).
+
+    Shown only when the Layer-7 audit actually ran on this batch (a blank
+    ``claim_check`` on every row means no question can be "fully passed", so the
+    button would be meaningless)."""
+    audited = any(str(r.get("claim_check", "") or "").strip() for r in rows)
+    if not audited:
+        return
+    eligible = review.fully_clean_ungraded_nos(rows, reviews, qrec_for)
+    n = len(eligible)
+    label = (
+        f"✅ Approve all {n} fully-clean question" + ("s" if n != 1 else "")
+        if n
+        else "✅ No ungraded fully-clean questions left"
+    )
+    if st.button(
+        label,
+        key=f"bulk_approve_clean::{key}",
+        disabled=(n == 0),
+        help=(
+            "Approves every question that PASSED the Layer-7 claim checker AND "
+            "has no soft-validator, cross-check, or sanity flag -- and that you "
+            "have not already graded. Your existing grades are never changed."
+        ),
+    ):
+        added = review.bulk_approve(csv_path, eligible)
+        st.success(
+            f"Approved {added} fully-clean question" + ("s" if added != 1 else "") + "."
+        )
+        st.rerun()
+
+
 def render_review_page() -> None:
     """Read each generated question in full and grade it.
 
@@ -4908,6 +4985,25 @@ def render_review_page() -> None:
         )
     else:
         st.caption("🧪 Prompt: _no metadata for this batch_")
+
+    # One-click "approve all fully-clean" (green on the Layer-7 audit AND every
+    # deterministic/soft flag source). qrec_for mirrors the per-card meta join
+    # (node reference + User Cards).
+    _render_bulk_approve_clean(
+        csv_path,
+        [r for _, r in df.iterrows()],
+        reviews,
+        lambda r: (
+            review.meta_question_for(
+                _meta,
+                user_cards=_cell(r, "User Cards"),
+                node_reference=_node_ref(r),
+            )
+            if _meta
+            else None
+        ),
+        key=f"preflop::{csv_path.name}",
+    )
 
     # Prominent banner for the experimental 4-LLM-call audit & auto-fix batch,
     # so a reviewer instantly knows this batch ran the special pipeline (and how
@@ -5213,7 +5309,7 @@ def render_review_page() -> None:
                     _rng_pack = {p.pack_id: p for p in _cached_preflop_packs()}.get(_pid)
                 _rng_node = None
                 if _rng_pack is not None:
-                    _nid = range_view.node_id_from_notes(_cell(row, "Notes"))
+                    _nid = range_view.node_id_from_solver_reference(_node_ref(row))
                     _rng_node = _cached_ranges_index(_rng_pack.pack_id)[0].get(_nid)
                 if _rng_node is not None:
                     _render_inline_spot_ranges(
@@ -8170,6 +8266,39 @@ def render_postflop_review_page() -> None:
                 "flagged. Flags show under each explanation."
             )
 
+    # One-click "approve all fully-clean" (green on the Layer-7 audit AND every
+    # deterministic/soft flag source). qrec_for mirrors the per-card meta join:
+    # (hand_id, sequence_index) for full-hand legs, node_id + hero_combo for
+    # standalone rows. NOTE: this approves individual clean rows, same as manual
+    # grading -- so a full hand with one flagged leg gets its clean legs
+    # approved and the flagged leg left ungraded (a partial hand in the pool),
+    # exactly as clicking "approve" on each clean leg by hand would.
+    def _pf_qrec_for(r):
+        q = review.meta_question_for_leg(
+            meta, hand_id=_cell(r, "hand_id"),
+            sequence_index=_cell(r, "sequence_index"),
+        )
+        if q is not None:
+            return q
+        _qrecs = meta.get("questions", []) if isinstance(meta, dict) else []
+        _ids = {qq.get("node_id") for qq in _qrecs}
+        _parts = [p for p in _node_ref(r).split("/") if p]
+        _node = next((p for p in reversed(_parts) if p in _ids), "")
+        _combo = _parts[-1] if _parts else ""
+        return next(
+            (qq for qq in _qrecs
+             if qq.get("node_id") == _node and qq.get("hero_combo") == _combo),
+            None,
+        )
+
+    _render_bulk_approve_clean(
+        csv_path,
+        [r for _, r in df.iterrows()],
+        reviews,
+        _pf_qrec_for,
+        key=f"postflop::{csv_path.name}",
+    )
+
     st.download_button(
         "⬇️ Download this batch (CSV)",
         data=csv_path.read_bytes(),
@@ -8538,11 +8667,12 @@ def render_postflop_compare_page() -> None:
     rows_b = [{str(k): str(v) for k, v in r.items()} for r in df_b.to_dict("records")]
     # Postflop node reference is ".../<node_id>/<combo>" — its LAST segment is
     # the combo, so the default (node_id, cards) key would collide across nodes.
-    # Key on the FULL ref instead (node+combo unique). The ref is now in the
-    # Notes `Node:` field (was the solver_reference column, July 2026).
-    from pipeline.provenance import node_reference_from_notes  # noqa: PLC0415
+    # Key on the FULL ref instead (node+combo unique). The ref is in the Notes
+    # `Node:` field (was the solver_reference column, July 2026); old batches
+    # fall back to that legacy column inside node_reference_from_row.
+    from pipeline.provenance import node_reference_from_row  # noqa: PLC0415
 
-    pf_key = lambda r: node_reference_from_notes(r.get("Notes", ""))  # noqa: E731
+    pf_key = lambda r: node_reference_from_row(r)  # noqa: E731
     pairs = compare.join_by_spot(rows_a, rows_b, key_fn=pf_key)
     verdicts = compare.load_verdicts(a_csv)
     counts = compare.tally(verdicts)
@@ -9442,7 +9572,13 @@ _PLO_MODEL_NAMES = {
 #: each holds one extracted Monker export, gitignored). ORDER MATTERS: the
 #: first available pack is the DEFAULT selection -- 9-max first (July 2026,
 #: the team's ask: most PLO production runs on the 9-max pack going forward).
-_PLO_PACK_BASES: tuple[str, ...] = ("plo9_ranges", "plo_ranges")
+#: The short-stack 6-max packs (12/20bb) follow (July 2026).
+_PLO_PACK_BASES: tuple[str, ...] = (
+    "plo9_ranges", "plo_ranges", "plo12_ranges", "plo20_ranges",
+    # MTT bb-ante 6-max packs (July 2026): the tournament-core depths.
+    "plo_mtt10_ranges", "plo_mtt15_ranges", "plo_mtt20_ranges",
+    "plo_mtt25_ranges", "plo_mtt30_ranges", "plo_mtt40_ranges",
+)
 
 
 def _available_plo_pack_dirs() -> list[str]:
@@ -9608,6 +9744,169 @@ def _render_plo_difficulty_explainer() -> None:
         "compressed magnitude (full credit near ~0.5 bb instead of 3 bb) — the "
         "`easy_ev` column is kept so that call can be made from real data."
     )
+
+
+def _reserved_output_names() -> set[str]:
+    """Output filenames claimed by the active job + the queue.
+
+    Queued batches haven't written their CSV yet, so ``dedupe_path``'s
+    on-disk check can't see them -- two same-second Generate clicks would
+    otherwise share a name and the second batch would overwrite the first.
+    """
+    names: set[str] = set()
+    job = jobs.get_current_job()
+    if job is not None and job.is_active:
+        name = job.meta.get("output_name")
+        if name:
+            names.add(str(name))
+    for req in jobs.pending_jobs():
+        name = req.meta.get("output_name")
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _sweep_finished_plo_jobs() -> None:
+    """Log spend + surface the result for every finished PLO batch, once each.
+
+    The job queue auto-advances, so a completed batch can leave the
+    current-job slot before this page ever renders it -- ``job_history()``
+    is the durable per-process record. For each not-yet-seen finished PLO
+    job: append its token spend to the lifetime usage log (from the totals
+    the ``PloBatchResult`` carries across the process boundary) and refresh
+    the ``plo_gen_done`` panel + the Review-page jump to the newest batch.
+    Idempotent via the module-level logged-ids set, so the per-second
+    fragment reruns never double-log.
+    """
+    from pipeline.plo.batch import PloBatchResult  # noqa: PLC0415
+
+    logged = _logged_job_ids()
+    current = jobs.get_current_job()
+    all_jobs = [*jobs.job_history(), *([current] if current is not None else [])]
+    for job in all_jobs:  # oldest first -> the newest completed wins the panel
+        if job.meta.get("kind") != "plo_generate" or not job.is_done:
+            continue
+        if job.id in logged:
+            continue
+        logged.add(job.id)
+        result = job.result
+        if job.status is not jobs.JobStatus.COMPLETED or not isinstance(
+            result, PloBatchResult
+        ):
+            continue  # failed/cancelled: rendered from history, nothing to log
+        cost = 0.0
+        if result.model_used and (
+            result.total_input_tokens or result.total_output_tokens
+        ):
+            cost = usage.compute_cost_usd(
+                model=result.model_used,
+                input_tokens=result.total_input_tokens,
+                output_tokens=result.total_output_tokens,
+                cache_creation_tokens=result.total_cache_creation_tokens,
+                cache_read_tokens=result.total_cache_read_tokens,
+            )
+            usage.append_log_entry(
+                USAGE_LOG_PATH,
+                model=result.model_used,
+                input_tokens=result.total_input_tokens,
+                output_tokens=result.total_output_tokens,
+                cache_creation_tokens=result.total_cache_creation_tokens,
+                cache_read_tokens=result.total_cache_read_tokens,
+                cost_usd=cost,
+                questions_written=result.questions_written,
+                output_filename=Path(result.output_path).name,
+            )
+        _l7_counters: dict[str, int] = {}
+        if result.meta_path and Path(result.meta_path).is_file():
+            try:
+                _l7_counters = json.loads(
+                    Path(result.meta_path).read_text(encoding="utf-8")
+                ).get("counters", {})
+            except (OSError, ValueError):
+                _l7_counters = {}
+        st.session_state["plo_gen_done"] = {
+            "path": str(result.output_path),
+            "cost": cost,
+            "out_tokens": result.total_output_tokens,
+            "written": result.questions_written,
+            "requested": result.questions_requested,
+            "explanations": result.explanations_written,
+            "failed": result.explanations_failed,
+            "failure_reasons": list(result.explanation_failure_reasons),
+            "shortfall": result.shortfall,
+            "difficulty_filtered": result.difficulty_filtered_out,
+            "ev_filtered": result.ev_gap_filtered_out,
+            "layer7_mode": str(job.meta.get("layer7_mode", "")),
+            "counters": _l7_counters,
+            "stopped_early": bool(getattr(result, "stopped_early", False)),
+        }
+        # So the PLO Review page auto-selects the newest batch.
+        st.session_state["_plo_review_jump"] = Path(result.output_path).name
+
+
+def _render_plo_job_panel() -> None:
+    """Active-batch progress + queue + session batch log for PLO generation.
+
+    PLO batches run as background subprocess jobs (July 2026) so they
+    survive every rerun; this panel is how the page shows what's running,
+    what's waiting, and what finished. The ticking fragment is the ONLY
+    auto-refreshing part (same design as the NLHE panel).
+    """
+    _sweep_finished_plo_jobs()
+    job = jobs.get_current_job()
+    pending = jobs.pending_jobs()
+
+    if job is not None and job.is_active:
+        with st.container(border=True):
+            # Generic ticking progress (label + bar + cancel). Shown for ANY
+            # active job -- if a PLO batch is queued behind an NLHE batch, the
+            # user should see what it's waiting on.
+            _render_active_job_progress()
+    if pending:
+        with st.container(border=True):
+            st.markdown(f"**⏳ Queued batches: {len(pending)}** (run in order)")
+            for i, req in enumerate(pending, start=1):
+                c1, c2 = st.columns([8, 1])
+                c1.caption(f"{i}. {req.label}")
+                if c2.button("✖", key=f"plo_unqueue_{req.id}", help="Remove from queue"):
+                    jobs.remove_queued(req.id)
+                    st.rerun()
+
+    # Failed / cancelled PLO batches: surfaced from history + the slot (a
+    # failure must never be silent -- the money and the batch are gone).
+    _problem_jobs = [
+        j
+        for j in [*jobs.job_history(), *([job] if job is not None else [])]
+        if j.meta.get("kind") == "plo_generate"
+        and j.status in (jobs.JobStatus.FAILED, jobs.JobStatus.CANCELLED)
+        and not st.session_state.get(f"plo_job_dismissed_{j.id}")
+    ]
+    for j in _problem_jobs:
+        icon = "❌ failed" if j.status is jobs.JobStatus.FAILED else "⛔ cancelled"
+        st.error(f"**Batch {icon}:** {j.label}")
+        if j.error and j.status is jobs.JobStatus.FAILED:
+            with st.expander("Traceback"):
+                st.code(j.error)
+        if st.button("Dismiss", key=f"plo_dismiss_{j.id}"):
+            st.session_state[f"plo_job_dismissed_{j.id}"] = True
+            if job is not None and j.id == job.id:
+                jobs.clear_current_job()
+            st.rerun()
+
+    _hist = [
+        j for j in jobs.job_history() if j.meta.get("kind") == "plo_generate"
+    ]
+    if _hist:
+        with st.expander(f"🗒️ Batch log — this session ({len(_hist)})"):
+            for j in reversed(_hist):  # newest first
+                mark = {
+                    jobs.JobStatus.COMPLETED: "✅",
+                    jobs.JobStatus.FAILED: "❌",
+                    jobs.JobStatus.CANCELLED: "⛔",
+                }.get(j.status, "·")
+                st.caption(
+                    f"{mark} {j.label} · {j.elapsed_seconds:.0f}s"
+                )
 
 
 def render_plo_generate_page() -> None:
@@ -10056,6 +10355,10 @@ def render_plo_generate_page() -> None:
         help="Unlocks when the pack finishes loading." if _pack_loading else None,
     )
 
+    # Background-job panel (July 2026): active batch progress, the queue, and
+    # failures. Also SWEEPS finished jobs -> usage log + the done panel below.
+    _render_plo_job_panel()
+
     # Last completed batch, re-rendered after the post-generate rerun (the rerun
     # lets the sidebar lifetime-spend pick up the new log entry).
     _done = st.session_state.get("plo_gen_done")
@@ -10108,7 +10411,12 @@ def render_plo_generate_page() -> None:
                         "retry. Your settings are kept — regenerate any time, or "
                         "edit the prompt to address the cause."
                     )
-        if _done["shortfall"]:
+        if _done.get("stopped_early"):
+            st.info(
+                "🛑 **Stopped early on request** — everything generated up to "
+                "the stop was saved and is on the PLO Review page."
+            )
+        if _done["shortfall"] and not _done.get("stopped_early"):
             st.warning(
                 f"{_done['shortfall']} short of {_done['requested']} "
                 f"({_done['difficulty_filtered']} difficulty-filtered, "
@@ -10124,7 +10432,7 @@ def render_plo_generate_page() -> None:
     if generate_clicked:
         import os  # noqa: PLC0415
 
-        from pipeline.plo.batch import generate_plo_batch  # noqa: PLC0415
+        from pipeline.plo.run import run_plo_generate_job  # noqa: PLC0415
 
         if not os.environ.get("ANTHROPIC_API_KEY"):
             st.error(
@@ -10162,113 +10470,68 @@ def render_plo_generate_page() -> None:
             player_counts=[int(n) for n in player_counts],
             custom_label=(out_prefix or "").removesuffix(".csv"),
         )
-        out_path = dedupe_path(_PLO_BATCH_DIR, _stem)
-        acc = {"in": 0, "out": 0, "cc": 0, "cr": 0}
-        model_seen = [model]
-
-        def _usage_cb(mdl: str, in_t: int, out_t: int, cc: int, cr: int) -> None:
-            acc["in"] += in_t
-            acc["out"] += out_t
-            acc["cc"] += cc
-            acc["cr"] += cr
-            model_seen[0] = mdl
-
-        # Live progress bar (July 2026): PLO generation runs INLINE (not a
-        # background job like NLHE), so we drive a st.progress bar from a
-        # per-question callback. Streamlit flushes the updates during the long
-        # synchronous call, so "12 / 20" ticks up as questions land.
-        _total = int(count)
-        _prog = st.progress(0.0, text=f"Starting… 0 / {_total} questions")
-
-        def _progress_cb(done: int, total: int) -> None:
-            total = max(total, 1)
-            _prog.progress(
-                min(1.0, done / total),
-                text=f"Generated {done} / {total} questions…",
-            )
-
-        with st.spinner(f"Generating {int(count)} PLO questions with {model}…"):
-            result = generate_plo_batch(
-                pack,
-                output_path=out_path,
-                total_questions=int(count),
-                seed=seed,
-                hero_positions=positions or None,
-                action_contexts=action_contexts or None,
-                player_counts=player_counts or None,
-                max_prior_raises=2 if clean_only else None,
-                max_active_players=3 if clean_only else None,
-                min_frequency=freq_low / 100.0,
-                max_frequency=_max_freq,
-                exclude_ambiguous_band=exclude_ambiguous,
-                min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
-                diversify=diversify,
-                min_difficulty=lo,
-                max_difficulty=hi,
-                compute_equity=compute_eq,
-                answer_style=style,
-                display_in_bb=display_in_bb,
-                generate_explanations=True,
-                explanation_model=model,
-                explanation_temperature=temperature,
-                explanation_system_prompt=plo_prompt_text,
-                run_claim_checker=run_claim_checker,
-                revise_pass=revise_pass,
-                final_audit=final_audit,
-                claim_checker_prompt=claim_checker_prompt,
-                usage_callback=_usage_cb,
-                progress_callback=_progress_cb,
-            )
-        _prog.empty()
-        cost = usage.compute_cost_usd(
-            model=model_seen[0],
-            input_tokens=acc["in"],
-            output_tokens=acc["out"],
-            cache_creation_tokens=acc["cc"],
-            cache_read_tokens=acc["cr"],
+        out_path = dedupe_path(
+            _PLO_BATCH_DIR, _stem, taken=_reserved_output_names()
         )
-        usage.append_log_entry(
-            USAGE_LOG_PATH,
-            model=model_seen[0],
-            input_tokens=acc["in"],
-            output_tokens=acc["out"],
-            cache_creation_tokens=acc["cc"],
-            cache_read_tokens=acc["cr"],
-            cost_usd=cost,
-            questions_written=result.questions_written,
-            output_filename=out_path.name,
+        # INVARIANT (July 2026): PLO generation MUST go through
+        # jobs.enqueue_subprocess_job, never run inline in the script thread.
+        # Streamlit kills the running script at its next st.* call whenever ANY
+        # interaction arrives (page switch, widget click), so an inline batch
+        # died mid-flight -- losing the whole CSV while the API spend had
+        # already happened (and never reached the usage log). The subprocess
+        # survives every rerun; spend comes back on the PloBatchResult and is
+        # logged by _sweep_finished_plo_jobs. Multiple clicks queue (FIFO).
+        _label = f"{int(count)} PLO questions · {model} → {out_path.name}"
+        job, queued, pos = jobs.enqueue_subprocess_job(
+            run_plo_generate_job,
+            label=_label,
+            # Graceful stop (July 2026): the batch checks stop_check between
+            # questions, so "finish the current question, keep what's done".
+            stop_check_kwarg="stop_check",
+            meta={
+                "kind": "plo_generate",
+                "output_name": out_path.name,
+                "layer7_mode": layer7_mode,
+            },
+            pack=pack,
+            output_path=out_path,
+            total_questions=int(count),
+            seed=seed,
+            hero_positions=positions or None,
+            action_contexts=action_contexts or None,
+            player_counts=player_counts or None,
+            max_prior_raises=2 if clean_only else None,
+            max_active_players=3 if clean_only else None,
+            min_frequency=freq_low / 100.0,
+            max_frequency=_max_freq,
+            exclude_ambiguous_band=exclude_ambiguous,
+            min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+            diversify=diversify,
+            min_difficulty=lo,
+            max_difficulty=hi,
+            compute_equity=compute_eq,
+            answer_style=style,
+            display_in_bb=display_in_bb,
+            generate_explanations=True,
+            explanation_model=model,
+            explanation_temperature=temperature,
+            explanation_system_prompt=plo_prompt_text,
+            run_claim_checker=run_claim_checker,
+            revise_pass=revise_pass,
+            final_audit=final_audit,
+            claim_checker_prompt=claim_checker_prompt,
         )
-        # Layer-7 lifecycle tallies for the done panel (from the meta sidecar
-        # the batch just wrote -- the result object stays lean).
-        _l7_counters: dict[str, int] = {}
-        if result.meta_path and Path(result.meta_path).is_file():
-            try:
-                _l7_counters = json.loads(
-                    Path(result.meta_path).read_text(encoding="utf-8")
-                ).get("counters", {})
-            except (OSError, ValueError):
-                _l7_counters = {}
-        st.session_state["plo_gen_done"] = {
-            "path": str(out_path),
-            "cost": cost,
-            "out_tokens": acc["out"],
-            "written": result.questions_written,
-            "requested": int(count),
-            "explanations": result.explanations_written,
-            "failed": result.explanations_failed,
-            "failure_reasons": list(result.explanation_failure_reasons),
-            "shortfall": result.shortfall,
-            "difficulty_filtered": result.difficulty_filtered_out,
-            "ev_filtered": result.ev_gap_filtered_out,
-            "layer7_mode": layer7_mode,
-            "counters": _l7_counters,
-        }
-        # So the PLO Review page auto-selects this batch when you switch to it.
-        st.session_state["_plo_review_jump"] = out_path.name
-        # Rerun so the sidebar's lifetime-spend metric -- rendered BEFORE this
-        # page on every run -- re-reads the log entry we just appended. Without
-        # it the new spend wouldn't show until the next interaction. The result
-        # is re-rendered from session_state above the buttons.
+        if queued is not None:
+            st.toast(
+                f"⏳ Queued at position {pos} — starts automatically when the "
+                "running batch finishes."
+            )
+        else:
+            st.toast(
+                "🚀 Batch started in the background — switching pages or "
+                "clicking around won't cancel it."
+            )
+        # Rerun so the job panel takes over the next render.
         st.rerun()
 
     if not preview_clicked:
@@ -10416,6 +10679,22 @@ def render_plo_review_page() -> None:
         for r in (_meta.get("questions") or [])
         if isinstance(r, dict)
     }
+    # Incremental-commit state (July 2026): complete=False means the batch is
+    # either STILL GENERATING (the CSV grows as questions land) or died
+    # mid-run (everything committed up to the crash is here). Old metas lack
+    # the key -> no banner. stopped_early=True is a clean early finish.
+    if _meta.get("complete") is False:
+        st.warning(
+            "⏳ **This batch is incomplete** — it is either still generating "
+            "(this page shows questions as they land; re-pick the batch to "
+            "refresh) or was interrupted mid-run. Everything shown here is "
+            "fully generated and safe to review."
+        )
+    elif (_meta.get("counters") or {}).get("stopped_early"):
+        st.info(
+            "🛑 This batch was **stopped early on request** — it contains "
+            "every question generated before the stop."
+        )
     # Pack provenance (multi-pack era): which range pack this batch generated
     # from. Older metas carry only pack_label; both name the same pack.
     _pack_line = _meta.get("pack_id") or _meta.get("pack_label")
@@ -10451,6 +10730,16 @@ def render_plo_review_page() -> None:
         "Edit explanations and difficulty inline below (they auto-save to the "
         "CSV). The **Download this batch** button is at the bottom and always "
         "reflects your latest edits."
+    )
+
+    # One-click "approve all fully-clean" (green on the Layer-7 audit AND every
+    # deterministic/soft flag source). PLO joins its meta record by ``No``.
+    _render_bulk_approve_clean(
+        csv_path,
+        questions,
+        reviews,
+        lambda r: _qrecords.get(str(r.get("No"))),
+        key=f"plo::{csv_path.name}",
     )
     st.divider()
 

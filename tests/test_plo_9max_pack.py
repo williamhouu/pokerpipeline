@@ -179,6 +179,9 @@ def test_nine_max_batch_end_to_end(tmp_path):
     assert row["Question"].startswith("You're UTG+1 with ")
     assert "UTG opens to $3.50." in row["Question"]
     assert row["Table Size"] == "9"
+    # 9-max is labelled Live in the CSV (team ask, July 2026): full-ring PLO is
+    # a live-casino format. (The Context prose still omits the venue.)
+    assert row["Live or Online"] == "Live"
     assert row["Position Matchup"] == "UTG+1_vs_UTG"
     # The node reference lives in Notes' Node: field now (July 2026).
     from pipeline.provenance import node_reference_from_notes

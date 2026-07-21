@@ -89,6 +89,19 @@ class PloBatchResult:
     # The .meta.json sidecar written next to the CSV (July 2026) -- the batch
     # re-verifier's input.
     meta_path: Path | None = None
+    # True when a graceful stop ended the batch before total_questions (the
+    # CSV/meta contain everything committed; the shortfall is intentional).
+    stopped_early: bool = False
+    # Token spend across EVERY LLM pass of this batch (generation + the
+    # Layer-7 gate/reviser/final audit), accumulated internally so the totals
+    # survive a process boundary (July 2026: PLO generation runs as a
+    # background subprocess job; the admin's spend logger reads these off the
+    # pickled result, like the NLHE BatchResult). "" model = no LLM ran.
+    model_used: str = ""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
 
     @property
     def shortfall(self) -> int:
@@ -216,9 +229,9 @@ def generate_plo_batch(
     answer_style: str = "auto",
     seed: int | None = 0,
     stakes_bb_dollars: float = 1.0,
-    game_format: str = "cash",
+    game_format: str | None = None,
     display_in_bb: bool = False,
-    stack_bb: float = 100.0,
+    stack_bb: float | None = None,
     pack_label: str | None = None,
     min_difficulty: int = 0,
     max_difficulty: int = 10_000,
@@ -234,6 +247,7 @@ def generate_plo_batch(
     claim_checker_prompt: str | None = None,
     usage_callback: UsageCallback | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    stop_check: Callable[[], bool] | None = None,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
 
@@ -277,6 +291,21 @@ def generate_plo_batch(
     # before (pinned test sets).
     if seed is None:
         seed = random.SystemRandom().randrange(2**32)
+    # Stack depth drives the pot-limit walk, the all-in-realism gate
+    # (allins_ok <= 40bb), and the Context. Default it to the PACK's registered
+    # depth (July 2026, short-stack packs): the 100bb/9-max packs are 100bb so
+    # this is a no-op for them, but a 12bb/20bb pack MUST generate at its own
+    # depth or the geometry (and the artifact-jam gate) would be wrong. An
+    # explicit caller value still wins.
+    if stack_bb is None:
+        stack_bb = pack.spec.stack_bb
+    # Tournament framing + the bb ante come from the pack registration (July
+    # 2026, MTT packs): the ante is load-bearing for EVERY pot number (prose,
+    # price, animation, app tokens), so it can never be a caller guess. An
+    # explicit game_format still wins (tests / the Compare page).
+    if game_format is None:
+        game_format = pack.spec.game_format
+    ante_bb = pack.spec.ante_bb
     # Which pack this batch generates from: the registered pack_id unless the
     # caller overrides the label (legacy callers passed a literal string; the
     # id and the label were the same value for the original 6-max pack).
@@ -294,6 +323,27 @@ def generate_plo_batch(
         from anthropic import Anthropic  # noqa: PLC0415
 
         explanation_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    # Accumulate token spend INTERNALLY (July 2026) so the result carries the
+    # batch's totals across a process boundary (background jobs). Every LLM
+    # call site already reports through usage_callback (THE USAGE RULE), so
+    # wrapping it here counts everything; a caller-supplied callback still
+    # gets every event, unchanged.
+    _usage_totals = {"in": 0, "out": 0, "cc": 0, "cr": 0}
+    _model_seen: list[str] = [""]
+    _caller_usage_cb = usage_callback
+
+    def _accumulate_usage(
+        mdl: str, in_t: int, out_t: int, cc: int, cr: int
+    ) -> None:
+        _usage_totals["in"] += in_t
+        _usage_totals["out"] += out_t
+        _usage_totals["cc"] += cc
+        _usage_totals["cr"] += cr
+        _model_seen[0] = mdl
+        if _caller_usage_cb is not None:
+            _caller_usage_cb(mdl, in_t, out_t, cc, cr)
+
+    usage_callback = _accumulate_usage
     nodes = enumerate_plo_nodes(pack)
     rng = random.Random(seed)
     ctx_set = set(action_contexts) if action_contexts else None
@@ -385,10 +435,106 @@ def generate_plo_batch(
     # backfill fine; this many in a row with no success aborts the batch.
     consecutive_failures = 0
     aborted = False
-    while len(rows) < total_questions and not aborted:
+    # Graceful stop (July 2026): when ``stop_check`` reports True (checked
+    # between spots, so the in-flight question always finishes), the batch
+    # ends early and ships what it has -- same clean write path as a full run.
+    stopped_early = False
+
+    # INCREMENTAL COMMIT (July 2026): the CSV + meta are (re)written after
+    # EVERY committed question, atomically (tmp + replace so a concurrent
+    # Review-page read never sees a torn file). A crash / kill / power loss
+    # loses at most the question in flight -- the old end-only write lost the
+    # whole batch. ``complete=False`` marks an in-flight (or interrupted)
+    # sidecar; the FINAL flush flips it True, producing byte-identical CSV
+    # content to the old single write.
+    output_path = Path(output_path)
+    meta_path = output_path.with_suffix(".meta.json")
+
+    def _flush(*, complete: bool) -> None:
+        csv_tmp = output_path.with_name(output_path.name + ".tmp")
+        write_plo_csv(rows, csv_tmp)
+        csv_tmp.replace(output_path)
+        meta = {
+            "pack_label": pack_label,
+            # The registered pack this batch generated from (July 2026,
+            # multi-pack era): the re-verifier resolves the pack folder
+            # from this id.
+            "pack_id": pack.pack_id,
+            "table_size": pack.table_size,
+            # False while the batch is still writing (or if it died mid-run);
+            # True on the final flush of a finished OR gracefully-stopped run.
+            "complete": complete,
+            "run_settings": {
+                "seed": seed,
+                "total_questions": total_questions,
+                "hero_positions": hero_positions,
+                "max_prior_raises": max_prior_raises,
+                "max_active_players": max_active_players,
+                "action_contexts": action_contexts,
+                "player_counts": player_counts,
+                "min_frequency": min_frequency,
+                "max_frequency": max_frequency,
+                "exclude_ambiguous_band": exclude_ambiguous_band,
+                "min_ev_gap_bb": min_ev_gap_bb,
+                "diversify": diversify,
+                "compute_equity": compute_equity,
+                "answer_style": answer_style,
+                "stakes_bb_dollars": stakes_bb_dollars,
+                "game_format": game_format,
+                "ante_bb": ante_bb,
+                "display_in_bb": display_in_bb,
+                "stack_bb": stack_bb,
+                "min_difficulty": min_difficulty,
+                "max_difficulty": max_difficulty,
+                "generate_explanations": generate_explanations,
+                "model": explanation_model if generate_explanations else "",
+                "run_claim_checker": run_claim_checker,
+                "revise_pass": revise_pass,
+                "final_audit": final_audit,
+            },
+            "counters": {
+                "nodes_scanned": scanned,
+                "questions_written": len(rows),
+                "difficulty_filtered_out": difficulty_filtered_out,
+                "ev_gap_filtered_out": ev_gap_filtered_out,
+                "explanations_written": explanations_written,
+                "explanations_failed": explanations_failed,
+                # Layer-7: rows whose SHIPPED text carries >= 1 claim flag.
+                "claim_flagged_rows": claim_flagged_rows,
+                # Auto-fix lifecycle (revise_pass batches):
+                # flagged = fixed + discarded + unchanged.
+                "revise_flagged": revise_flagged,
+                "revise_fixed": revise_fixed,
+                "revise_discarded": revise_discarded,
+                "revise_unchanged": revise_unchanged,
+                # Deterministic soft validators (position wording, v1).
+                "soft_flagged_rows": soft_flagged_rows,
+                # Deep-stack spots whose real strategy mixes the artifact
+                # All-in at >= 5% -- silenced (never asked); trace dust was
+                # stripped + renormalised (per-question artifact_stripped
+                # records).
+                "artifact_material_spots_skipped": strip_counters.get(
+                    "artifact_material_spots_skipped", 0
+                ),
+                # True when a graceful stop ended the batch before
+                # total_questions (the shortfall is intentional).
+                "stopped_early": stopped_early,
+            },
+            "questions": question_records,
+        }
+        meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
+        meta_tmp.write_text(json.dumps(meta, indent=2, default=str))
+        meta_tmp.replace(meta_path)
+
+    while len(rows) < total_questions and not aborted and not stopped_early:
         drew_this_pass = False
         for node in candidates:
             if len(rows) >= total_questions or aborted:
+                break
+            # Graceful stop: checked between spots, never mid-question, so
+            # "finish the current question, keep everything committed".
+            if stop_check is not None and stop_check():
+                stopped_early = True
                 break
             scanned += 1
             spot = _first_worthy_spot(
@@ -443,6 +589,8 @@ def generate_plo_batch(
                         model=explanation_model,
                         temperature=explanation_temperature,
                         include_skills=explanation_include_skills,
+                        stack_bb=stack_bb,
+                        ante_bb=ante_bb,
                         usage_callback=usage_callback,
                     )
                     explanations_written += 1
@@ -468,6 +616,7 @@ def generate_plo_batch(
                         solver_data = build_solver_data(
                             facts, list(options), correct,
                             include_skills=explanation_include_skills,
+                            stack_bb=stack_bb, ante_bb=ante_bb,
                         )
                         gate_dicts = _gate_check_best_of(
                             generated.answer_explanation,
@@ -495,6 +644,8 @@ def generate_plo_batch(
                                         temperature=explanation_temperature,
                                         system_prompt=explanation_system_prompt,
                                         include_skills=explanation_include_skills,
+                                        stack_bb=stack_bb,
+                                        ante_bb=ante_bb,
                                         usage_callback=usage_callback,
                                     )
                                 except Exception as exc:  # noqa: BLE001 - never drop a row
@@ -604,6 +755,7 @@ def generate_plo_batch(
                 pack=pack,
                 stakes_bb_dollars=stakes_bb_dollars,
                 game_format=game_format,
+                ante_bb=ante_bb,
                 display_in_bb=display_in_bb,
                 stack_bb=stack_bb,
                 # Flagged when the SHIPPED text still carries claim flags
@@ -650,78 +802,15 @@ def generate_plo_batch(
             # this batch is). Called after each question is committed.
             if progress_callback is not None:
                 progress_callback(len(rows), total_questions)
+            # INCREMENTAL COMMIT: everything committed so far is now on disk;
+            # a crash from here loses only the next question.
+            _flush(complete=False)
         if not drew_this_pass:
             break  # every node is out of new worthy hands
 
-    output_path = Path(output_path)
-    write_plo_csv(rows, output_path)
-
-    # Meta sidecar (July 2026, parity with the NLHE batches): everything the
-    # batch re-verifier (scripts/audit_plo_batch.py) needs to rebuild every
-    # row byte-exactly -- the RESOLVED seed, the full run settings, filter
-    # counters, and one record per question with the node id + hand index.
-    # Deterministic content only (no timestamps).
-    meta_path = output_path.with_suffix(".meta.json")
-    meta = {
-        "pack_label": pack_label,
-        # The registered pack this batch generated from (July 2026, multi-pack
-        # era): the re-verifier resolves the right pack folder from this id.
-        "pack_id": pack.pack_id,
-        "table_size": pack.table_size,
-        "run_settings": {
-            "seed": seed,
-            "total_questions": total_questions,
-            "hero_positions": hero_positions,
-            "max_prior_raises": max_prior_raises,
-            "max_active_players": max_active_players,
-            "action_contexts": action_contexts,
-            "player_counts": player_counts,
-            "min_frequency": min_frequency,
-            "max_frequency": max_frequency,
-            "exclude_ambiguous_band": exclude_ambiguous_band,
-            "min_ev_gap_bb": min_ev_gap_bb,
-            "diversify": diversify,
-            "compute_equity": compute_equity,
-            "answer_style": answer_style,
-            "stakes_bb_dollars": stakes_bb_dollars,
-            "game_format": game_format,
-            "display_in_bb": display_in_bb,
-            "stack_bb": stack_bb,
-            "min_difficulty": min_difficulty,
-            "max_difficulty": max_difficulty,
-            "generate_explanations": generate_explanations,
-            "model": explanation_model if generate_explanations else "",
-            "run_claim_checker": run_claim_checker,
-            "revise_pass": revise_pass,
-            "final_audit": final_audit,
-        },
-        "counters": {
-            "nodes_scanned": scanned,
-            "questions_written": len(rows),
-            "difficulty_filtered_out": difficulty_filtered_out,
-            "ev_gap_filtered_out": ev_gap_filtered_out,
-            "explanations_written": explanations_written,
-            "explanations_failed": explanations_failed,
-            # Layer-7: rows whose SHIPPED text carries >= 1 claim flag.
-            "claim_flagged_rows": claim_flagged_rows,
-            # Auto-fix lifecycle (revise_pass batches):
-            # flagged = fixed + discarded + unchanged.
-            "revise_flagged": revise_flagged,
-            "revise_fixed": revise_fixed,
-            "revise_discarded": revise_discarded,
-            "revise_unchanged": revise_unchanged,
-            # Deterministic soft validators (position wording, v1).
-            "soft_flagged_rows": soft_flagged_rows,
-            # Deep-stack spots whose real strategy mixes the artifact All-in
-            # at >= 5% -- silenced (never asked); trace dust was stripped +
-            # renormalised (per-question artifact_stripped records).
-            "artifact_material_spots_skipped": strip_counters.get(
-                "artifact_material_spots_skipped", 0
-            ),
-        },
-        "questions": question_records,
-    }
-    meta_path.write_text(json.dumps(meta, indent=2, default=str))
+    # Final flush: same content, complete=True. A gracefully-stopped batch is
+    # COMPLETE (it ended cleanly, just early); only a crash leaves False.
+    _flush(complete=True)
 
     return PloBatchResult(
         output_path=output_path,
@@ -737,6 +826,12 @@ def generate_plo_batch(
             "artifact_material_spots_skipped", 0
         ),
         meta_path=meta_path,
+        stopped_early=stopped_early,
+        model_used=_model_seen[0],
+        total_input_tokens=_usage_totals["in"],
+        total_output_tokens=_usage_totals["out"],
+        total_cache_creation_tokens=_usage_totals["cc"],
+        total_cache_read_tokens=_usage_totals["cr"],
     )
 
 

@@ -335,6 +335,13 @@ def classify_plo_archetype(
             return "sb_complete"
         if dominant in (PloActionType.RAISE, PloActionType.MIN_RAISE, PloActionType.ALL_IN):
             return "open_for_value"
+        # A non-blind CALL with no raise faced is a LIMP (first-in or behind
+        # limpers) -- the MTT bb-ante packs limp 16-22% of RFI hands at
+        # 25-40bb, so this is a real answer class there. Falling through to
+        # "open_fold" handed the LLM a fold frame for a Call answer (July
+        # 2026, the same bug the SB comment above describes).
+        if dominant is PloActionType.CALL:
+            return "open_limp"
         return "open_fold"
 
     if dominant is PloActionType.FOLD:

@@ -22,6 +22,22 @@ plo_ranges/
 # like every pack; NOT yet integrated — audit first.
 plo9_ranges/
 
+# PLO 6-max short-stack packs (July 2026) — 12bb (585 files) + 20bb (2,349
+# files), rake 5%/1bb, same provider/grammar as plo_ranges. Short-stack
+# (tournament-flavoured) play; local-only like every pack.
+plo12_ranges/
+plo20_ranges/
+
+# PLO MTT bb-ante 6-max packs (July 2026) — the "PLO MTT (BB ANTE) 3.5x
+# Open" MonkerViewer export, one folder per depth (~27GB for the six
+# tournament-core depths; 50/75/100bb stay unextracted in ~/Downloads).
+plo_mtt10_ranges/
+plo_mtt15_ranges/
+plo_mtt20_ranges/
+plo_mtt25_ranges/
+plo_mtt30_ranges/
+plo_mtt40_ranges/
+
 # NLHE 9-max Monker pack (June 2026) — MonkerViewer export, 93k .rng files
 # (~428MB extracted), local-only like the other packs. The canonical full
 # solve (the 3.4GB .mkr) stays in the team Dropbox.

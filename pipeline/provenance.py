@@ -93,9 +93,43 @@ def node_reference_from_notes(notes: str) -> str:
     return notes.rsplit(_NODE, 1)[-1].strip()
 
 
+# Batches written before July 2026 carry the node reference in this column
+# instead of the Notes ``Node:`` field.
+_LEGACY_NODE_COLUMN = "solver_reference"
+
+
+def node_reference_from_row(row) -> str:
+    """The node reference for a CSV row, old batches included.
+
+    Reads the Notes ``Node:`` field first; when absent (a batch generated
+    before the July 2026 Notes fold-in), falls back to the row's legacy
+    ``solver_reference`` column, which those CSVs still physically carry.
+
+    INVARIANT: every admin consumer that keys on the node reference (the
+    Review range panels, Compare spot joins, cross-batch dedup) MUST resolve
+    it through this function, not ``node_reference_from_notes`` directly --
+    otherwise historical batches silently lose those features again.
+
+    ``row`` is any Mapping-like with ``.get`` (csv dict or pandas Series);
+    values are str()-coerced and a pandas ``NaN`` cell reads as missing.
+    """
+
+    def _text(value) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() == "nan" else text
+
+    ref = node_reference_from_notes(_text(row.get("Notes", "")))
+    if ref:
+        return ref
+    return _text(row.get(_LEGACY_NODE_COLUMN, ""))
+
+
 __all__ = [
     "NotesParts",
     "build_notes",
     "node_reference_from_notes",
+    "node_reference_from_row",
     "parse_notes",
 ]

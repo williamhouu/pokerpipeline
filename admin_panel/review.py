@@ -17,10 +17,11 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pipeline.provenance import node_reference_from_notes
+from pipeline.provenance import node_reference_from_row
 
 # Grade vocabulary (a subset of the CSV's validation_status values).
 REVIEW_STATUSES = ("approved", "needs_review", "rejected")
@@ -31,8 +32,10 @@ def _node_ref(row: dict) -> str:
 
     Lives in the Notes ``Node:`` field since July 2026; this is the single
     seam Review uses to key spots (cross-batch dedup, promote idempotency).
+    Pre-July-2026 batches resolve via their legacy ``solver_reference``
+    column inside ``node_reference_from_row``.
     """
-    return node_reference_from_notes(str(row.get("Notes", "")))
+    return node_reference_from_row(row)
 
 
 def review_sidecar_path(csv_path: Path) -> Path:
@@ -101,6 +104,122 @@ def save_review(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         json.dump(reviews, fh, indent=2, ensure_ascii=False)
+
+
+# --- one-click "approve all fully-clean" (bulk approve) --------------------
+# A question is "fully clean" when it is GREEN on EVERY flag source: the
+# Layer-7 claim checker actually ran and came back empty, AND no deterministic
+# soft validator, deterministic cross-check, or AI sanity audit flagged it.
+# The Review pages expose a button that sweeps every such row that the reviewer
+# hasn't already graded into the approved pool in one click. The eligibility
+# logic lives HERE (pure, browserless-tested) so the Streamlit button is a thin
+# shell -- see the fix-durability rule in CLAUDE.md.
+
+# Meta question-record fields that flag the SHIPPED row regardless of audit
+# mode. NOTE: ``claim_check_issues`` is deliberately NOT here -- in an auto-fix
+# batch it holds the PRE-rewrite gate flags, so a fixed-then-clean row still
+# carries them; the shipped-text claim verdict comes from the ``revise`` record
+# (auto-fix mode) or the ``claim_check`` column (flag-only mode) instead. A
+# field simply absent from a given pipeline's meta reads as clean.
+_FLAG_FIELDS = (
+    "validator_warnings",   # deterministic soft validators (position wording, ...)
+    "sanity_check_issues",  # AI sanity audit (challenges the solver facts)
+    "cross_check_issues",   # deterministic first-principles cross-check
+)
+
+
+def row_is_fully_clean(claim_check_cell: str, qrec: dict | None) -> bool:
+    """True when a shipped question is green on EVERY flag source.
+
+    "Fully clean" = the Layer-7 audit ran on this row and the SHIPPED text
+    passed it with zero outstanding flags from any source. The claim verdict is
+    read MODE-AWARELY, because where "did it pass" is recorded differs:
+
+    * **Auto-fix batch** (``revise_pass`` -- the meta record has a ``revise``
+      block): the shipped-text verdict lives in that block, NOT the
+      ``claim_check`` column (which in this mode may hold the pre-rewrite gate
+      flags, or be blank even when the gate ran clean). Green means
+      ``status`` is ``"clean"`` (never flagged) or ``"fixed"`` (rewritten) AND
+      the 4th-call ``final_audit_issues`` is empty. ``"discarded"`` /
+      ``"unchanged"`` ship the flagged original, and a ``"fixed"`` row that still
+      has final-audit flags carries an outstanding flag -- none are green.
+    * **Flag-only / un-revised batch** (no ``revise`` block): the ``claim_check``
+      column is authoritative. ``""`` = the audit never ran (not eligible);
+      ``"[]"`` = ran and clean; a populated list = flagged.
+
+    In BOTH modes the deterministic + sanity flag sources (:data:`_FLAG_FIELDS`)
+    on the shipped row must also be empty. This mirrors exactly what the Review
+    card shows as "green" (see ``_render_revise_panel`` in the app).
+    """
+    if isinstance(qrec, dict):
+        for field in _FLAG_FIELDS:
+            if qrec.get(field):
+                return False
+        revise = qrec.get("revise")
+        if isinstance(revise, dict):
+            if revise.get("status") not in ("clean", "fixed"):
+                return False  # discarded / unchanged ship the flagged original
+            if revise.get("final_audit_issues"):
+                return False  # rewrite the 4th-call audit still flags -> not green
+            return True
+    # No revise record: the claim_check column is the shipped-text verdict.
+    cell = (claim_check_cell or "").strip()
+    if not cell:
+        return False  # audit did not run -> cannot be "fully passed"
+    try:
+        parsed = json.loads(cell)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, list) and not parsed
+
+
+def fully_clean_ungraded_nos(
+    rows: Iterable[dict],
+    reviews: dict[str, dict[str, str]],
+    qrec_for: Callable[[dict], dict | None],
+) -> list[str]:
+    """The ``No``s eligible for one-click bulk approve, in row order.
+
+    A row qualifies when it is :func:`row_is_fully_clean` AND has NO existing
+    reviewer grade -- so the sweep can only add approvals, never overturn a
+    human approve / reject / needs-review decision. ``qrec_for`` resolves a
+    row's meta question record (each Review page joins differently: preflop by
+    node+cards, full-hand by hand_id+sequence, PLO by ``No``)."""
+    out: list[str] = []
+    for row in rows:
+        no = str(row.get("No", "")).strip()
+        if not no or no in reviews:
+            continue
+        if row_is_fully_clean(str(row.get("claim_check", "")), qrec_for(row)):
+            out.append(no)
+    return out
+
+
+def bulk_approve(
+    csv_path: Path,
+    nos: Iterable[str | int],
+    *,
+    note: str = "Bulk-approved: fully clean (Layer-7 audit + all validators).",
+) -> int:
+    """Mark every ``No`` in ``nos`` ``approved`` in one sidecar write.
+
+    Skips any ``No`` that already has a grade (idempotent, and never overwrites
+    a human decision -- the caller already filters to ungraded rows, this is the
+    belt-and-suspenders guard). Returns the number newly approved."""
+    reviews = load_reviews(csv_path)
+    added = 0
+    for no in nos:
+        key = str(no)
+        if key in reviews:
+            continue
+        reviews[key] = {"status": "approved", "note": note}
+        added += 1
+    if added:
+        path = review_sidecar_path(csv_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(reviews, fh, indent=2, ensure_ascii=False)
+    return added
 
 
 # --- PLO range hand-type breakdown panel (July 2026) -----------------------

@@ -281,6 +281,62 @@ def test_row_shows_the_math():
     assert "need" not in pot_note["value"]
 
 
+def test_range_width_renders_right_after_pot_odds(monkeypatch):
+    # User feedback: "what percent of hands are played" as a Show-the-math row,
+    # right below Pot odds. The share comes from a pure frequency read; here we
+    # stub it so the test pins the WIRING (position + wording), not the pack.
+    from pipeline.plo import format_writer
+    from pipeline.plo.difficulty import compute_plo_difficulty
+    from pipeline.plo.format_writer import build_plo_row
+
+    monkeypatch.setattr(
+        format_writer, "hero_range_action_shares",
+        lambda facts: ({"Call": 0.13, "Fold": 0.87}, 100.0),
+    )
+    history = parse_node_path("2." + ".".join(["0"] * 7), seats=SEATS_9MAX)
+    facts = _facts(history, "BB", villain_seat="UTG",
+                   freqs={"Call": 0.7, "Fold": 0.3}, hero_eq=0.55)
+    row = build_plo_row(
+        facts, difficulty=compute_plo_difficulty(facts),
+        options=["Fold", "Call"], correct_answer="Call", number=1,
+    )
+    notes = json.loads(row["stat_notes"])
+    keys = [n["key"] for n in notes]
+    assert "pot_odds" in keys and "range_width" in keys
+    assert keys.index("range_width") == keys.index("pot_odds") + 1  # right after
+    rw = next(n for n in notes if n["key"] == "range_width")
+    assert rw["value"] == "13%"
+    # Facing a raise -> denominator is the reaching range, not all hands.
+    assert "the hands you reach this spot with" in rw["note"]
+    assert "13% call here" in rw["note"]
+
+
+def test_range_width_open_says_all_starting_hands(monkeypatch):
+    # A first-in (all-fold history) spot: the denominator is all starting hands
+    # (the classic RFI width the feedback describes), and with no call on the
+    # menu there is no Pot odds row, so Range width leads.
+    from pipeline.plo import format_writer
+    from pipeline.plo.difficulty import compute_plo_difficulty
+    from pipeline.plo.format_writer import build_plo_row
+
+    monkeypatch.setattr(
+        format_writer, "hero_range_action_shares",
+        lambda facts: ({"Raise": 0.18, "Fold": 0.82}, 200.0),
+    )
+    history = parse_node_path(".".join(["0"] * 3), seats=SEATS_9MAX)  # folds to LJ
+    facts = _facts(history, "LJ", freqs={"Raise": 0.9, "Fold": 0.1})
+    row = build_plo_row(
+        facts, difficulty=compute_plo_difficulty(facts),
+        options=["Fold", "Raise"], correct_answer="Raise", number=1,
+    )
+    notes = json.loads(row["stat_notes"])
+    keys = [n["key"] for n in notes]
+    assert "pot_odds" not in keys  # no call to make -> no price row
+    rw = next(n for n in notes if n["key"] == "range_width")
+    assert rw["value"] == "18%"
+    assert "all starting hands" in rw["note"]
+
+
 def test_row_action_evs_use_canonical_labels():
     """The EV cell must speak the same labels as the rest of the row: the raw
     'Raise 100%' EV shows up as the canonical '3-bet' when facing one raise
