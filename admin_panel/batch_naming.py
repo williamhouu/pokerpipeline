@@ -61,6 +61,7 @@ def auto_plo_batch_name(
     action_contexts: list[str] | None = None,
     player_counts: list[int] | None = None,
     custom_label: str = "",
+    balanced: bool = False,
 ) -> str:
     """The self-describing filename stem for a PLO batch.
 
@@ -77,6 +78,8 @@ def auto_plo_batch_name(
         parts.append(label)
     parts.append(f"{table_size}max")
     parts.append(difficulty_label)
+    if balanced:
+        parts.append("Balanced")
     parts.append(f"{count}q")
     if positions:
         parts.append(_listed(list(positions), "seats"))

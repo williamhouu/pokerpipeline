@@ -288,8 +288,21 @@ def build_context_line(solve: PostflopSolve, *, display_in_bb: bool = True) -> s
     if solve.game_format != "tournament" and round(solve.effective_stack_bb) != 100:  # noqa: PLR2004
         parts.append(f"{round_to_half_bb(solve.effective_stack_bb):g}bb")
     if solve.rake and solve.rake.strip().lower() != "none":
-        parts.append(f"{solve.rake.strip()} rake")
+        parts.append(f"{display_rake(solve.rake)} rake")
     return " · ".join(parts)
 
 
-__all__ = ["build_context_line", "format_card", "format_question"]
+def display_rake(rake: str) -> str:
+    """The rake structure with the solver's internal chip units stripped.
+
+    Vendor metadata says e.g. ``"10% cap 3bb (300 chips)"`` -- the
+    parenthetical is the same cap in the solve's internal chip currency
+    (100 chips/bb here) and means nothing to a reader; the bb figure
+    carries it all (July 22 2026, user ask).
+    """
+    import re  # noqa: PLC0415
+
+    return re.sub(r"\s*\(\s*\d+(?:\.\d+)?\s*chips?\s*\)", "", rake).strip()
+
+
+__all__ = ["build_context_line", "display_rake", "format_card", "format_question"]

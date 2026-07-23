@@ -135,4 +135,118 @@ def test_context_cash_dollars():
 
 def test_context_bb_and_tournament():
     assert "100bb effective stacks" in format_plo_context(display_in_bb=True)
-    assert format_plo_context(game_format="tournament").startswith("PLO tournament.")
+    assert format_plo_context(game_format="tournament").startswith("Tournament.")
+
+
+def test_min_raise_resolves_to_the_min_raise_rule_not_a_pot_raise():
+    """GROUND TRUTH (July 22 2026, user catch): a preflop first-in min-raise
+    goes to exactly 2bb (BB post = the opening bet increment), and a pot
+    3-bet over it goes to 2 + (2 + 3.5) = 7.5bb. The old resolver defaulted
+    MIN_RAISE into the pot-raise arm ("raise_pct or 100"), rendering the
+    2bb open as 3.5bb and the 3-bet as 12bb -- while the solver file's own
+    fold EV (-2bb) proved the real size. Display, prices, SOLVER DATA,
+    animation, and app tokens all read this walk, so all were wrong on
+    min-raise lines."""
+    from pipeline.plo.pack import PloAction, PloActionType
+
+    history = (
+        PloAction("LJ", PloActionType.FOLD, None),
+        PloAction("HJ", PloActionType.MIN_RAISE, None),
+        PloAction("CO", PloActionType.FOLD, None),
+        PloAction("BU", PloActionType.RAISE, 100),
+        PloAction("SB", PloActionType.FOLD, None),
+        PloAction("BB", PloActionType.FOLD, None),
+    )
+    resolved, pot = resolve_pot_limit(history, stack_bb=20.0)
+    sizes = {r.seat: r.to_bb for r in resolved if r.to_bb is not None}
+    assert sizes["HJ"] == 2.0  # min-raise open = 2bb, never 3.5bb
+    assert sizes["BU"] == 7.5  # pot 3-bet over a 2bb open
+    assert pot == 11.0
+
+    # Min-3-bet over a POT open: 3.5 + (3.5 - 1) = 6bb.
+    history2 = (
+        PloAction("HJ", PloActionType.RAISE, 100),
+        PloAction("BU", PloActionType.MIN_RAISE, None),
+    )
+    resolved2, _pot2 = resolve_pot_limit(history2, stack_bb=100.0)
+    sizes2 = {r.seat: r.to_bb for r in resolved2 if r.to_bb is not None}
+    assert sizes2["HJ"] == 3.5
+    assert sizes2["BU"] == 6.0
+
+    # MTT bb-ante: the ante joins the pot but never the raise increment, so
+    # a min-raise open is STILL 2bb.
+    history3 = (PloAction("HJ", PloActionType.MIN_RAISE, None),)
+    resolved3, pot3 = resolve_pot_limit(history3, stack_bb=20.0, ante_bb=1.0)
+    assert resolved3[0].to_bb == 2.0
+    assert pot3 == 1.5 + 1.0 + 2.0  # blinds + ante + the min-raise
+
+
+def test_fold_ev_consistency_guard_catches_size_resolution_bugs():
+    """The tripwire born from the min-raise bug (July 22 2026): the pack's
+    fold EV always equals minus hero's invested chips, so any displayed-size
+    arithmetic error trips it -- for any pack and any token type. Also pins
+    the blind/ante conventions (SB fold = -0.5bb, BB fold = -1bb with the
+    ante EXCLUDED -- the ante is dead before the EV baseline)."""
+    from types import SimpleNamespace
+
+    from pipeline.plo.action_history import (
+        fold_ev_consistency_issue,
+        resolved_commitment_bb,
+    )
+    from pipeline.plo.pack import PloAction, PloActionType
+
+    open_then_3bet = (
+        PloAction("HJ", PloActionType.MIN_RAISE, None),  # to 2bb
+        PloAction("BU", PloActionType.RAISE, 100),       # pot: to 7.5bb
+    )
+    # Commitments follow the fixed walk.
+    assert resolved_commitment_bb(open_then_3bet, "HJ", stack_bb=20.0) == 2.0
+    assert resolved_commitment_bb(open_then_3bet, "BU", stack_bb=20.0) == 7.5
+    # Blinds count; the MTT ante does not.
+    assert resolved_commitment_bb((), "SB", ante_bb=1.0) == 0.5
+    assert resolved_commitment_bb((), "BB", ante_bb=1.0) == 1.0
+
+    def spot(fold_ev_sb, history, actor):
+        return SimpleNamespace(
+            ev_by_action={"Fold": fold_ev_sb, "Call": -1.0},
+            node=SimpleNamespace(history_before=history, actor=actor),
+        )
+
+    # Consistent: HJ invested 2bb -> fold EV -4.0sb (-2bb). No issue.
+    assert fold_ev_consistency_issue(
+        spot(-4.0, open_then_3bet, "HJ"), stack_bb=20.0
+    ) is None
+    # The old bug's exact shape: sizes resolved as if the open were 3.5bb
+    # would DISAGREE with the file's -2bb fold EV. Simulate by lying about
+    # the fold EV instead (same arithmetic): -7.0sb (-3.5bb) vs invested 2bb.
+    issue = fold_ev_consistency_issue(
+        spot(-7.0, open_then_3bet, "HJ"), stack_bb=20.0
+    )
+    assert issue is not None and "size-resolution" in issue
+    # No fold on the menu -> no check.
+    no_fold = SimpleNamespace(
+        ev_by_action={"Call": -1.0},
+        node=SimpleNamespace(history_before=(), actor="BB"),
+    )
+    assert fold_ev_consistency_issue(no_fold) is None
+
+
+def test_short_stack_packs_are_venue_neutral():
+    """July 22 2026 (team ask): the 12bb/20bb cash packs carry NO Live/Online
+    framing -- the Context is stacks-only in both display modes, and the
+    100bb 6-max format is unchanged."""
+    from pipeline.plo.action_history import format_plo_context
+    from pipeline.plo.pack import PLO_PACK_6MAX_12BB, PLO_PACK_6MAX_20BB
+
+    assert PLO_PACK_6MAX_12BB.venue_neutral is True
+    assert PLO_PACK_6MAX_20BB.venue_neutral is True
+    assert format_plo_context(
+        stack_bb=20.0, display_in_bb=True, venue_neutral=True
+    ) == "20bb effective stacks."
+    assert format_plo_context(
+        stack_bb=20.0, display_in_bb=False, venue_neutral=True
+    ) == "$20 effective stacks."
+    # The 100bb 6-max pack keeps its venue framing exactly as before.
+    assert format_plo_context(stack_bb=100.0, display_in_bb=True).startswith(
+        "Online PLO cash."
+    )

@@ -561,11 +561,12 @@ def flush_ceiling_stat_entries(hand: object) -> list[dict[str, str]]:
             {
                 "key": "flush_ceiling",
                 "label": "Flush ceiling",
-                "value": "no flush possible",
+                # "NA" + plain-English note (July 2026, user wording ask).
+                "value": "NA",
                 "note": (
-                    "No two of your four cards share a suit, and a flush "
-                    "must use exactly two hole cards of the same suit, so "
-                    "this hand can never make a flush."
+                    "You have a rainbow hand. Every card is a different "
+                    "suit, and a flush needs two of your own cards in the "
+                    "same suit, so this hand can never make one."
                 ),
             }
         ]

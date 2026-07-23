@@ -470,7 +470,11 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   they'd return only at library scale, derived from each solve's metadata.
 - **Postflop Generate/Review parity (June 2026).** The Generate page has the
   preflop controls: **answer-option style** (`options.build_options(spot,
-  style=)` — basic plain-labels / gto always-mostly-spectrum-on-binary / auto),
+  style=)` — July 22 2026 rework, user rule: **basic = VERBS ONLY, never a
+  bet size** (Fold/Check/Call/Bet/Raise/All-in; multi-size verbs merge);
+  **sizing** = the old size-carrying labels as their own style; gto
+  always-mostly-spectrum; auto; **blend** = deterministic ~50/50 basic-vs-
+  sizing per spot keyed on node+combo),
   **display amounts in bb or dollars** (`display_in_bb` threaded through
   `action_history.make_amount_fmt` + `format_writer`), **output filename**,
   model, and worthiness — all threaded `batch → run.generate_postflop_batch_from_db`.
@@ -708,6 +712,30 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   street), and every standalone preflop Review card captions "Pack: X" via
   `batch_pack_id`. Tests: `tests/test_full_hand_pack_legs.py` +
   `tests/test_pack_provenance.py`.
+- **🎛️ Fully balanced batches (July 21 2026, BOTH games).** Shared greedy
+  marginal-balance leaf `pipeline/balanced_select.py` (uniform targets over
+  values PRESENT in the pool; honest shortfall, never a stall; ties break
+  on the seeded pool order). PLO adapter `pipeline/plo/balanced_select.py`
+  (axes: difficulty band 1.0 / situation 0.9 / answer verb 0.8 / position
+  0.5 / hand shape 0.25; `generate_plo_batch(balanced=)` pre-draws a capped
+  pool 12x/600, scores CHEAP facts, greedy-orders; verified live 8/8/8 on
+  difficulty AND fold/call/raise at 24q). Postflop FULL-HAND adapter
+  `pipeline/postflop/balanced_hands.py` (`generate_full_hand_batch(
+  fully_balanced=)`): ending street stays QUOTA-owned by the length profile
+  (not an axis); the candidate pool is pre-ordered on the cheap axes (final
+  answer verb 1.0 / situation 0.8 / strength 0.6 / hero seat 0.5 —
+  `balanced_length_mix` keeps input order within street buckets, so quota
+  picks inherit the balance); hand-DIFFICULTY thirds via a BOUNDED swap pass
+  (2x total extra scores max) against the same-street reserve. The answer
+  verb always reads the DOMINANT ACTION, never option text, so basic and
+  GTO styles balance identically (user rule). meta `balance_report` =
+  achieved-vs-target per axis, rendered on the done panels + Review
+  expanders. Admin checkboxes on PLO Generate + the full-hand mode.
+  Review-time: `review.fully_clean_hand_ids` + the "✅ Keep all fully-clean
+  hands" button (a hand qualifies only when EVERY leg passes Layer-7 +
+  all validators, ungraded) — whole clean play-throughs skip manual review.
+  Tests: `tests/test_plo_balanced_select.py`,
+  `tests/test_full_hand_balanced.py`, balanced cases in `test_plo_batch.py`.
 - **NOT done (seamed extension points)**: a postflop **prompt library** (the
   Compare page uses two free-text boxes today); LLM prompt tuning against gold
   postflop examples; the harder-to-detect skills (`Facing a Check-Raise`, MDF,
@@ -1138,13 +1166,14 @@ signatures before the bare `Omaha/6-way` 100bb spec):
   `stack_bb` derives from `pack.spec` everywhere (was hardcoded 100 —
   would have stripped realistic short-stack jams as artifacts).
   Tournament-realism caveat: these are rake-cash solves, no ICM.
-- **`plo_mtt_6max_{10,15,20,25,30,40}bb`** — the "PLO MTT (BB ANTE)
+- **`plo_mtt_6max_{10,15,20,25,30,40,75}bb`** — the "PLO MTT (BB ANTE)
   10bb-100bb 3.5x Open" MonkerViewer export (July 2026, $499; 9.79GB .7z
   in ~/Downloads), one spec per extracted depth under
-  `plo_mtt{10..40}_ranges/` (gitignored; dir names are QUIRKY:
-  `10bb`/`15b`/`20bb`/`25bb`/`30b`/`40` + `(bb-ante)3.5x`; the 50/75/100bb
-  depths stay unextracted — ~47GB, near-cash play; the `.mkr` files are
-  Monker NATIVE Java saves, never parse them). `PloPackSpec` gained
+  `plo_mtt{10..40,75}_ranges/` (gitignored; dir names are QUIRKY:
+  `10bb`/`15b`/`20bb`/`25bb`/`30b`/`40`/`75b` + `(bb-ante)3.5x`; 75bb
+  (15GB) added July 21 PM — the team wanted ~80bb and the archive has no
+  80, so 75 is the nearest; the 50/100bb depths stay unextracted, team
+  call; the `.mkr` files are Monker NATIVE Java saves, never parse them). `PloPackSpec` gained
   `ante_bb` (1.0) / `game_format` ("tournament") / `ev_in_bb` (True):
   **EV units are milli-BB** (cash packs are milli-SB!) normalized at read
   via `PloDecisionNode.ev_scale` (the ONE unit seam, in `spot_sampler`);

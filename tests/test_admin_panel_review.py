@@ -744,3 +744,110 @@ def test_bulk_approve_writes_and_is_idempotent(tmp_path: Path) -> None:
     assert saved["3"]["status"] == "rejected"  # human decision untouched
     # Re-running approves nothing new.
     assert review.bulk_approve(csv, ["1", "6"]) == 0
+
+
+def test_regrade_or_ungrade_drops_row_from_approved_pool(tmp_path: Path) -> None:
+    """USER RULE (July 2026): changing a grade OFF approved -- to rejected,
+    needs_review, or cleared entirely (the Ungrade button / PLO 'ungraded'
+    radio) -- must remove the row from the cross-batch approved pool and its
+    download. The pool is rebuilt from the sidecars on every scan, so this
+    pins that no stale copy survives a re-grade."""
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [{
+        "No": "1", "User Cards": "A,A", "Notes": _notes("p/CO/n1"),
+        "Correct Answer": "Call", "validation_status": "draft",
+        "Answer Explanation": "fine",
+    }])
+
+    def _in_pool() -> bool:
+        _f, pool = review.collect_approved_rows(tmp_path)
+        return any(r["No"] == "1" for r in pool)
+
+    review.save_review(csv_path, "1", "approved", "")
+    assert _in_pool()
+    review.save_review(csv_path, "1", "rejected", "")
+    assert not _in_pool()
+    review.save_review(csv_path, "1", "approved", "")
+    assert _in_pool()
+    review.remove_review(csv_path, "1")  # the Ungrade button's helper
+    assert not _in_pool()
+    assert review.load_reviews(csv_path) == {}
+
+
+def test_fully_clean_hand_ids_requires_every_leg_clean() -> None:
+    """USER RULE (July 2026, review-time): 'Keep all fully-clean hands'
+    grades a whole play-through only when EVERY leg is fully clean and
+    ungraded -- one flagged leg keeps the whole hand in the human queue,
+    and a hand a human already touched is never re-graded."""
+    rows = [
+        # Hand A: both legs clean -> eligible.
+        {"No": "1", "hand_id": "A", "claim_check": "[]"},
+        {"No": "2", "hand_id": "A", "claim_check": "[]"},
+        # Hand B: second leg flagged -> whole hand OUT.
+        {"No": "3", "hand_id": "B", "claim_check": "[]"},
+        {"No": "4", "hand_id": "B", "claim_check": json.dumps([{"claim": "x"}])},
+        # Hand C: clean but one leg already graded -> OUT (never overturn).
+        {"No": "5", "hand_id": "C", "claim_check": "[]"},
+        {"No": "6", "hand_id": "C", "claim_check": "[]"},
+        # Standalone row (blank / pandas-nan hand_id): not this sweep's job.
+        {"No": "7", "hand_id": "", "claim_check": "[]"},
+        {"No": "8", "hand_id": "nan", "claim_check": "[]"},
+    ]
+    reviews = {"6": {"status": "rejected", "note": ""}}
+    hands = review.fully_clean_hand_ids(rows, reviews, qrec_for=lambda r: None)
+    assert hands == {"A": ["1", "2"]}
+
+
+def test_apply_grade_choice_writes_and_clears(tmp_path: Path) -> None:
+    """The ONE write path for state-holding grade widgets (July 21 2026
+    root-cause fix): 'ungraded' clears the entry, any status upserts, and
+    the approved pool follows the sidecar immediately."""
+    csv_path = tmp_path / "b.csv"
+    _write_fail_csv(csv_path, [{
+        "No": "1", "User Cards": "A,A", "Notes": _notes("p/CO/n1"),
+        "Correct Answer": "Call", "validation_status": "draft",
+        "Answer Explanation": "fine",
+    }])
+    review.apply_grade_choice(csv_path, "1", "approved")
+    assert review.load_reviews(csv_path)["1"]["status"] == "approved"
+    _f, pool = review.collect_approved_rows(tmp_path)
+    assert any(r["No"] == "1" for r in pool)
+    review.apply_grade_choice(csv_path, "1", "rejected")
+    assert review.load_reviews(csv_path)["1"]["status"] == "rejected"
+    review.apply_grade_choice(csv_path, "1", "ungraded")
+    assert review.load_reviews(csv_path) == {}
+    _f, pool = review.collect_approved_rows(tmp_path)
+    assert not pool
+
+
+def test_plo_grade_radio_never_compares_stale_state() -> None:
+    """REGRESSION PIN (July 21 2026): the PLO grade radio must write ONLY
+    from its on_change callback -- never by comparing its remembered widget
+    value against the sidecar on a rerun. The old comparison treated stale
+    widget memory as a user action, so 'Clear all approved' resurrected one
+    approval per rerun (the pool that grew by one on every clear click).
+    This pins the app source to the new contract; if the radio block is
+    refactored, keep the sidecar-first sync + on_change write shape."""
+    src = (Path(__file__).resolve().parent.parent / "admin_panel" / "app.py").read_text(
+        encoding="utf-8"
+    )
+    assert "SIDECAR IS THE SOURCE OF TRUTH" in src
+    assert "if choice != status" not in src
+    assert "apply_grade_choice" in src
+
+
+def test_hand_unclean_counts_badges_hands_at_a_glance() -> None:
+    """July 22 2026 (user ask): the grouped Review badges every hand
+    'all clear' vs 'N flagged' without opening it. 0 = every leg fully
+    clean; standalone (blank/nan hand_id) rows are ignored."""
+    rows = [
+        {"No": "1", "hand_id": "A", "claim_check": "[]"},
+        {"No": "2", "hand_id": "A", "claim_check": "[]"},
+        {"No": "3", "hand_id": "B", "claim_check": "[]"},
+        {"No": "4", "hand_id": "B", "claim_check": json.dumps([{"claim": "x"}])},
+        {"No": "5", "hand_id": "B", "claim_check": json.dumps([{"claim": "y"}])},
+        {"No": "6", "hand_id": "", "claim_check": "[]"},
+        {"No": "7", "hand_id": "nan", "claim_check": "[]"},
+    ]
+    counts = review.hand_unclean_counts(rows, qrec_for=lambda r: None)
+    assert counts == {"A": 0, "B": 2}

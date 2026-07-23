@@ -126,7 +126,7 @@ def test_ev_scale_normalises_milli_bb_to_sb_units(tmp_path):
 def test_tournament_context_names_the_ante():
     assert format_plo_context(
         stack_bb=10.0, game_format="tournament", ante_bb=1.0
-    ) == "PLO tournament. 10bb effective stacks. Big blind ante 1bb."
+    ) == "Tournament. 10bb effective stacks. Big blind ante 1bb."
     # Cash context byte-identical to before (no ante mention).
     assert format_plo_context() == (
         "$0.5/$1 Online PLO cash. $100 effective stacks."
@@ -167,7 +167,7 @@ def test_mtt_batch_end_to_end(tmp_path):
         row = next(iter(csv.DictReader(handle)))
     assert "opens to 3.5bb" in row["Question"]
     assert row["Context"] == (
-        "PLO tournament. 10bb effective stacks. Big blind ante 1bb."
+        "Tournament. 10bb effective stacks. Big blind ante 1bb."
     )
     assert row["Cash/Tourney"] == "Tournament"
     assert row["Live or Online"] == ""
@@ -257,3 +257,20 @@ def test_grammar_decodes_the_mtt_tokens():
     assert hist[0].action is R and hist[0].raise_pct == 72
     assert hist[1].action is C
     assert hist[-1].action is A
+
+
+def test_deep_mtt_75bb_depth_is_registered(tmp_path):
+    """July 21 PM (team ask): the 75bb MTT depth is registered (the archive
+    has no 80bb -- 75 is the nearest to the requested ~80; 50bb and the
+    deep MTT 100bb deliberately skipped)."""
+    from pipeline.plo.pack import discover_plo_pack
+
+    root = tmp_path / "ranges" / "Omaha" / "6-way" / "75b(bb-ante)3.5x"
+    root.mkdir(parents=True)
+    _write_rng(root / "0.rng", 0.3, 0)
+    pack = discover_plo_pack(tmp_path)
+    assert pack.pack_id == "plo_mtt_6max_75bb"
+    assert pack.spec.stack_bb == 75.0
+    assert pack.spec.game_format == "tournament"
+    assert pack.spec.ante_bb == 1.0
+    assert pack.spec.ev_in_bb is True

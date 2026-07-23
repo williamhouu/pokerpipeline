@@ -135,13 +135,14 @@ def test_villain_copy_uses_seat_reference_verbatim():
         _Bucket("One Pair Single-Suited", 41.0, None),
         _Bucket("Unpaired Double-Suited", 16.0, None),
     ]
-    # "UTG" takes no article; "The Big Blind" keeps its article.
+    # "UTG" takes no article; "The Big Blind" keeps its article. "made up
+    # of" (July 22 2026, user wording): plainer than the bare "is 41% ...".
     assert _villain_copy("UTG", "open", buckets) == (
-        "UTG's opening range is 41% one pair single-suited, "
+        "UTG's opening range is made up of 41% one pair single-suited, "
         "16% unpaired double-suited."
     )
     assert _villain_copy("The Big Blind", "3-bet", buckets).startswith(
-        "The Big Blind's 3-betting range is 41% one pair single-suited"
+        "The Big Blind's 3-betting range is made up of 41% one pair single-suited"
     )
 
 

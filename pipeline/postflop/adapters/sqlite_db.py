@@ -792,8 +792,14 @@ class DbSolveSummary:
 
     @property
     def rake_pretty(self) -> str:
-        """The rake structure for display, e.g. "8% cap 2bb" or "none"."""
-        r = (self.rake or "").strip()
+        """The rake structure for display, e.g. "8% cap 2bb" or "none".
+
+        Internal chip units are stripped ("10% cap 3bb (300 chips)" shows
+        as "10% cap 3bb") -- same rule as the Context line's display_rake.
+        """
+        from pipeline.postflop.action_history import display_rake  # noqa: PLC0415
+
+        r = display_rake(self.rake or "")
         return r if r and r.lower() != "none" else "none"
 
     @property
@@ -921,3 +927,44 @@ __all__ = [
     "read_db_metadata",
     "summarize_db",
 ]
+
+
+# --- known-problem solves (July 22 2026, user ask) ---------------------------
+# Plain-English quality flags the admin solve picker shows, so nobody has to
+# remember which files fight back. Matched by filename substring; first hit
+# wins. severity: "warn" renders as a warning, "info" as a note.
+SOLVE_QUALITY_FLAGS: tuple[tuple[str, str, str], ...] = (
+    (
+        "_v7",
+        "warn",
+        "Hard to use: this v7 export is internally inconsistent. The "
+        "strategies and the EVs in the file describe two different solves "
+        "(the vendor exported early, unfinished strategies next to finished "
+        "EVs). That means the Layer-7 checker keeps finding REAL "
+        "contradictions, so batches from this file flag heavily, auto-fix "
+        "churns, and river-barrel answers are suspect. Fine for dry runs "
+        "and testing. For real batches use the v8 solve, and wait for the "
+        "vendor's re-export of the v7 family.",
+    ),
+    (
+        "_v8",
+        "info",
+        "Good solve (intake checks clean). One quirk to know: its Big Blind "
+        "donk-bets the flop about 70% of the time, more than typical "
+        "theory, so lead-into-raiser spots are common in its batches.",
+    ),
+    (
+        "_v6",
+        "warn",
+        "Hard to use: v6 was the proof-of-concept trial solve, kept only "
+        "for history. Not production quality. Use the v8 solve instead.",
+    ),
+)
+
+
+def solve_quality_flag(filename: str) -> tuple[str, str] | None:
+    """``(severity, plain_english)`` for a known-problem solve, else None."""
+    for pattern, severity, text in SOLVE_QUALITY_FLAGS:
+        if pattern in filename:
+            return severity, text
+    return None

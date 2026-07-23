@@ -329,6 +329,37 @@ def _preflop_leg_row_entry(
     return row, record, None, _zero_counters()
 
 
+def leg_is_fully_clean(row: dict[str, Any], record: dict[str, Any] | None) -> bool:
+    """True when one leg is green on every flag source it CAN have.
+
+    The generation-side mirror of the Review page's ``row_is_fully_clean``
+    (July 22 2026, the self-cleaning batch): auto-fixed legs count as clean
+    only when the final audit re-passed the rewrite; a discarded/unchanged
+    rewrite, an unresolved claim flag, or a deterministic soft-validator
+    warning makes the leg unclean. A leg that CANNOT be audited (the
+    preflop-entry fallback has no SOLVER DATA block) passes by default --
+    strictness never blocks on a check that does not exist for the leg.
+    """
+    rec = record or {}
+    if rec.get("validator_warnings"):
+        return False
+    if rec.get("cross_check_issues"):
+        return False
+    revise = rec.get("revise")
+    if isinstance(revise, dict):
+        status = revise.get("status")
+        if status == "clean":
+            return True
+        if status == "fixed" and not revise.get("final_audit_issues"):
+            return True
+        return False
+    # Flag-only mode (or no audit): any recorded claim flag is unclean.
+    claim_cell = str(row.get("claim_check", "") or "").strip()
+    if claim_cell and claim_cell != "[]":
+        return False
+    return not rec.get("claim_check_issues")
+
+
 def _write_meta(meta_path: Path, meta: dict[str, Any]) -> None:
     meta_path.write_text(json.dumps(meta, indent=2, default=str))
 
@@ -384,11 +415,14 @@ def generate_full_hand_batch(
     variety_seed: int | None = None,
     diversify_hands: bool = False,
     balanced_lengths: bool = False,
+    fully_balanced: bool = False,
     length_profile: str = "river_heavy",
     run_claim_checker: bool = False,
     claim_checker_prompt: str | None = None,
     revise_pass: bool = False,
     final_audit: bool = False,
+    strict_clean_hands: bool = False,
+    stop_check: Any = None,
     progress_callback: ProgressCallback = None,
     write_meta: bool = True,
     provenance: dict[str, Any] | None = None,
@@ -431,6 +465,15 @@ def generate_full_hand_batch(
     # usually deleted it -- a silent empty batch. With a band set, assemble a
     # larger candidate pool and scan until enough in-band hands are found.
     band_set = min_hand_difficulty is not None or max_hand_difficulty is not None
+    # 🎛️ Fully balanced (July 2026): supersets balanced_lengths -- the street
+    # quotas stay (the length profile owns the ending-street mix, a product
+    # choice), the candidate pool is PRE-ORDERED by greedy marginal balance
+    # on the cheap axes (final answer verb / situation / strength / hero;
+    # see pipeline/postflop/balanced_hands.py), and a bounded swap pass
+    # evens the hand-difficulty bands after scoring. A difficulty band
+    # filter overrides it (the band IS the selector there).
+    if fully_balanced and not band_set:
+        balanced_lengths = True
     if balanced_lengths and not band_set:
         # Balanced lengths assembles the WHOLE pool: fold-truncated flop
         # enders come from combos that rarely reach deep streets, so they
@@ -551,6 +594,8 @@ def generate_full_hand_batch(
         hands = hands + preflop_ender_hands
 
     length_reserve: dict[str, list] = {}
+    balance_pool: list = []  # 🎛️ full candidate pool, for the balance report
+    committed_hands: list = []  # hands whose rows actually shipped
     diversify_backfill: list = []
     if balanced_lengths and not band_set:
         # Ending-street quotas per the length profile (river-leaning is the
@@ -560,6 +605,17 @@ def generate_full_hand_batch(
         # silently lose its river hand. With a difficulty band the band
         # scan governs instead.
         pool = hands
+        if fully_balanced:
+            # Greedy cheap-axis pre-order (answer verb / situation /
+            # strength / hero). balanced_length_mix keeps input order
+            # WITHIN each street bucket, so the quota picks inherit this
+            # balance -- and so does the reserve (backfill stays balanced).
+            from pipeline.postflop.balanced_hands import (  # noqa: PLC0415
+                order_pool_for_balance,
+            )
+
+            pool = order_pool_for_balance(pool, solve)
+            balance_pool = list(pool)
         hands = balanced_length_mix(
             pool, total_hands,
             weights=LENGTH_PROFILES.get(
@@ -812,6 +868,66 @@ def generate_full_hand_batch(
                 else max(hand_difficulty_observed_max, score)
             )
 
+    # --- 🎛️ fully-balanced difficulty refinement (July 2026) ---------------
+    # The cheap axes were balanced by the pool pre-order; hand DIFFICULTY
+    # needs equity-priced facts, so it is evened here by a BOUNDED swap
+    # pass: while one band (Easy/Medium/Hard) is overfull, score reserve
+    # candidates from the same ending street (quotas untouched) and swap
+    # one in when it lands in an underfull band. Hard budget of 2x
+    # total_hands extra scores, so a difficulty-starved pool can never
+    # stall the batch -- the shortfall ships and the balance_report says so.
+    balance_swaps_made = 0
+    balance_swap_scored = 0
+    if fully_balanced and not band_set and hands:
+        from pipeline.postflop.balanced_hands import (  # noqa: PLC0415
+            hand_difficulty_band,
+        )
+
+        _swap_budget = 2 * total_hands
+        _target = len(hands) / 3.0
+
+        def _band_counts() -> dict[str, int]:
+            counts = {"Easy": 0, "Medium": 0, "Hard": 0}
+            for h in hands:
+                counts[hand_difficulty_band(hand_difficulties[h.hand_id])] += 1
+            return counts
+
+        for _street in ("river", "turn", "flop", "preflop"):
+            _queue = length_reserve.get(_street) or []
+            while _queue and _swap_budget > 0:
+                _counts = _band_counts()
+                _over = max(_counts, key=lambda b: _counts[b])
+                if _counts[_over] <= _target + 0.5:
+                    break  # as even as thirds allow
+                # The overfull band must have a swappable hand ON this
+                # street, or scoring this street's reserve is pointless.
+                _out_idx = next(
+                    (
+                        i
+                        for i in range(len(hands) - 1, -1, -1)
+                        if hands[i].ending_street == _street
+                        and hand_difficulty_band(
+                            hand_difficulties[hands[i].hand_id]
+                        )
+                        == _over
+                    ),
+                    None,
+                )
+                if _out_idx is None:
+                    break
+                _cand = _filter_preflop_legs(_queue.pop(0))
+                if _cand is None:
+                    continue
+                _swap_budget -= 1
+                balance_swap_scored += 1
+                _score = _score_hand(_cand)
+                hand_difficulties[_cand.hand_id] = _score
+                _band = hand_difficulty_band(_score)
+                if _counts.get(_band, 0) >= _target - 0.5:
+                    continue  # lands in a band that is not underfull
+                hands[_out_idx] = _cand
+                balance_swaps_made += 1
+
     in_tokens = out_tokens = 0
 
     def _usage(usage: object) -> None:
@@ -829,12 +945,185 @@ def generate_full_hand_batch(
     done = 0
     hands_dropped_failed_leg = 0
     hands_topped_up = 0
+    hands_regenerated_for_flags = 0
+    hands_dropped_still_flagged = 0
+    hands_shipped_flagged_budget = 0
     showdown_resolutions = 0
     ending_counts: dict[str, int] = {}
     from collections import deque as _deque  # noqa: PLC0415
 
+    output_path = Path(output_path)
+    meta_path: Path | None = (
+        output_path.with_suffix(".meta.json") if write_meta else None
+    )
+    cross_check_problems = 0
+    stopped_early = False
+
+    def _fh_balance_report() -> dict:
+        from pipeline.postflop.balanced_hands import (  # noqa: PLC0415
+            full_hand_balance_report,
+        )
+
+        return full_hand_balance_report(
+            committed_hands, balance_pool, solve,
+            selected_difficulties=hand_difficulties,
+            scored_difficulties=hand_difficulties,
+        )
+
+    def _flush(*, complete: bool) -> None:
+        """INCREMENTAL COMMIT (July 22 2026, ported from PLO after a
+        cancelled strict-clean run lost 200+ legs of finished work): the
+        CSV + meta are (re)written ATOMICALLY after every committed hand,
+        so a cancel/crash keeps every finished hand. complete=False marks
+        an in-flight batch; the final flush flips it True."""
+        csv_tmp = output_path.with_name(output_path.name + ".tmp")
+        # Full-hand batches emit the TRIMMED schema (no pot_odds..easy_hand
+        # diagnostics; hand_difficulty kept) -- see FULL_HAND_CSV_COLUMNS.
+        write_postflop_csv(csv_tmp, rows, columns=FULL_HAND_CSV_COLUMNS)
+        csv_tmp.replace(output_path)
+        if not write_meta:
+            return
+        meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
+        _write_meta(meta_tmp, {
+            "complete": complete,
+            "solve_id": solve.solve_id,
+            "source_reference": solve.source_reference,
+            "mode": "full_hand",
+            "model": model if not use_placeholder else "(dry-run placeholder)",
+            "dry_run": use_placeholder,
+            "provenance": provenance or {},
+            "run_settings": {
+                "total_hands": total_hands, "answer_style": answer_style,
+                "display_in_bb": display_in_bb, "heroes": list(heroes),
+                "include_villain": include_villain, "include_preflop": include_preflop,
+                "min_frequency": min_frequency, "max_frequency": max_frequency,
+                "min_ev_gap_bb": min_ev_gap_bb, "quality_gate": quality_gate,
+                "min_premise_freq": min_premise_freq, "equity_runouts": equity_runouts,
+                "trap_difficulty": trap_difficulty,
+                "razor_difficulty": razor_difficulty,
+                "preflop_leg_pack": pack_source.pack_id if pack_source else None,
+                "prompt_names": prompt_names or {},
+                "min_hand_difficulty": min_hand_difficulty,
+                "max_hand_difficulty": max_hand_difficulty,
+                # The hand-selection shuffle seed (None = legacy fixed order).
+                # Recorded so any batch is reproducible: same solve + same
+                # settings + this seed = the same hands.
+                "variety_seed": variety_seed,
+                "diversify_hands": diversify_hands,
+                "balanced_lengths": balanced_lengths,
+                "fully_balanced": fully_balanced,
+                "length_profile": length_profile,
+                "run_claim_checker": run_claim_checker,
+                "revise_pass": revise_pass,
+                "final_audit": final_audit and revise_pass,
+                "strict_clean_hands": strict_clean_hands,
+            },
+            "counters": {
+                "worthy_spots_available": len(worthy),
+                "low_quality_nodes_skipped": low_quality,
+                "premise_filtered_nodes": premise_skipped,
+                # Seed spots silenced by artifact-strip materiality (their
+                # real strategy mixes an unrealistic jam >= 5%); mid-hand
+                # material legs are additionally skipped inside _build_legs.
+                "artifact_material_spots_skipped": artifact_material_out,
+                "hands_assembled": hands_scanned,
+                "hands_difficulty_filtered": hands_difficulty_filtered,
+                # Band-scan diagnostics (July 2026): the hardest hand seen in
+                # the scan, and whether the scan pool ran out before the
+                # requested count was reached -- the Review page reads these
+                # to explain an empty/short band-filtered batch.
+                "hand_difficulty_observed_max": hand_difficulty_observed_max,
+                "band_scan_capped": band_scan_capped,
+                "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
+                "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
+                "preflop_line_legs_dropped": preflop_line_legs_dropped,
+                "preflop_entry_legs_dropped": preflop_entry_legs_dropped,
+                # July 15 2026 (user's call): a refused preflop leg drops the
+                # WHOLE hand -- no play-through ever starts at the flop. This
+                # counts the hands discarded for it (backfill refills the
+                # batch where a reserve/remainder exists).
+                "hands_dropped_preflop_incoherent": hands_dropped_preflop_incoherent,
+                "hands_dropped_failed_leg": hands_dropped_failed_leg,
+                "hands_topped_up": hands_topped_up,
+                # 🧼 strict-clean lifecycle: hands rebuilt once for surviving
+                # flags, and hands replaced after the rebuild stayed flagged.
+                "hands_regenerated_for_flags": hands_regenerated_for_flags,
+                "hands_dropped_still_flagged": hands_dropped_still_flagged,
+                # Budget-spent ships: hands shipped WITH flags after the
+                # strict-clean circuit breaker tripped (never silent).
+                "hands_shipped_flagged_budget": hands_shipped_flagged_budget,
+                "showdown_resolutions": showdown_resolutions,
+                "cross_check_problems": cross_check_problems,
+                # True when a graceful stop ended the batch early (the
+                # shortfall is intentional; everything shown is complete).
+                "stopped_early": stopped_early,
+                # Balanced-lengths accounting: the ACTUAL ending-street mix
+                # of the committed hands (quotas back-fill when a bucket
+                # runs short, so this is the ground truth, not the target),
+                # and how many preflop-ender candidates the pack yielded.
+                "hands_by_ending": ending_counts,
+                "preflop_ender_candidates": len(preflop_ender_hands),
+                # 🎛️ fully-balanced diagnostics: reserve hands scored by the
+                # bounded difficulty swap pass, and swaps actually made.
+                "balance_swap_scored": balance_swap_scored,
+                "balance_swaps_made": balance_swaps_made,
+                "hands_written": len(hand_index),
+                "questions_written": len(rows),
+                # Layer-7 + soft-validator tallies (postflop legs only; 0 unless
+                # the opt-in passes ran). Keys match the standalone batch.
+                "soft_flagged_rows": agg["soft_flagged"],
+                "claim_flagged_rows": agg["claim_flagged"],
+                "revise_flagged": agg["revise_flagged"],
+                "revise_fixed": agg["revise_fixed"],
+                "revise_discarded": agg["revise_discarded"],
+                "revise_unchanged": agg["revise_unchanged"],
+            },
+            "hands": hand_index,
+            "questions": records,
+            "failures": failures,
+            # 🎛️ fully-balanced only: achieved (the COMMITTED hands) vs the
+            # examined pools -- the honest-shortfall record the done panel
+            # and Review read. Absent otherwise.
+            **(
+                {"balance_report": _fh_balance_report()}
+                if fully_balanced and complete
+                else {}
+            ),
+        })
+        meta_tmp.replace(meta_path)
+
     pending = _deque(hands)
+    # 🧼 strict-clean bookkeeping: builds already spent per hand_id, so a
+    # flagged hand is rebuilt at most ONCE before being replaced.
+    strict_attempts: dict[str, int] = {}
+
+    def _top_up_replacement(ending_street: str) -> bool:
+        """Pull a same-ending replacement hand from the reserve into the
+        queue (then any street, deepest first) -- shared by the failed-leg
+        drop and the strict-clean drop, so both keep the batch full.
+        Returns False when the reserve is exhausted (nothing to pull)."""
+        nonlocal total_legs, hands_topped_up
+        for street in (ending_street, "river", "turn", "flop", "preflop"):
+            queue = length_reserve.get(street) or []
+            while queue:
+                cand = _filter_preflop_legs(queue.pop(0))
+                # None = the candidate's own preflop leg was refused
+                # (July 15: whole-hand drop) -- keep pulling.
+                if cand is not None and cand.legs:
+                    hand_difficulties[cand.hand_id] = _score_hand(cand)
+                    pending.append(cand)
+                    total_legs += cand.total
+                    hands_topped_up += 1
+                    return True
+        return False
     while pending:
+        # Graceful stop (July 22 2026): checked BETWEEN hands, never
+        # mid-hand -- "finish the current hand, keep everything committed".
+        # The incremental flush means everything committed is already on
+        # disk as a clean batch; the final flush marks it complete.
+        if stop_check is not None and stop_check():
+            stopped_early = True
+            break
         hand = pending.popleft()
         # WHOLE-HAND ATOMICITY (July 2026): a play-through with a missing
         # street is a broken story (the app would show a hand starting at
@@ -955,27 +1244,56 @@ def generate_full_hand_batch(
         if hand_failed:
             hands_dropped_failed_leg += 1
             # TOP-UP (July 2026): whole-hand atomicity just cost the batch a
-            # hand -- pull a SAME-ENDING replacement from the reserve (then
-            # any street, deepest first) so a 2-hand batch can't silently
-            # lose its river hand. Replacements pass the same preflop-leg
-            # gates and get scored like everything else.
-            for street in (hand.ending_street, "river", "turn", "flop",
-                           "preflop"):
-                queue = length_reserve.get(street) or []
-                while queue:
-                    cand = _filter_preflop_legs(queue.pop(0))
-                    # None = the candidate's own preflop leg was refused
-                    # (July 15: whole-hand drop) -- keep pulling.
-                    if cand is not None and cand.legs:
-                        hand_difficulties[cand.hand_id] = _score_hand(cand)
-                        pending.append(cand)
-                        total_legs += cand.total
-                        hands_topped_up += 1
-                        break
-                else:
-                    continue
-                break
+            # hand -- pull a SAME-ENDING replacement from the reserve so a
+            # 2-hand batch can't silently lose its river hand. Replacements
+            # pass the same preflop-leg gates and get scored like everything
+            # else.
+            _top_up_replacement(hand.ending_street)
             continue
+        # 🧼 STRICT-CLEAN HANDS (July 22 2026, phase 2 of removing manual
+        # review): a hand whose ANY leg still carries a flag after the
+        # Layer-7 auto-fix is not shippable whole -- and partial hands are
+        # useless. First offense: rebuild the WHOLE hand once (fresh LLM
+        # calls; the deterministic facts are cached, so only prose + audit
+        # rerun). Second offense: drop it and pull a replacement, exactly
+        # like a failed leg. Result: every shipped hand is fully clean, so
+        # the Review page's "Keep all fully-clean hands" covers the entire
+        # batch in one click.
+        if strict_clean_hands and hand_rows:
+            _unclean = [
+                str(r.get("No", "")) for r, rec in zip(hand_rows, hand_recs)
+                if not leg_is_fully_clean(r, rec)
+            ]
+            # CIRCUIT BREAKER (July 22 2026, from the first live run): with a
+            # flag-prone solve (e.g. the inconsistent v7 exports) the
+            # rebuild->drop->replace loop can churn through the whole reserve
+            # -- a 4-hand batch was observed grinding 180+ legs. Budgets:
+            # at most ``total_hands`` rebuilds and ``3 x total_hands`` total
+            # churn events per batch; once the budget is spent OR the reserve
+            # is exhausted, a flagged hand SHIPS FLAGGED (honest -- Review
+            # shows the flags) instead of chasing a clean one forever.
+            # ``hands_shipped_flagged_budget`` counts those ships.
+            if _unclean:
+                _budget_spent = (
+                    hands_regenerated_for_flags + hands_dropped_still_flagged
+                    >= 3 * total_hands
+                )
+                if (
+                    not _budget_spent
+                    and strict_attempts.get(hand.hand_id, 0) < 1
+                    and hands_regenerated_for_flags < total_hands
+                ):
+                    strict_attempts[hand.hand_id] = 1
+                    hands_regenerated_for_flags += 1
+                    total_legs += hand.total  # the rebuild's progress share
+                    pending.appendleft(hand)  # rebuild NOW, fresh prose
+                    continue
+                if not _budget_spent and _top_up_replacement(hand.ending_street):
+                    hands_dropped_still_flagged += 1
+                    continue
+                # Budget spent or nothing left to replace with: ship it,
+                # flags visible on Review.
+                hands_shipped_flagged_budget += 1
         if hand_rows:
             # Showdown resolution (July 2026): the hand's FINAL leg gets the
             # closing sequence (hero's correct action, an invented villain
@@ -1035,6 +1353,7 @@ def generate_full_hand_batch(
             ending_counts[hand.ending_street] = (
                 ending_counts.get(hand.ending_street, 0) + 1
             )
+            committed_hands.append(hand)
             rows.extend(hand_rows)
             records.extend(hand_recs)
             leg_numbers = list(range(start + 1, start + len(hand_rows) + 1))
@@ -1044,6 +1363,9 @@ def generate_full_hand_batch(
                 "row_numbers": leg_numbers, "legs": hand.total,
                 "hand_difficulty": hd,
             })
+            # INCREMENTAL COMMIT: this hand is on disk from here on; a
+            # cancel or crash loses at most the hand in flight.
+            _flush(complete=False)
 
     # Deterministic cross-check (July 2026, ported from preflop): re-read
     # every row AS WRITTEN and verify first-principles facts (positions,
@@ -1056,95 +1378,7 @@ def generate_full_hand_batch(
         records[idx]["cross_check_issues"] = cc_issues
         cross_check_problems += len(cc_issues)
 
-    output_path = Path(output_path)
-    # Full-hand batches emit the TRIMMED schema (no pot_odds..easy_hand
-    # diagnostics; hand_difficulty kept) -- see FULL_HAND_CSV_COLUMNS.
-    write_postflop_csv(output_path, rows, columns=FULL_HAND_CSV_COLUMNS)
-
-    meta_path: Path | None = None
-    if write_meta:
-        meta_path = output_path.with_suffix(".meta.json")
-        _write_meta(meta_path, {
-            "solve_id": solve.solve_id,
-            "source_reference": solve.source_reference,
-            "mode": "full_hand",
-            "model": model if not use_placeholder else "(dry-run placeholder)",
-            "dry_run": use_placeholder,
-            "provenance": provenance or {},
-            "run_settings": {
-                "total_hands": total_hands, "answer_style": answer_style,
-                "display_in_bb": display_in_bb, "heroes": list(heroes),
-                "include_villain": include_villain, "include_preflop": include_preflop,
-                "min_frequency": min_frequency, "max_frequency": max_frequency,
-                "min_ev_gap_bb": min_ev_gap_bb, "quality_gate": quality_gate,
-                "min_premise_freq": min_premise_freq, "equity_runouts": equity_runouts,
-                "trap_difficulty": trap_difficulty,
-                "razor_difficulty": razor_difficulty,
-                "preflop_leg_pack": pack_source.pack_id if pack_source else None,
-                "prompt_names": prompt_names or {},
-                "min_hand_difficulty": min_hand_difficulty,
-                "max_hand_difficulty": max_hand_difficulty,
-                # The hand-selection shuffle seed (None = legacy fixed order).
-                # Recorded so any batch is reproducible: same solve + same
-                # settings + this seed = the same hands.
-                "variety_seed": variety_seed,
-                "diversify_hands": diversify_hands,
-                "balanced_lengths": balanced_lengths,
-                "length_profile": length_profile,
-                "run_claim_checker": run_claim_checker,
-                "revise_pass": revise_pass,
-                "final_audit": final_audit and revise_pass,
-            },
-            "counters": {
-                "worthy_spots_available": len(worthy),
-                "low_quality_nodes_skipped": low_quality,
-                "premise_filtered_nodes": premise_skipped,
-                # Seed spots silenced by artifact-strip materiality (their
-                # real strategy mixes an unrealistic jam >= 5%); mid-hand
-                # material legs are additionally skipped inside _build_legs.
-                "artifact_material_spots_skipped": artifact_material_out,
-                "hands_assembled": hands_scanned,
-                "hands_difficulty_filtered": hands_difficulty_filtered,
-                # Band-scan diagnostics (July 2026): the hardest hand seen in
-                # the scan, and whether the scan pool ran out before the
-                # requested count was reached -- the Review page reads these
-                # to explain an empty/short band-filtered batch.
-                "hand_difficulty_observed_max": hand_difficulty_observed_max,
-                "band_scan_capped": band_scan_capped,
-                "preflop_leg_pack_used": agg["preflop_leg_pack_used"],
-                "preflop_leg_entry_fallback": agg["preflop_leg_entry_fallback"],
-                "preflop_line_legs_dropped": preflop_line_legs_dropped,
-                "preflop_entry_legs_dropped": preflop_entry_legs_dropped,
-                # July 15 2026 (user's call): a refused preflop leg drops the
-                # WHOLE hand -- no play-through ever starts at the flop. This
-                # counts the hands discarded for it (backfill refills the
-                # batch where a reserve/remainder exists).
-                "hands_dropped_preflop_incoherent": hands_dropped_preflop_incoherent,
-                "hands_dropped_failed_leg": hands_dropped_failed_leg,
-                "hands_topped_up": hands_topped_up,
-                "showdown_resolutions": showdown_resolutions,
-                "cross_check_problems": cross_check_problems,
-                # Balanced-lengths accounting: the ACTUAL ending-street mix
-                # of the committed hands (quotas back-fill when a bucket
-                # runs short, so this is the ground truth, not the target),
-                # and how many preflop-ender candidates the pack yielded.
-                "hands_by_ending": ending_counts,
-                "preflop_ender_candidates": len(preflop_ender_hands),
-                "hands_written": len(hand_index),
-                "questions_written": len(rows),
-                # Layer-7 + soft-validator tallies (postflop legs only; 0 unless
-                # the opt-in passes ran). Keys match the standalone batch.
-                "soft_flagged_rows": agg["soft_flagged"],
-                "claim_flagged_rows": agg["claim_flagged"],
-                "revise_flagged": agg["revise_flagged"],
-                "revise_fixed": agg["revise_fixed"],
-                "revise_discarded": agg["revise_discarded"],
-                "revise_unchanged": agg["revise_unchanged"],
-            },
-            "hands": hand_index,
-            "questions": records,
-            "failures": failures,
-        })
+    _flush(complete=True)
 
     return PostflopBatchResult(
         output_path=output_path,

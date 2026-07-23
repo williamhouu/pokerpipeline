@@ -346,7 +346,12 @@ def _villain_copy(seat_ref: str, role: str, buckets: list[_Bucket]) -> str:
     if not buckets:
         return f"{seat_ref}'s range could not be broken down by shape."
     role_word = _ROLE_WORD.get(role, "continuing")
-    return f"{seat_ref}'s {role_word} range is {_shape_phrase(buckets, ', ')}."
+    # "is made up of" (July 22 2026, user wording ask): plainer than the bare
+    # "is 37% ...", which read as if the range WERE one shape.
+    return (
+        f"{seat_ref}'s {role_word} range is made up of "
+        f"{_shape_phrase(buckets, ', ')}."
+    )
 
 
 def _bucket_json(b: _Bucket) -> dict[str, object]:

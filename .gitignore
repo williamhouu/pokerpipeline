@@ -30,13 +30,15 @@ plo20_ranges/
 
 # PLO MTT bb-ante 6-max packs (July 2026) — the "PLO MTT (BB ANTE) 3.5x
 # Open" MonkerViewer export, one folder per depth (~27GB for the six
-# tournament-core depths; 50/75/100bb stay unextracted in ~/Downloads).
+# tournament-core depths + the 15GB 75bb deep depth added July 21 PM;
+# 50bb and 100bb stay unextracted in ~/Downloads).
 plo_mtt10_ranges/
 plo_mtt15_ranges/
 plo_mtt20_ranges/
 plo_mtt25_ranges/
 plo_mtt30_ranges/
 plo_mtt40_ranges/
+plo_mtt75_ranges/
 
 # NLHE 9-max Monker pack (June 2026) — MonkerViewer export, 93k .rng files
 # (~428MB extracted), local-only like the other packs. The canonical full

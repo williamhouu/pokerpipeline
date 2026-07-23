@@ -302,7 +302,7 @@ def test_gto_spectrum_options_never_carry_a_bet_size() -> None:
 
     Sweep EVERY node of the fixture solve under style="gto": any option with
     an Always/Mostly prefix must contain no digits (no "53%", no "8.5bb").
-    Plain-label fallbacks (3+ live verbs) and basic style keep their sizes.
+    Plain-label fallbacks (3+ live verbs) and the sizing style keep sizes.
     """
     solve = btn_vs_bb_srp_2cJs7s()
     checked = 0
@@ -321,15 +321,25 @@ def test_gto_spectrum_options_never_carry_a_bet_size() -> None:
 
 def test_options_styles_basic_gto_auto() -> None:
     spot = _spot("flop_oop_lead", "7h6h")  # a clearly-dominant (>=80%) 2-action spot
-    # basic = plain labels.
+    # basic = VERB-ONLY (July 22 2026 user rule: basic NEVER shows a bet
+    # size -- Fold / Check / Call / Bet / Raise / All-in only).
     basic_opts, basic_correct = build_options(spot, style="basic")
-    assert basic_opts == ["Check", "Bet 33%"]
-    assert basic_correct == spot.dominant_action
+    assert basic_opts == ["Check", "Bet"]
+    for opt in basic_opts:
+        assert not any(ch.isdigit() for ch in opt)
+    # sizing = the old plain labels WITH sizes, as its own style.
+    sizing_opts, sizing_correct = build_options(spot, style="sizing")
+    assert sizing_opts == ["Check", "Bet 33%"]
+    assert sizing_correct == spot.dominant_action
     # auto picks basic here (dominant >= 80%), not the spectrum.
     assert spot.dominant_frequency >= 0.80  # noqa: PLR2004
     assert build_options(spot, style="auto") == (basic_opts, basic_correct)
     # gto forces the spectrum.
     assert build_options(spot, style="gto")[0][0] == "Always Check"
+    # blend resolves deterministically to basic OR sizing, same pick per spot.
+    blend = build_options(spot, style="blend")
+    assert blend in ((basic_opts, basic_correct), (sizing_opts, sizing_correct))
+    assert build_options(spot, style="blend") == blend
     # unknown style raises.
     import pytest as _pytest
 
@@ -2162,3 +2172,30 @@ def test_validate_no_list_formatting_postflop() -> None:
         gen("Bet 75% for value. Worse hands call, and 5-4 suited folds out."),
         facts,
     ).is_valid
+
+
+def test_solve_quality_flags_name_the_difficult_files() -> None:
+    """July 22 2026 (user ask): the picker must flag known-problem solves
+    with a plain-English reason. The v7 family and the v6 trial are warns;
+    v8 is an informational note; unknown files carry no flag."""
+    from pipeline.postflop.adapters.sqlite_db import solve_quality_flag
+
+    sev, text = solve_quality_flag("BTN_vs_BB_SRP_200bb_Kd7s3s_v7.db")
+    assert sev == "warn"
+    assert "inconsistent" in text and "v8" in text
+    sev8, text8 = solve_quality_flag("BTN_vs_BB_SRP_100bb_QsJd9s_v8.db")
+    assert sev8 == "info"
+    assert "donk" in text8
+    assert solve_quality_flag("BTN_vs_BB_SRP_100bb_trial_v6.db")[0] == "warn"
+    assert solve_quality_flag("Fresh_export_v9.db") is None
+
+
+def test_context_rake_strips_internal_chip_units() -> None:
+    """July 22 2026 (user ask): the vendor metadata's "(300 chips)" is the
+    same cap in the solver's internal currency and means nothing to a
+    reader -- the Context and the picker both show the bb figure only."""
+    from pipeline.postflop.action_history import display_rake
+
+    assert display_rake("10% cap 3bb (300 chips)") == "10% cap 3bb"
+    assert display_rake("8% cap 2bb") == "8% cap 2bb"
+    assert display_rake("none") == "none"

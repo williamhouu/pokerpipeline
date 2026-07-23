@@ -433,13 +433,21 @@ def build_plo_row(
         })
     # Flush ceiling + dead weight (July 16 2026, panel ideas 1+2): the
     # 4-card structural facts, one row per suit hero can flush in (or the
-    # "no flush possible" row) plus at most one redundant-card row. Pure
+    # "NA" no-flush row) plus at most one redundant-card row. Pure
     # functions of hero's cards; the notes reuse the exact describe_*
     # sentences the SOLVER DATA block ships, so panel and prose can never
     # disagree. Flush ceiling always emits >= 1 entry, so PLO stat_notes
     # is now never empty.
     stat_entries.extend(flush_ceiling_stat_entries(facts.spot.hero_cards))
     stat_entries.extend(dead_weight_stat_entries(facts.spot.hero_cards))
+
+    # Venue-neutral packs (July 22 2026, team ask): the short-stack 12bb/20bb
+    # cash packs carry NO Live/Online framing -- stacks-only Context and a
+    # blank "Live or Online" column. Derived from the pack spec so the batch
+    # layer and the re-verifiers need no extra threading.
+    venue_neutral = bool(
+        pack is not None and getattr(pack.spec, "venue_neutral", False)
+    )
 
     row = {
         "No": str(number),
@@ -458,6 +466,7 @@ def build_plo_row(
             live_or_online=live_or_online,
             table_size=facts.spot.node.table_size,
             ante_bb=ante_bb,
+            venue_neutral=venue_neutral,
         ),
         "Question": question_text,
         "Question Type": "Hand scenario question",  # sentence case, no period (July 2026)
@@ -478,7 +487,7 @@ def build_plo_row(
         # 9-max Context still omits the venue (separate team rule); this only
         # sets the CSV's Live/Online column. 6-max keeps its resolved venue.
         "Live or Online": (
-            "" if game_format == "tournament"
+            "" if game_format == "tournament" or venue_neutral
             else ("Live" if facts.spot.node.table_size == 9 else live_or_online)
         ),
         "Relative Position": hero_relative_position(facts),

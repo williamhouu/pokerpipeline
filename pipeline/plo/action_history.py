@@ -124,6 +124,11 @@ def resolve_pot_limit(
     high_bet = _BB
     pot = _SB_BB + _BB + ante_bb
     raise_level = 0
+    # The min-raise rule needs the size of the LAST bet/raise increment: a
+    # min-raise is "match the high bet, then raise by at least that much
+    # again". Preflop the BB post is the opening bet, so the first-in
+    # min-raise goes to exactly 2bb.
+    last_increment = _BB
     out: list[ResolvedAction] = []
 
     def _allin_total(seat: str) -> float:
@@ -143,13 +148,27 @@ def resolve_pot_limit(
             total = _allin_total(seat)
             pot += total - prev
             committed[seat] = total
-            high_bet = max(high_bet, total)
+            if total > high_bet:
+                last_increment = total - high_bet
+                high_bet = total
             out.append(ResolvedAction(seat, "all-in", total))
         else:  # RAISE / MIN_RAISE
             raise_level += 1
             to_call = high_bet - prev
-            pct = (action.raise_pct or 100) / 100.0
-            raise_to = high_bet + pct * (pot + to_call)
+            if action.action is PloActionType.MIN_RAISE:
+                # A REAL min-raise: high bet + the last raise increment.
+                # July 22 2026 fact-correctness fix: this used to fall into
+                # the pot-raise arm below (raise_pct None -> "or 100"), so a
+                # 2bb min-raise open rendered as a 3.5bb pot open and every
+                # size after it compounded the error (a pot 3-bet showed
+                # 12bb where the real line is 7.5bb) -- while the EV panel,
+                # reading the solver file, showed the truth (fold EV -2bb).
+                # Caught by the user comparing the two, July 22.
+                raise_to = high_bet + last_increment
+            else:
+                pct = (action.raise_pct or 100) / 100.0
+                raise_to = high_bet + pct * (pot + to_call)
+            last_increment = raise_to - high_bet
             pot += raise_to - prev
             committed[seat] = raise_to
             high_bet = raise_to
@@ -157,6 +176,87 @@ def resolve_pot_limit(
                 ResolvedAction(seat, _RAISE_LEVEL.get(raise_level, "raise"), raise_to)
             )
     return tuple(out), pot
+
+
+def resolved_commitment_bb(
+    history: tuple[PloAction, ...],
+    seat: str,
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
+) -> float:
+    """How many bb ``seat`` has voluntarily committed (blind posts included,
+    the dead ante excluded) after ``history`` -- the same walk as
+    :func:`resolve_pot_limit`, exposed for the fold-EV consistency guard."""
+    committed: dict[str, float] = {"SB": _SB_BB, "BB": _BB}
+    high_bet = _BB
+    pot = _SB_BB + _BB + ante_bb
+    last_increment = _BB
+    for action in history:
+        actor = action.seat
+        prev = committed.get(actor, 0.0)
+        if action.action is PloActionType.FOLD:
+            continue
+        if action.action is PloActionType.CALL:
+            pot += high_bet - prev
+            committed[actor] = high_bet
+        elif action.action is PloActionType.ALL_IN:
+            total = stack_bb - ante_bb if actor == "BB" else stack_bb
+            pot += total - prev
+            committed[actor] = total
+            if total > high_bet:
+                last_increment = total - high_bet
+                high_bet = total
+        else:  # RAISE / MIN_RAISE
+            to_call = high_bet - prev
+            if action.action is PloActionType.MIN_RAISE:
+                raise_to = high_bet + last_increment
+            else:
+                raise_to = high_bet + ((action.raise_pct or 100) / 100.0) * (
+                    pot + to_call
+                )
+            last_increment = raise_to - high_bet
+            pot += raise_to - prev
+            committed[actor] = raise_to
+            high_bet = raise_to
+    return committed.get(seat, 0.0)
+
+
+def fold_ev_consistency_issue(
+    spot: object,
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
+    tolerance_bb: float = 0.05,
+) -> str | None:
+    """The solver file's own fold EV must equal MINUS what hero invested.
+
+    The size-resolution tripwire (July 22 2026, born from the min-raise bug:
+    a 2bb open rendered as 3.5bb while the file's fold EV said -2.0bb).
+    Folding surrenders exactly the chips voluntarily committed (blinds
+    included; the MTT ante is dead before the EV baseline and excluded), so
+    for EVERY hand the pack's fold EV is -(hero's invested amount). If our
+    resolved sizes ever disagree with that, the display arithmetic is wrong
+    for this line -- for ANY pack, ANY token type, automatically. Returns a
+    plain-English issue string, or None when consistent / no fold on the
+    menu. ``spot`` needs ``ev_by_action`` (sb units) and ``node``.
+    """
+    fold_ev_sb = getattr(spot, "ev_by_action", {}).get("Fold")
+    if fold_ev_sb is None:
+        return None
+    node = spot.node
+    invested = resolved_commitment_bb(
+        node.history_before, node.actor, stack_bb=stack_bb, ante_bb=ante_bb
+    )
+    fold_ev_bb = fold_ev_sb / 2.0
+    if abs(fold_ev_bb + invested) > tolerance_bb:
+        return (
+            f"fold-EV consistency: the solver file says folding costs "
+            f"{fold_ev_bb:+.2f}bb, but the resolved action sizes say hero "
+            f"invested {invested:.2f}bb -- a displayed bet size on this "
+            f"line is wrong (size-resolution bug, not a solver issue)."
+        )
+    return None
 
 
 # --- formatting ------------------------------------------------------------
@@ -262,6 +362,7 @@ def format_plo_context(
     live_or_online: str = "Online",
     table_size: int = 6,
     ante_bb: float = 0.0,
+    venue_neutral: bool = False,
 ) -> str:
     """The context line: stakes + effective stacks.
 
@@ -271,15 +372,19 @@ def format_plo_context(
 
     9-max pack questions (July 2026, team ask): the Context carries ONLY the
     effective stack size -- no stakes, venue, or game-type framing. The
-    6-max format is unchanged.
+    6-max format is unchanged. ``venue_neutral`` (July 22 2026, team ask)
+    gives a 6-max cash pack the same stacks-only treatment -- set for the
+    short-stack 12bb/20bb packs, whose venue is deliberately unspecified.
     """
-    if table_size == 9:  # noqa: PLR2004
+    if table_size == 9 or (venue_neutral and game_format == "cash"):  # noqa: PLR2004
         if display_in_bb or game_format != "cash":
             return f"{_fmt_num(stack_bb)}bb effective stacks."
         return f"${_fmt_num(stack_bb * stakes_bb_dollars)} effective stacks."
     if game_format != "cash":
         ante = f" Big blind ante {_fmt_num(ante_bb)}bb." if ante_bb else ""
-        return f"PLO tournament. {_fmt_num(stack_bb)}bb effective stacks.{ante}"
+        # No game-type prefix (July 2026, team ask): the Holdem and PLO apps
+        # are separate products, so "PLO" is dead weight in the Context line.
+        return f"Tournament. {_fmt_num(stack_bb)}bb effective stacks.{ante}"
     venue = live_or_online.capitalize()
     if display_in_bb:
         return f"{venue} PLO cash. {_fmt_num(stack_bb)}bb effective stacks."

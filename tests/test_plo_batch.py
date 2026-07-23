@@ -555,3 +555,63 @@ def test_crash_mid_batch_leaves_committed_rows_on_disk(tmp_path):
     meta = json.loads(out.with_suffix(".meta.json").read_text())
     assert meta["complete"] is False
     assert meta["counters"]["questions_written"] == 1
+
+
+def test_balanced_mode_writes_balance_report_and_stays_deterministic(tmp_path):
+    """🎛️ Fully balanced (July 2026): the batch generates, records
+    run_settings.balanced, and writes a meta balance_report whose achieved
+    counts sum to the questions written. Same seed -> byte-identical output
+    (the pre-pass is part of the deterministic draw)."""
+    import json
+
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "balanced.csv"
+    result = generate_plo_batch(
+        pack, output_path=out, total_questions=4, seed=0,
+        compute_equity=False, balanced=True,
+    )
+    assert result.questions_written == 4  # noqa: PLR2004
+    meta = json.loads(result.meta_path.read_text())
+    assert meta["run_settings"]["balanced"] is True
+    report = meta["balance_report"]
+    assert report["selected"] == 4  # noqa: PLR2004
+    assert report["pool"] >= 4  # noqa: PLR2004
+    for axis in report["axes"]:
+        assert sum(v["achieved"] for v in axis["values"]) == 4  # noqa: PLR2004
+    # Determinism: a rerun with the same seed is byte-identical.
+    first_csv = out.read_bytes()
+    generate_plo_batch(
+        pack, output_path=out, total_questions=4, seed=0,
+        compute_equity=False, balanced=True,
+    )
+    assert out.read_bytes() == first_csv
+
+
+def test_balanced_mode_balances_the_answer_verb(tmp_path):
+    """USER RULE: fold / call / raise answers must spread. Two nodes whose
+    worthy answers differ (call-dominant vs fold-dominant) -> a balanced
+    4-question batch takes 2 of each, never 4 of one."""
+    import csv as _csv
+
+    root = tmp_path / "pack2"
+    root.mkdir()
+    # Node A (HJ vs open): call 70 / 3-bet 30 -> dominant Call.
+    _write_rng(root / "40100.0.rng", 0.0)
+    _write_rng(root / "40100.1.rng", 0.7)
+    _write_rng(root / "40100.40100.rng", 0.3)
+    # Node B (CO vs open, next seat on): fold 70 / call 30 -> dominant Fold.
+    _write_rng(root / "40100.0.0.rng", 0.7)
+    _write_rng(root / "40100.0.1.rng", 0.3)
+    _write_rng(root / "40100.0.40100.rng", 0.0)
+    pack = PloPack(root=root, label="test2")
+
+    out = tmp_path / "verbs.csv"
+    generate_plo_batch(
+        pack, output_path=out, total_questions=4, seed=0,
+        compute_equity=False, balanced=True,
+    )
+    with out.open(encoding="utf-8") as handle:
+        answers = [r["Correct Answer"] for r in _csv.DictReader(handle)]
+    folds = sum("fold" in a.lower() for a in answers)
+    calls = sum("call" in a.lower() for a in answers)
+    assert folds == 2 and calls == 2, answers

@@ -188,3 +188,25 @@ def test_read_csv_cache_respects_mtime(tmp_path) -> None:
         "check that the mtime parameter has NOT been renamed with a leading "
         "underscore (st.cache_data skips underscore-prefixed params)"
     )
+
+
+def test_blur_save_replaced_the_save_button():
+    """REGRESSION PIN (July 22 2026, user ask): explanation + difficulty
+    edits save when the user clicks OUT of the box (live widgets with a
+    compare-and-write, the PLO page's proven pattern) -- there is no Save
+    button to forget. The nav/grade controls stay form submits, and
+    _flush_review_edit still runs in the handlers as belt-and-suspenders.
+    If a refactor reintroduces an in-form editor with a Save button, edits
+    are one missed click from vanishing again."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parent.parent / "admin_panel" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "Save edits" not in src
+    assert "_save_clicked" not in src
+    # Both cards blur-save through the shared pure writers.
+    assert src.count("review.update_explanation(csv_path, no, _live_expl)") >= 2
+    assert src.count("review.update_difficulty(csv_path, no, str(int(_live_diff)))") >= 2
+    # The belt-and-suspenders flush survives on both pages.
+    assert src.count("_flush_review_edit(csv_path, no") >= 2

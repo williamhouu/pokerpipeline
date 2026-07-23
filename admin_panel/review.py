@@ -105,7 +105,6 @@ def save_review(
     with path.open("w", encoding="utf-8") as fh:
         json.dump(reviews, fh, indent=2, ensure_ascii=False)
 
-
 # --- one-click "approve all fully-clean" (bulk approve) --------------------
 # A question is "fully clean" when it is GREEN on EVERY flag source: the
 # Layer-7 claim checker actually ran and came back empty, AND no deterministic
@@ -193,6 +192,64 @@ def fully_clean_ungraded_nos(
         if row_is_fully_clean(str(row.get("claim_check", "")), qrec_for(row)):
             out.append(no)
     return out
+
+
+def fully_clean_hand_ids(
+    rows: Iterable[dict],
+    reviews: dict[str, dict[str, str]],
+    qrec_for: Callable[[dict], dict | None],
+) -> dict[str, list[str]]:
+    """``{hand_id: [leg Nos]}`` for hands eligible for one-click Keep.
+
+    The HAND-level analogue of :func:`fully_clean_ungraded_nos` (July 2026,
+    the user's review-time ask): a full play-through qualifies only when
+    EVERY leg is :func:`row_is_fully_clean` AND no leg carries an existing
+    grade -- so "Keep all clean hands" can only add whole-hand approvals,
+    never overturn a human and never ship a partial hand. Standalone rows
+    (blank ``hand_id``) are excluded; the question-level sweep covers them.
+    """
+    by_hand: dict[str, list[dict]] = {}
+    for row in rows:
+        hand_id = str(row.get("hand_id", "") or "").strip()
+        if hand_id and hand_id.lower() != "nan":  # pandas blank tolerance
+            by_hand.setdefault(hand_id, []).append(row)
+    out: dict[str, list[str]] = {}
+    for hand_id, legs in by_hand.items():
+        nos = [str(r.get("No", "")) for r in legs]
+        if any(n in reviews for n in nos):
+            continue  # a human already touched this hand
+        if all(
+            row_is_fully_clean(str(r.get("claim_check", "")), qrec_for(r))
+            for r in legs
+        ):
+            out[hand_id] = nos
+    return out
+
+
+def hand_unclean_counts(
+    rows: Iterable[dict],
+    qrec_for: Callable[[dict], dict | None],
+) -> dict[str, int]:
+    """``{hand_id: legs with an outstanding flag}`` (0 = hand is all clear).
+
+    Grade-INDEPENDENT cleanliness per :func:`row_is_fully_clean`, so the
+    grouped Review can badge every hand ✅ all clear / ⚠️ N flagged at a
+    glance (July 22 2026, user ask) -- no need to open a hand to learn
+    whether its questions all passed the audit. Blank / pandas-nan
+    ``hand_id`` rows (standalone questions) are ignored.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        hand_id = str(row.get("hand_id", "") or "").strip()
+        if not hand_id or hand_id.lower() == "nan":
+            continue
+        claim_cell = str(row.get("claim_check", "") or "").strip()
+        if claim_cell.lower() == "nan":
+            claim_cell = ""
+        counts.setdefault(hand_id, 0)
+        if not row_is_fully_clean(claim_cell, qrec_for(row)):
+            counts[hand_id] += 1
+    return counts
 
 
 def bulk_approve(
@@ -370,6 +427,26 @@ def summarize(
         needs_review=needs_review,
         rejected=rejected,
     )
+
+
+def apply_grade_choice(csv_path: Path, no: str | int, choice: str) -> None:
+    """Write one grade choice from a UI control: ``"ungraded"`` clears the
+    entry, any other status upserts it.
+
+    The ONE write path for state-holding grade widgets (the PLO radio's
+    ``on_change``), extracted pure so it is browserless-testable. INVARIANT
+    (July 21 2026 root-cause fix): a state-holding grade widget must ONLY
+    write through its own change callback -- never by comparing its
+    remembered value against the sidecar on a rerun. The old comparison
+    treated STALE widget memory as a user action, so any out-of-band grade
+    change (Clear all approved, un-approve, bulk approve) was "corrected"
+    back, one question per rerun -- the approved pool that could never be
+    cleared.
+    """
+    if choice == "ungraded":
+        remove_review(csv_path, no)
+    else:
+        save_review(csv_path, no, choice, "")
 
 
 def remove_review(csv_path: Path, no: str | int) -> None:
@@ -1100,6 +1177,7 @@ __all__ = [
     "meta_question_for",
     "range_player_count",
     "remove_question",
+    "apply_grade_choice",
     "remove_review",
     "review_sidecar_path",
     "save_review",

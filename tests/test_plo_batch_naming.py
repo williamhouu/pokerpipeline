@@ -166,3 +166,26 @@ def test_dedupe_path_respects_reserved_names(tmp_path):
         dedupe_path(tmp_path, "stem", taken={"stem (2).csv"}).name
         == "stem (3).csv"
     )
+
+
+def test_auto_name_carries_the_balanced_token():
+    from datetime import datetime
+
+    from admin_panel.batch_naming import auto_plo_batch_name
+
+    stem = auto_plo_batch_name(
+        now=datetime(2026, 7, 21, 18, 5, 9),
+        table_size=9,
+        difficulty_label="Mixed",
+        count=24,
+        balanced=True,
+    )
+    assert stem == "18.05.09 · 9max · Mixed · Balanced · 24q"
+    # And absent when off (the historical shape is unchanged).
+    stem_off = auto_plo_batch_name(
+        now=datetime(2026, 7, 21, 18, 5, 9),
+        table_size=9,
+        difficulty_label="Mixed",
+        count=24,
+    )
+    assert "Balanced" not in stem_off

@@ -199,3 +199,33 @@ def test_integer_percentages_shared_by_csv_and_solver_data():
     assert sum(ints3.values()) == 100
     # Labels come back highest-frequency first (the column's display order).
     assert list(integer_percentages({"Fold": 0.2, "Call": 0.8})) == ["Call", "Fold"]
+
+
+def test_integer_percentages_never_hide_a_real_mix_as_100_0():
+    """HONESTY CLAMP (July 2026, user rule): a genuinely-mixed strategy must
+    never display 100%/0% -- the 10bb MTT spot Check 99.5/Raise 0.5 rendered
+    "Check: 100%, Raise: 0%" next to a correct answer of "Mostly Check" (the
+    Always qualifier requires a literally-pure action). Display and qualifier
+    share one purity test so they can never contradict each other."""
+    from pipeline.plo.options import _PURE_STRATEGY_PREFIX, integer_percentages
+
+    # The observed spot: 99.5/0.5 shows 99/1, not 100/0.
+    assert integer_percentages({"Check": 0.995, "Raise": 0.005}) == {
+        "Check": 99,
+        "Raise": 1,
+    }
+    # Two slivers: each shows 1, dominant gives up the difference; sum 100.
+    ints = integer_percentages({"Check": 0.994, "Raise": 0.003, "All-in": 0.003})
+    assert ints == {"Check": 98, "Raise": 1, "All-in": 1}
+    # Literally pure stays 100.
+    assert integer_percentages({"Check": 1.0}) == {"Check": 100}
+    # Dust below the purity epsilon: the dominant IS "Always" to the
+    # qualifier, so the display may say 100/0 -- still consistent.
+    assert integer_percentages({"Check": 0.99995, "Raise": 0.00005}) == {
+        "Check": 100,
+        "Raise": 0,
+    }
+    assert 0.99995 >= _PURE_STRATEGY_PREFIX
+    # A zero-frequency listed option stays 0 (options list zero-freq actions).
+    ints0 = integer_percentages({"Check": 0.995, "Raise": 0.005, "Fold": 0.0})
+    assert ints0["Fold"] == 0 and sum(ints0.values()) == 100

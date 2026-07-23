@@ -861,7 +861,10 @@ def render_generate_page() -> None:
     mode = st.radio(
         "Mode",
         options=["Postflop", "Preflop"],
-        index=1,  # default to Preflop
+        # Default to Postflop (July 22 2026, user ask): full preflop->river
+        # play-throughs are the main production mode now, and they live under
+        # Postflop -> Full hands (itself the default there).
+        index=0,
         horizontal=True,
         help=(
             "Postflop generates from a specific `.db` solve you pick (drop them "
@@ -996,16 +999,36 @@ def _render_generate_page_postflop() -> None:
                     st.caption(f"`{Path(b.path).name}` — {b.error}")
         return
 
-    # 2. Pick a solve (labelled by its own metadata).
+    # 2. Pick a solve (labelled by its own metadata). Known-problem solves
+    # carry a ⚠️ in the list and a plain-English explanation below (July 22
+    # 2026, user ask: "flag the solves that make things difficult so I
+    # always remember which ones").
+    from pipeline.postflop.adapters.sqlite_db import (  # noqa: PLC0415
+        solve_quality_flag,
+    )
+
     st.subheader("1. Pick a solve")
     by_path = {s.path: s for s in usable}
+
+    def _pick_label(p: str) -> str:
+        flag = solve_quality_flag(Path(p).name)
+        mark = "⚠️ " if flag and flag[0] == "warn" else ""
+        return f"{mark}{Path(p).name}   —   {by_path[p].label}"
+
     picked = st.selectbox(
         f"{len(usable)} solve(s) found",
         options=[s.path for s in usable],
-        format_func=lambda p: f"{Path(p).name}   —   {by_path[p].label}",
+        format_func=_pick_label,
         key="postflop_pick_solve",
     )
     solve = by_path[picked]
+    _flag = solve_quality_flag(Path(picked).name)
+    if _flag is not None:
+        _sev, _text = _flag
+        (st.warning if _sev == "warn" else st.info)(
+            ("⚠️ **Known-problem solve.** " if _sev == "warn" else "ℹ️ ")
+            + _text
+        )
     if broken:
         st.caption(f"({len(broken)} other file(s) in the folder couldn't be read.)")
 
@@ -1097,7 +1120,26 @@ def _render_generate_page_postflop() -> None:
     pf_include_villain = False
     pf_diversify_hands = False
     pf_balanced_lengths = False
+    pf_fully_balanced = False
     if pf_mode == "full_hand":
+        pf_fully_balanced = st.checkbox(
+            "🎛️ Fully balanced hands (difficulty · situation · answer · "
+            "strength · seat)",
+            value=False,
+            key="postflop_fully_balanced",
+            help=(
+                "Balance the WHOLE batch at once: a third Easy / Medium / "
+                "Hard hands, an even split of final answers (fold / call / "
+                "raise -- works the same under Basic and GTO answer "
+                "options), and a spread of situations, hand strengths, and "
+                "hero seats. The hand-length mix stays governed by the "
+                "Length profile below (river-heavy default). When the pool "
+                "runs short of something, the batch ships what exists and "
+                "the done panel shows the shortfall honestly. Works best "
+                "at 8+ hands. Set the difficulty band to Mixed -- a band "
+                "filter overrides this."
+            ),
+        )
         pf_balanced_lengths = st.checkbox(
             "⚖️ Balanced hand lengths (production default)",
             value=True,
@@ -1135,19 +1177,26 @@ def _render_generate_page_postflop() -> None:
                     "mix on small batches (40% of 4 hands quotas to 1)."
                 ),
             )
-        pf_diversify_hands = st.checkbox(
-            "🎨 Balanced hand mix",
-            value=True,
-            key="postflop_diversify_hands",
-            help=(
-                "Round-robins the batch across hero seat, line depth, and "
-                "hand strength so a small batch isn't clustered (e.g. three "
-                "Button river hands, all air). Assembles an oversized "
-                "candidate pool first, so it composes with the per-batch "
-                "shuffle. Ignored when a difficulty band is set (the band "
-                "is the selector there)."
-            ),
-        )
+        if pf_fully_balanced:
+            pf_diversify_hands = False
+            st.caption(
+                "🎨 Balanced hand mix is included in Fully balanced "
+                "(seat and strength are two of its axes)."
+            )
+        else:
+            pf_diversify_hands = st.checkbox(
+                "🎨 Balanced hand mix",
+                value=True,
+                key="postflop_diversify_hands",
+                help=(
+                    "Round-robins the batch across hero seat, line depth, and "
+                    "hand strength so a small batch isn't clustered (e.g. three "
+                    "Button river hands, all air). Assembles an oversized "
+                    "candidate pool first, so it composes with the per-batch "
+                    "shuffle. Ignored when a difficulty band is set (the band "
+                    "is the selector there)."
+                ),
+            )
         pf_include_villain = st.checkbox(
             "Also ask the villain's decisions (flip the frame)",
             value=False,
@@ -1317,17 +1366,25 @@ def _render_generate_page_postflop() -> None:
                 "answer.",
             )
 
-    # Answer option style — all modes.
+    # Answer option style — all modes. Sanitize a stale saved label (the
+    # July 22 style rework renamed Basic and added Sizing/Blend) so an old
+    # session value can't crash the radio.
+    _style_opts = list(ANSWER_STYLE_FROM_RADIO_LABEL)
+    if st.session_state.get("postflop_style") not in _style_opts:
+        st.session_state.pop("postflop_style", None)
     style_label = st.radio(
         "Answer option style",
-        options=list(ANSWER_STYLE_FROM_RADIO_LABEL),
-        index=1,  # GTO (always/mostly) — matches the preflop default the team uses
+        options=_style_opts,
+        index=_style_opts.index("GTO (always/mostly)"),  # the team default
         horizontal=True,
         key="postflop_style",
         help=(
-            "Basic = plain action labels (Check / Bet 33% / Bet 75%). "
-            "GTO = the Always/Mostly spectrum on 2-action spots (plain on 3+ "
-            "sizes). Auto = plain when one action clearly dominates, else GTO."
+            "Basic = verbs only, never a bet size (Fold / Check / Call / "
+            "Bet / Raise / All-in). Sizing = labels carry the real sizes "
+            "(Check / Bet 33% / Raise to 12bb). GTO = the Always/Mostly "
+            "spectrum. Auto = Basic when one action clearly dominates, else "
+            "GTO. Blend = a deterministic ~50/50 mix of Basic and Sizing "
+            "questions across the batch."
         ),
     )
     answer_style = ANSWER_STYLE_FROM_RADIO_LABEL[style_label]
@@ -1646,6 +1703,25 @@ def _render_generate_page_postflop() -> None:
                 help="Re-runs the claim checker on the rewritten explanation as a "
                 "last check (flag only; never triggers another rewrite).",
             )
+        if is_full and (pf_run_claim_checker or pf_revise_pass):
+            pf_strict_clean = st.checkbox(
+                "🧼 Ship only fully-clean hands "
+                "(regenerate a flagged hand once, else replace it)",
+                value=True,
+                key="postflop_strict_clean_hands",
+                help=(
+                    "A play-through ships whole or not at all, so one flagged "
+                    "leg blocks the entire hand. With this on: a hand with any "
+                    "surviving flag after the audit is REBUILT once with fresh "
+                    "explanations; if it is still flagged, it is dropped and a "
+                    "replacement hand takes its slot. Every hand in the batch "
+                    "comes out fully clean — one click of 'Keep all fully-clean "
+                    "hands' finishes review. Costs extra LLM calls only on the "
+                    "flagged minority (counters report how many)."
+                ),
+            )
+        else:
+            pf_strict_clean = False
         if pf_run_claim_checker or pf_revise_pass:
             ck_key = "postflop_claim_checker_prompt"
             if ck_key not in st.session_state:
@@ -1833,6 +1909,7 @@ def _render_generate_page_postflop() -> None:
                 jobs.start_subprocess_job(
                     generate_full_hand_batch_from_db,
                     label=f"Postflop full hands: {Path(picked).name} ({int(total)} hands)",
+                    stop_check_kwarg="stop_check",
                     db_path=picked,
                     output_path=str(out_path),
                     total_hands=int(total),
@@ -1867,11 +1944,13 @@ def _render_generate_page_postflop() -> None:
                     variety_seed=random.randrange(2**31),
                     diversify_hands=pf_diversify_hands,
                     balanced_lengths=pf_balanced_lengths,
+                    fully_balanced=pf_fully_balanced,
                     length_profile=pf_length_profile,
                     run_claim_checker=pf_run_claim_checker,
                     claim_checker_prompt=pf_claim_checker_prompt,
                     revise_pass=pf_revise_pass,
                     final_audit=pf_final_audit,
+                    strict_clean_hands=pf_strict_clean,
                 )
             elif pf_mode == "preflop":
                 jobs.start_subprocess_job(
@@ -4858,6 +4937,56 @@ def _render_inline_spot_ranges(node, pack, *, key_prefix: str) -> None:
         st.html(range_view.grid_html(_mix(vnode)))
 
 
+def _render_keep_clean_hands(
+    csv_path: Path,
+    rows: list,
+    reviews: dict,
+    qrec_for,
+    *,
+    key: str,
+) -> None:
+    """One-click "keep every fully-clean HAND" (July 2026, the user's
+    review-time ask: manual review of full play-throughs takes too long).
+
+    The HAND-level analogue of :func:`_render_bulk_approve_clean` below: a
+    play-through qualifies only when EVERY leg is fully clean (Layer-7 audit
+    ran and passed + zero deterministic/soft flags) and no leg has a grade
+    yet -- so one click grades whole clean hands into the Kept pool and the
+    "Kept hands only" download, and only flagged hands need human eyes.
+    Eligibility is pure (:func:`review.fully_clean_hand_ids`,
+    browserless-tested); this is the thin Streamlit shell.
+    """
+    audited = any(str(r.get("claim_check", "") or "").strip() for r in rows)
+    has_hands = any(
+        str(r.get("hand_id", "") or "").strip().lower() not in ("", "nan")
+        for r in rows
+    )
+    if not audited or not has_hands:
+        return
+    hands = review.fully_clean_hand_ids(rows, reviews, qrec_for)
+    n = len(hands)
+    label = (
+        f"✅ Keep all {n} fully-clean hand" + ("s" if n != 1 else "")
+        if n
+        else "✅ No ungraded fully-clean hands left"
+    )
+    if st.button(label, key=f"keepcleanhands::{key}", disabled=not n) and n:
+        total = 0
+        for leg_nos in hands.values():
+            total += review.bulk_approve(
+                csv_path, leg_nos,
+                note="Bulk-kept: every leg fully clean "
+                "(Layer-7 audit + all validators).",
+            )
+        st.toast(f"Kept {n} hand(s) — {total} questions approved")
+        st.rerun()
+    st.caption(
+        "A hand qualifies only when EVERY leg passed the Layer-7 audit and "
+        "every validator, with no leg graded yet. Kept hands flow into the "
+        "hand-level metrics and the 'Kept hands only' download."
+    )
+
+
 def _render_bulk_approve_clean(
     csv_path: Path,
     rows: list,
@@ -5051,16 +5180,17 @@ def render_review_page() -> None:
     no = str(row["No"])
     existing = reviews.get(no, {})
 
-    # EDIT-LOSS INVARIANT (the recurring "my explanation edit vanished" bug):
-    # every control that can leave this question -- Prev/Next/Go, the grade
-    # buttons, Remove -- MUST be an st.form_submit_button of THIS form, with the
-    # editor + difficulty inside the same form. A form submit ships the current
-    # widget values ATOMICALLY with the click (framework contract). A plain
-    # st.button races the text_area's on-blur commit: type -> click Next could
-    # rerun WITHOUT the edit ever reaching session_state, and the server can
-    # never recover it. NEVER add a plain st.button that navigates here.
-    _form = st.form(key=f"review_form::{csv_path.name}::{no}", border=False)
-    with _form:
+    # EDIT-LOSS DESIGN (July 22 2026 revision -- blur-save, the user's ask):
+    # the explanation and difficulty are LIVE widgets outside any form. A
+    # blur with a changed value triggers its own rerun, and the card's
+    # compare-and-write saves it to the CSV immediately -- so the edit is on
+    # disk BEFORE any navigation/grade click can fire, and no Save button is
+    # needed (the PLO Review page's long-proven pattern). Nav and grade
+    # buttons stay form submits (atomic clicks), and the post-form handler
+    # still calls _flush_review_edit over the same widget keys as
+    # belt-and-suspenders. INVARIANT: any new edit widget on this card must
+    # either save-on-compare like these or live inside a form.
+    with st.form(key=f"review_nav_form::{csv_path.name}::{no}", border=False):
         nav1, nav2, nav3 = st.columns([1, 2, 1])
         with nav1:
             _prev_clicked = st.form_submit_button(
@@ -5081,6 +5211,7 @@ def render_review_page() -> None:
                 "Next ▶", use_container_width=True, disabled=idx >= len(df) - 1
             )
 
+    with st.container():
         # Persistent confirmation of the last removal. After a remove the view
         # shifts to the NEXT question (it slides into this slot) and remaining
         # questions keep their original numbers (gaps are intentional), so spell
@@ -5201,8 +5332,8 @@ def render_review_page() -> None:
                     st.markdown(("✅ " if opt == correct else "▫️ ") + opt)
 
             st.markdown(
-                "**Answer Explanation** _(saves on any button click: "
-                "Save, Prev/Next, grade)_"
+                "**Answer Explanation** _(auto-saves when you click out "
+                "of the box)_"
             )
             # Flagged-phrase highlighting (July 2026, user request): every
             # Layer-7 flag quotes the exact offending phrase, so show the
@@ -5233,7 +5364,7 @@ def render_review_page() -> None:
                     st.markdown(_hl_note)
                     st.markdown(_hl_html, unsafe_allow_html=True)
             _expl_key = f"review_expl::{csv_path.name}::{no}"
-            st.text_area(
+            _live_expl = st.text_area(
                 "Answer Explanation",
                 value=_cell(row, "Answer Explanation"),
                 key=_expl_key,
@@ -5242,7 +5373,11 @@ def render_review_page() -> None:
                 height=500,
                 label_visibility="collapsed",
             )
-            _save_clicked = st.form_submit_button("💾 Save edits")
+            # Blur-save: a changed value arrives on the blur's own rerun and
+            # is written before anything else can happen (no-op when equal).
+            if _live_expl != _cell(row, "Answer Explanation"):
+                review.update_explanation(csv_path, no, _live_expl)
+                st.toast(f"Saved #{no} explanation")
             # The deterministic "Show the math" strip, right under the
             # explanation (the decision-math stats: pot odds, equity, range
             # advantage, blockers, what you're up against).
@@ -5262,17 +5397,20 @@ def render_review_page() -> None:
                 _cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
             except ValueError:
                 _cur_diff = 0
-            st.number_input(
-                "Difficulty Rating (saves with any button click)",
+            _live_diff = st.number_input(
+                "Difficulty Rating (auto-saves)",
                 min_value=0,
                 max_value=3500,
                 step=10,
                 value=_cur_diff,
                 key=_diff_key,
             )
+            if int(_live_diff) != _cur_diff:
+                review.update_difficulty(csv_path, no, str(int(_live_diff)))
+                st.toast(f"Saved #{no} difficulty")
             # Rendered preview (suit emojis etc.) of the saved explanation.
             with st.expander("Preview (rendered)", expanded=False):
-                st.info(_md_lines(_cell(row, "Answer Explanation")))
+                st.info(_md_lines(_live_expl))
 
             st.markdown(
                 "**Solver frequencies:**&nbsp;"
@@ -5362,44 +5500,52 @@ def render_review_page() -> None:
                     st.markdown("**Full assembled prompt** (system + gold + this spot)")
                     st.code(review.assembled_prompt(_meta, _q))
 
-        # --- grading (inside the form: grade clicks also carry the edit) ---
+        # --- grading: its own form so a grade click ships the note
+        # atomically with the click. (Edits already blur-saved above.)
         st.markdown("**Grade**")
-        note = st.text_area(
-            "Note (optional)",
-            value=existing.get("note", ""),
-            key=f"review_note::{csv_path.name}::{no}",
-            height=70,
-        )
-        g1, g2, g3 = st.columns(3)
-        _approve_clicked = g1.form_submit_button(
-            "✅ Approve", use_container_width=True, type="primary"
-        )
-        _needs_clicked = g2.form_submit_button(
-            "⚠️ Needs review", use_container_width=True
-        )
-        _reject_clicked = g3.form_submit_button(
-            "❌ Reject", use_container_width=True
-        )
+        with st.form(key=f"review_grade_form::{csv_path.name}::{no}", border=False):
+            note = st.text_area(
+                "Note (optional)",
+                value=existing.get("note", ""),
+                key=f"review_note::{csv_path.name}::{no}",
+                height=70,
+            )
+            g1, g2, g3, g4 = st.columns(4)
+            _approve_clicked = g1.form_submit_button(
+                "✅ Approve", use_container_width=True, type="primary"
+            )
+            _needs_clicked = g2.form_submit_button(
+                "⚠️ Needs review", use_container_width=True
+            )
+            _reject_clicked = g3.form_submit_button(
+                "❌ Reject", use_container_width=True
+            )
+            _ungrade_clicked = g4.form_submit_button(
+                "↩️ Ungrade", use_container_width=True,
+                help="Clear the grade entirely. An approved question drops out "
+                "of the approved pool and its download immediately (the pool is "
+                "rebuilt from grades on every render).",
+            )
 
-        # --- remove from batch: ONE click (destructive -- edits the CSV -- but
-        #     recoverable by regenerating). No confirm gate by request; the
-        #     button names the # it'll remove and the persistent note up top
-        #     confirms it afterward, so a misclick is obvious and cheap. ---
-        st.divider()
-        _remove_clicked = st.form_submit_button(
-            f"🗑  Remove #{no} from this batch",
-            help=(
-                "Deletes this question from the CSV in one click. Remaining "
-                "questions keep their original numbers (gaps are fine). Can't "
-                "be undone here, but you can regenerate the batch."
-            ),
-        )
+            # --- remove from batch: ONE click (destructive -- edits the CSV --
+            #     but recoverable by regenerating). No confirm gate by request;
+            #     the button names the # it'll remove and the persistent note up
+            #     top confirms it afterward, so a misclick is obvious and cheap.
+            st.divider()
+            _remove_clicked = st.form_submit_button(
+                f"🗑  Remove #{no} from this batch",
+                help=(
+                    "Deletes this question from the CSV in one click. Remaining "
+                    "questions keep their original numbers (gaps are fine). Can't "
+                    "be undone here, but you can regenerate the batch."
+                ),
+            )
     # --- the single post-form handler: the ONLY place navigation happens.
-    # The form submit delivered the editor/difficulty/note values atomically
-    # with whichever button was clicked, so saving first can never lose an
-    # in-flight edit (see the EDIT-LOSS INVARIANT above).
-    if any((_prev_clicked, _next_clicked, _go_clicked, _save_clicked,
-            _approve_clicked, _needs_clicked, _reject_clicked, _remove_clicked)):
+    # Edits are already blur-saved (and re-flushed here as belt-and-
+    # suspenders), so no click can outrun an unsaved edit.
+    if any((_prev_clicked, _next_clicked, _go_clicked,
+            _approve_clicked, _needs_clicked, _reject_clicked,
+            _ungrade_clicked, _remove_clicked)):
         _flush_review_edit(csv_path, no)
         if _remove_clicked:
             if review.remove_question(csv_path, no):
@@ -5411,7 +5557,11 @@ def render_review_page() -> None:
             st.warning(f"#{no} was not found in the batch.")
         else:
             new_idx = idx
-            if _approve_clicked or _needs_clicked or _reject_clicked:
+            if _ungrade_clicked:
+                # Back to ungraded: drops the row from the approved pool
+                # (rebuilt from grades on every scan). Stay on this question.
+                review.remove_review(csv_path, no)
+            elif _approve_clicked or _needs_clicked or _reject_clicked:
                 status = (
                     "approved" if _approve_clicked
                     else "needs_review" if _needs_clicked
@@ -7691,17 +7841,21 @@ def _render_postflop_question_card(
     if _sd_n > 1:
         _stage_label += f" · decision {_sd_k} of {_sd_n}"
 
-    # EDIT-LOSS INVARIANT: the editor, difficulty, and EVERY control that can
-    # leave this question (nav / grade / remove) live inside ONE st.form, so a
-    # click ships the current edit atomically with the click (framework
-    # contract -- see _flush_review_edit). A plain st.button here races the
-    # text_area's blur commit and loses edits. NEVER add a plain st.button
-    # that navigates.
+    # EDIT-LOSS DESIGN (July 22 2026 revision -- blur-save, the user's ask):
+    # the explanation and difficulty are LIVE widgets outside any form. A
+    # blur with a changed value triggers its own rerun, and the card's
+    # compare-and-write saves it to the CSV immediately -- so the edit is on
+    # disk BEFORE any navigation/grade click can fire, and no Save button is
+    # needed (the PLO Review page's long-proven pattern). Nav and grade
+    # buttons stay form submits (atomic clicks), and the post-form handler
+    # still calls _flush_review_edit over the same widget keys as
+    # belt-and-suspenders. INVARIANT: any new edit widget on this card must
+    # either save-on-compare like these or live inside a form.
     _has_nav = not grouped and nav_key is not None and idx is not None
     _prev_clicked = _next_clicked = _go_clicked = False
     _jump_val = idx if idx is not None else 0
-    with st.form(key=f"pf_review_form::{csv_path.name}::{no}", border=False):
-        if _has_nav:
+    if _has_nav:
+        with st.form(key=f"pf_nav_form::{csv_path.name}::{no}", border=False):
             _n1, _n2, _n3 = st.columns([1, 2, 1])
             _prev_clicked = _n1.form_submit_button(
                 "◀ Prev", use_container_width=True, disabled=idx == 0
@@ -7720,6 +7874,7 @@ def _render_postflop_question_card(
             _next_clicked = _n3.form_submit_button(
                 "Next ▶", use_container_width=True, disabled=idx >= len(df) - 1
             )
+    with st.container():
         with st.container(border=True):
             # In the grouped view each leg leads with its place in the hand.
             if grouped:
@@ -7805,8 +7960,8 @@ def _render_postflop_question_card(
                 )
 
             st.markdown(
-                "**Answer Explanation** _(saves on any button click: "
-                "Save, Prev/Next, grade)_"
+                "**Answer Explanation** _(auto-saves when you click out "
+                "of the box)_"
             )
             # Flagged-phrase highlighting (July 2026, user request): every
             # Layer-7 flag quotes the exact offending phrase, so show the
@@ -7837,16 +7992,20 @@ def _render_postflop_question_card(
                     st.markdown(_hl_note)
                     st.markdown(_hl_html, unsafe_allow_html=True)
             ekey = f"postflop_review_expl::{csv_path.name}::{no}"
-            st.text_area(
+            _live_expl = st.text_area(
                 "Answer Explanation",
                 value=_cell(row, "Answer Explanation"),
                 key=ekey,
                 height=240,
                 label_visibility="collapsed",
             )
-            _save_clicked = st.form_submit_button("💾 Save edits")
+            # Blur-save: a changed value arrives on the blur's own rerun and
+            # is written before anything else can happen (no-op when equal).
+            if _live_expl != _cell(row, "Answer Explanation"):
+                review.update_explanation(csv_path, no, _live_expl)
+                st.toast(f"Saved #{no} explanation")
             with st.expander("Preview (rendered)", expanded=False):
-                st.info(_md_lines(_cell(row, "Answer Explanation")))
+                st.info(_md_lines(_live_expl))
 
             # The deterministic "Show the math" strip (pot odds / equity / currently
             # ahead / blockers / SPR), from the row's stat_notes column -- now
@@ -7945,37 +8104,48 @@ def _render_postflop_question_card(
                 cur_diff = int(float(_cell(row, "Difficulty Rating") or 0))
             except ValueError:
                 cur_diff = 0
-            st.number_input(
-                "Difficulty Rating (saves with any button click)",
+            _live_diff = st.number_input(
+                "Difficulty Rating (auto-saves)",
                 min_value=0,
                 max_value=3500,
                 step=10,
                 value=cur_diff,
                 key=dkey,
             )
+            if int(_live_diff) != cur_diff:
+                review.update_difficulty(csv_path, no, str(int(_live_diff)))
+                st.toast(f"Saved #{no} difficulty")
 
-        # --- grading (inside the form: grade clicks also carry the edit) ---
+        # --- grading: its own form so a grade click ships the note
+        # atomically with the click.
         st.markdown("**Grade**")
-        note = st.text_area(
-            "Note (optional)",
-            value=existing.get("note", ""),
-            key=f"postflop_review_note::{csv_path.name}::{no}",
-            height=70,
-        )
-        g1, g2, g3 = st.columns(3)
-        _approve_clicked = g1.form_submit_button(
-            "✅ Approve", use_container_width=True, type="primary"
-        )
-        _needs_clicked = g2.form_submit_button(
-            "⚠️ Needs review", use_container_width=True
-        )
-        _reject_clicked = g3.form_submit_button(
-            "❌ Reject", use_container_width=True
-        )
-        _remove_clicked = st.form_submit_button(
-            f"🗑  Remove #{no} from this batch",
-            help="Deletes this question from the CSV (regenerate to recover).",
-        )
+        with st.form(key=f"pf_grade_form::{csv_path.name}::{no}", border=False):
+            note = st.text_area(
+                "Note (optional)",
+                value=existing.get("note", ""),
+                key=f"postflop_review_note::{csv_path.name}::{no}",
+                height=70,
+            )
+            g1, g2, g3, g4 = st.columns(4)
+            _approve_clicked = g1.form_submit_button(
+                "✅ Approve", use_container_width=True, type="primary"
+            )
+            _needs_clicked = g2.form_submit_button(
+                "⚠️ Needs review", use_container_width=True
+            )
+            _reject_clicked = g3.form_submit_button(
+                "❌ Reject", use_container_width=True
+            )
+            _ungrade_clicked = g4.form_submit_button(
+                "↩️ Ungrade", use_container_width=True,
+                help="Clear the grade entirely. An approved question drops out "
+                "of the approved pool and its download immediately (the pool is "
+                "rebuilt from grades on every render).",
+            )
+            _remove_clicked = st.form_submit_button(
+                f"🗑  Remove #{no} from this batch",
+                help="Deletes this question from the CSV (regenerate to recover).",
+            )
     # Ranges panel OUTSIDE the form: a toggle inside an st.form only takes
     # effect on the next submit click, which made Conditional view appear
     # broken. See the RERUN INVARIANT on _render_postflop_ranges_panel.
@@ -7985,8 +8155,9 @@ def _render_postflop_question_card(
     )
     # --- the single post-form handler: saving first can never lose an edit
     # (the submit shipped editor/difficulty/note atomically with the click).
-    if any((_prev_clicked, _next_clicked, _go_clicked, _save_clicked,
-            _approve_clicked, _needs_clicked, _reject_clicked, _remove_clicked)):
+    if any((_prev_clicked, _next_clicked, _go_clicked,
+            _approve_clicked, _needs_clicked, _reject_clicked,
+            _ungrade_clicked, _remove_clicked)):
         _flush_review_edit(csv_path, no, key_prefix="postflop_review")
         if _remove_clicked:
             if review.remove_question(csv_path, no):
@@ -7995,7 +8166,11 @@ def _render_postflop_question_card(
                 st.rerun()
             st.warning(f"#{no} was not found in the batch.")
         else:
-            if _approve_clicked or _needs_clicked or _reject_clicked:
+            if _ungrade_clicked:
+                # Back to ungraded: drops the row from the approved pool
+                # (rebuilt from grades on every scan). Stay on this question.
+                review.remove_review(csv_path, no)
+            elif _approve_clicked or _needs_clicked or _reject_clicked:
                 status = (
                     "approved" if _approve_clicked
                     else "needs_review" if _needs_clicked
@@ -8094,6 +8269,25 @@ def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> 
         st.caption("No hands kept yet — click ✅ Keep hand on the good ones first.")
 
     _status_icon = {"approved": "✅", "rejected": "❌", "needs_review": "⚠️", "": "⬜"}
+    # Per-hand audit badge (July 22 2026, user ask): when the Layer-7 audit
+    # ran, every hand card says AT A GLANCE whether all its questions came
+    # back clear -- no need to open the hand. Pure logic in
+    # review.hand_unclean_counts (browserless-tested).
+    _batch_audited = any(
+        str(r.get("claim_check", "") or "").strip().lower() not in ("", "nan")
+        for r in all_rows
+    )
+    _unclean_by_hand = (
+        review.hand_unclean_counts(
+            all_rows,
+            lambda r: review.meta_question_for_leg(
+                meta, hand_id=_cell(r, "hand_id"),
+                sequence_index=_cell(r, "sequence_index"),
+            ),
+        )
+        if _batch_audited
+        else {}
+    )
     for _hid, rows in ordered:
         legs = sorted(rows, key=_seq)
         first = legs[0]
@@ -8101,9 +8295,18 @@ def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> 
         hstatus = hand_statuses[_hid]
         hero_cards = _cell(first, "User Cards")
         board = _cell(legs[-1], "Cards on Table")
+        _audit_badge = ""
+        if _batch_audited:
+            _n_flagged = _unclean_by_hand.get(_hid, 0)
+            _audit_badge = (
+                "  ·  🧼 all questions clear" if _n_flagged == 0
+                else f"  ·  🚩 {_n_flagged} flagged question"
+                + ("s" if _n_flagged != 1 else "")
+            )
         title = (
             f"{_status_icon[hstatus]} 🃏 {hero_cards}  ·  {len(legs)} questions"
             + (f"  ·  board {board}" if board else "")
+            + _audit_badge
         )
         with st.expander(title, expanded=False):
             st.caption(f"`{_hid}`  ·  {_cell(first, 'Context')}")
@@ -8112,13 +8315,12 @@ def _render_postflop_grouped_review(df, csv_path: Path, reviews: dict, meta) -> 
             # per-leg grade buttons below still work; any rejected leg
             # rejects the hand (review.hand_status).
             # EDIT-LOSS NOTE: these buttons live OUTSIDE the legs' forms, so
-            # an in-flight explanation edit inside a leg does NOT ship with
-            # them -- the caption warns to Save first (Streamlit form values
-            # are not readable server-side before a submit).
+            # Edits blur-save (July 22 2026): clicking any hand button first
+            # blurs the editor, whose changed value saves on its own rerun —
+            # so hand-level clicks can no longer race an unsaved edit.
             st.caption(
-                "✍️ Editing an explanation below? Click its **Save edits** "
-                "(or a per-question grade) BEFORE using these hand buttons — "
-                "hand-level clicks don't carry an unsaved edit."
+                "✍️ Edits to explanations below auto-save when you click "
+                "out of the box — no Save step before using these buttons."
             )
             hb = st.columns([1, 1, 1, 1.6])
             if hb[0].button(
@@ -8265,6 +8467,19 @@ def render_postflop_review_page() -> None:
                 f"{ctr.get('claim_flagged_rows', 0)} of {summary.total} rows "
                 "flagged. Flags show under each explanation."
             )
+        # 🎛️ Fully balanced full-hand batches: achieved-vs-target per axis.
+        if meta.get("balance_report"):
+            from pipeline.balanced_select import (  # noqa: PLC0415
+                format_balance_report,
+            )
+
+            with st.expander("🎛️ Balance report — how this batch spreads"):
+                for _bline in format_balance_report(meta["balance_report"]):
+                    st.markdown(f"- {_bline}")
+                st.caption(
+                    "Hand-length mix is governed by the length profile, not "
+                    "balanced here — see `hands_by_ending` in the meta."
+                )
 
     # One-click "approve all fully-clean" (green on the Layer-7 audit AND every
     # deterministic/soft flag source). qrec_for mirrors the per-card meta join:
@@ -8291,12 +8506,29 @@ def render_postflop_review_page() -> None:
             None,
         )
 
-    _render_bulk_approve_clean(
+    # Full-hand batches get ONLY the hand-level sweep: the question-level
+    # sweep would approve clean LEGS out of flagged hands, creating partial
+    # play-throughs -- useless downstream, since a hand ships whole or not
+    # at all (July 22 2026, user's call).
+    _pf_rows = [r for _, r in df.iterrows()]
+    _has_hand_rows = any(
+        str(r.get("hand_id", "") or "").strip().lower() not in ("", "nan")
+        for r in _pf_rows
+    )
+    if not _has_hand_rows:
+        _render_bulk_approve_clean(
+            csv_path,
+            _pf_rows,
+            reviews,
+            _pf_qrec_for,
+            key=f"postflop::{csv_path.name}",
+        )
+    _render_keep_clean_hands(
         csv_path,
-        [r for _, r in df.iterrows()],
+        _pf_rows,
         reviews,
         _pf_qrec_for,
-        key=f"postflop::{csv_path.name}",
+        key=f"postflop_hands::{csv_path.name}",
     )
 
     st.download_button(
@@ -9410,6 +9642,7 @@ _PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
     "plo_pack_select",
     "plo_clean_only",
     "plo_gen_diversify",
+    "plo_gen_balanced",
     "plo_gen_positions",
     "plo_gen_contexts",
     "plo_gen_player_counts",
@@ -9518,6 +9751,9 @@ def _seed_plo_generate_settings() -> None:
         # Balanced action mix (July 2026): ON by default -- the raw draw on
         # the 9-max pack is ~all facing-3-bet spots.
         "plo_gen_diversify": _flag(saved.get("plo_gen_diversify"), True),
+        # 🎛️ Fully balanced (July 2026): OFF by default -- a deliberate
+        # bigger-batch mode (24-48q recommended).
+        "plo_gen_balanced": _flag(saved.get("plo_gen_balanced"), False),
         "plo_min_ev_gap": _num(saved.get("plo_min_ev_gap"), 0.0, 3.0, 0.0, float),
         "plo_answer_style": _choice(
             saved.get("plo_answer_style"),
@@ -9578,6 +9814,7 @@ _PLO_PACK_BASES: tuple[str, ...] = (
     # MTT bb-ante 6-max packs (July 2026): the tournament-core depths.
     "plo_mtt10_ranges", "plo_mtt15_ranges", "plo_mtt20_ranges",
     "plo_mtt25_ranges", "plo_mtt30_ranges", "plo_mtt40_ranges",
+    "plo_mtt75_ranges",
 )
 
 
@@ -9817,13 +10054,17 @@ def _sweep_finished_plo_jobs() -> None:
                 output_filename=Path(result.output_path).name,
             )
         _l7_counters: dict[str, int] = {}
+        _balance_rep: dict = {}
         if result.meta_path and Path(result.meta_path).is_file():
             try:
-                _l7_counters = json.loads(
+                _meta_doc = json.loads(
                     Path(result.meta_path).read_text(encoding="utf-8")
-                ).get("counters", {})
+                )
+                _l7_counters = _meta_doc.get("counters", {})
+                _balance_rep = _meta_doc.get("balance_report", {})
             except (OSError, ValueError):
                 _l7_counters = {}
+                _balance_rep = {}
         st.session_state["plo_gen_done"] = {
             "path": str(result.output_path),
             "cost": cost,
@@ -9838,6 +10079,7 @@ def _sweep_finished_plo_jobs() -> None:
             "ev_filtered": result.ev_gap_filtered_out,
             "layer7_mode": str(job.meta.get("layer7_mode", "")),
             "counters": _l7_counters,
+            "balance_report": _balance_rep,
             "stopped_early": bool(getattr(result, "stopped_early", False)),
         }
         # So the PLO Review page auto-selects the newest batch.
@@ -9954,15 +10196,35 @@ def render_plo_generate_page() -> None:
         "which is largely UNCONVERGED (absurd EV gaps, inverted ranges like AA "
         "folding a jam). Leave ON unless you specifically want the wild lines.",
     )
-    diversify = st.checkbox(
-        "🎨 Balanced action mix (recommended)",
-        key="plo_gen_diversify",
-        help="Spread the batch across the action situations (opens, "
-        "single-raise defends, 3-bet defends, squeezes) by drawing from them "
-        "round-robin. OFF = a raw draw, which on the 9-max pack lands almost "
-        "entirely on facing-3-bet spots because they dominate the tree. Your "
-        "'Action faced' filter below still applies on top.",
+    balanced = st.checkbox(
+        "🎛️ Fully balanced batch (difficulty · situation · answer · position · shape)",
+        key="plo_gen_balanced",
+        help="Balance the WHOLE batch at once: a third Easy / Medium / Hard, "
+        "an even split of situations (opens, raise defends, 3-bet defends), "
+        "an even split of correct answers (fold / call / raise -- works the "
+        "same under Basic and GTO answer options), and a spread of positions "
+        "and hand shapes. When the pool runs short of something (e.g. only 2 "
+        "Hard spots exist under your filters), the batch ships what exists "
+        "and the done panel shows the shortfall honestly. Works best at "
+        "24-48 questions. Tip: leave the Difficulty preset on Mixed -- a "
+        "single-band preset defeats difficulty balancing.",
     )
+    if balanced:
+        diversify = False
+        st.caption(
+            "🎨 Balanced action mix is included in Fully balanced "
+            "(situation is one of its five axes)."
+        )
+    else:
+        diversify = st.checkbox(
+            "🎨 Balanced action mix (recommended)",
+            key="plo_gen_diversify",
+            help="Spread the batch across the action situations (opens, "
+            "single-raise defends, 3-bet defends, squeezes) by drawing from them "
+            "round-robin. OFF = a raw draw, which on the 9-max pack lands almost "
+            "entirely on facing-3-bet spots because they dominate the tree. Your "
+            "'Action faced' filter below still applies on top.",
+        )
     hc1, hc2 = st.columns(2)
     with hc1:
         # Seat options come from the SELECTED pack (6-max vs 9-max). A saved
@@ -10070,6 +10332,13 @@ def render_plo_generate_page() -> None:
     else:
         lo, hi = _PLO_DIFFICULTY_BANDS[preset]
         st.caption(f"Difficulty band: **{lo}–{hi}** (computed 4-axis rating).")
+    if balanced and (lo > 400 or hi < 3200):  # noqa: PLR2004
+        st.warning(
+            "🎛️ Fully balanced is ON but this Difficulty band restricts the "
+            "pool, so the difficulty axis can't fully balance (the other "
+            "axes still will). Switch the preset to **Mixed** for a third "
+            "each of Easy / Medium / Hard."
+        )
 
     with st.expander(
         "Advanced filters (worthiness window · EV-gap gate)", expanded=True
@@ -10373,6 +10642,18 @@ def render_plo_generate_page() -> None:
             f"({_done['out_tokens']:,} output tokens). Tallied in the sidebar "
             "lifetime spend."
         )
+        _brep = _done.get("balance_report") or {}
+        if _brep:
+            from pipeline.plo.balanced_select import (  # noqa: PLC0415
+                format_balance_report,
+            )
+
+            st.info(
+                "🎛️ **Fully balanced batch** — how the shipped questions "
+                "spread on each axis (a value marked \"pool only had N\" means "
+                "your filters simply don't contain more of it):\n\n"
+                + "\n".join(f"- {line}" for line in format_balance_report(_brep))
+            )
         _l7c = _done.get("counters") or {}
         _l7m = _done.get("layer7_mode", "")
         if _l7m == "Audit & auto-fix":
@@ -10469,6 +10750,7 @@ def render_plo_generate_page() -> None:
             action_contexts=action_contexts,
             player_counts=[int(n) for n in player_counts],
             custom_label=(out_prefix or "").removesuffix(".csv"),
+            balanced=balanced,
         )
         out_path = dedupe_path(
             _PLO_BATCH_DIR, _stem, taken=_reserved_output_names()
@@ -10507,6 +10789,7 @@ def render_plo_generate_page() -> None:
             exclude_ambiguous_band=exclude_ambiguous,
             min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
             diversify=diversify,
+            balanced=balanced,
             min_difficulty=lo,
             max_difficulty=hi,
             compute_equity=compute_eq,
@@ -10704,6 +10987,15 @@ def render_plo_review_page() -> None:
             f"📦 Pack: **{_pack_line}**"
             + (f" · {_tsz}-max" if _tsz else "")
         )
+    # 🎛️ Fully balanced batches: the achieved-vs-target spread per axis.
+    if _meta.get("balance_report"):
+        from pipeline.plo.balanced_select import (  # noqa: PLC0415
+            format_balance_report,
+        )
+
+        with st.expander("🎛️ Balance report — how this batch spreads"):
+            for _bline in format_balance_report(_meta["balance_report"]):
+                st.markdown(f"- {_bline}")
 
     reviews = review.load_reviews(csv_path)
     summary = review.summarize([q.get("No") for q in questions], reviews)
@@ -10840,19 +11132,32 @@ def render_plo_review_page() -> None:
             st.caption("**Concept tags:** " + (q.get("concept_tags", "") or "none"))
 
             gcol, dcol, rcol = st.columns([3, 1, 1])
-            choice = gcol.radio(
+            # SIDECAR IS THE SOURCE OF TRUTH (July 21 2026 root-cause fix).
+            # The old block compared the radio's REMEMBERED value against the
+            # sidecar and "corrected" any divergence -- so a stale widget
+            # memory (after Clear all approved / un-approve / bulk approve)
+            # was treated as a user action and re-graded one question per
+            # rerun (the approved pool that grew by one on every clear
+            # click). INVARIANT: sync the widget FROM the sidecar before it
+            # renders, and write ONLY from on_change (fires on a genuine
+            # user interaction, never from stale state). Any control that
+            # changes grades out-of-band needs NO widget-key cleanup under
+            # this contract.
+            _grade_key = f"plo_grade_{pick}_{no}"
+            _desired = status if status in grade_opts else "ungraded"
+            if st.session_state.get(_grade_key) != _desired:
+                st.session_state[_grade_key] = _desired
+            gcol.radio(
                 "Grade",
                 options=grade_opts,
-                index=grade_opts.index(status) if status in grade_opts else 0,
-                key=f"plo_grade_{pick}_{no}",
+                key=_grade_key,
                 horizontal=True,
+                on_change=lambda p=csv_path, n=no, k=_grade_key: (
+                    review.apply_grade_choice(
+                        p, n, st.session_state.get(k, "ungraded")
+                    )
+                ),
             )
-            if choice != status:
-                if choice == "ungraded":
-                    review.remove_review(csv_path, no)
-                else:
-                    review.save_review(csv_path, no, choice, "")
-                st.rerun()
             new_diff = dcol.text_input(
                 "Difficulty", value=q.get("Difficulty Rating", ""), key=f"plo_diff_{pick}_{no}"
             )
@@ -10912,15 +11217,9 @@ def render_plo_review_page() -> None:
                 use_container_width=True,
             ):
                 n = review.clear_all_approved(_PLO_BATCH_DIR)
-                # The open batch's grade radios still hold the OLD grade in
-                # widget session state; left alone, the very next rerun sees
-                # radio != sidecar and re-saves "approved" -- the clear that
-                # never sticks. Dropping the keys re-initializes every radio
-                # from the sidecar (the source of truth).
-                for k in [
-                    k for k in st.session_state if str(k).startswith("plo_grade_")
-                ]:
-                    del st.session_state[k]
+                # No widget-key cleanup needed: the grade radios sync FROM
+                # the sidecar before rendering and write only on_change
+                # (July 21 2026 root-cause fix -- see the radio block).
                 st.session_state["plo_confirm_clear_approved"] = False
                 st.toast(f"Cleared {n} approved question(s)")
                 st.rerun()
@@ -10943,10 +11242,8 @@ def render_plo_review_page() -> None:
                     "🗑", key=f"plo_appr_del_{csv_path.name}_{no}", help="Un-approve"
                 ):
                     review.remove_review(csv_path, no)
-                    # If this row belongs to the batch open above, its grade
-                    # radio would re-save "approved" on rerun -- drop the
-                    # widget state so it re-reads the sidecar instead.
-                    st.session_state.pop(f"plo_grade_{csv_path.name}_{no}", None)
+                    # No widget-key cleanup needed: the grade radios sync
+                    # FROM the sidecar before rendering (July 21 2026 fix).
                     st.rerun()
 
 

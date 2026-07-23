@@ -208,6 +208,11 @@ class PloPackSpec:
     # The spot sampler normalises to sb-units at read time so every
     # downstream consumer (EV gap, difficulty, action_ev_bb) is unit-safe.
     ev_in_bb: bool = False
+    # No Live/Online framing anywhere (July 22 2026, team ask): the Context
+    # line says only the effective stacks and the CSV "Live or Online"
+    # column stays blank. Set on the short-stack cash packs, whose venue
+    # is deliberately unspecified.
+    venue_neutral: bool = False
 
 
 PLO_PACK_6MAX_100BB = PloPackSpec(
@@ -250,6 +255,7 @@ PLO_PACK_6MAX_12BB = PloPackSpec(
     rake_note="5% up to 1bb",
     dir_signature="Omaha/6-way/12bb[5p-1bb]",
     default_base="plo12_ranges",
+    venue_neutral=True,
 )
 
 PLO_PACK_6MAX_20BB = PloPackSpec(
@@ -261,6 +267,7 @@ PLO_PACK_6MAX_20BB = PloPackSpec(
     rake_note="5% up to 1bb",
     dir_signature="Omaha/6-way/20bb[5p-1bb]",
     default_base="plo20_ranges",
+    venue_neutral=True,
 )
 
 # MTT bb-ante 6-max packs (July 2026): the "PLO MTT (BB ANTE) 3.5x Open"
@@ -269,8 +276,8 @@ PLO_PACK_6MAX_20BB = PloPackSpec(
 # (40072 first-in, 40083 SB first-in, ...), limp branches included. EV units
 # are milli-BB with the ante sunk in the baseline -- both verified by
 # scripts/audit_plo6_pack.py section [5b]. Chip-EV, NOT ICM: honest scope is
-# early/deep-field tournament play. The 50/75/100bb depths exist in the
-# archive but are unextracted (disk); register them here when pulled.
+# early/deep-field tournament play. Depths 10-40 + 75 are extracted; the
+# 50bb and 100bb depths stay unextracted (team call: not needed).
 def _mtt_spec(stack: float, dir_name: str, base: str) -> PloPackSpec:
     return PloPackSpec(
         pack_id=f"plo_mtt_6max_{stack:g}bb",
@@ -294,6 +301,10 @@ PLO_MTT_PACKS: tuple[PloPackSpec, ...] = (
     _mtt_spec(25, "25bb(bb-ante)3.5x", "plo_mtt25_ranges"),
     _mtt_spec(30, "30b(bb-ante)3.5x", "plo_mtt30_ranges"),
     _mtt_spec(40, "40(bb-ante)3.5x", "plo_mtt40_ranges"),
+    # Deep depth (July 21 PM, team ask): 75bb only -- the team wanted ~80bb;
+    # the archive has no 80, so 75 is the nearest. 50bb and the deep MTT
+    # 100bb deliberately skipped (disk; near-cash play).
+    _mtt_spec(75, "75b(bb-ante)3.5x", "plo_mtt75_ranges"),
 )
 
 #: Every integrated PLO pack. Audit a new export first

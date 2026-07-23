@@ -141,10 +141,37 @@ def integer_percentages(strategy: dict[str, float]) -> dict[str, int]:
         i
         for i, _ in sorted(enumerate(floors), key=lambda kv: -kv[1][2])[: max(deficit, 0)]
     }
-    return {
+    out = {
         label: floor + (1 if i in bumps else 0)
         for i, (label, floor, _) in enumerate(floors)
     }
+    # HONESTY CLAMP (July 2026, user rule): never display 100%/0% unless
+    # literally true. A 99.5/0.5 mix used to round to "Check: 100%, Raise: 0%"
+    # while the correct answer stayed "Mostly Check" (the Always qualifier
+    # needs a literally-pure action, _PURE_STRATEGY_PREFIX) -- the display
+    # contradicted the answer key. Same purity test as the qualifier, so the
+    # two surfaces can never disagree: a present-but-mixed action shows at
+    # least 1, a mixed dominant at most 99; sums stay exactly 100.
+    present_floor = 1.0 - _PURE_STRATEGY_PREFIX
+    exact = dict(strategy)
+    for label in out:
+        if out[label] == 0 and exact[label] > present_floor:
+            out[label] = 1
+        elif out[label] == 100 and exact[label] < _PURE_STRATEGY_PREFIX:
+            out[label] = 99
+    overflow = sum(out.values()) - 100
+    for label, _v in (by_freq if overflow > 0 else reversed(by_freq)):
+        if overflow == 0:
+            break
+        if overflow > 0 and out[label] > 1 and exact[label] < _PURE_STRATEGY_PREFIX:
+            take = min(overflow, out[label] - 1)
+            out[label] -= take
+            overflow -= take
+        elif overflow < 0 and 0 < out[label] < 99:
+            give = min(-overflow, 99 - out[label])
+            out[label] += give
+            overflow += give
+    return out
 
 
 def canonicalize_strategy(facts: PloFacts) -> dict[str, float]:

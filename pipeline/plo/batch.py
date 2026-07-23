@@ -27,6 +27,15 @@ from pipeline.explanation_generator import (
     DEFAULT_TEMPERATURE,
     ExplanationValidationError,
 )
+from pipeline.plo.action_history import fold_ev_consistency_issue
+from pipeline.plo.balanced_select import (
+    BalanceAttrs,
+    answer_verb,
+    balance_report,
+    balanced_order,
+    difficulty_band,
+    hand_shape_family,
+)
 from pipeline.plo.difficulty import compute_plo_difficulty
 from pipeline.plo.explanation_generator import (
     UsageCallback,
@@ -44,6 +53,7 @@ from pipeline.plo.node_enumerator import (
 )
 from pipeline.plo.options import build_options
 from pipeline.plo.pack import PloActionType, PloPack
+from pipeline.plo.position import position_bucket
 from pipeline.plo.question_extractor import (
     MAX_TOP_FREQUENCY,
     MIN_TOP_FREQUENCY,
@@ -154,6 +164,23 @@ def _first_worthy_spot(
     return None
 
 
+def _balance_attrs_for(
+    spot: PloSpot, facts: Any, difficulty_score: float, pack: PloPack
+) -> BalanceAttrs:
+    """The five balance-axis values for one spot (see balanced_select)."""
+    hand_class = facts.hand_class
+    return BalanceAttrs(
+        difficulty_band=difficulty_band(difficulty_score),
+        action_context=plo_node_action_context(spot.node),
+        answer_verb=answer_verb(spot.dominant_action),
+        position=position_bucket(spot.node.actor, table_size=pack.table_size),
+        hand_shape=hand_shape_family(
+            hand_class.pair_pattern, hand_class.suit_pattern
+        ),
+        node_id=spot.node.node_id,
+    )
+
+
 def _gate_check_best_of(
     explanation_text: str,
     solver_data: dict[str, Any],
@@ -225,6 +252,7 @@ def generate_plo_batch(
     exclude_ambiguous_band: bool = False,
     min_ev_gap_bb: float | None = None,
     diversify: bool = False,
+    balanced: bool = False,
     compute_equity: bool = True,
     answer_style: str = "auto",
     seed: int | None = 0,
@@ -255,6 +283,14 @@ def generate_plo_batch(
     hand per node per pass, so situations spread first and a node contributes
     multiple (always different) hands only when the batch is bigger than the
     node pool.
+
+    ``balanced=True`` (🎛️ Fully balanced, July 2026) pre-draws a capped
+    candidate pool, scores it cheaply, and greedy-orders it for marginal
+    balance across difficulty band, situation, correct-answer verb
+    (fold/call/raise -- read from the dominant action, so basic and GTO
+    option styles balance identically), position, and hand shape; achieved
+    vs target lands in the meta ``balance_report``. Supersedes
+    ``diversify`` (situation is one of its axes).
     Equity is computed per kept spot when ``compute_equity`` (the ~1s/spot cost;
     it only enriches the equity/range concept tags).
 
@@ -477,6 +513,7 @@ def generate_plo_batch(
                 "exclude_ambiguous_band": exclude_ambiguous_band,
                 "min_ev_gap_bb": min_ev_gap_bb,
                 "diversify": diversify,
+                "balanced": balanced,
                 "compute_equity": compute_equity,
                 "answer_style": answer_style,
                 "stakes_bb_dollars": stakes_bb_dollars,
@@ -522,13 +559,93 @@ def generate_plo_batch(
             },
             "questions": question_records,
         }
+        if balanced:
+            # Achieved-vs-target per axis for the SHIPPED rows, against the
+            # scored pool -- the honest-shortfall record the done panel and
+            # Review read (see balanced_select.balance_report).
+            meta["balance_report"] = balance_report(
+                selected_attrs, balance_pool_attrs
+            )
         meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
         meta_tmp.write_text(json.dumps(meta, indent=2, default=str))
         meta_tmp.replace(meta_path)
 
+    def _drawn_spots():
+        """Round-robin worthy-spot draw over the (shuffled) nodes.
+
+        Each pass draws at most one NEW hand per node, so a node contributes
+        its 2nd question only after every node has had the chance to
+        contribute a 1st; ends when a full pass draws nothing new. This is
+        the old inline draw moved verbatim into a generator so the balanced
+        pre-pass and the default path share ONE draw order (and stay
+        byte-deterministic).
+        """
+        nonlocal scanned
+        while True:
+            drew = False
+            for node in candidates:
+                scanned += 1
+                spot = _first_worthy_spot(
+                    node,
+                    rng,
+                    min_frequency=min_frequency,
+                    max_frequency=max_frequency,
+                    exclude_ambiguous_band=exclude_ambiguous_band,
+                    exclude_indices=drawn.setdefault(node.node_id, set()),
+                    allow_allin_answers=allins_ok,
+                    counters=strip_counters,
+                )
+                if spot is None:
+                    continue
+                drawn[node.node_id].add(spot.hero_index)
+                drew = True
+                yield spot
+            if not drew:
+                return
+
+    # --- 🎛️ Fully balanced mode (July 2026): pre-draw a capped pool, score
+    # it CHEAPLY (facts without the equity sim -- PLO difficulty has no
+    # equity axis), gate it, then greedy-order it for marginal balance
+    # across difficulty band / situation / answer verb / position / hand
+    # shape (pipeline/plo/balanced_select.py). Generation then consumes the
+    # ordered pool front-to-back, so backfill after a failed question stays
+    # balanced too. Supersedes ``diversify`` (situation is one of its axes).
+    # The committed rows' attrs are recomputed from the REAL facts, so the
+    # meta ``balance_report`` is honest even if an estimate drifted.
+    balance_pool_attrs: list[BalanceAttrs] = []
+    selected_attrs: list[BalanceAttrs] = []
+    if balanced:
+        pool_cap = min(max(12 * total_questions, 120), 600)
+        pool_spots: list[PloSpot] = []
+        for pool_spot in _drawn_spots():
+            pool_facts = extract_plo_facts(
+                pool_spot, pack, compute_equity=False, rng=random.Random(seed)
+            )
+            if (
+                min_ev_gap_bb is not None
+                and pool_facts.ev_gap_bb is not None
+                and pool_facts.ev_gap_bb < min_ev_gap_bb
+            ):
+                ev_gap_filtered_out += 1
+                continue
+            pool_diff = compute_plo_difficulty(pool_facts)
+            if not min_difficulty <= pool_diff.score <= max_difficulty:
+                difficulty_filtered_out += 1
+                continue
+            pool_spots.append(pool_spot)
+            balance_pool_attrs.append(
+                _balance_attrs_for(pool_spot, pool_facts, pool_diff.score, pack)
+            )
+            if len(pool_spots) >= pool_cap:
+                break
+        order = balanced_order(balance_pool_attrs, total_questions)
+        spot_iter = iter([pool_spots[i] for i in order])
+    else:
+        spot_iter = _drawn_spots()
+
     while len(rows) < total_questions and not aborted and not stopped_early:
         drew_this_pass = False
-        for node in candidates:
+        for spot in spot_iter:
             if len(rows) >= total_questions or aborted:
                 break
             # Graceful stop: checked between spots, never mid-question, so
@@ -536,20 +653,7 @@ def generate_plo_batch(
             if stop_check is not None and stop_check():
                 stopped_early = True
                 break
-            scanned += 1
-            spot = _first_worthy_spot(
-                node,
-                rng,
-                min_frequency=min_frequency,
-                max_frequency=max_frequency,
-                exclude_ambiguous_band=exclude_ambiguous_band,
-                exclude_indices=drawn.setdefault(node.node_id, set()),
-                allow_allin_answers=allins_ok,
-                counters=strip_counters,
-            )
-            if spot is None:
-                continue
-            drawn[node.node_id].add(spot.hero_index)
+            node = spot.node
             drew_this_pass = True
             facts = extract_plo_facts(
                 spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
@@ -744,6 +848,21 @@ def generate_plo_batch(
                         aborted = True
                     continue
 
+            # FOLD-EV TRIPWIRE (July 22 2026, from the min-raise size bug):
+            # the pack's own fold EV must equal minus hero's resolved
+            # invested amount -- a mismatch means a DISPLAYED bet size on
+            # this line is wrong. Deterministic, runs on every question
+            # (dry runs included); flags-not-rejects like the other soft
+            # validators, and a size-resolution bug flags EVERY affected
+            # row, so it cannot ship quietly.
+            fold_issue = fold_ev_consistency_issue(
+                spot, stack_bb=stack_bb, ante_bb=ante_bb
+            )
+            if fold_issue:
+                if not soft_warnings:
+                    soft_flagged_rows += 1
+                soft_warnings.append(fold_issue)
+
             row = build_plo_row(
                 facts,
                 difficulty=difficulty,
@@ -798,6 +917,12 @@ def generate_plo_batch(
             if soft_warnings:
                 record["validator_warnings"] = soft_warnings
             question_records.append(record)
+            if balanced:
+                # Recomputed from the REAL facts (not the pre-pass estimate)
+                # so the meta balance_report describes what actually shipped.
+                selected_attrs.append(
+                    _balance_attrs_for(spot, facts, difficulty.score, pack)
+                )
             # Live progress for the admin page's inline bar (how far along
             # this batch is). Called after each question is committed.
             if progress_callback is not None:

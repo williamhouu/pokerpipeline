@@ -408,10 +408,13 @@ def _by_key(entries):
 
 
 def test_flush_ceiling_rainbow_emits_the_no_flush_row():
+    # July 2026 user wording: value is the terse "NA"; the note explains in
+    # plain English (rainbow hand + the two-cards-one-suit rule).
     entries = flush_ceiling_stat_entries(("As", "Kd", "Qh", "Jc"))
     assert len(entries) == 1
-    assert entries[0]["value"] == "no flush possible"
-    assert "exactly two hole cards" in entries[0]["note"]
+    assert entries[0]["value"] == "NA"
+    assert "rainbow hand" in entries[0]["note"]
+    assert "can never make one" in entries[0]["note"]
 
 
 def test_flush_ceiling_double_suited_orders_high_suit_first():

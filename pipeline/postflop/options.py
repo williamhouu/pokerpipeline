@@ -48,18 +48,27 @@ _AUTO_BASIC_THRESHOLD = 0.80
 # falling back to plain labels.
 _NEAR_BINARY_DROP_FREQ = 0.05
 
-# The three answer-option styles (parity with preflop):
-#   * "basic" -- plain action labels (Check / Bet 33% / Fold / Call / Raise to X).
-#   * "gto"   -- the Always/Mostly spectrum for a 2-action spot; a 3+-size spot
-#                can't be spectrum'd, so it falls back to plain labels.
-#   * "auto"  -- basic when one action is clearly dominant (>= 80%), else gto.
-ANSWER_STYLES: tuple[str, ...] = ("basic", "gto", "auto")
+# The answer-option styles (July 22 2026 revision, user rule: "basic" must
+# NEVER show a bet size -- sizes are their own style):
+#   * "basic"  -- VERB-ONLY labels (Fold / Check / Call / Bet / Raise /
+#                 All-in). Multiple sizes of one verb merge into one option;
+#                 the size lives in the question prose and SOLVER DATA only.
+#   * "sizing" -- plain action labels WITH sizes (Check / Bet 33% /
+#                 Raise to 12bb) -- the pre-July-22 "basic".
+#   * "gto"    -- the Always/Mostly spectrum (size-free by the July rule).
+#   * "auto"   -- basic when one action is clearly dominant (>= 80%), else gto.
+#   * "blend"  -- deterministic per-spot mix of basic and sizing (~50/50,
+#                 keyed on the node+combo), so a full-hand batch carries both
+#                 kinds of question.
+ANSWER_STYLES: tuple[str, ...] = ("basic", "sizing", "gto", "auto", "blend")
 
 # Admin radio label -> canonical style (kept here so the CLI + admin agree).
 ANSWER_STYLE_FROM_RADIO_LABEL: dict[str, str] = {
-    "Basic (plain labels)": "basic",
+    "Basic (verbs only — no sizes)": "basic",
+    "Sizing (labels carry bet sizes)": "sizing",
     "GTO (always/mostly)": "gto",
     "Auto-pick": "auto",
+    "Blend (mix of Basic + Sizing)": "blend",
 }
 
 
@@ -69,6 +78,38 @@ def _aggression_key(action: NodeAction) -> tuple[int, float]:
         action.to_bb if action.to_bb is not None else 0.0
     )
     return (_VERB_RANK.get(action.verb, 9), size)
+
+
+def _verb_label(action: NodeAction) -> str:
+    """The size-free wording of one action: its verb, except ``All-in``
+    (which IS the action, not a size) and the passive labels, kept verbatim."""
+    if action.verb in ("bet", "raise") and action.label != "All-in":
+        return action.verb.capitalize()
+    return action.label
+
+
+def _verb_options(
+    actions: list[NodeAction], dominant: str
+) -> tuple[list[str], str]:
+    """VERB-ONLY options (the July 22 2026 "basic": Fold / Check / Call /
+    Bet / Raise / All-in, aggression-ordered, no sizes anywhere).
+
+    Multiple sizes of one verb merge into a single option; the correct
+    answer is the dominant action's verb. The real size still reaches the
+    LLM's SOLVER DATA block and the question prose -- only the option
+    wording drops it (same rule the GTO spectrum has followed since July).
+    """
+    options: list[str] = []
+    for action in actions:  # already aggression-sorted
+        label = _verb_label(action)
+        if label not in options:
+            options.append(label)
+    options = options[:4]
+    dominant_action = next(a for a in actions if a.label == dominant)
+    correct = _verb_label(dominant_action)
+    if correct not in options:  # defensive: dominant beyond the 4-option cut
+        options = [correct] + options[:3]
+    return options, correct
 
 
 def _plain_options(
@@ -260,10 +301,22 @@ def build_options(
     dominant = spot.dominant_action
 
     resolved = style
+    if resolved == "blend":
+        # Deterministic ~50/50 per spot (node + combo), so a blend batch is
+        # byte-exactly rebuildable and a hand's legs vary naturally.
+        import zlib  # noqa: PLC0415
+
+        seed = zlib.crc32(f"{spot.node.node_id}|{spot.hero_combo}".encode())
+        resolved = "basic" if seed % 2 == 0 else "sizing"
     if resolved == "auto":
         resolved = "basic" if spot.dominant_frequency >= _AUTO_BASIC_THRESHOLD else "gto"
-    if resolved not in ("basic", "gto"):
+    if resolved not in ("basic", "sizing", "gto"):
         raise ValueError(f"unknown answer style {style!r}; expected one of {ANSWER_STYLES}")
+    if resolved == "basic":
+        # USER RULE (July 22 2026): basic NEVER shows a bet size.
+        return _verb_options(actions, dominant)
+    if resolved == "sizing":
+        return _plain_options(actions, labels, dominant)
 
     # The Always/Mostly spectrum: a 2-ACTION spot uses the two action labels; a
     # multi-SIZE spot with only two action TYPES (Check + Bet 33%/50%/67%)
