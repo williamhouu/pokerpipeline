@@ -430,6 +430,20 @@ def start_subprocess_job[T](
     progress_path = work_dir / "progress.json"
     result_path = work_dir / "result.pkl"
     stop_path = work_dir / "stop.requested"
+    # Durable descriptor (July 2026): lets a RESTARTED panel process
+    # rediscover this job from disk (see adopt_disk_jobs). Written before
+    # the child spawns; the supervisor fills in the pid afterwards.
+    _write_descriptor(
+        work_dir,
+        {
+            "id": job.id,
+            "label": label,
+            "meta": job.meta,
+            "started_at": job.started_at,
+            "stop_check_kwarg": stop_check_kwarg,
+            "pid": None,
+        },
+    )
     spec_path.write_bytes(
         pickle.dumps(
             {
@@ -462,6 +476,7 @@ def start_subprocess_job[T](
                 cwd=str(_PROJECT_ROOT),
                 env=os.environ.copy(),
             )
+            _update_descriptor(work_dir, pid=proc.pid)
             with _LOCK:
                 _CURRENT_PROC = proc
                 job.status = JobStatus.RUNNING
@@ -600,18 +615,443 @@ def request_cancel_current_job() -> bool:
     return True
 
 
+# --- disk re-attach (July 2026) ----------------------------------------------
+# INVARIANT: a panel-process restart must NEVER hide a running or finished
+# batch. Job history/queue live in process memory, but the subprocess child
+# survives a restart -- before this section, a restarted panel simply forgot
+# its jobs ("started but never finished"), their results went unread and
+# their token spend never reached the usage ledger. Every subprocess job now
+# leaves a durable ``job.json`` descriptor in its ``pp_job_*`` work dir, and
+# :func:`adopt_disk_jobs` rediscovers those dirs:
+#
+#   * still running  -> ADOPTED into a side registry (never the single
+#     _CURRENT_JOB slot: two orphans can be running at once, and the slot
+#     must stay free for new work), with a watcher thread that mirrors
+#     progress and harvests the result exactly like a supervisor.
+#   * finished       -> the result envelope is harvested straight into
+#     _HISTORY (a work dir still on disk == its parent died before the
+#     harvest, so this is never a double-read; the normal path removes the
+#     dir the moment the supervisor finishes) and the dir is cleaned up.
+#     History is what the ledger sweeps read, so recovered spend gets logged.
+#   * dead (no process, no result) -> a FAILED history entry that says so.
+#
+# Dirs made by the pre-descriptor code (no job.json) are handled by
+# reconstructing label/meta from spec.pkl; their pid is recovered via pgrep.
+
+_ADOPTED: dict[str, tuple[Job[Any], "DiskJobInfo"]] = {}
+# Serializes whole adoption passes: two Streamlit sessions rendering at once
+# must not both adopt the same dir (double watcher, double history entry).
+_ADOPT_LOCK = threading.Lock()
+
+
+@dataclass
+class DiskJobInfo:
+    """What we know about one ``pp_job_*`` work dir found on disk."""
+
+    work_dir: Path
+    job_id: str
+    label: str
+    meta: dict[str, Any]
+    started_at: float
+    pid: int | None
+    stop_check_kwarg: str | None
+    legacy: bool  # True when reconstructed from spec.pkl (no job.json)
+
+    @property
+    def spec_path(self) -> Path:
+        return self.work_dir / "spec.pkl"
+
+    @property
+    def progress_path(self) -> Path:
+        return self.work_dir / "progress.json"
+
+    @property
+    def result_path(self) -> Path:
+        return self.work_dir / "result.pkl"
+
+    @property
+    def stop_path(self) -> Path:
+        return self.work_dir / "stop.requested"
+
+
+def _write_descriptor(work_dir: Path, data: dict[str, Any]) -> None:
+    """Write ``job.json`` (best-effort: never let bookkeeping kill a job)."""
+    try:
+        tmp = work_dir / "job.json.tmp"
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, work_dir / "job.json")
+    except OSError:
+        pass
+
+
+def _update_descriptor(work_dir: Path, **updates: Any) -> None:
+    try:
+        path = work_dir / "job.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.update(updates)
+        _write_descriptor(work_dir, data)
+    except (OSError, ValueError):
+        pass
+
+
+def _legacy_label_meta(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Reconstruct a display label + meta for a pre-descriptor work dir.
+
+    Mirrors the labels/meta the Generate pages attach at enqueue time, so an
+    adopted legacy job renders in the same panels a remembered one would.
+    """
+    qualname = str(spec.get("fn_qualname", ""))
+    module = str(spec.get("fn_module", ""))
+    kwargs = spec.get("kwargs", {}) or {}
+    out_name = Path(str(kwargs.get("output_path", ""))).name
+    db_name = Path(str(kwargs.get("db_path", ""))).name
+    if "full_hand" in qualname:
+        n = kwargs.get("total_hands")
+        label = f"Postflop full hands: {db_name}" + (f" ({n} hands)" if n else "")
+        return label, {}
+    if module.startswith("pipeline.plo"):
+        label = out_name or qualname
+        return label, {"kind": "plo_generate", "output_name": out_name}
+    if "preflop_entry" in qualname:
+        return f"Preflop entry: {db_name}", {}
+    if "postflop" in module:
+        return f"Postflop: {db_name or out_name or qualname}", {}
+    return out_name or qualname or "recovered job", {}
+
+
+def _read_disk_job(work_dir: Path) -> DiskJobInfo | None:
+    """Parse one ``pp_job_*`` dir into a :class:`DiskJobInfo`, or None."""
+    name = work_dir.name  # pp_job_<id>_<random>
+    parts = name.split("_")
+    job_id = parts[2] if len(parts) >= 4 else name
+    desc_path = work_dir / "job.json"
+    if desc_path.is_file():
+        try:
+            d = json.loads(desc_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return DiskJobInfo(
+            work_dir=work_dir,
+            job_id=str(d.get("id", job_id)),
+            label=str(d.get("label", "recovered job")),
+            meta=dict(d.get("meta") or {}),
+            started_at=float(d.get("started_at") or work_dir.stat().st_mtime),
+            pid=int(d["pid"]) if d.get("pid") else None,
+            stop_check_kwarg=d.get("stop_check_kwarg"),
+            legacy=False,
+        )
+    spec_path = work_dir / "spec.pkl"
+    if not spec_path.is_file():
+        return None
+    try:
+        spec = pickle.loads(spec_path.read_bytes())
+        label, meta = _legacy_label_meta(spec)
+    except Exception:  # noqa: BLE001 -- unreadable spec: not adoptable
+        return None
+    try:
+        started_at = spec_path.stat().st_mtime
+    except OSError:
+        started_at = time.time()
+    return DiskJobInfo(
+        work_dir=work_dir,
+        job_id=job_id,
+        label=label,
+        meta=meta,
+        started_at=started_at,
+        pid=None,
+        stop_check_kwarg=spec.get("stop_check_kwarg"),
+        legacy=True,
+    )
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _find_worker_pid(info: DiskJobInfo) -> int | None:
+    """The child's pid: from the descriptor, else pgrep on the spec path
+    (legacy dirs -- the spec path is unique per job, so a match is exact)."""
+    if info.pid is not None:
+        return info.pid
+    if shutil.which("pgrep") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", str(info.spec_path)],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    pids = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+    return pids[0] if pids else None
+
+
+def _probe_disk_job(info: DiskJobInfo) -> str:
+    """``"finished"`` (result file present) / ``"running"`` / ``"dead"``."""
+    if info.result_path.is_file():
+        return "finished"
+    pid = _find_worker_pid(info)
+    if pid is not None and _pid_alive(pid):
+        info.pid = pid  # remember for cancel support
+        return "running"
+    return "dead"
+
+
+def _known_job_ids() -> set[str]:
+    with _LOCK:
+        ids = {j.id for j in _HISTORY}
+        ids.update(_ADOPTED.keys())
+        if _CURRENT_JOB is not None:
+            ids.add(_CURRENT_JOB.id)
+    return ids
+
+
+def _harvest_result(job: Job[Any], info: DiskJobInfo) -> None:
+    """Terminal state from the result envelope (adopted-job analogue of
+    :func:`_finish_subprocess_job`; no cancel flag -- nobody asked)."""
+    try:
+        envelope = pickle.loads(info.result_path.read_bytes())
+        finished_at = info.result_path.stat().st_mtime
+    except Exception as exc:  # noqa: BLE001 -- incl. unpickle of stale classes
+        with _LOCK:
+            job.status = JobStatus.FAILED
+            job.error = (
+                f"Recovered batch finished but its result could not be read: {exc}. "
+                "The output CSV (if any) is still on disk."
+            )
+            job.finished_at = time.time()
+        return
+    with _LOCK:
+        if envelope.get("ok"):
+            job.result = envelope.get("result")
+            job.status = JobStatus.COMPLETED
+        else:
+            job.status = JobStatus.FAILED
+            job.error = envelope.get("error", "Unknown worker error.")
+        job.finished_at = finished_at
+
+
+def _retire_adopted(job: Job[Any], info: DiskJobInfo) -> None:
+    """Move a terminal adopted job into history + clean its work dir."""
+    with _LOCK:
+        _ADOPTED.pop(job.id, None)
+        _HISTORY.append(job)
+        del _HISTORY[:-_HISTORY_MAX]
+    shutil.rmtree(info.work_dir, ignore_errors=True)
+
+
+def _watch_adopted(job: Job[Any], info: DiskJobInfo) -> None:
+    """Supervisor for an adopted RUNNING job: mirror progress, then harvest.
+
+    Harvests as soon as the result file appears (the child writes it
+    atomically right before exiting); a vanished process with no result
+    file means the child died -> FAILED with an honest message.
+    """
+    while True:
+        _mirror_progress(job, info.progress_path)
+        if info.result_path.is_file():
+            _harvest_result(job, info)
+            break
+        pid = info.pid
+        if pid is not None and not _pid_alive(pid):
+            # Grace re-check: the child may have written the result between
+            # our file check and the pid check.
+            time.sleep(_POLL_SECONDS)
+            if info.result_path.is_file():
+                _harvest_result(job, info)
+            else:
+                with _LOCK:
+                    job.status = JobStatus.FAILED
+                    job.error = (
+                        "The recovered batch's worker process exited without "
+                        "writing a result (killed or crashed). Its output CSV "
+                        "may be partial -- check the batch folder."
+                    )
+                    job.finished_at = time.time()
+            break
+        time.sleep(_POLL_SECONDS)
+    _mirror_progress(job, info.progress_path)
+    _retire_adopted(job, info)
+
+
+def adopt_disk_jobs(tmp_root: str | None = None) -> list[Job[Any]]:
+    """Rediscover subprocess jobs from ``pp_job_*`` dirs on disk.
+
+    Idempotent and cheap (skips every already-known job id), so callers can
+    run it on every panel render. Returns the jobs adopted THIS call:
+    running ones (now watched, visible via :func:`adopted_jobs`) and
+    finished/dead ones (already moved into :func:`job_history`).
+    """
+    root = Path(tmp_root or tempfile.gettempdir())
+    try:
+        candidates = sorted(
+            p for p in root.iterdir() if p.is_dir() and p.name.startswith("pp_job_")
+        )
+    except OSError:
+        return []
+    if not candidates:
+        return []
+    with _ADOPT_LOCK:
+        return _adopt_candidates(candidates)
+
+
+def _adopt_candidates(candidates: list[Path]) -> list[Job[Any]]:
+    known = _known_job_ids()
+    adopted: list[Job[Any]] = []
+    for work_dir in candidates:
+        info = _read_disk_job(work_dir)
+        if info is None or info.job_id in known:
+            continue
+        state = _probe_disk_job(info)
+        job: Job[Any] = Job(
+            id=info.job_id,
+            label=info.label,
+            meta=dict(info.meta),
+            cancellable=False,
+            graceful_stoppable=False,
+            started_at=info.started_at,
+        )
+        if state == "running":
+            job.status = JobStatus.RUNNING
+            job.cancellable = info.pid is not None
+            job.graceful_stoppable = bool(info.stop_check_kwarg)
+            _mirror_progress(job, info.progress_path)
+            with _LOCK:
+                _ADOPTED[job.id] = (job, info)
+            threading.Thread(
+                target=_watch_adopted, args=(job, info), daemon=True,
+                name=f"adopted-{job.id}",
+            ).start()
+        elif state == "finished":
+            _harvest_result(job, info)
+            _mirror_progress(job, info.progress_path)
+            with _LOCK:
+                _HISTORY.append(job)
+                del _HISTORY[:-_HISTORY_MAX]
+            shutil.rmtree(work_dir, ignore_errors=True)
+        else:  # dead
+            job.status = JobStatus.FAILED
+            job.error = (
+                "This batch was recovered from a previous panel session: its "
+                "worker process is gone and no result was written. Its output "
+                "CSV may be partial -- check the batch folder."
+            )
+            job.finished_at = time.time()
+            _mirror_progress(job, info.progress_path)
+            with _LOCK:
+                _HISTORY.append(job)
+                del _HISTORY[:-_HISTORY_MAX]
+            shutil.rmtree(work_dir, ignore_errors=True)
+        known.add(info.job_id)
+        adopted.append(job)
+    return adopted
+
+
+def adopted_jobs() -> list[Job[Any]]:
+    """Snapshot of currently-adopted (recovered, still running) jobs."""
+    with _LOCK:
+        return [job for job, _info in _ADOPTED.values()]
+
+
+@dataclass
+class JobBoard:
+    """One consistent snapshot of EVERYTHING in flight, for the always-on
+    sidebar board (July 2026, user ask: a batch must never 'stop showing
+    up' while it is still generating).
+
+    ``active`` is every job currently running or pending, whatever started
+    it: the registry slot's job AND every adopted (recovered) one --
+    ordered oldest-first so the board reads top-down in start order.
+    ``queued`` is the FIFO of not-yet-started requests. ``last_done`` is
+    the most recently finished job (slot or history), for the idle state.
+    """
+
+    active: list[Job[Any]] = field(default_factory=list)
+    queued: list[QueuedRequest] = field(default_factory=list)
+    last_done: Job[Any] | None = None
+
+
+def job_board() -> JobBoard:
+    """Snapshot the whole job landscape under one lock acquisition."""
+    with _LOCK:
+        active: list[Job[Any]] = []
+        if _CURRENT_JOB is not None and _CURRENT_JOB.is_active:
+            active.append(_CURRENT_JOB)
+        active.extend(job for job, _info in _ADOPTED.values() if job.is_active)
+        active.sort(key=lambda j: j.started_at)
+        queued = list(_PENDING)
+        done_candidates = [j for j in _HISTORY if j.is_done]
+        if _CURRENT_JOB is not None and _CURRENT_JOB.is_done:
+            done_candidates.append(_CURRENT_JOB)
+        last_done = max(
+            done_candidates,
+            key=lambda j: j.finished_at or 0.0,
+            default=None,
+        )
+    return JobBoard(active=active, queued=queued, last_done=last_done)
+
+
+def request_adopted_stop(job_id: str) -> bool:
+    """Graceful-stop an adopted job (touch its stop sentinel). True iff sent."""
+    with _LOCK:
+        entry = _ADOPTED.get(job_id)
+    if entry is None:
+        return False
+    job, info = entry
+    if not job.graceful_stoppable:
+        return False
+    try:
+        info.stop_path.touch()
+    except OSError:
+        return False
+    with _LOCK:
+        job.stop_requested = True
+    return True
+
+
+def request_adopted_cancel(job_id: str) -> bool:
+    """Terminate an adopted job's worker process. True iff a signal was sent."""
+    with _LOCK:
+        entry = _ADOPTED.get(job_id)
+    if entry is None:
+        return False
+    job, info = entry
+    if info.pid is None:
+        return False
+    try:
+        os.kill(info.pid, 15)  # SIGTERM; the watcher observes the exit
+    except OSError:
+        return False
+    return True
+
+
 __all__ = [
+    "DiskJobInfo",
     "Job",
     "JobProgress",
     "JobStatus",
     "QueuedRequest",
+    "JobBoard",
+    "adopt_disk_jobs",
+    "adopted_jobs",
     "clear_current_job",
+    "job_board",
     "enqueue_subprocess_job",
     "get_current_job",
     "has_active_job",
     "job_history",
     "pending_jobs",
     "remove_queued",
+    "request_adopted_cancel",
+    "request_adopted_stop",
     "request_cancel_current_job",
     "request_graceful_stop_current_job",
     "start_job",

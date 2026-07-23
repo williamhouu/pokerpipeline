@@ -552,6 +552,15 @@ def test_full_hand_reverifier_rebuilds_every_leg(tmp_path: Path) -> None:
     meta = json.loads(out.with_suffix(".meta.json").read_text())
     qs = meta["questions"]
     assert len(rows) == len(qs)
+    # Each hand's FINAL leg carries the showdown resolution; the audit
+    # re-attaches it before comparing (same seeded inputs), and so must we.
+    final_seq: dict[str, int] = {}
+    for q in qs:
+        hid = q.get("hand_id", "")
+        if hid:
+            final_seq[hid] = max(
+                final_seq.get(hid, 0), int(q.get("sequence_index") or 0)
+            )
     checked_pre = checked_post = 0
     for row, q in zip(rows, qs, strict=True):
         if (q.get("street") == "preflop") or not q.get("node_id"):
@@ -565,6 +574,20 @@ def test_full_hand_reverifier_rebuilds_every_leg(tmp_path: Path) -> None:
                 equity_runouts=int(meta["run_settings"]["equity_runouts"]),
             )
             checked_post += 1
+            hid = q.get("hand_id", "")
+            if (
+                rebuilt is not None and hid
+                and int(q.get("sequence_index") or 0) == final_seq.get(hid)
+            ):
+                from pipeline.postflop.showdown import (  # noqa: PLC0415
+                    attach_showdown_resolution,
+                )
+
+                attach_showdown_resolution(
+                    rebuilt, node=solve.nodes[q["node_id"]], solve=solve,
+                    hero_combo=q["hero_combo"], correct_answer=correct,
+                    hand_id=hid,
+                )
         assert rebuilt is not None
         for col in afh.EXACT_COLS:
             assert rebuilt.get(col, "") == row.get(col, ""), (col, row["No"])

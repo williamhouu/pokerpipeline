@@ -322,12 +322,30 @@ def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
     n6 = _node("r:0:c:b180:c:2h:c:b455:c:Kd", "river", river_board, "BB", "BTN", 18.2,
                91.2, 0.0, r_lead, (f_check, f_bet, f_call, t_check, t_bet, t_call),
                {hero: {"Check": 0.60, "Bet 50%": 0.40}})
-    r_face = (_action("Fold", "fold", 0.45, ev_bb=0.0),
-              _action("Call", "call", 0.55, to_bb=9.0, ev_bb=0.8))
+    # 70/30 (not the old 55/45): the river facing-bet node must be WORTHY
+    # (65-99 window) so the fixture's canonical hand is seeded HERE and ends
+    # on the river -- the July 22 2026 no-mid-hand-endings rule outlaws
+    # non-fold flop/turn enders, so a fixture whose deepest worthy seed was
+    # the turn check-lead could no longer assemble a single legal hand.
+    r_face = (_action("Fold", "fold", 0.30, ev_bb=0.0),
+              _action("Call", "call", 0.70, to_bb=9.0, ev_bb=0.8))
     n7 = _node("r:0:c:b180:c:2h:c:b455:c:Kd:c:b900", "river", river_board, "BB", "BTN",
                36.2, 82.2, 9.0, r_face,
                (f_check, f_bet, f_call, t_check, t_bet, t_call, r_check, r_bet),
-               {hero: {"Call": 0.55, "Fold": 0.45}})
+               {hero: {"Call": 0.70, "Fold": 0.30}})
+
+    # BTN's river barrel decision after BB checks (July 22 2026): BTN's line
+    # needs a RIVER decision node, or every BTN/villain-frame hand ends on
+    # the flop check-back -- a non-fold early ending the no-mid-hand-endings
+    # rule rightly drops, which would leave the fixture with a single
+    # assemblable hand (and no villain-frame hand at all).
+    n8 = _node("r:0:c:b180:c:2h:c:b455:c:Kd:c", "river", river_board, "BTN", "BB",
+               18.2, 91.2, 0.0,
+               (_action("Check", "check", 0.30, ev_bb=4.4),
+                _action("Bet 50%", "bet", 0.70, to_bb=9.0, pot_fraction=0.50,
+                        ev_bb=5.1)),
+               (f_check, f_bet, f_call, t_check, t_bet, t_call, r_check),
+               {"AcJc": {"Bet 50%": 0.70, "Check": 0.30}})
 
     return PostflopSolve(
         solve_id="btn_vs_bb_full_hand_2cJs7s",
@@ -336,7 +354,7 @@ def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
         starting_pot_bb=5.5,
         flop=flop,
         preflop_summary=pre,
-        nodes={n.node_id: n for n in (n1, n2, n3, n4, n5, n6, n7)},
+        nodes={n.node_id: n for n in (n1, n2, n3, n4, n5, n6, n7, n8)},
         game_format="cash",
         bb_in_dollars=1.0,
         stakes="$0.50/$1",

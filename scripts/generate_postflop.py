@@ -90,6 +90,17 @@ def main(argv: list[str] | None = None) -> int:
              "as a separate hand (the 'flip the frame' path)",
     )
     parser.add_argument(
+        "--llm-workers", type=int, default=1,
+        help="full-hands mode: generate a hand's legs with this many "
+             "concurrent LLM calls (1 = sequential; ~Nx faster, same cost)",
+    )
+    parser.add_argument(
+        "--no-action-heavy", action="store_true",
+        help="full-hands mode: disable the 🎬 action-heavy policy (checkdown "
+             "quota + trivial-fold-ender drop + density ordering + "
+             "postflop-spine difficulty banding); on by default",
+    )
+    parser.add_argument(
         "--no-preflop-leg", action="store_true",
         help="full-hands mode: omit the preflop-entry leg from each hand",
     )
@@ -243,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
             res = generate_full_hand_batch(
                 total_hands=args.num, include_villain=args.include_villain,
                 include_preflop=not args.no_preflop_leg,
+                action_heavy=not args.no_action_heavy,
+                llm_workers=args.llm_workers,
                 # Pack-backed preflop legs from the repo's ranges/ -- the same
                 # root the admin driver (run.py) uses. Without it the legs
                 # degrade to entry-derived (SRP) or drop (3-bet pots).

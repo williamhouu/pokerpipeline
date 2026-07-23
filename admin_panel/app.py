@@ -1711,8 +1711,11 @@ def _render_generate_page_postflop() -> None:
                 key="postflop_strict_clean_hands",
                 help=(
                     "A play-through ships whole or not at all, so one flagged "
-                    "leg blocks the entire hand. With this on: a hand with any "
-                    "surviving flag after the audit is REBUILT once with fresh "
+                    "leg blocks the entire hand. With this on: a leg the final "
+                    "audit still flags after the auto-fix gets ONE more rewrite "
+                    "round aimed at those exact flags (July 2026 — this is what "
+                    "makes small batches come out fully clean); a hand with any "
+                    "surviving flag after that is REBUILT once with fresh "
                     "explanations; if it is still flagged, it is dropped and a "
                     "replacement hand takes its slot. Every hand in the batch "
                     "comes out fully clean — one click of 'Keep all fully-clean "
@@ -1722,6 +1725,48 @@ def _render_generate_page_postflop() -> None:
             )
         else:
             pf_strict_clean = False
+        if is_full:
+            pf_action_heavy = st.checkbox(
+                "🎬 Action-heavy hands (recommended)",
+                value=True,
+                key="postflop_action_heavy",
+                help=(
+                    "Optimizes the batch for interesting, educational hands "
+                    "(July 2026). Three things happen: check-check-checkdown "
+                    "stories are capped at ~15% of the batch (they were 37% "
+                    "of everything generated before this); a hand can never "
+                    "END on a near-pure fold (folding 5-high to a small stab "
+                    "is not a lesson — genuinely mixed bluff-catch folds "
+                    "stay); and the Easy/Medium/Hard bands judge a hand by "
+                    "its hardest POSTFLOP decision, so a hand no longer "
+                    "counts as 'hard' just because its preflop defend was "
+                    "marginal while every street after was trivial. "
+                    "Candidates are also ordered by educational density "
+                    "(real action, close decisions, raised pots first). "
+                    "All deterministic, zero API cost — it only changes "
+                    "which hands get picked."
+                ),
+            )
+        else:
+            pf_action_heavy = True
+        if is_full:
+            st.session_state.setdefault("postflop_llm_workers", 3)
+            pf_llm_workers = int(st.select_slider(
+                "⚡ Parallel leg generation (speed)",
+                options=[1, 2, 3, 4],
+                key="postflop_llm_workers",
+                help=(
+                    "Generate a hand's questions AT THE SAME TIME instead of "
+                    "one after another (July 2026). A play-through's legs are "
+                    "independent LLM calls, so 3 workers make each hand about "
+                    "as fast as its slowest question — roughly 3x faster "
+                    "batches at IDENTICAL cost. Hand selection, numbering, "
+                    "and the strict-clean logic are exactly the same as a "
+                    "sequential run. 1 = classic sequential."
+                ),
+            ))
+        else:
+            pf_llm_workers = 1
         if pf_run_claim_checker or pf_revise_pass:
             ck_key = "postflop_claim_checker_prompt"
             if ck_key not in st.session_state:
@@ -1951,6 +1996,8 @@ def _render_generate_page_postflop() -> None:
                     revise_pass=pf_revise_pass,
                     final_audit=pf_final_audit,
                     strict_clean_hands=pf_strict_clean,
+                    action_heavy=pf_action_heavy,
+                    llm_workers=pf_llm_workers,
                 )
             elif pf_mode == "preflop":
                 jobs.start_subprocess_job(
@@ -2042,6 +2089,7 @@ def _render_postflop_job_panel() -> None:
     jobs (filtered by the label prefix), so a preflop job doesn't render here."""
     from pipeline.postflop.batch import PostflopBatchResult  # noqa: PLC0415
 
+    _render_recovered_jobs_panel()
     job = jobs.get_current_job()
     # Match all three Generate-page job kinds (independent spots, full hands,
     # preflop entry) but NOT "PostflopCompare:" (the Compare page has its own panel).
@@ -3924,6 +3972,109 @@ def _render_active_job_progress() -> None:
             st.warning("Cancelling… the batch will stop in a moment.")
 
 
+def _adopt_and_log_disk_jobs() -> None:
+    """Re-attach jobs left behind by a previous panel process (July 2026).
+
+    ``jobs.adopt_disk_jobs()`` is idempotent and cheap, so this runs on
+    every render (from the sidebar indicator, which every page mounts).
+    Recovered FINISHED batches get their token spend logged here -- before
+    re-attach existed, a panel restart silently dropped that spend from the
+    lifetime ledger. Recovered PLO results are logged by
+    ``_sweep_finished_plo_jobs`` instead (it owns the PLO done-panel too and
+    reads ``job_history()``, where adopted finished jobs land).
+    """
+    from pipeline.postflop.batch import PostflopBatchResult  # noqa: PLC0415
+
+    try:
+        recovered = jobs.adopt_disk_jobs()
+    except Exception:  # noqa: BLE001 -- recovery must never break a render
+        return
+    for job in recovered:
+        if job.status is jobs.JobStatus.RUNNING:
+            st.toast(f"♻️ Re-attached a running batch: {job.label}")
+        else:
+            st.toast(f"♻️ Recovered a batch from a previous session: {job.label}")
+    # Ledger sweep over job HISTORY (not just this call's recoveries): an
+    # adopted-RUNNING job lands in history when its watcher harvests the
+    # result later, and a queue-advanced postflop job can leave the slot
+    # before its page ever rendered -- both would otherwise miss the spend
+    # log. Idempotent per job id via the shared logged-ids set. PLO results
+    # are deliberately excluded: _sweep_finished_plo_jobs owns those (it
+    # also drives the PLO done-panel, and double-entry would corrupt the
+    # lifetime ledger).
+    for job in jobs.job_history():
+        if job.status is not jobs.JobStatus.COMPLETED:
+            continue
+        res = job.result
+        if isinstance(res, PostflopBatchResult):
+            _maybe_log_completed_postflop_job(job, res)
+        elif isinstance(res, BatchResult):
+            _maybe_log_completed_job(job, res)
+
+
+@st.fragment(run_every=1.0)
+def _render_recovered_jobs_ticker() -> None:
+    """Live progress for re-attached (recovered) batches.
+
+    Mounted only while at least one adopted job is running; when the last
+    one finishes (it moves into job history), triggers ONE full-app rerun
+    so the static panels take over and the ticking stops.
+    """
+    active = jobs.adopted_jobs()
+    if not active:
+        if not st.session_state.get("_recovered_done_rerun"):
+            st.session_state["_recovered_done_rerun"] = True
+            st.rerun(scope="app")
+        return
+    st.session_state["_recovered_done_rerun"] = False
+    for job in active:
+        st.markdown(f"**♻️ Recovered batch (still running):** {job.label}")
+        p = job.progress
+        if p.total > 0:
+            st.progress(min(1.0, (p.current + 1) / p.total),
+                        text=p.message or "Running…")
+        else:
+            st.text(p.message or "Running…")
+        st.caption(
+            f"job id `{job.id}` · started before the panel restarted · "
+            "it kept running the whole time."
+        )
+        if job.stop_requested:
+            st.info("🛑 Stopping after the current unit of work…")
+        c1, c2 = st.columns(2)
+        if (
+            job.graceful_stoppable
+            and not job.stop_requested
+            and c1.button(
+                "🛑 Stop after current question (keeps finished work)",
+                key=f"gstop_adopted_{job.id}",
+            )
+            and jobs.request_adopted_stop(job.id)
+        ):
+            st.rerun(scope="fragment")
+        if job.cancellable and c2.button(
+            "⛔ Cancel batch", key=f"cancel_adopted_{job.id}"
+        ):
+            if jobs.request_adopted_cancel(job.id):
+                st.warning("Cancelling… the batch will stop in a moment.")
+
+
+def _render_recovered_jobs_panel() -> None:
+    """Panel for batches re-attached from disk after a panel restart.
+
+    INVARIANT (July 2026): every Generate page's job panel MUST mount this
+    first, so a running batch stays visible even when the panel process
+    that started it is gone. Finished recovered batches don't render here
+    -- they land in job history (PLO done-panels + ledger sweeps read it)
+    and their CSVs show up in the Review pages as usual.
+    """
+    if not jobs.adopted_jobs():
+        return
+    with st.container(border=True):
+        _render_recovered_jobs_ticker()
+    st.divider()
+
+
 def _render_preflop_job_panel() -> None:
     """Top-of-page panel showing the current (or last) background job.
 
@@ -3939,6 +4090,7 @@ def _render_preflop_job_panel() -> None:
     UX-only (the registry slot is freed so the next batch can start
     without an extra step).
     """
+    _render_recovered_jobs_panel()
     job = jobs.get_current_job()
     if job is None:
         return
@@ -8591,13 +8743,64 @@ def _render_postflop_approved_pool() -> None:
     appr_rows = [r for _c, _n, r in approved_sources]
     appr_fields = list(appr_rows[0].keys())
     st.caption(f"**{len(appr_rows)}** approved across all postflop batches.")
-    st.download_button(
+    dcol, ccol = st.columns([3, 2])
+    dcol.download_button(
         "⬇️  Download approved (CSV)",
         data=review.approved_rows_to_csv(appr_fields, appr_rows),
         file_name="postflop_approved.csv",
         mime="text/csv",
+        type="primary",
+        use_container_width=True,
         key="pf_approved_dl",
     )
+    # Clear-all is destructive (un-approves everything): confirm in 2 steps,
+    # same pattern as the NLHE + PLO Review pages (July 2026, user ask --
+    # the postflop pool previously had NO way to remove anything).
+    if st.session_state.get("pf_confirm_clear_approved"):
+        if ccol.button(
+            f"⚠️ Confirm: clear all {len(appr_rows)}",
+            key="pf_clear_approved_confirm",
+            use_container_width=True,
+        ):
+            n_cleared = review.clear_all_approved(POSTFLOP_OUTPUT_DIR)
+            st.session_state["pf_confirm_clear_approved"] = False
+            st.toast(f"Cleared {n_cleared} approved question(s)")
+            st.rerun()
+    elif ccol.button(
+        "🧹 Clear all approved",
+        key="pf_clear_approved",
+        use_container_width=True,
+    ):
+        st.session_state["pf_confirm_clear_approved"] = True
+        st.rerun()
+
+    with st.expander("🗑  Remove individual questions"):
+        st.caption(
+            "Removing a play-through leg un-approves its WHOLE hand -- a "
+            "hand ships whole or not at all, so a partial hand can never "
+            "linger in the pool."
+        )
+        for src_csv, src_no, src_row in approved_sources:
+            rcol, xcol = st.columns([10, 1])
+            hand_id = str(src_row.get("hand_id", "") or "").strip()
+            seq = str(src_row.get("sequence_index", "") or "").strip()
+            hand_bit = f"  ·  hand `{hand_id[-8:]}` leg {seq}" if hand_id else ""
+            rcol.markdown(
+                f"**{src_row.get('User Cards', '')}**  ·  "
+                f"{src_row.get('Correct Answer', '')}  ·  "
+                f"{src_row.get('board_texture', '') or 'preflop'}  ·  diff "
+                f"{src_row.get('Difficulty Rating', '')}{hand_bit}"
+            )
+            if xcol.button(
+                "🗑",
+                key=f"pf_appr_del_{src_csv.name}_{src_no}",
+                help="Un-approve (a full-hand leg un-approves the whole hand)",
+            ):
+                for c, n in review.approved_removal_group(
+                    approved_sources, src_csv, src_no
+                ):
+                    review.remove_review(c, n)
+                st.rerun()
 
 
 def render_postflop_compare_page() -> None:
@@ -9660,6 +9863,7 @@ _PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
     "plo_gen_out_prefix",
     "plo_gen_model",
     "plo_gen_temperature",
+    "plo_gen_llm_workers",
     "plo_gen_compute_eq",
     "plo_layer7_mode",
     "plo_final_audit",
@@ -9773,6 +9977,9 @@ def _seed_plo_generate_settings() -> None:
         ),
         "plo_gen_model": _choice(
             saved.get("plo_gen_model"), _PLO_MODELS, "claude-opus-4-7"
+        ),
+        "plo_gen_llm_workers": _num(
+            saved.get("plo_gen_llm_workers"), 1, 4, 3, int
         ),
         "plo_gen_temperature": _num(
             saved.get("plo_gen_temperature"), 0.0, 1.0, 0.6, float
@@ -10094,6 +10301,7 @@ def _render_plo_job_panel() -> None:
     what's waiting, and what finished. The ticking fragment is the ONLY
     auto-refreshing part (same design as the NLHE panel).
     """
+    _render_recovered_jobs_panel()
     _sweep_finished_plo_jobs()
     job = jobs.get_current_job()
     pending = jobs.pending_jobs()
@@ -10495,6 +10703,20 @@ def render_plo_generate_page() -> None:
         help="Higher = more varied prose. 0.6 is a good start with no "
         "examples. (Opus ignores temperature; it affects Sonnet.)",
     )
+    llm_workers = int(st.select_slider(
+        "⚡ Parallel questions (speed)",
+        options=[1, 2, 3, 4],
+        key="plo_gen_llm_workers",
+        help=(
+            "Generate this many questions' LLM calls AT THE SAME TIME "
+            "(July 2026). A batch's time is almost all waiting on the API, "
+            "so 3 workers make it roughly 3x faster at IDENTICAL cost — "
+            "same calls, just overlapped. Everything deterministic (spot "
+            "selection, numbers, row order) is exactly the same as running "
+            "one at a time, and batches re-verify identically. 1 = the "
+            "classic sequential run."
+        ),
+    ))
     compute_eq = st.checkbox(
         "Compute hand equity for the explanation (~1s/spot; real generate only)",
         key="plo_gen_compute_eq",
@@ -10798,6 +11020,7 @@ def render_plo_generate_page() -> None:
             generate_explanations=True,
             explanation_model=model,
             explanation_temperature=temperature,
+            llm_workers=llm_workers,
             explanation_system_prompt=plo_prompt_text,
             run_claim_checker=run_claim_checker,
             revise_pass=revise_pass,
@@ -12426,51 +12649,89 @@ def main() -> None:
         render_plo_compare_page()
 
 
+def _short_label(label: str, limit: int = 70) -> str:
+    """A label trimmed for the narrow sidebar (full text on its page panel)."""
+    label = str(label)
+    return label if len(label) <= limit else label[: limit - 1] + "…"
+
+
 @st.fragment(run_every=1.0)
 def _render_sidebar_active_job() -> None:
-    """Ticking sidebar progress line -- mounted only while a job runs.
+    """Ticking sidebar JOB BOARD -- every in-flight batch, on every page.
 
-    Writes via bare ``st.info`` (NOT ``st.sidebar.X``): Streamlit
-    forbids fragments from calling ``st.sidebar`` directly; the caller
-    wraps the invocation in ``with st.sidebar:`` instead. When the job
-    flips to done, triggers one full-app rerun (the user may be on any
-    page -- this fragment is the only ticker there) so the static
-    done/failed line below takes over and the ticking stops.
+    INVARIANT (July 2026, user ask): while ANYTHING is generating or
+    queued, this board must show it -- the slot job, every adopted
+    (recovered) job, AND the waiting queue, each with its label, its
+    numeric progress, and its current STAGE (the progress message, e.g.
+    "Generated 12 / 52 questions" or "Hand X leg 3/5"). A batch must
+    never be running while the sidebar shows nothing -- that is the
+    "it stopped showing up but was still generating" bug class.
+
+    Writes via bare ``st.*`` (NOT ``st.sidebar.X``): Streamlit forbids
+    fragments from calling ``st.sidebar`` directly; the caller wraps the
+    invocation in ``with st.sidebar:``. When the last job finishes,
+    triggers one full-app rerun so the static done/failed line takes
+    over and the ticking stops (June 2026 lesson: never tick forever).
     """
-    job = jobs.get_current_job()
-    if job is None:
+    board = jobs.job_board()
+    if not board.active and not board.queued:
+        if st.session_state.get("_sidebar_board_had_work"):
+            st.session_state["_sidebar_board_had_work"] = False
+            st.rerun(scope="app")
         return
-    if not job.is_active:
-        _job_done_rerun_once(job)
-        return
-    p = job.progress
-    if p.total > 0:
-        pct = ((p.current + 1) / p.total) * 100
-        st.info(
-            f"🔄 Job: {p.current + 1}/{p.total}  ({pct:.0f}%) · "
-            f"{job.elapsed_seconds:.0f}s"
-        )
-    else:
-        st.info(f"🔄 Job: starting · {job.elapsed_seconds:.0f}s")
+    st.session_state["_sidebar_board_had_work"] = True
+    adopted_ids = {a.id for a in jobs.adopted_jobs()}
+    for job in board.active:
+        recovered = "♻️ " if job.id in adopted_ids else ""
+        p = job.progress
+        if p.total > 0:
+            pct = min(1.0, (p.current + 1) / p.total)
+            head = (
+                f"{recovered}🔄 **{_short_label(job.label)}**\n\n"
+                f"{p.current}/{p.total} ({pct * 100:.0f}%) · "
+                f"{job.elapsed_seconds:.0f}s"
+            )
+        else:
+            head = (
+                f"{recovered}🔄 **{_short_label(job.label)}**\n\n"
+                f"starting · {job.elapsed_seconds:.0f}s"
+            )
+        stage = p.message or "Starting…"
+        if job.stop_requested:
+            stage += "  🛑 stopping after this one"
+        st.info(f"{head}\n\n{stage}")
+    for i, req in enumerate(board.queued, start=1):
+        st.caption(f"⏳ Queued #{i}: {_short_label(req.label)}")
 
 
 def _render_sidebar_job_indicator() -> None:
-    """Tiny sidebar widget showing current job status (any page).
+    """The sidebar job board (any page): everything running, queued, done.
 
     Live progress comes from the ticking fragment above, mounted only
-    while the job is active; done/failed states are plain static lines
-    on normal reruns (June 2026: the always-ticking version kept the
-    whole app busy once a second forever after a batch finished).
+    while something is in flight; done/failed states are plain static
+    lines on normal reruns (June 2026: the always-ticking version kept
+    the whole app busy once a second forever after a batch finished).
+
+    Also the once-per-render hook for disk re-attach (July 2026): the
+    sidebar renders on EVERY page, so orphaned batches from a previous
+    panel process are rediscovered no matter where the user lands.
     """
-    job = jobs.get_current_job()
+    _adopt_and_log_disk_jobs()
+    board = jobs.job_board()
+    if board.active or board.queued:
+        _render_sidebar_active_job()
+        return
+    job = board.last_done
     if job is None:
         return
-    if job.is_active:
-        _render_sidebar_active_job()
-    elif job.status is jobs.JobStatus.COMPLETED:
-        st.success(f"✅ Job done · {job.elapsed_seconds:.0f}s")
+    if job.status is jobs.JobStatus.COMPLETED:
+        st.success(
+            f"✅ Done · {_short_label(job.label, 55)} · {job.elapsed_seconds:.0f}s"
+        )
     elif job.status is jobs.JobStatus.FAILED:
-        st.error("❌ Job failed (see Generate tab)")
+        st.error(f"❌ Failed · {_short_label(job.label, 55)} (see its Generate page)")
+    elif job.status is jobs.JobStatus.CANCELLED:
+        st.warning(f"⛔ Cancelled · {_short_label(job.label, 55)}")
 
 
 if __name__ == "__main__":

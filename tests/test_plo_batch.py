@@ -615,3 +615,78 @@ def test_balanced_mode_balances_the_answer_verb(tmp_path):
     folds = sum("fold" in a.lower() for a in answers)
     calls = sum("call" in a.lower() for a in answers)
     assert folds == 2 and calls == 2, answers
+
+
+# --- ⚡ parallel LLM workers (July 2026, user ask) -----------------------------
+# llm_workers > 1 runs each question's LLM chain on a worker thread while ALL
+# deterministic work (facts RNG, gates, row building, incremental commit)
+# stays on the main thread in draw order, with strictly in-order commits --
+# so the CSV must come out IDENTICAL to a sequential run, and the usage
+# totals must stay exact under concurrency (THE USAGE RULE).
+
+def test_parallel_workers_match_sequential_output(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out_seq = tmp_path / "seq.csv"
+    out_par = tmp_path / "par.csv"
+    r1 = generate_plo_batch(
+        pack, output_path=out_seq, total_questions=4, seed=7,
+        compute_equity=False, generate_explanations=True,
+        explanation_client=_MockClient(), llm_workers=1,
+    )
+    r3 = generate_plo_batch(
+        pack, output_path=out_par, total_questions=4, seed=7,
+        compute_equity=False, generate_explanations=True,
+        explanation_client=_MockClient(), llm_workers=3,
+    )
+    assert r1.questions_written == r3.questions_written == 4  # noqa: PLR2004
+    assert out_seq.read_text(encoding="utf-8") == out_par.read_text(
+        encoding="utf-8"
+    )
+    # Meta question records match too (order + content), bar nothing.
+    meta_seq = json.loads(r1.meta_path.read_text(encoding="utf-8"))
+    meta_par = json.loads(r3.meta_path.read_text(encoding="utf-8"))
+    assert meta_seq["questions"] == meta_par["questions"]
+    assert meta_par["run_settings"]["llm_workers"] == 3  # noqa: PLR2004
+
+
+def test_parallel_usage_totals_stay_exact(tmp_path):
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    result = generate_plo_batch(
+        pack, output_path=out, total_questions=4, seed=7,
+        compute_equity=False, generate_explanations=True,
+        explanation_client=_UsageClient(), llm_workers=4,
+    )
+    n = result.explanations_written
+    assert n == 4  # noqa: PLR2004
+    # One generation call per question with the fixed 100/40/7/3 usage.
+    assert result.total_input_tokens == 100 * n
+    assert result.total_output_tokens == 40 * n
+    assert result.total_cache_creation_tokens == 7 * n
+    assert result.total_cache_read_tokens == 3 * n
+
+
+def test_parallel_graceful_stop_keeps_in_flight_work(tmp_path):
+    """A graceful stop with workers in flight finishes and KEEPS every chain
+    already submitted (the plural of 'finish the current question')."""
+    pack = _clean_hj_pack(tmp_path)
+    out = tmp_path / "batch.csv"
+    committed: list[int] = []
+
+    def stop_after_first() -> bool:
+        return bool(committed)
+
+    result = generate_plo_batch(
+        pack, output_path=out, total_questions=6, seed=7,
+        compute_equity=False, generate_explanations=True,
+        explanation_client=_MockClient(), llm_workers=3,
+        stop_check=stop_after_first,
+        progress_callback=lambda done, total: committed.append(done),
+    )
+    assert result.stopped_early is True
+    # At least the first commit, plus whatever was in flight when the stop
+    # landed -- never more than requested.
+    assert 1 <= result.questions_written <= 6  # noqa: PLR2004
+    meta = json.loads(result.meta_path.read_text(encoding="utf-8"))
+    assert meta["complete"] is True
+    assert len(meta["questions"]) == result.questions_written

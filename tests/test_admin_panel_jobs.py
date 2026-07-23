@@ -30,10 +30,12 @@ def _reset_registry() -> None:
     jobs._CURRENT_JOB = None  # noqa: SLF001
     jobs._PENDING.clear()  # noqa: SLF001
     jobs._HISTORY.clear()  # noqa: SLF001
+    jobs._ADOPTED.clear()  # noqa: SLF001
     yield
     jobs._CURRENT_JOB = None  # noqa: SLF001
     jobs._PENDING.clear()  # noqa: SLF001
     jobs._HISTORY.clear()  # noqa: SLF001
+    jobs._ADOPTED.clear()  # noqa: SLF001
 
 
 def _wait_for_done(job: jobs.Job[object], timeout: float = 2.0) -> None:
@@ -301,3 +303,271 @@ def test_graceful_stop_refused_without_support() -> None:
     assert job.graceful_stoppable is False
     assert jobs.request_graceful_stop_current_job() is False
     _wait_for_done(job, timeout=20.0)
+
+
+# --- disk re-attach (July 2026) ----------------------------------------------
+# A panel restart must never hide a running/finished batch: every subprocess
+# job writes a durable job.json descriptor, and adopt_disk_jobs() rediscovers
+# pp_job_* dirs (running -> adopted + watched; finished -> harvested into
+# history; dead -> honest FAILED history entry). These tests fabricate work
+# dirs directly (no Streamlit, no real subprocess needed except where noted).
+
+import json
+import os
+import pickle
+import subprocess
+import sys
+
+
+def _fabricate_dir(
+    root,
+    *,
+    job_id: str = "abc123def456",
+    label: str = "fabricated job",
+    meta: dict | None = None,
+    pid: int | None = None,
+    stop_check_kwarg: str | None = None,
+    envelope: dict | None = None,
+    spec: dict | None = None,
+    descriptor: bool = True,
+):
+    """Build a pp_job_* dir the way jobs.py would have left it behind."""
+    work_dir = root / f"pp_job_{job_id}_testtail"
+    work_dir.mkdir()
+    if descriptor:
+        (work_dir / "job.json").write_text(
+            json.dumps(
+                {
+                    "id": job_id,
+                    "label": label,
+                    "meta": meta or {},
+                    "started_at": time.time() - 60,
+                    "stop_check_kwarg": stop_check_kwarg,
+                    "pid": pid,
+                }
+            ),
+            encoding="utf-8",
+        )
+    if spec is not None:
+        (work_dir / "spec.pkl").write_bytes(pickle.dumps(spec))
+    (work_dir / "progress.json").write_text(
+        json.dumps({"message": "leg 3/5", "current": 3, "total": 5}),
+        encoding="utf-8",
+    )
+    if envelope is not None:
+        (work_dir / "result.pkl").write_bytes(pickle.dumps(envelope))
+    return work_dir
+
+
+def test_subprocess_job_writes_descriptor_with_pid(tmp_path, monkeypatch) -> None:
+    from admin_panel.job_worker import _echo_job
+
+    monkeypatch.setattr(jobs.tempfile, "tempdir", str(tmp_path))
+    job = jobs.start_subprocess_job(
+        _echo_job, label="descriptor test", meta={"kind": "x"}, sleep_s=0.3
+    )
+    dirs = [p for p in tmp_path.iterdir() if p.name.startswith("pp_job_")]
+    assert len(dirs) == 1
+    desc = json.loads((dirs[0] / "job.json").read_text(encoding="utf-8"))
+    assert desc["id"] == job.id
+    assert desc["label"] == "descriptor test"
+    assert desc["meta"] == {"kind": "x"}
+    # The supervisor fills the pid in once the child spawns.
+    deadline = time.time() + 10
+    pid = None
+    while time.time() < deadline:
+        pid = json.loads((dirs[0] / "job.json").read_text(encoding="utf-8"))["pid"]
+        if pid:
+            break
+        time.sleep(0.05)
+    assert pid, "descriptor pid was never filled in"
+    _wait_for_done(job, timeout=20.0)
+
+
+def test_adopt_finished_dir_harvests_into_history(tmp_path) -> None:
+    work_dir = _fabricate_dir(
+        tmp_path, label="done batch", envelope={"ok": True, "result": 42}
+    )
+    adopted = jobs.adopt_disk_jobs(tmp_root=str(tmp_path))
+    assert len(adopted) == 1
+    job = adopted[0]
+    assert job.status is jobs.JobStatus.COMPLETED
+    assert job.result == 42
+    assert job.label == "done batch"
+    assert [j.id for j in jobs.job_history()] == [job.id]
+    assert not work_dir.exists()  # cleaned up like the normal path
+    # Idempotent: a second pass adopts nothing.
+    assert jobs.adopt_disk_jobs(tmp_root=str(tmp_path)) == []
+
+
+def test_adopt_failed_envelope_marks_failed(tmp_path) -> None:
+    _fabricate_dir(
+        tmp_path, envelope={"ok": False, "error": "Traceback: boom"}
+    )
+    (job,) = jobs.adopt_disk_jobs(tmp_root=str(tmp_path))
+    assert job.status is jobs.JobStatus.FAILED
+    assert "boom" in (job.error or "")
+
+
+def test_adopt_dead_dir_marks_failed_with_honest_message(tmp_path) -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    _fabricate_dir(tmp_path, pid=proc.pid)  # dead pid, no result file
+    (job,) = jobs.adopt_disk_jobs(tmp_root=str(tmp_path))
+    assert job.status is jobs.JobStatus.FAILED
+    assert "worker process is gone" in (job.error or "")
+    assert jobs.job_history()[-1].id == job.id
+
+
+def test_adopt_running_job_watches_and_harvests(tmp_path) -> None:
+    # pid = this test process: alive for the whole test.
+    work_dir = _fabricate_dir(
+        tmp_path, pid=os.getpid(), stop_check_kwarg="stop_check"
+    )
+    (job,) = jobs.adopt_disk_jobs(tmp_root=str(tmp_path))
+    assert job.status is jobs.JobStatus.RUNNING
+    assert job.cancellable is True  # pid known -> can SIGTERM
+    assert job.graceful_stoppable is True
+    assert job.progress.message == "leg 3/5"  # mirrored at adoption
+    assert [j.id for j in jobs.adopted_jobs()] == [job.id]
+    # Graceful stop: touches the sentinel the child polls.
+    assert jobs.request_adopted_stop(job.id) is True
+    assert (work_dir / "stop.requested").exists()
+    assert job.stop_requested is True
+    # The "child" (us) writes its result; the watcher harvests it.
+    (work_dir / "result.pkl").write_bytes(
+        pickle.dumps({"ok": True, "result": "kept"})
+    )
+    _wait_for_done(job, timeout=20.0)
+    assert job.status is jobs.JobStatus.COMPLETED
+    assert job.result == "kept"
+    # The watcher retires the job (adopted -> history) and removes the work
+    # dir moments after flipping the status -- wait for it, don't race it.
+    _wait_until(lambda: not work_dir.exists(), what="work dir cleanup")
+    assert jobs.adopted_jobs() == []
+    assert [j.id for j in jobs.job_history()] == [job.id]
+
+
+def test_adopt_skips_already_known_ids(tmp_path) -> None:
+    known = jobs.Job(id="abc123def456", label="already seen")
+    known.status = jobs.JobStatus.COMPLETED
+    jobs._HISTORY.append(known)  # noqa: SLF001
+    _fabricate_dir(tmp_path, job_id="abc123def456", envelope={"ok": True, "result": 1})
+    assert jobs.adopt_disk_jobs(tmp_root=str(tmp_path)) == []
+
+
+def test_adopt_legacy_dir_reconstructs_label_and_meta(tmp_path) -> None:
+    # Pre-descriptor dirs have only spec.pkl -- label/meta come from it.
+    _fabricate_dir(
+        tmp_path,
+        job_id="aaaa11112222",
+        descriptor=False,
+        spec={
+            "fn_module": "pipeline.postflop.run",
+            "fn_qualname": "generate_full_hand_batch_from_db",
+            "kwargs": {
+                "db_path": "/x/solves/BTN_vs_BB_SRP_100bb_QsJd9s_v8.db",
+                "output_path": "/x/out/PLZ OWRK.csv",
+                "total_hands": 5,
+            },
+            "stop_check_kwarg": "stop_check",
+        },
+        envelope={"ok": True, "result": "full-hand result"},
+    )
+    _fabricate_dir(
+        tmp_path,
+        job_id="bbbb33334444",
+        descriptor=False,
+        spec={
+            "fn_module": "pipeline.plo.run",
+            "fn_qualname": "run_plo_generate_job",
+            "kwargs": {"output_path": "/x/out/20bb rerun.csv"},
+        },
+        envelope={"ok": True, "result": "plo result"},
+    )
+    adopted = {j.id: j for j in jobs.adopt_disk_jobs(tmp_root=str(tmp_path))}
+    fh = adopted["aaaa11112222"]
+    assert fh.label == "Postflop full hands: BTN_vs_BB_SRP_100bb_QsJd9s_v8.db (5 hands)"
+    assert fh.status is jobs.JobStatus.COMPLETED
+    plo = adopted["bbbb33334444"]
+    # The PLO ledger sweep keys off meta kind -- legacy adoption must restore it.
+    assert plo.meta == {"kind": "plo_generate", "output_name": "20bb rerun.csv"}
+
+
+def test_adopted_cancel_terminates_worker(tmp_path) -> None:
+    # A real (harmless) child process standing in for a batch worker.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _fabricate_dir(tmp_path, pid=proc.pid)
+        (job,) = jobs.adopt_disk_jobs(tmp_root=str(tmp_path))
+        assert job.status is jobs.JobStatus.RUNNING
+        assert jobs.request_adopted_cancel(job.id) is True
+        # Reap the SIGTERM'd child: as OUR subprocess it would otherwise
+        # linger as a zombie, which kill(pid, 0) still counts as alive. In
+        # production the worker's parent (the dead panel) is gone, so the
+        # OS reaps it immediately -- this wait is test-plumbing only.
+        proc.wait(timeout=10)
+        _wait_for_done(job, timeout=20.0)
+        # No result file was ever written -> the honest-failure path.
+        assert job.status is jobs.JobStatus.FAILED
+        assert "exited without writing a result" in (job.error or "")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+# --- job board (July 2026: the always-visible sidebar board) -----------------
+# INVARIANT: while ANYTHING is generating or queued it must appear in
+# job_board().active / .queued -- slot job AND adopted jobs alike -- so the
+# sidebar can never show "nothing running" while a batch is still going.
+
+def test_job_board_lists_slot_and_adopted_jobs_oldest_first(tmp_path) -> None:
+    gate = threading.Event()
+
+    def blocker(*, progress_callback) -> str:
+        progress_callback("stage: working", 1, 4)
+        gate.wait(timeout=20.0)
+        return "done"
+
+    slot_job = jobs.start_job(blocker, label="slot batch")
+    _wait_until(
+        lambda: slot_job.progress.message == "stage: working",
+        what="slot progress",
+    )
+    # An adopted (recovered) job running alongside the slot job.
+    _fabricate_dir(tmp_path, pid=os.getpid(), label="recovered batch")
+    (adopted,) = jobs.adopt_disk_jobs(tmp_root=str(tmp_path))
+    adopted.started_at = slot_job.started_at + 1  # deterministic order
+
+    board = jobs.job_board()
+    assert [j.label for j in board.active] == ["slot batch", "recovered batch"]
+    # Stage messages ride along (the board shows WHICH STAGE each job is at).
+    assert board.active[0].progress.message == "stage: working"
+    assert board.active[1].progress.message == "leg 3/5"
+
+    gate.set()
+    _wait_for_done(slot_job)
+    (tmp_path / f"pp_job_{adopted.id}_testtail" / "result.pkl").write_bytes(
+        pickle.dumps({"ok": True, "result": 1})
+    )
+    _wait_for_done(adopted, timeout=20.0)
+    _wait_until(lambda: not jobs.job_board().active, what="board drained")
+    assert jobs.job_board().last_done is not None
+
+
+def test_job_board_lists_queued_requests_in_order() -> None:
+    gate = threading.Event()
+
+    def blocker(*, progress_callback) -> None:
+        gate.wait(timeout=20.0)
+
+    jobs.start_job(blocker, label="running")
+    from admin_panel.job_worker import _echo_job
+
+    jobs.enqueue_subprocess_job(_echo_job, label="waiting one", steps=1)
+    jobs.enqueue_subprocess_job(_echo_job, label="waiting two", steps=1)
+    board = jobs.job_board()
+    assert [r.label for r in board.queued] == ["waiting one", "waiting two"]
+    assert [j.label for j in board.active] == ["running"]
+    gate.set()
+    _wait_until(lambda: len(jobs.job_history()) == 3, what="all three finished")

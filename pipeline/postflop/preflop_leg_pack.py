@@ -867,6 +867,7 @@ def build_pack_preflop_leg_row(
     run_claim_checker: bool = False,
     revise_pass: bool = False,
     final_audit: bool = False,
+    second_rewrite: bool = False,
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None, dict[str, Any] | None]:
     """Build the pack-backed preflop leg row (POSTFLOP schema).
 
@@ -1014,6 +1015,68 @@ def build_pack_preflop_leg_row(
                             revise_record["final_audit_issues"] = [
                                 f"{i.claim} -- {i.problem}" for i in cc4.issues
                             ]
+                        # SECOND REWRITE ROUND (July 2026, strict-clean):
+                        # same bounded extra round as the postflop legs
+                        # (pipeline.postflop.layer7) -- revise vs the
+                        # final-audit issues, then re-audit. One round only;
+                        # a discarded/unchanged second rewrite keeps round
+                        # 1's text and flags.
+                        fa_issues = list(
+                            revise_record.get("final_audit_issues") or []
+                        )
+                        if second_rewrite and fa_issues:
+                            try:
+                                rev2 = revise_explanation(
+                                    explanation, facts, issues=fa_issues,
+                                    client=client, model=model,
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    system_prompt=system_prompt,
+                                    usage_callback=pre_usage_cb,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "pack leg second-round reviser failed"
+                                    " for %s: %s",
+                                    facts.spot.node.node_id, exc,
+                                )
+                                rev2 = None
+                            second_rec: dict[str, Any] = {
+                                "issues_before": fa_issues,
+                            }
+                            if rev2 is not None and rev2.changed:
+                                explanation = rev2.explanation
+                                second_rec["status"] = "fixed"
+                                revise_record["revised_explanation"] = (
+                                    rev2.explanation.answer_explanation
+                                )
+                                cc5 = _safe_claim_check(
+                                    explanation.answer_explanation, facts,
+                                    client, model=model,
+                                    system_prompt=CHECKER_SYSTEM_PROMPT,
+                                    node_id=facts.spot.node.node_id,
+                                    usage_callback=pre_usage_cb,
+                                )
+                                revise_record["final_audit_issues"] = (
+                                    [
+                                        f"{i.claim} -- {i.problem}"
+                                        for i in cc5.issues
+                                    ]
+                                    if cc5 is not None else []
+                                )
+                            else:
+                                second_rec["status"] = (
+                                    "discarded"
+                                    if rev2 is not None
+                                    and getattr(rev2, "rejected_reason", "")
+                                    else "unchanged"
+                                )
+                                second_rec["rejected_reason"] = (
+                                    getattr(rev2, "rejected_reason", "")
+                                    if rev2 is not None
+                                    else "the reviser call failed"
+                                )
+                            revise_record["second_rewrite"] = second_rec
                 else:
                     reason = (
                         getattr(rev, "rejected_reason", "") if rev

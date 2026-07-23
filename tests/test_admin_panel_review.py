@@ -851,3 +851,48 @@ def test_hand_unclean_counts_badges_hands_at_a_glance() -> None:
     ]
     counts = review.hand_unclean_counts(rows, qrec_for=lambda r: None)
     assert counts == {"A": 0, "B": 2}
+
+
+# --- approved-pool removal groups (July 2026, postflop Review) ---------------
+def test_approved_removal_group_standalone_row_is_just_itself() -> None:
+    from pathlib import Path
+
+    from admin_panel.review import approved_removal_group
+
+    a = Path("a.csv")
+    sources = [
+        (a, "1", {"No": "1", "hand_id": ""}),
+        (a, "2", {"No": "2", "hand_id": ""}),
+    ]
+    assert approved_removal_group(sources, a, "1") == [(a, "1")]
+
+
+def test_approved_removal_group_full_hand_leg_clears_the_whole_hand() -> None:
+    """Un-approving one leg of a play-through must clear EVERY approved leg
+    of that hand in that batch (a partial hand can never linger), while
+    other hands, standalone rows, and other batches are untouched."""
+    from pathlib import Path
+
+    from admin_panel.review import approved_removal_group
+
+    a, b = Path("a.csv"), Path("b.csv")
+    sources = [
+        (a, "1", {"No": "1", "hand_id": "hand_X"}),
+        (a, "2", {"No": "2", "hand_id": "hand_X"}),
+        (a, "3", {"No": "3", "hand_id": "hand_X"}),
+        (a, "4", {"No": "4", "hand_id": "hand_Y"}),  # other hand
+        (a, "5", {"No": "5", "hand_id": ""}),  # standalone
+        (b, "1", {"No": "1", "hand_id": "hand_X"}),  # other batch
+    ]
+    group = approved_removal_group(sources, a, "2")
+    assert group == [(a, "1"), (a, "2"), (a, "3")]
+
+
+def test_approved_removal_group_unknown_row_falls_back_to_itself() -> None:
+    from pathlib import Path
+
+    from admin_panel.review import approved_removal_group
+
+    assert approved_removal_group([], Path("a.csv"), "9") == [
+        (Path("a.csv"), "9")
+    ]

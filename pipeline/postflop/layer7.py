@@ -111,6 +111,9 @@ class Layer7Outcome:
     revise_fixed: int = 0
     revise_discarded: int = 0
     revise_unchanged: int = 0
+    # Second rewrite round vs final-audit flags (July 2026, strict-clean).
+    second_rewrite_attempted: int = 0
+    second_rewrite_fixed: int = 0
 
 
 def run_layer7_audit(
@@ -129,6 +132,7 @@ def run_layer7_audit(
     run_claim_checker: bool,
     revise_pass: bool,
     final_audit: bool,
+    second_rewrite: bool = False,
     usage_callback=None,
 ) -> Layer7Outcome:
     """Run the opt-in Layer-7 audit/revise pass on one explanation.
@@ -196,6 +200,74 @@ def run_layer7_audit(
                         ]
                         out.claim_check_json = claim_check_to_json(cc4)
                     out.revise_record["final_audit_issues"] = out.final_audit_issues
+                    # SECOND REWRITE ROUND (July 2026, opt-in via
+                    # ``second_rewrite`` -- strict-clean full hands turn it
+                    # on): the final audit is flag-only by design, so a
+                    # rewrite it still flags used to ship 🚩 and strict-clean
+                    # churned whole hands chasing a clean one. One more
+                    # bounded round -- revise vs the FINAL-AUDIT issues, then
+                    # re-audit -- converts most of those to 🧼 at the cost of
+                    # up to 2 extra calls. Never loops: exactly one extra
+                    # round, and a discarded/unchanged second rewrite keeps
+                    # round 1's text and flags.
+                    if second_rewrite and out.final_audit_issues:
+                        out.second_rewrite_attempted = 1
+                        round1 = out.explanation
+                        try:
+                            rev2 = revise_postflop_explanation(
+                                round1, facts, issues=out.final_audit_issues,
+                                client=client, model=model,
+                                temperature=temperature, max_tokens=max_tokens,
+                                question=question_text,
+                                system_prompt=system_prompt,
+                                usage_callback=usage_callback,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "layer7: second-round reviser failed for %s: %s",
+                                node_id, exc,
+                            )
+                            rev2 = None
+                        second_rec: dict = {
+                            "issues_before": list(out.final_audit_issues),
+                        }
+                        if rev2 is not None and rev2.changed:
+                            out.explanation = rev2.explanation
+                            out.second_rewrite_fixed = 1
+                            second_rec["status"] = "fixed"
+                            out.revise_record["revised_explanation"] = (
+                                rev2.explanation.answer_explanation
+                            )
+                            # Re-audit the second rewrite (same fail-open
+                            # convention as the first final audit).
+                            cc5 = _safe_claim_check(
+                                out.explanation.answer_explanation,
+                                solver_data_block, client, model=model,
+                                system_prompt=checker_prompt, node_id=node_id,
+                                question=question_text,
+                                usage_callback=usage_callback,
+                            )
+                            out.final_audit_issues = (
+                                [f"{i.claim} -- {i.problem}" for i in cc5.issues]
+                                if cc5 is not None else []
+                            )
+                            if cc5 is not None:
+                                out.claim_check_json = claim_check_to_json(cc5)
+                            out.revise_record["final_audit_issues"] = (
+                                out.final_audit_issues
+                            )
+                        else:
+                            second_rec["status"] = (
+                                "discarded"
+                                if rev2 is not None
+                                and getattr(rev2, "rejected_reason", "")
+                                else "unchanged"
+                            )
+                            second_rec["rejected_reason"] = (
+                                getattr(rev2, "rejected_reason", "")
+                                if rev2 is not None else "the reviser call failed"
+                            )
+                        out.revise_record["second_rewrite"] = second_rec
             else:
                 reason = (
                     getattr(rev, "rejected_reason", "") if rev

@@ -1816,6 +1816,153 @@ Vendor-label gotcha inside: the facing-bet passive action is CHECK in
 v8 / CALL in v7 -- resolved by betting state, never label. Details in
 the v7-export-inconsistency memory.
 
+**NO MID-HAND ENDINGS (July 22 2026 late, USER STANDING RULE).** A
+play-through may end BEFORE the river ONLY on a fold — a hand whose last
+question is a flop/turn check/bet/call reads as a story cut off mid-hand
+("this is gonna feel weird if the hand doesn't continue to the river").
+Such lines exist because the down-sampled solve can lack a turn line's
+river continuation; the honest move is to DROP the hand. Enforced at the
+ROOT (`play_through._ends_legally`, applied inside `assemble_hands` for
+hero AND villain frames — every full-hand mode, not a toggle); counter
+`hands_dropped_nonfold_early_ender` (v8 measured: 173 dropped). River
+enders may end on anything (showdown resolution plays it out); preflop
+enders stay fold/raise by construction. COMPANION REFINEMENT to the 🎬
+passive cap: a checkdown line ending in a REAL bluff-catch (facing a bet,
+correct action non-fold) is NOT passive (without the carve-out the river
+bucket starved and batches over-rotated into turn-folds; v8 now mixes
+4/6 river call-enders + fold-only early enders under river_heavy).
+FIXTURE NOTE: `btn_vs_bb_full_hand_2cJs7s` gained a worthy river
+facing-bet mix (70/30) + a BTN river node (`...Kd:c`) so fixture hands
+end legally; tests updated. Tests: the no-mid-hand-endings +
+bluff-catch-carve-out cases in `tests/test_full_hand_action_heavy.py`.
+
+**⚡ Parallel LLM workers — PLO (July 22 2026 PM, user ask).**
+`generate_plo_batch(llm_workers=1)`: with N>1, up to N questions' LLM
+CHAINS (generation + gate + reviser + final audit — sequential PER
+question) run concurrently on a ThreadPoolExecutor; wall-clock ~N-fold
+faster at identical cost. INVARIANTS: all deterministic work (facts RNG,
+gates, difficulty, row building, incremental commit) stays on the MAIN
+thread in draw order; results commit strictly in SUBMISSION order
+(head-of-line), so CSV/meta row order and every deterministic column are
+identical to sequential and `audit_plo_batch.py` needs no knowledge of the
+worker count; usage totals go through a lock (THE USAGE RULE); graceful
+stop finishes + keeps every chain in flight; the consecutive-failure abort
+discards not-yet-committed results (spend still counted). workers==1 is
+the untouched classic path. Admin: "⚡ Parallel questions (speed)" slider
+on PLO Generate (1-4, default 3, persisted); `run_settings.llm_workers`.
+Tests: the parallel section of `tests/test_plo_batch.py` (byte-parity vs
+sequential, exact usage totals under concurrency, graceful-stop drain).
+**FULL-HAND legs are parallel too (same evening, user ask — "a lot of
+NLHE preflop→river")**: `generate_full_hand_batch(llm_workers=1)` runs a
+hand's legs concurrently (`_build_leg` closure, shared-state-free; results
+applied in LEG order; hand-level control flow — strict-clean rebuilds,
+atomicity, commit order — stays sequential, so a hand takes ~its slowest
+leg). Usage lock; leg numbers precomputed (len(rows) frozen during a
+hand). Trade-off: on a leg failure the sibling legs' spend is already
+paid (sequential stopped early); the hand drops either way. Admin: "⚡
+Parallel leg generation (speed)" in the full-hand mode (default 3); CLI
+`--llm-workers`; `run_settings.llm_workers`; byte-parity test in
+`tests/test_full_hand_action_heavy.py`. Standalone postflop + NLHE
+preflop batches remain sequential (next candidates for the same pattern).
+
+**🎬 Action-heavy hands (July 22 2026 PM, user ask — full-hand mode, ON by
+default).** Measured problem: 37% of all full hands ever generated had <=1
+bet in the whole postflop line (x/x, x/x, easy river fold), and "Hard"
+hands were hard PREFLOP only (a marginal defend maxes the freq+EV axes at
+~2000-2600 while every checkdown postflop leg rates ~800-1000; the
+peak-anchored hand_difficulty let the preflop spike qualify the hand).
+NEW pure leaf `pipeline/postflop/hand_quality.py` +
+`generate_full_hand_batch(action_heavy=True)`:
+- **Trivial-fold-ender drop**: a hand can't END on a fold > 90% (mixed
+  bluff-catch folds stay; preflop enders exempt — pack-quota'd).
+- **Checkdown quota**: turn/river-ending hands with ZERO bets/raises
+  before the ending street are capped at ceil(15% x total) — the
+  best-scoring ones kept; flop/preflop enders exempt.
+- **Educational-density ordering**: pool ordered by action content +
+  mixed-ender + facing-a-bet + raised-line bonuses (stable sort, cheap:
+  no facts) — every downstream selector preserves input order within its
+  buckets, so the ordering survives quotas/diversify/greedy balance.
+- **Postflop-SPINE banding**: difficulty bands + the fully-balanced
+  difficulty thirds judge a hand by its hardest POSTFLOP leg
+  (`_band_value` in full_hand_batch; the CSV `hand_difficulty` column
+  keeps its documented peak-blend semantics). `hand_difficulty_observed_
+  max` reports the same selector.
+Counters `hands_excluded_trivial_fold_ender` / `hands_excluded_passive_
+line` / `passive_hands_kept`; run_settings `action_heavy`; admin checkbox
+"🎬 Action-heavy hands (recommended)" in the full-hand mode; CLI
+`--no-action-heavy`. Plain mode gets a 20x oversized pool when ON.
+KNOWN TRADE-OFF (v8, single flop): most river-enders are checkdowns, so
+with the policy on the river_heavy quota back-fills toward turn-enders —
+more solves relax this. Measured on v8 (5-hand dry): 21 fold-enders + 133
+checkdowns excluded, every kept hand had 1-2 bets in line, postflop peaks
+1399-2438 (was 804-1000). Tests: `tests/test_full_hand_action_heavy.py`.
+
+**Second rewrite round vs final-audit flags (July 22 2026 PM, strict-clean
+only).** The final audit was flag-only by design, so strict-clean full-hand
+mode churned whole hands whose rewrite the final audit still flagged (a
+5-hand batch shipped 4/5 🚩 under the churn budget). Now, inside strict-clean
+(`second_rewrite=strict_clean_hands`, no separate toggle): a rewrite the
+final audit flags gets ONE more bounded revise round aimed at those exact
+flags, then ONE re-audit; clean -> the leg ships 🧼, else round 1's text +
+flags are kept (never loops). Implemented in `pipeline/postflop/layer7.py`
+(postflop legs) AND `preflop_leg_pack.build_pack_preflop_leg_row`
+(pack preflop legs — a hand is only clean when EVERY leg is). Counters
+`revise_second_round` / `revise_second_fixed`; record field
+`revise.second_rewrite`. Tests: the `second_rewrite` cases in
+`tests/test_postflop_pipeline.py` + `tests/test_full_hand_pack_legs.py`.
+
+**Panel job re-attach from disk (July 22 2026 PM).** Job history/queue
+lived in process memory, so a panel restart HID running batches (the
+subprocess survived; the UI forgot it — the July-22 "orphaned jobs"
+confusion). Now every subprocess job writes a durable `job.json` descriptor
+(id/label/meta/pid/stop kwarg) in its `pp_job_*` work dir, and
+`jobs.adopt_disk_jobs()` (run on every render via the sidebar indicator)
+rediscovers dirs: running -> ADOPTED into a side registry (never the single
+`_CURRENT_JOB` slot; two orphans can run at once) with a watcher thread +
+the ♻️ recovered-jobs panel (progress, graceful stop, cancel) on every
+Generate page; finished -> harvested straight into job history (ledger
+sweeps read it, so recovered spend gets logged — a dir still on disk means
+its parent died pre-harvest, never a double-read) and the dir is cleaned;
+dead -> honest FAILED history entry. Legacy pre-descriptor dirs reconstruct
+label/meta from `spec.pkl` (pid via pgrep). INVARIANT: every Generate
+page's job panel mounts `_render_recovered_jobs_panel()` first. Tests: the
+disk re-attach section of `tests/test_admin_panel_jobs.py`.
+
+**Sidebar job BOARD (July 22 2026 PM, user ask).** The sidebar's job
+indicator is now a full board on EVERY page: `jobs.job_board()` (pure,
+tested) snapshots every in-flight job — the slot job AND adopted ones,
+oldest first — plus the FIFO queue and the last finished job. The ticking
+fragment renders each active job with its label, numeric progress
+(`19/52 (38%) · 407s`), and its STAGE (the progress message, e.g.
+"Generated 19 / 52 questions…" / "Hand X leg 3/5"), queued items as
+"⏳ Queued #n", and a static done/failed/cancelled line when idle.
+INVARIANT: a batch must never be running or queued while the sidebar
+shows nothing — that was the "it stopped showing up but was still
+generating" bug class (the old indicator showed only the slot job, with
+numbers but no label or stage; adopted jobs were a bare count; the queue
+showed only on the PLO page).
+
+**Postflop approved-pool removal (July 22 2026 PM, user ask).** The
+Postflop Review approved pool previously had ONLY a download button — no
+way to un-approve anything. Now at parity with the NLHE/PLO pages: "🧹
+Clear all approved" (2-step confirm → `review.clear_all_approved(
+POSTFLOP_OUTPUT_DIR)`) + a "🗑 Remove individual questions" expander.
+HAND-AWARE removal: un-approving one full-hand LEG clears EVERY approved
+leg of that hand in that batch (a play-through ships whole or not at all —
+a partial hand must never linger in the pool), via the pure
+`review.approved_removal_group` (browserless tests in
+`test_admin_panel_review.py`; AppTest wiring check in
+`test_postflop_generate_page.py`).
+
+**Vendor repro script (July 22 2026 PM):**
+`scripts/vendor_repro_ev_vs_strategy.py` — a fully STANDALONE (stdlib-only,
+zero pipeline imports, no app mention) version of the audit's section-[8]
+EV-vs-strategy check, built to send to the solve vendor with the DB
+SHA-256s (`--dump-node` reproduces the per-combo detail). Verified to
+reproduce the section-[8] numbers exactly on all v7 files + the v8
+baseline. The vendor's local AsKd9h shows a different solve_seconds than
+our copy (27.91 vs 29.86) — his files are re-runs; compare hashes first.
+
 Migrate off Sheets to Airtable/Firestore only around 7k–10k active questions.
 
 ### Authoritative format sample — `docs/output_format_examples.xlsx`

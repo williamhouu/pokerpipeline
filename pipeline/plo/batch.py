@@ -17,6 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
@@ -276,6 +279,7 @@ def generate_plo_batch(
     usage_callback: UsageCallback | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     stop_check: Callable[[], bool] | None = None,
+    llm_workers: int = 1,
 ) -> PloBatchResult:
     """Generate up to ``total_questions`` PLO question rows and write the CSV.
 
@@ -318,6 +322,17 @@ def generate_plo_batch(
     spots. ``explanation_system_prompt`` (when set) overrides the built-in
     Layer 6 system prompt verbatim -- the admin prompt library + Compare page
     pass an edited prompt here.
+
+    ``llm_workers`` (⚡ July 2026, user ask): run up to N questions' LLM
+    chains CONCURRENTLY (generation + gate + reviser + final audit are one
+    sequential chain PER question, but different questions are independent
+    and the time is ~all API latency, so N workers cut wall-clock ~N-fold at
+    identical cost). Everything deterministic stays in the MAIN thread in
+    draw order -- facts, gates, difficulty, row building, the incremental
+    commit -- and results are committed strictly in submission order, so the
+    CSV/meta row order and every deterministic column are IDENTICAL to a
+    sequential run and the byte-exact re-verifier is unaffected. 1 = the
+    classic sequential path, byte-for-byte unchanged.
     """
     # Resolve a concrete seed up front (July 2026): ``None`` used to mean
     # "irreproducible OS entropy", which made a batch impossible to re-verify.
@@ -367,15 +382,19 @@ def generate_plo_batch(
     _usage_totals = {"in": 0, "out": 0, "cc": 0, "cr": 0}
     _model_seen: list[str] = [""]
     _caller_usage_cb = usage_callback
+    # ⚡ llm_workers > 1 reports usage from worker threads; the lock keeps the
+    # totals exact (THE USAGE RULE: an uncounted call is invisible spend).
+    _usage_lock = threading.Lock()
 
     def _accumulate_usage(
         mdl: str, in_t: int, out_t: int, cc: int, cr: int
     ) -> None:
-        _usage_totals["in"] += in_t
-        _usage_totals["out"] += out_t
-        _usage_totals["cc"] += cc
-        _usage_totals["cr"] += cr
-        _model_seen[0] = mdl
+        with _usage_lock:
+            _usage_totals["in"] += in_t
+            _usage_totals["out"] += out_t
+            _usage_totals["cc"] += cc
+            _usage_totals["cr"] += cr
+            _model_seen[0] = mdl
         if _caller_usage_cb is not None:
             _caller_usage_cb(mdl, in_t, out_t, cc, cr)
 
@@ -528,6 +547,11 @@ def generate_plo_batch(
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
                 "final_audit": final_audit,
+                # ⚡ concurrent LLM chains (July 2026); 1 = sequential.
+                # Selection, row order, and every deterministic column are
+                # worker-count-independent (commits are in submission order),
+                # so the re-verifier needs no knowledge of this.
+                "llm_workers": llm_workers,
             },
             "counters": {
                 "nodes_scanned": scanned,
@@ -643,295 +667,431 @@ def generate_plo_batch(
     else:
         spot_iter = _drawn_spots()
 
-    while len(rows) < total_questions and not aborted and not stopped_early:
-        drew_this_pass = False
-        for spot in spot_iter:
-            if len(rows) >= total_questions or aborted:
-                break
-            # Graceful stop: checked between spots, never mid-question, so
-            # "finish the current question, keep everything committed".
-            if stop_check is not None and stop_check():
-                stopped_early = True
-                break
-            node = spot.node
-            drew_this_pass = True
-            facts = extract_plo_facts(
-                spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
+    # ⚡ One question's WHOLE LLM chain (Layer 6 + the opt-in Layer-7 gate /
+    # reviser / final audit + the deterministic soft validators), free of any
+    # shared-state mutation so it can run on a worker thread (llm_workers).
+    # Returns an "ok" result carrying the shipped pieces plus counter DELTAS
+    # -- applied at commit time, in submission order, on the main thread --
+    # or a "failed" result with the reason. Deltas accumulated BEFORE a
+    # mid-chain exception are still returned, mirroring the sequential
+    # counter semantics exactly (e.g. explanations_written ticks the moment
+    # generation succeeds, even if a later stage raises).
+    def _run_llm_chain(spot, facts, options, correct) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "ok": True, "explanation": "", "claim_check_cell": "",
+            "claim_issues": [], "revise_record": None, "soft_warnings": [],
+            "deltas": {},
+        }
+        if not generate_explanations:
+            return out
+        deltas: dict[str, int] = {}
+        out["deltas"] = deltas
+
+        def _bump(key: str) -> None:
+            deltas[key] = deltas.get(key, 0) + 1
+
+        node = spot.node
+        try:
+            generated = generate_plo_answer_explanation(
+                facts,
+                list(options),
+                correct,
+                client=explanation_client,
+                system_prompt=explanation_system_prompt,
+                model=explanation_model,
+                temperature=explanation_temperature,
+                include_skills=explanation_include_skills,
+                stack_bb=stack_bb,
+                ante_bb=ante_bb,
+                usage_callback=usage_callback,
             )
-            # EV-gap quality gate (PLO has a real ev_gap on every spot, raises
-            # included), applied BEFORE the paid LLM call -- mirrors the NLHE
-            # gate.
-            if (
-                min_ev_gap_bb is not None
-                and facts.ev_gap_bb is not None
-                and facts.ev_gap_bb < min_ev_gap_bb
-            ):
-                ev_gap_filtered_out += 1
-                continue
-            # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
-            # spots cost no API spend -- the same gate the NLHE Generate page
-            # uses.
-            difficulty = compute_plo_difficulty(facts)
-            if not min_difficulty <= difficulty.score <= max_difficulty:
-                difficulty_filtered_out += 1
-                continue
-            options, correct = build_options(facts, style=answer_style)
-
-            explanation = ""
+            _bump("explanations_written")
             claim_check_cell = ""
-            claim_issues: list[dict[str, str]] = []  # flags on the SHIPPED text
+            claim_issues: list[dict[str, str]] = []
             revise_record: dict[str, Any] | None = None
-            soft_warnings: list[str] = []
-            if generate_explanations:
-                try:
-                    generated = generate_plo_answer_explanation(
-                        facts,
-                        list(options),
-                        correct,
-                        client=explanation_client,
-                        system_prompt=explanation_system_prompt,
-                        model=explanation_model,
-                        temperature=explanation_temperature,
-                        include_skills=explanation_include_skills,
-                        stack_bb=stack_bb,
-                        ante_bb=ante_bb,
-                        usage_callback=usage_callback,
-                    )
-                    explanations_written += 1
-                    consecutive_failures = 0
-                    # --- Layer-7 LLM audit / revise passes (opt-in extra LLM
-                    # calls; July 2026 NLHE-parity port). Two flows share one
-                    # "gate" check:
-                    #   * run_claim_checker (no revise): FLAG-ONLY, one call ->
-                    #     claim_check column + meta record, prose untouched.
-                    #   * revise_pass: the gate (best-of-2, issues UNIONed)
-                    #     DECIDES whether to rewrite. If it flags, the reviser
-                    #     rewrites the prose (minimal-edit, one corrective
-                    #     retry), re-validated by the deterministic hard
-                    #     validators -- a rewrite that breaks a rule is
-                    #     DISCARDED and the original ships flagged. final_audit
-                    #     re-checks the KEPT rewrite. Lifecycle -> `revise` in
-                    #     the meta record for the PLO Review page.
-                    if run_claim_checker or revise_pass:
-                        from pipeline.plo.explanation_generator import (  # noqa: PLC0415
-                            build_solver_data,
-                        )
+            # --- Layer-7 LLM audit / revise passes (opt-in extra LLM
+            # calls; July 2026 NLHE-parity port). Two flows share one
+            # "gate" check:
+            #   * run_claim_checker (no revise): FLAG-ONLY, one call ->
+            #     claim_check column + meta record, prose untouched.
+            #   * revise_pass: the gate (best-of-2, issues UNIONed)
+            #     DECIDES whether to rewrite. If it flags, the reviser
+            #     rewrites the prose (minimal-edit, one corrective
+            #     retry), re-validated by the deterministic hard
+            #     validators -- a rewrite that breaks a rule is
+            #     DISCARDED and the original ships flagged. final_audit
+            #     re-checks the KEPT rewrite. Lifecycle -> `revise` in
+            #     the meta record for the PLO Review page.
+            if run_claim_checker or revise_pass:
+                from pipeline.plo.explanation_generator import (  # noqa: PLC0415
+                    build_solver_data,
+                )
 
-                        solver_data = build_solver_data(
-                            facts, list(options), correct,
-                            include_skills=explanation_include_skills,
-                            stack_bb=stack_bb, ante_bb=ante_bb,
-                        )
-                        gate_dicts = _gate_check_best_of(
-                            generated.answer_explanation,
-                            solver_data,
-                            explanation_client,
-                            model=explanation_model,
-                            system_prompt=claim_checker_prompt,
-                            usage_callback=usage_callback,
-                            passes=_REVISE_GATE_PASSES if revise_pass else 1,
-                        )
-                        gate_strs = [
-                            f"{d['claim']} -- {d['problem']}" for d in gate_dicts
-                        ]
-                        if revise_pass:
-                            if not gate_dicts:
-                                revise_record = {"status": "clean", "gate_issues": []}
-                            else:
-                                revise_flagged += 1
-                                original_prose = generated.answer_explanation
-                                try:
-                                    rev = revise_plo_explanation(
-                                        generated, facts, issues=gate_strs,
-                                        client=explanation_client,
-                                        model=explanation_model,
-                                        temperature=explanation_temperature,
-                                        system_prompt=explanation_system_prompt,
-                                        include_skills=explanation_include_skills,
-                                        stack_bb=stack_bb,
-                                        ante_bb=ante_bb,
-                                        usage_callback=usage_callback,
-                                    )
-                                except Exception as exc:  # noqa: BLE001 - never drop a row
-                                    logger.warning(
-                                        "plo batch: reviser failed for %s: %s",
-                                        node.node_id, exc,
-                                    )
-                                    rev = None
-                                if rev is not None and rev.changed:
-                                    revise_fixed += 1
-                                    generated = rev.explanation  # ship the rewrite
-                                    revise_record = {
-                                        "status": "fixed",
-                                        "gate_issues": gate_strs,
-                                        "original_explanation": original_prose,
-                                        "revised_explanation":
-                                            rev.explanation.answer_explanation,
-                                    }
-                                    if final_audit:  # re-check the KEPT rewrite
-                                        fa_dicts = _gate_check_best_of(
-                                            generated.answer_explanation,
-                                            solver_data,
-                                            explanation_client,
-                                            model=explanation_model,
-                                            system_prompt=claim_checker_prompt,
-                                            usage_callback=usage_callback,
-                                            passes=1,
-                                        )
-                                        claim_check_cell = _issues_json(fa_dicts)
-                                        claim_issues = fa_dicts
-                                        revise_record["final_audit_issues"] = [
-                                            f"{d['claim']} -- {d['problem']}"
-                                            for d in fa_dicts
-                                        ]
-                                else:
-                                    # UNCHANGED or DISCARDED: the ORIGINAL ships,
-                                    # so the gate's issues stay on it -- record why.
-                                    reason = (
-                                        getattr(rev, "rejected_reason", "") if rev
-                                        else "the reviser call failed"
-                                    )
-                                    attempt = (
-                                        getattr(rev, "revised_text", "") if rev else ""
-                                    )
-                                    if reason:
-                                        revise_discarded += 1
-                                        status = "discarded"
-                                    else:
-                                        revise_unchanged += 1
-                                        status = "unchanged"
-                                    revise_record = {
-                                        "status": status,
-                                        "gate_issues": gate_strs,
-                                        "rejected_reason": reason,
-                                        "attempted_rewrite": attempt,
-                                        "original_explanation": original_prose,
-                                    }
-                                    claim_check_cell = _issues_json(gate_dicts)
-                                    claim_issues = gate_dicts
+                solver_data = build_solver_data(
+                    facts, list(options), correct,
+                    include_skills=explanation_include_skills,
+                    stack_bb=stack_bb, ante_bb=ante_bb,
+                )
+                gate_dicts = _gate_check_best_of(
+                    generated.answer_explanation,
+                    solver_data,
+                    explanation_client,
+                    model=explanation_model,
+                    system_prompt=claim_checker_prompt,
+                    usage_callback=usage_callback,
+                    passes=_REVISE_GATE_PASSES if revise_pass else 1,
+                )
+                gate_strs = [
+                    f"{d['claim']} -- {d['problem']}" for d in gate_dicts
+                ]
+                if revise_pass:
+                    if not gate_dicts:
+                        revise_record = {"status": "clean", "gate_issues": []}
+                    else:
+                        _bump("revise_flagged")
+                        original_prose = generated.answer_explanation
+                        try:
+                            rev = revise_plo_explanation(
+                                generated, facts, issues=gate_strs,
+                                client=explanation_client,
+                                model=explanation_model,
+                                temperature=explanation_temperature,
+                                system_prompt=explanation_system_prompt,
+                                include_skills=explanation_include_skills,
+                                stack_bb=stack_bb,
+                                ante_bb=ante_bb,
+                                usage_callback=usage_callback,
+                            )
+                        except Exception as exc:  # noqa: BLE001 - never drop a row
+                            logger.warning(
+                                "plo batch: reviser failed for %s: %s",
+                                node.node_id, exc,
+                            )
+                            rev = None
+                        if rev is not None and rev.changed:
+                            _bump("revise_fixed")
+                            generated = rev.explanation  # ship the rewrite
+                            revise_record = {
+                                "status": "fixed",
+                                "gate_issues": gate_strs,
+                                "original_explanation": original_prose,
+                                "revised_explanation":
+                                    rev.explanation.answer_explanation,
+                            }
+                            if final_audit:  # re-check the KEPT rewrite
+                                fa_dicts = _gate_check_best_of(
+                                    generated.answer_explanation,
+                                    solver_data,
+                                    explanation_client,
+                                    model=explanation_model,
+                                    system_prompt=claim_checker_prompt,
+                                    usage_callback=usage_callback,
+                                    passes=1,
+                                )
+                                claim_check_cell = _issues_json(fa_dicts)
+                                claim_issues = fa_dicts
+                                revise_record["final_audit_issues"] = [
+                                    f"{d['claim']} -- {d['problem']}"
+                                    for d in fa_dicts
+                                ]
                         else:
-                            # Plain claim checker: one pass, flag only.
+                            # UNCHANGED or DISCARDED: the ORIGINAL ships,
+                            # so the gate's issues stay on it -- record why.
+                            reason = (
+                                getattr(rev, "rejected_reason", "") if rev
+                                else "the reviser call failed"
+                            )
+                            attempt = (
+                                getattr(rev, "revised_text", "") if rev else ""
+                            )
+                            if reason:
+                                _bump("revise_discarded")
+                                status = "discarded"
+                            else:
+                                _bump("revise_unchanged")
+                                status = "unchanged"
+                            revise_record = {
+                                "status": status,
+                                "gate_issues": gate_strs,
+                                "rejected_reason": reason,
+                                "attempted_rewrite": attempt,
+                                "original_explanation": original_prose,
+                            }
                             claim_check_cell = _issues_json(gate_dicts)
                             claim_issues = gate_dicts
-                        if claim_issues:
-                            claim_flagged_rows += 1
-                    # Soft validators (deterministic, flag-not-reject) run on
-                    # the FINAL (possibly revised) prose -- v1 is the
-                    # position-wording check, the PLO checker's #1 live catch.
-                    soft_warnings = run_plo_soft_validators(generated, facts)
-                    if soft_warnings:
-                        soft_flagged_rows += 1
-                    explanation = generated.answer_explanation
-                except (ExplanationValidationError, OSError, KeyError) as exc:
-                    # A failed explanation DROPS the question from the CSV --
-                    # a blank-explanation row is not shippable. The failure is
-                    # still counted + reported (the Generate page's failure
-                    # expander), and the round-robin keeps drawing, so the
-                    # batch backfills toward total_questions with other spots
-                    # instead of shipping a hole.
-                    explanations_failed += 1
-                    consecutive_failures += 1
-                    cards = " ".join(spot.hero_cards)
-                    explanation_failure_reasons.append(
-                        f"{type(exc).__name__} ({cards}): {exc}"
-                    )
-                    logger.warning(
-                        "Layer 6 failed for a spot, dropping the question: %s",
-                        exc,
-                    )
-                    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                        logger.error(
-                            "Aborting batch: %d consecutive explanation "
-                            "failures (systemic problem, not bad luck).",
-                            consecutive_failures,
-                        )
-                        aborted = True
-                    continue
-
-            # FOLD-EV TRIPWIRE (July 22 2026, from the min-raise size bug):
-            # the pack's own fold EV must equal minus hero's resolved
-            # invested amount -- a mismatch means a DISPLAYED bet size on
-            # this line is wrong. Deterministic, runs on every question
-            # (dry runs included); flags-not-rejects like the other soft
-            # validators, and a size-resolution bug flags EVERY affected
-            # row, so it cannot ship quietly.
-            fold_issue = fold_ev_consistency_issue(
-                spot, stack_bb=stack_bb, ante_bb=ante_bb
-            )
-            if fold_issue:
-                if not soft_warnings:
-                    soft_flagged_rows += 1
-                soft_warnings.append(fold_issue)
-
-            row = build_plo_row(
-                facts,
-                difficulty=difficulty,
-                options=options,
-                correct_answer=correct,
-                explanation=explanation,
-                number=len(rows) + 1,
-                pack_label=pack_label,
-                pack=pack,
-                stakes_bb_dollars=stakes_bb_dollars,
-                game_format=game_format,
-                ante_bb=ante_bb,
-                display_in_bb=display_in_bb,
-                stack_bb=stack_bb,
-                # Flagged when the SHIPPED text still carries claim flags
-                # (flag-only, unresolved gate issues, or final-audit hits) OR
-                # a deterministic soft validator warned -- same rule as NLHE.
-                validation_status=(
-                    "flagged" if (claim_issues or soft_warnings) else "draft"
-                ),
-            )
-            # Layer-7 verdict (""=not checked, "[]"=checked clean, else the
-            # JSON issue list) -- same convention as the NLHE claim_check.
-            row["claim_check"] = claim_check_cell
-            rows.append(row)
-            record: dict[str, Any] = {
-                "number": len(rows),
-                "node_id": node.node_id,
-                "actor": node.actor,
-                # The .rng hand index -- the re-verifier's join key (User
-                # Cards is only a representative rendering of the class).
-                "hero_index": spot.hero_index,
-                "hero_label": spot.hero_label,
-                "correct_answer": correct,
-                "options": list(options),
-                "difficulty": difficulty.score,
-                # Lifecycle status lives HERE since the CSV column was
-                # dropped (July 16 declutter): draft, or flagged when the
-                # shipped text carries claim flags / soft warnings.
-                "validation_status": row["validation_status"],
-            }
-            # Artifact-strip transparency (July 2026), as in the NLHE metas.
-            if spot.stripped_artifact_freq > 0:
-                record["artifact_stripped"] = {
-                    "labels": ["All-in"],
-                    "freq": round(spot.stripped_artifact_freq, 4),
-                }
-            if claim_issues:
-                record["claim_check_issues"] = claim_issues
-            if revise_record is not None:
-                record["revise"] = revise_record
+                else:
+                    # Plain claim checker: one pass, flag only.
+                    claim_check_cell = _issues_json(gate_dicts)
+                    claim_issues = gate_dicts
+                if claim_issues:
+                    _bump("claim_flagged_rows")
+            # Soft validators (deterministic, flag-not-reject) run on
+            # the FINAL (possibly revised) prose -- v1 is the
+            # position-wording check, the PLO checker's #1 live catch.
+            soft_warnings = run_plo_soft_validators(generated, facts)
             if soft_warnings:
-                record["validator_warnings"] = soft_warnings
-            question_records.append(record)
-            if balanced:
-                # Recomputed from the REAL facts (not the pre-pass estimate)
-                # so the meta balance_report describes what actually shipped.
-                selected_attrs.append(
-                    _balance_attrs_for(spot, facts, difficulty.score, pack)
+                _bump("soft_flagged_rows")
+            out.update(
+                explanation=generated.answer_explanation,
+                claim_check_cell=claim_check_cell,
+                claim_issues=claim_issues,
+                revise_record=revise_record,
+                soft_warnings=soft_warnings,
+            )
+            return out
+        except (ExplanationValidationError, OSError, KeyError) as exc:
+            cards = " ".join(spot.hero_cards)
+            out.update(
+                ok=False,
+                failure_reason=f"{type(exc).__name__} ({cards}): {exc}",
+            )
+            return out
+
+    def _commit_result(spot, facts, difficulty, options, correct, res) -> None:
+        """Apply one chain result on the MAIN thread, in submission order:
+        counters, the failure path (incl. the consecutive-failure abort),
+        the fold-EV tripwire, the row + meta record, progress, and the
+        incremental flush. This is the ONLY place shared batch state moves,
+        so llm_workers > 1 needs no locking beyond the usage totals."""
+        nonlocal aborted, consecutive_failures, explanations_failed
+        nonlocal explanations_written, claim_flagged_rows, soft_flagged_rows
+        nonlocal revise_flagged, revise_fixed, revise_discarded, revise_unchanged
+        node = spot.node
+        d = res.get("deltas") or {}
+        explanations_written += d.get("explanations_written", 0)
+        claim_flagged_rows += d.get("claim_flagged_rows", 0)
+        soft_flagged_rows += d.get("soft_flagged_rows", 0)
+        revise_flagged += d.get("revise_flagged", 0)
+        revise_fixed += d.get("revise_fixed", 0)
+        revise_discarded += d.get("revise_discarded", 0)
+        revise_unchanged += d.get("revise_unchanged", 0)
+        if not res["ok"]:
+            # A failed explanation DROPS the question from the CSV --
+            # a blank-explanation row is not shippable. The failure is
+            # still counted + reported (the Generate page's failure
+            # expander), and the driver keeps drawing, so the batch
+            # backfills toward total_questions with other spots
+            # instead of shipping a hole.
+            explanations_failed += 1
+            # Sequential parity: generation success reset the streak
+            # BEFORE a later stage failed, so such a failure lands at 1.
+            consecutive_failures = (
+                1 if d.get("explanations_written") else consecutive_failures + 1
+            )
+            explanation_failure_reasons.append(res["failure_reason"])
+            logger.warning(
+                "Layer 6 failed for a spot, dropping the question: %s",
+                res["failure_reason"],
+            )
+            if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                logger.error(
+                    "Aborting batch: %d consecutive explanation "
+                    "failures (systemic problem, not bad luck).",
+                    consecutive_failures,
                 )
-            # Live progress for the admin page's inline bar (how far along
-            # this batch is). Called after each question is committed.
-            if progress_callback is not None:
-                progress_callback(len(rows), total_questions)
-            # INCREMENTAL COMMIT: everything committed so far is now on disk;
-            # a crash from here loses only the next question.
-            _flush(complete=False)
-        if not drew_this_pass:
-            break  # every node is out of new worthy hands
+                aborted = True
+            return
+        if generate_explanations:
+            consecutive_failures = 0
+        explanation = res["explanation"]
+        claim_check_cell = res["claim_check_cell"]
+        claim_issues = res["claim_issues"]
+        revise_record = res["revise_record"]
+        soft_warnings = list(res["soft_warnings"])
+
+        # FOLD-EV TRIPWIRE (July 22 2026, from the min-raise size bug):
+        # the pack's own fold EV must equal minus hero's resolved
+        # invested amount -- a mismatch means a DISPLAYED bet size on
+        # this line is wrong. Deterministic, runs on every question
+        # (dry runs included); flags-not-rejects like the other soft
+        # validators, and a size-resolution bug flags EVERY affected
+        # row, so it cannot ship quietly.
+        fold_issue = fold_ev_consistency_issue(
+            spot, stack_bb=stack_bb, ante_bb=ante_bb
+        )
+        if fold_issue:
+            if not soft_warnings:
+                soft_flagged_rows += 1
+            soft_warnings.append(fold_issue)
+
+        row = build_plo_row(
+            facts,
+            difficulty=difficulty,
+            options=options,
+            correct_answer=correct,
+            explanation=explanation,
+            number=len(rows) + 1,
+            pack_label=pack_label,
+            pack=pack,
+            stakes_bb_dollars=stakes_bb_dollars,
+            game_format=game_format,
+            ante_bb=ante_bb,
+            display_in_bb=display_in_bb,
+            stack_bb=stack_bb,
+            # Flagged when the SHIPPED text still carries claim flags
+            # (flag-only, unresolved gate issues, or final-audit hits) OR
+            # a deterministic soft validator warned -- same rule as NLHE.
+            validation_status=(
+                "flagged" if (claim_issues or soft_warnings) else "draft"
+            ),
+        )
+        # Layer-7 verdict (""=not checked, "[]"=checked clean, else the
+        # JSON issue list) -- same convention as the NLHE claim_check.
+        row["claim_check"] = claim_check_cell
+        rows.append(row)
+        record: dict[str, Any] = {
+            "number": len(rows),
+            "node_id": node.node_id,
+            "actor": node.actor,
+            # The .rng hand index -- the re-verifier's join key (User
+            # Cards is only a representative rendering of the class).
+            "hero_index": spot.hero_index,
+            "hero_label": spot.hero_label,
+            "correct_answer": correct,
+            "options": list(options),
+            "difficulty": difficulty.score,
+            # Lifecycle status lives HERE since the CSV column was
+            # dropped (July 16 declutter): draft, or flagged when the
+            # shipped text carries claim flags / soft warnings.
+            "validation_status": row["validation_status"],
+        }
+        # Artifact-strip transparency (July 2026), as in the NLHE metas.
+        if spot.stripped_artifact_freq > 0:
+            record["artifact_stripped"] = {
+                "labels": ["All-in"],
+                "freq": round(spot.stripped_artifact_freq, 4),
+            }
+        if claim_issues:
+            record["claim_check_issues"] = claim_issues
+        if revise_record is not None:
+            record["revise"] = revise_record
+        if soft_warnings:
+            record["validator_warnings"] = soft_warnings
+        question_records.append(record)
+        if balanced:
+            # Recomputed from the REAL facts (not the pre-pass estimate)
+            # so the meta balance_report describes what actually shipped.
+            selected_attrs.append(
+                _balance_attrs_for(spot, facts, difficulty.score, pack)
+            )
+        # Live progress for the admin page's inline bar (how far along
+        # this batch is). Called after each question is committed.
+        if progress_callback is not None:
+            progress_callback(len(rows), total_questions)
+        # INCREMENTAL COMMIT: everything committed so far is now on disk;
+        # a crash from here loses only the next question.
+        _flush(complete=False)
+
+    def _prepare_spot(spot):
+        """Deterministic pre-LLM work, ALWAYS on the main thread in draw
+        order (the facts RNG + the filter counters must never depend on
+        thread scheduling). Returns None when a pre-LLM gate filters the
+        spot, else the tuple the chain + commit need."""
+        nonlocal ev_gap_filtered_out, difficulty_filtered_out
+        facts = extract_plo_facts(
+            spot, pack, compute_equity=compute_equity, rng=random.Random(seed)
+        )
+        # EV-gap quality gate (PLO has a real ev_gap on every spot, raises
+        # included), applied BEFORE the paid LLM call -- mirrors the NLHE
+        # gate.
+        if (
+            min_ev_gap_bb is not None
+            and facts.ev_gap_bb is not None
+            and facts.ev_gap_bb < min_ev_gap_bb
+        ):
+            ev_gap_filtered_out += 1
+            return None
+        # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
+        # spots cost no API spend -- the same gate the NLHE Generate page
+        # uses.
+        difficulty = compute_plo_difficulty(facts)
+        if not min_difficulty <= difficulty.score <= max_difficulty:
+            difficulty_filtered_out += 1
+            return None
+        options, correct = build_options(facts, style=answer_style)
+        return facts, difficulty, options, correct
+
+    workers = max(1, int(llm_workers or 1))
+    if workers == 1:
+        # The classic sequential path -- behaviour (and dry-run bytes)
+        # identical to before the ⚡ refactor.
+        while len(rows) < total_questions and not aborted and not stopped_early:
+            drew_this_pass = False
+            for spot in spot_iter:
+                if len(rows) >= total_questions or aborted:
+                    break
+                # Graceful stop: checked between spots, never mid-question, so
+                # "finish the current question, keep everything committed".
+                if stop_check is not None and stop_check():
+                    stopped_early = True
+                    break
+                drew_this_pass = True
+                prepared = _prepare_spot(spot)
+                if prepared is None:
+                    continue
+                facts, difficulty, options, correct = prepared
+                _commit_result(
+                    spot, facts, difficulty, options, correct,
+                    _run_llm_chain(spot, facts, options, correct),
+                )
+            if not drew_this_pass:
+                break
+    else:
+        # ⚡ Bounded pipeline: keep up to ``workers`` chains in flight, never
+        # more than the questions still needed; commit strictly in
+        # SUBMISSION order (head-of-line), so row order + numbering match a
+        # sequential run over the same draws. Graceful stop finishes every
+        # chain already in flight and keeps it (the plural of "finish the
+        # current question"); the consecutive-failure abort discards
+        # not-yet-committed results exactly like the sequential path never
+        # would have drawn them (their spend is still counted -- the usage
+        # callback fires from the worker at call time).
+        inflight: deque[tuple[Any, ...]] = deque()
+        exhausted = False
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="plo-llm"
+        ) as pool_exec:
+            while True:
+                while (
+                    not exhausted and not stopped_early and not aborted
+                    and len(inflight) < workers
+                    and len(rows) + len(inflight) < total_questions
+                ):
+                    if stop_check is not None and stop_check():
+                        stopped_early = True
+                        break
+                    spot = next(spot_iter, None)
+                    if spot is None:
+                        exhausted = True
+                        break
+                    prepared = _prepare_spot(spot)
+                    if prepared is None:
+                        continue
+                    facts, difficulty, options, correct = prepared
+                    inflight.append((
+                        spot, facts, difficulty, options, correct,
+                        pool_exec.submit(
+                            _run_llm_chain, spot, facts, options, correct
+                        ),
+                    ))
+                if aborted or not inflight:
+                    break
+                spot, facts, difficulty, options, correct, fut = (
+                    inflight.popleft()
+                )
+                _commit_result(spot, facts, difficulty, options, correct,
+                               fut.result())
+            # Graceful stop: commit everything already in flight (paid for
+            # and wanted). An abort discards instead -- same as sequential,
+            # which would never have drawn past the failure streak.
+            while inflight and not aborted and len(rows) < total_questions:
+                spot, facts, difficulty, options, correct, fut = (
+                    inflight.popleft()
+                )
+                _commit_result(spot, facts, difficulty, options, correct,
+                               fut.result())
+            inflight.clear()
+
 
     # Final flush: same content, complete=True. A gracefully-stopped batch is
     # COMPLETE (it ended cleanly, just early); only a crash leaves False.

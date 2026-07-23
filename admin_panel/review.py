@@ -630,6 +630,39 @@ def collect_approved_sources(
     return _scan_approved(batch_dir, exclude_prefix)[1]
 
 
+def approved_removal_group(
+    approved_sources: list[tuple[Path, str, dict[str, str]]],
+    csv_path: Path,
+    no: str,
+) -> list[tuple[Path, str]]:
+    """The ``(csv_path, No)`` set one un-approve click must clear.
+
+    A standalone row clears just itself. A FULL-HAND leg (non-blank
+    ``hand_id``) clears every approved leg of the SAME hand in the SAME
+    batch: a play-through ships whole or not at all, so un-approving one
+    leg must never leave a partial hand in the approved pool (July 2026,
+    postflop Review's remove control). Pure -- browserless-testable; the
+    Streamlit button is a thin shell over this.
+    """
+    target = next(
+        (
+            (c, n, row) for c, n, row in approved_sources
+            if c == csv_path and str(n) == str(no)
+        ),
+        None,
+    )
+    if target is None:
+        return [(csv_path, str(no))]
+    hand_id = str(target[2].get("hand_id", "") or "").strip()
+    if not hand_id or hand_id.lower() == "nan":
+        return [(csv_path, str(no))]
+    return [
+        (c, str(n)) for c, n, row in approved_sources
+        if c == csv_path
+        and str(row.get("hand_id", "") or "").strip() == hand_id
+    ]
+
+
 def clear_all_approved(
     batch_dir: Path, *, exclude_prefix: str | None = None
 ) -> int:
@@ -1167,6 +1200,7 @@ __all__ = [
     "batch_pack_id",
     "empty_batch_diagnosis",
     "preflop_leg_provenance",
+    "approved_removal_group",
     "clear_all_approved",
     "collect_approved_rows",
     "collect_approved_sources",

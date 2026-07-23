@@ -442,6 +442,24 @@ def _as_played_verb(node: PostflopNode, anchor: PostflopNode, hero: str) -> str 
     return step.verb if step.position == hero else None
 
 
+def _ends_legally(legs: list[HandLeg]) -> bool:
+    """USER STANDING RULE (July 22 2026): a play-through may end BEFORE the
+    river ONLY on a fold. A hand whose last question is a flop/turn
+    check/bet/call reads as a story cut off mid-hand ("the hand obviously
+    continues, why did it stop?") -- these lines exist because the solve's
+    river nodes are down-sampled, so a turn line can lack its river
+    continuation; the honest move is to DROP the hand, never to ship it.
+    River enders may end on anything (the river is the last street; the
+    showdown resolution plays it out). Preflop enders are fold/raise by
+    construction (terminal_fold / terminal_raise)."""
+    if not legs:
+        return False
+    last = legs[-1]
+    if last.kind != "postflop":
+        return True  # preflop enders: fold/raise-ender machinery owns these
+    return last.street == "river" or last.terminal_fold
+
+
 def assemble_hands(
     solve: PostflopSolve,
     *,
@@ -451,6 +469,7 @@ def assemble_hands(
     include_preflop: bool = True,
     include_villain: bool = False,
     variety_seed: int | None = None,
+    counters: dict | None = None,
 ) -> list[PlayThroughHand]:
     """Assemble play-through hands from ``solve``, seeded by worthy ``seeds``.
 
@@ -505,6 +524,13 @@ def assemble_hands(
         legs = _build_legs(solve, hero, combo, line, include_preflop=include_preflop)
         if legs is None:
             continue  # as-played coherence: divergent line, drop the hand
+        if not _ends_legally(legs):
+            # No-mid-hand-endings rule (July 22 2026): drop, count, refill.
+            if counters is not None:
+                counters["hands_dropped_nonfold_early_ender"] = (
+                    counters.get("hands_dropped_nonfold_early_ender", 0) + 1
+                )
+            continue
         anchor = line[-1]
         hands.append(PlayThroughHand(
             hand_id=_hand_id(solve, hero, combo, anchor, "hero"),
@@ -529,6 +555,12 @@ def assemble_hands(
                 v_legs = _build_legs(
                     solve, villain, v_combo, v_nodes, include_preflop=include_preflop
                 )
+                if v_legs and not _ends_legally(v_legs):
+                    if counters is not None:
+                        counters["hands_dropped_nonfold_early_ender"] = (
+                            counters.get("hands_dropped_nonfold_early_ender", 0) + 1
+                        )
+                    v_legs = None
                 if v_legs:  # None (divergent) or [] both skip
                     hands.append(PlayThroughHand(
                         hand_id=_hand_id(solve, villain, v_combo, anchor, "villain"),

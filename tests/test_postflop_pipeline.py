@@ -2199,3 +2199,110 @@ def test_context_rake_strips_internal_chip_units() -> None:
     assert display_rake("10% cap 3bb (300 chips)") == "10% cap 3bb"
     assert display_rake("8% cap 2bb") == "8% cap 2bb"
     assert display_rake("none") == "none"
+
+
+# --- second rewrite round vs final-audit flags (July 2026, strict-clean) ----
+class _TwoRoundMessages:
+    """Content-aware mock for the second-rewrite lifecycle: the claim checker
+    flags the ORIGINAL and the FIRST rewrite, and clears only the SECOND;
+    revise calls return rewrite 1 then rewrite 2."""
+
+    def __init__(self, gen: str, revised1: str, revised2: str) -> None:
+        self.gen, self.revised1, self.revised2 = gen, revised1, revised2
+        self.revise_calls = 0
+
+    def create(self, **kw):
+        system = kw.get("system", "")
+        user = kw["messages"][0]["content"]
+        if "poker editor" in system:  # claim-check call
+            if self.revised2 in user:
+                return _Resp('{"issues": []}')
+            return _Resp(
+                '{"issues": [{"claim": "vague", "problem": "unclear line"}]}'
+            )
+        if "AUDIT ISSUES TO FIX" in user:  # revise call
+            self.revise_calls += 1
+            return _Resp(self.revised1 if self.revise_calls == 1 else self.revised2)
+        return _Resp(self.gen)
+
+
+class _TwoRoundClient:
+    def __init__(self, gen: str, revised1: str, revised2: str) -> None:
+        self.messages = _TwoRoundMessages(gen, revised1, revised2)
+
+
+def _run_layer7(client, **flags):
+    from pipeline.postflop.claim_checker import (
+        POSTFLOP_CHECKER_SYSTEM_PROMPT,
+    )
+    from pipeline.postflop.layer7 import run_layer7_audit
+
+    facts = _facts_for()
+    opts, correct = build_options(facts.spot)
+    explanation = GeneratedExplanation(
+        *(opts + ["", "", "", ""])[:4], correct, "Check to control the pot.",
+    )
+    return run_layer7_audit(
+        explanation, facts,
+        solver_data_block=build_solver_data_block(facts),
+        question_text="You checked. Villain bets.",
+        node_id=facts.spot.node.node_id, client=client, model="test-model",
+        temperature=0.0, max_tokens=64, system_prompt=None,
+        checker_prompt=POSTFLOP_CHECKER_SYSTEM_PROMPT,
+        run_claim_checker=False, revise_pass=True, final_audit=True,
+        **flags,
+    )
+
+
+def test_layer7_second_rewrite_converts_flagged_to_clean() -> None:
+    """The 🧼 lever: a rewrite the final audit still flags gets ONE more
+    revise round against those flags, and the re-audited clean rewrite ships
+    with no remaining issues (so strict-clean stops churning the hand)."""
+    r1 = "Check to keep the pot small on this flop."
+    r2 = "Check to keep the pot small and realize your equity cheaply."
+    out = _run_layer7(_TwoRoundClient("gen", r1, r2), second_rewrite=True)
+    assert out.explanation.answer_explanation == r2
+    assert out.final_audit_issues == []
+    assert out.remaining_issues == []
+    assert out.second_rewrite_attempted == 1
+    assert out.second_rewrite_fixed == 1
+    rec = out.revise_record
+    assert rec["status"] == "fixed"
+    assert rec["second_rewrite"]["status"] == "fixed"
+    assert rec["second_rewrite"]["issues_before"]  # what round 2 targeted
+    assert rec["revised_explanation"] == r2
+    assert rec["final_audit_issues"] == []
+    # And the claim_check CSV cell reflects the CLEAN final state.
+    assert out.claim_check_json.strip() in ("[]", '{"issues": []}') or (
+        "vague" not in out.claim_check_json
+    )
+
+
+def test_layer7_second_rewrite_off_keeps_round_one_flags() -> None:
+    """Default (flag-only final audit, pre-July-22 behaviour): the first
+    rewrite ships still flagged; no second revise call is made."""
+    r1 = "Check to keep the pot small on this flop."
+    r2 = "Check to keep the pot small and realize your equity cheaply."
+    client = _TwoRoundClient("gen", r1, r2)
+    out = _run_layer7(client, second_rewrite=False)
+    assert out.explanation.answer_explanation == r1
+    assert out.final_audit_issues  # still flagged
+    assert out.second_rewrite_attempted == 0
+    assert client.messages.revise_calls == 1  # never asked for rewrite 2
+    assert "second_rewrite" not in out.revise_record
+
+
+def test_layer7_second_rewrite_discarded_keeps_round_one_text() -> None:
+    """A second rewrite that breaks a hard rule is discarded (after the
+    reviser's own corrective retry): round 1's text AND flags are kept, and
+    the discard is recorded."""
+    r1 = "Check to keep the pot small on this flop."
+    bad = "Check — to keep the pot small."  # em dash = hard-rule violation
+    out = _run_layer7(_TwoRoundClient("gen", r1, bad), second_rewrite=True)
+    assert out.explanation.answer_explanation == r1
+    assert out.final_audit_issues  # round 1's flags survive
+    assert out.second_rewrite_attempted == 1
+    assert out.second_rewrite_fixed == 0
+    second = out.revise_record["second_rewrite"]
+    assert second["status"] == "discarded"
+    assert second["rejected_reason"]

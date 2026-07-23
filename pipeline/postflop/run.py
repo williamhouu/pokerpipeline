@@ -349,6 +349,8 @@ def generate_full_hand_batch_from_db(
     revise_pass: bool = False,
     final_audit: bool = False,
     strict_clean_hands: bool = False,
+    action_heavy: bool = True,
+    llm_workers: int = 1,
     stop_check: Any = None,
     progress_callback: Any = None,
 ):
@@ -434,6 +436,8 @@ def generate_full_hand_batch_from_db(
         revise_pass=revise_pass,
         final_audit=final_audit,
         strict_clean_hands=strict_clean_hands,
+        action_heavy=action_heavy,
+        llm_workers=llm_workers,
         stop_check=stop_check,
         progress_callback=progress_callback,
         provenance={

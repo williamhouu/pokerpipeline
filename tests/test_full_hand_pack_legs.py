@@ -236,10 +236,15 @@ def test_band_scan_looks_past_the_requested_count(tmp_path, monkeypatch) -> None
     solve = btn_vs_bb_full_hand_2cJs7s()
 
     # Unfiltered reference run: every hand + its difficulty, in kept order.
+    # action_heavy=False on BOTH runs: this test exercises the band-scan
+    # MECHANICS against the aggregate hand_difficulty; with the 🎬 policy on
+    # (the default) the band judges the postflop spine instead (its own
+    # tests live in test_full_hand_action_heavy.py).
     out_all = tmp_path / "all.csv"
     generate_full_hand_batch(
         solve=solve, output_path=out_all, total_hands=50, dry_run=True,
         answer_style="gto", equity_runouts=20, include_villain=True,
+        action_heavy=False,
     )
     meta_all = json.loads(
         out_all.with_suffix(".meta.json").read_text(encoding="utf-8")
@@ -260,6 +265,7 @@ def test_band_scan_looks_past_the_requested_count(tmp_path, monkeypatch) -> None
         solve=solve, output_path=out, total_hands=1, dry_run=True,
         answer_style="gto", equity_runouts=20, include_villain=True,
         min_hand_difficulty=target, max_hand_difficulty=target,
+        action_heavy=False,
     )
     assert result.questions_written > 0, "band scan failed to look past hand #1"
     rows = list(_csv.DictReader(out.open(encoding="utf-8-sig")))
@@ -832,3 +838,79 @@ def test_balanced_hand_mix_round_robins_buckets() -> None:
     assert balanced_hand_mix(hands, 99) == hands[:99] or len(
         balanced_hand_mix(hands, 99)
     ) == len(hands)
+
+
+def test_pack_leg_second_rewrite_round(tmp_path, monkeypatch) -> None:
+    """Second rewrite round vs final-audit flags (July 2026, strict-clean):
+    the pack preflop leg mirrors the postflop layer7 -- a rewrite the final
+    audit still flags gets ONE more revise round, and the re-audited clean
+    second rewrite ships with an empty final_audit_issues list."""
+    from types import SimpleNamespace
+
+    import pipeline.preflop.batch as preflop_batch
+    import pipeline.preflop.reviser as preflop_reviser
+    from pipeline.postflop.preflop_leg_pack import build_pack_preflop_leg_row
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    pack = _matching_pack(tmp_path)
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+
+    fake_issue = SimpleNamespace(claim="the pot is 9bb", problem="it is 5.5bb")
+
+    def fake_claim_check(prose, *a, **k):
+        # Flags everything except the SECOND rewrite.
+        if prose == "Second fix.":
+            return SimpleNamespace(issues=[])
+        return SimpleNamespace(issues=[fake_issue])
+
+    monkeypatch.setattr(preflop_batch, "_safe_claim_check", fake_claim_check)
+
+    def fake_generate(facts, options, correct, **kwargs):
+        from pipeline.explanation_generator import GeneratedExplanation
+
+        return GeneratedExplanation(
+            option_1=options[0], option_2=options[1],
+            option_3=options[2] if len(options) > 2 else "",
+            option_4=options[3] if len(options) > 3 else "",
+            correct_answer=correct, answer_explanation="Original prose.",
+        )
+
+    import pipeline.preflop.explanation_generator as preflop_gen
+
+    monkeypatch.setattr(
+        preflop_gen, "generate_preflop_answer_explanation", fake_generate,
+    )
+
+    rewrites = iter(["Fixed prose.", "Second fix."])
+
+    def fake_revise(explanation, facts, *, issues, **kwargs):
+        from dataclasses import replace as _r
+
+        return SimpleNamespace(
+            changed=True,
+            explanation=_r(explanation, answer_explanation=next(rewrites)),
+            rejected_reason="",
+        )
+
+    monkeypatch.setattr(preflop_reviser, "revise_explanation", fake_revise)
+
+    row, record, failure = build_pack_preflop_leg_row(
+        src, "BB", "7h6h", solve,
+        number=1, hand_id="h1", sequence_index=1, sequence_total=3,
+        use_placeholder=False, client=object(), model="test-model",
+        temperature=0.0, max_tokens=64, answer_style="gto",
+        display_in_bb=True, equity_runouts=20,
+        revise_pass=True, final_audit=True, second_rewrite=True,
+    )
+    assert failure is None and row is not None
+    rev = record["revise"]
+    assert rev["status"] == "fixed"
+    assert rev["second_rewrite"]["status"] == "fixed"
+    assert rev["second_rewrite"]["issues_before"] == [
+        "the pot is 9bb -- it is 5.5bb"
+    ]
+    assert rev["final_audit_issues"] == []  # re-audited clean
+    assert "Second fix." in row["Answer Explanation"]
+    # A clean second rewrite means the leg ships unflagged.
+    assert row["validation_status"] != "flagged"

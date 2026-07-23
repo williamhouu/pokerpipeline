@@ -32,6 +32,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +70,7 @@ from pipeline.postflop.format_writer import (
     build_postflop_row,
     write_postflop_csv,
 )
+from pipeline.postflop.hand_quality import apply_action_heavy_policy
 from pipeline.postflop.layer7 import run_layer7_audit
 from pipeline.postflop.options import build_options
 from pipeline.postflop.play_through import (
@@ -108,6 +111,8 @@ ProgressCallback = Any
 _LEG_COUNTER_KEYS = (
     "soft_flagged", "claim_flagged", "revise_flagged", "revise_fixed",
     "revise_discarded", "revise_unchanged",
+    # Second rewrite round vs final-audit flags (July 2026, strict-clean).
+    "revise_second_round", "revise_second_fixed",
     "preflop_leg_pack_used", "preflop_leg_entry_fallback",
     # Multi-raise (3-bet pot) preflop legs that could not be built: no
     # matching pack, or the pack's strategy for the hand contradicts the
@@ -156,10 +161,16 @@ def _pack_leg_counter_delta(record: dict[str, Any]) -> dict[str, int]:
         d["soft_flagged"] = 1
     if record.get("claim_check_issues"):
         d["claim_flagged"] = 1
-    status = (record.get("revise") or {}).get("status")
+    revise = record.get("revise") or {}
+    status = revise.get("status")
     if status in ("fixed", "discarded", "unchanged"):
         d["revise_flagged"] = 1
         d[f"revise_{status}"] = 1
+    second = revise.get("second_rewrite")
+    if isinstance(second, dict):
+        d["revise_second_round"] = 1
+        if second.get("status") == "fixed":
+            d["revise_second_fixed"] = 1
     return d
 
 
@@ -169,7 +180,7 @@ def _postflop_leg_row(
     use_placeholder, client, model, temperature, max_tokens, answer_style,
     display_in_bb, equity_runouts, trap_difficulty, system_prompt, usage_cb,
     run_claim_checker=False, claim_checker_prompt=None, revise_pass=False,
-    final_audit=False, facts=None,
+    final_audit=False, second_rewrite=False, facts=None,
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, int]]:
     """Build one postflop-leg row. Returns (row, meta_record, failure, counters).
 
@@ -215,7 +226,8 @@ def _postflop_leg_row(
             system_prompt=system_prompt,
             checker_prompt=claim_checker_prompt or POSTFLOP_CHECKER_SYSTEM_PROMPT,
             run_claim_checker=run_claim_checker, revise_pass=revise_pass,
-            final_audit=final_audit, usage_callback=usage_cb,
+            final_audit=final_audit, second_rewrite=second_rewrite,
+            usage_callback=usage_cb,
         )
         explanation = l7.explanation
         claim_check_json = l7.claim_check_json
@@ -227,6 +239,8 @@ def _postflop_leg_row(
         counters["revise_fixed"] += l7.revise_fixed
         counters["revise_discarded"] += l7.revise_discarded
         counters["revise_unchanged"] += l7.revise_unchanged
+        counters["revise_second_round"] += l7.second_rewrite_attempted
+        counters["revise_second_fixed"] += l7.second_rewrite_fixed
 
     soft_warnings = (
         [] if use_placeholder else run_postflop_soft_validators(explanation, facts)
@@ -422,6 +436,8 @@ def generate_full_hand_batch(
     revise_pass: bool = False,
     final_audit: bool = False,
     strict_clean_hands: bool = False,
+    action_heavy: bool = True,
+    llm_workers: int = 1,
     stop_check: Any = None,
     progress_callback: ProgressCallback = None,
     write_meta: bool = True,
@@ -491,12 +507,19 @@ def generate_full_hand_batch(
         # front-loads one actor's longest lines, so a shallow pool can
         # miss the other seat's hands entirely.
         scan_cap = max(60, total_hands * 20)
+    elif action_heavy:
+        # 🎬 The action-heavy policy gates and RANKS the pool (density
+        # ordering, checkdown quota, trivial-fold-ender drop), so the plain
+        # path needs an oversized pool too -- exactly total_hands would
+        # leave it nothing to be picky with. Assembly is cheap (no facts).
+        scan_cap = max(60, total_hands * 20)
     else:
         scan_cap = total_hands
+    assemble_counters: dict[str, int] = {}
     hands = assemble_hands(
         solve, seeds=worthy, heroes=tuple(heroes) or (), max_hands=scan_cap,
         include_preflop=include_preflop, include_villain=include_villain,
-        variety_seed=variety_seed,
+        variety_seed=variety_seed, counters=assemble_counters,
     )
 
     # --- pack-backed preflop legs (July 2026) -----------------------------
@@ -593,6 +616,19 @@ def generate_full_hand_batch(
                 ))
         hands = hands + preflop_ender_hands
 
+    # --- 🎬 action-heavy policy (July 2026, user ask) ----------------------
+    # Runs on the WHOLE candidate pool BEFORE any selection, so the length
+    # quotas, the diversify mix, the reserves, and every top-up/backfill all
+    # draw exclusively from compliant, density-ordered hands: checkdown
+    # stories capped (~15%), near-pure fold enders gone, and the most
+    # educational lines (real action, mixed enders, raised pots) first --
+    # every downstream selector preserves input order within its buckets.
+    action_heavy_counters: dict[str, int] = {}
+    if action_heavy:
+        hands, action_heavy_counters = apply_action_heavy_policy(
+            hands, total_hands=total_hands,
+        )
+
     length_reserve: dict[str, list] = {}
     balance_pool: list = []  # 🎛️ full candidate pool, for the balance report
     committed_hands: list = []  # hands whose rows actually shipped
@@ -650,6 +686,14 @@ def generate_full_hand_batch(
     pack_facts_cache: dict[tuple[str, str], Any] = {}
     line_facts_cache: dict[tuple[int, str], Any] = {}
     hand_difficulties: dict[str, int] = {}
+    # 🎬 The hand's POSTFLOP SPINE difficulty: the hardest postflop leg.
+    # With action_heavy on, the band filter and the balanced difficulty
+    # bands judge hands by THIS (via _band_value) -- a marginal preflop
+    # defend rates ~2000-2600 on the frequency+EV axes alone, so the old
+    # hand-level peak let "Hard" hands be hard preflop and trivial after.
+    # hand_difficulty (the CSV column) keeps its documented peak-blend
+    # semantics unchanged.
+    hand_postflop_peaks: dict[str, int] = {}
 
     # --- multi-raise preflop line legs (3-bet pots, July 2026) -------------
     # A preflop_line leg is built EXCLUSIVELY from the matched pack: the
@@ -781,6 +825,7 @@ def generate_full_hand_batch(
         rest -- see pipeline/postflop/difficulty.py). Facts cached for the
         generation loop, so nothing is computed twice."""
         leg_scores: list[int] = []
+        post_scores: list[int] = []
         for leg in hand.legs:
             if leg.kind == "preflop_entry":
                 score = None
@@ -819,8 +864,26 @@ def generate_full_hand_batch(
                 score = compute_difficulty(
                     facts_cache[key], apply_trap_bump=trap_difficulty,
                 ).score
+                post_scores.append(score)
             leg_scores.append(score)
+        if post_scores:
+            hand_postflop_peaks[hand.hand_id] = max(post_scores)
         return aggregate_hand_difficulty(leg_scores)
+
+    def _band_value(hand) -> int:
+        """The difficulty the band machinery judges ``hand`` by.
+
+        INVARIANT (🎬 July 2026): with action_heavy on, a hand with a
+        postflop spine is banded by its hardest POSTFLOP leg -- a preflop
+        spike alone must never qualify a hand as Medium/Hard. Falls back to
+        the aggregate for preflop-only hands (and whenever the toggle is
+        off). Call only after _score_hand has scored the hand.
+        """
+        if action_heavy:
+            peak = hand_postflop_peaks.get(hand.hand_id)
+            if peak is not None:
+                return peak
+        return hand_difficulties[hand.hand_id]
 
     hands_difficulty_filtered = 0
     hands_scanned = len(hands)
@@ -847,11 +910,15 @@ def generate_full_hand_batch(
             scanned += 1
             score = _score_hand(hand)
             hand_difficulties[hand.hand_id] = score
+            # 🎬 the band judges the postflop spine (see _band_value) --
+            # observed_max reports the same selector the band compares, so
+            # the Review page's "band unreachable" explanation stays honest.
+            sel = _band_value(hand)
             hand_difficulty_observed_max = (
-                score if hand_difficulty_observed_max is None
-                else max(hand_difficulty_observed_max, score)
+                sel if hand_difficulty_observed_max is None
+                else max(hand_difficulty_observed_max, sel)
             )
-            if lo <= score <= hi:
+            if lo <= sel <= hi:
                 kept.append(hand)
         hands_scanned = scanned
         hands_difficulty_filtered = scanned - len(kept)
@@ -889,7 +956,9 @@ def generate_full_hand_batch(
         def _band_counts() -> dict[str, int]:
             counts = {"Easy": 0, "Medium": 0, "Hard": 0}
             for h in hands:
-                counts[hand_difficulty_band(hand_difficulties[h.hand_id])] += 1
+                # 🎬 balance the same selector the bands use: the postflop
+                # spine (action_heavy) -- see _band_value.
+                counts[hand_difficulty_band(_band_value(h))] += 1
             return counts
 
         for _street in ("river", "turn", "flop", "preflop"):
@@ -906,9 +975,7 @@ def generate_full_hand_batch(
                         i
                         for i in range(len(hands) - 1, -1, -1)
                         if hands[i].ending_street == _street
-                        and hand_difficulty_band(
-                            hand_difficulties[hands[i].hand_id]
-                        )
+                        and hand_difficulty_band(_band_value(hands[i]))
                         == _over
                     ),
                     None,
@@ -922,18 +989,22 @@ def generate_full_hand_batch(
                 balance_swap_scored += 1
                 _score = _score_hand(_cand)
                 hand_difficulties[_cand.hand_id] = _score
-                _band = hand_difficulty_band(_score)
+                _band = hand_difficulty_band(_band_value(_cand))
                 if _counts.get(_band, 0) >= _target - 0.5:
                     continue  # lands in a band that is not underfull
                 hands[_out_idx] = _cand
                 balance_swaps_made += 1
 
     in_tokens = out_tokens = 0
+    # ⚡ llm_workers > 1 reports usage from leg worker threads; the lock
+    # keeps the totals exact (THE USAGE RULE).
+    _usage_lock = threading.Lock()
 
     def _usage(usage: object) -> None:
         nonlocal in_tokens, out_tokens
-        in_tokens += int(getattr(usage, "input_tokens", 0) or 0)
-        out_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+        with _usage_lock:
+            in_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+            out_tokens += int(getattr(usage, "output_tokens", 0) or 0)
 
     rows: list[dict[str, str]] = []
     records: list[dict[str, Any]] = []
@@ -964,10 +1035,19 @@ def generate_full_hand_batch(
             full_hand_balance_report,
         )
 
+        # 🎬 report the SAME difficulty the balancing judged (the postflop
+        # spine under action_heavy), so achieved-vs-target reads honestly.
+        _report_diffs = (
+            {
+                hid: hand_postflop_peaks.get(hid, d)
+                for hid, d in hand_difficulties.items()
+            }
+            if action_heavy else hand_difficulties
+        )
         return full_hand_balance_report(
             committed_hands, balance_pool, solve,
-            selected_difficulties=hand_difficulties,
-            scored_difficulties=hand_difficulties,
+            selected_difficulties=_report_diffs,
+            scored_difficulties=_report_diffs,
         )
 
     def _flush(*, complete: bool) -> None:
@@ -1017,6 +1097,12 @@ def generate_full_hand_batch(
                 "revise_pass": revise_pass,
                 "final_audit": final_audit and revise_pass,
                 "strict_clean_hands": strict_clean_hands,
+                # 🎬 July 2026: density ordering + checkdown quota +
+                # trivial-fold-ender drop + postflop-spine banding.
+                "action_heavy": action_heavy,
+                # ⚡ July 2026: legs of one hand generate concurrently
+                # (1 = sequential); selection + row order are unaffected.
+                "llm_workers": llm_workers,
             },
             "counters": {
                 "worthy_spots_available": len(worthy),
@@ -1027,6 +1113,16 @@ def generate_full_hand_batch(
                 # material legs are additionally skipped inside _build_legs.
                 "artifact_material_spots_skipped": artifact_material_out,
                 "hands_assembled": hands_scanned,
+                # No-mid-hand-endings rule (July 22 2026, user): hands whose
+                # line ended flop/turn on a NON-fold (down-sampled river
+                # continuation missing) -- dropped at assembly, never shipped.
+                "hands_dropped_nonfold_early_ender": assemble_counters.get(
+                    "hands_dropped_nonfold_early_ender", 0
+                ),
+                # 🎬 what the action-heavy policy dropped (never silent):
+                # near-pure fold enders, and checkdown lines past the ~15%
+                # cap. passive_hands_kept = the checkdowns that DID ship.
+                **action_heavy_counters,
                 "hands_difficulty_filtered": hands_difficulty_filtered,
                 # Band-scan diagnostics (July 2026): the hardest hand seen in
                 # the scan, and whether the scan pool ran out before the
@@ -1077,6 +1173,10 @@ def generate_full_hand_batch(
                 "revise_fixed": agg["revise_fixed"],
                 "revise_discarded": agg["revise_discarded"],
                 "revise_unchanged": agg["revise_unchanged"],
+                # Second rewrite round vs final-audit flags (strict-clean):
+                # attempts, and how many re-audited clean afterwards.
+                "revise_second_round": agg["revise_second_round"],
+                "revise_second_fixed": agg["revise_second_fixed"],
             },
             "hands": hand_index,
             "questions": records,
@@ -1135,13 +1235,14 @@ def generate_full_hand_batch(
         hand_rows: list[dict[str, str]] = []
         hand_recs: list[dict[str, Any]] = []
         hand_failed = False
-        for i, leg in enumerate(hand.legs, start=1):
-            done += 1
-            if progress_callback is not None:
-                progress_callback(
-                    f"Hand {hand.hand_id[:22]} leg {i}/{hand.total}", done, total_legs,
-                )
-            number = len(rows) + len(hand_rows) + 1
+
+        def _build_leg(i: int, leg, number: int) -> tuple:
+            """Build ONE leg (deterministic inputs are pre-cached; the LLM
+            chain is the work). Free of shared-state mutation so it can run
+            on a worker thread (⚡ llm_workers): returns ``(row, record,
+            failure, counters, extra_agg)`` and the caller applies them in
+            LEG ORDER on the main thread."""
+            extra: dict[str, int] = {}
             if leg.kind == "preflop_line":
                 # Multi-raise line leg: always pack-built (the up-front
                 # filter guarantees the prebuilt facts exist for it).
@@ -1169,9 +1270,10 @@ def generate_full_hand_batch(
                     run_claim_checker=run_claim_checker,
                     revise_pass=revise_pass,
                     final_audit=final_audit and revise_pass,
+                    second_rewrite=strict_clean_hands,
                 )
                 if row is not None:
-                    agg["preflop_leg_pack_used"] += 1
+                    extra["preflop_leg_pack_used"] = 1
                     counters = _pack_leg_counter_delta(record)
             elif leg.kind == "preflop_entry":
                 row = record = failure = None
@@ -1200,13 +1302,16 @@ def generate_full_hand_batch(
                         run_claim_checker=run_claim_checker,
                         revise_pass=revise_pass,
                         final_audit=final_audit and revise_pass,
+                        # Strict-clean turns on the second rewrite round vs
+                        # final-audit flags (the 🧼 lever for small batches).
+                        second_rewrite=strict_clean_hands,
                     )
                 if row is not None or failure is not None:
-                    agg["preflop_leg_pack_used"] += 1 if row is not None else 0
                     if row is not None:
+                        extra["preflop_leg_pack_used"] = 1
                         counters = _pack_leg_counter_delta(record)
                 else:
-                    agg["preflop_leg_entry_fallback"] += 1
+                    extra["preflop_leg_entry_fallback"] = 1
                     row, record, failure, counters = _preflop_leg_row_entry(
                         leg.entry_facts, number=number, hand_id=hand.hand_id,
                         sequence_index=i, sequence_total=hand.total,
@@ -1232,7 +1337,61 @@ def generate_full_hand_batch(
                     run_claim_checker=run_claim_checker,
                     claim_checker_prompt=claim_checker_prompt,
                     revise_pass=revise_pass, final_audit=final_audit,
+                    second_rewrite=strict_clean_hands,
                 )
+            return row, record, failure, counters, extra
+
+        # ⚡ Parallel legs (July 2026, user ask -- NLHE preflop→river): a
+        # hand's legs are INDEPENDENT LLM chains, so they generate
+        # concurrently (hand wall-clock ≈ its slowest leg) while the
+        # hand-LEVEL control flow -- strict-clean rebuilds, atomicity,
+        # commit order -- stays sequential and results are applied in leg
+        # order. Leg numbers are precomputed (len(rows) is frozen during a
+        # hand: commits are whole-hand). Trade-off vs sequential: on a leg
+        # failure the sibling legs' spend is already committed to the API
+        # (sequential would have stopped early); failures are rare and the
+        # whole hand is dropped either way.
+        legs_indexed = list(enumerate(hand.legs, start=1))
+        if llm_workers > 1 and len(legs_indexed) > 1:
+            if progress_callback is not None:
+                progress_callback(
+                    f"Hand {hand.hand_id[:22]} · {hand.total} legs in parallel",
+                    done, total_legs,
+                )
+            with ThreadPoolExecutor(
+                max_workers=min(llm_workers, len(legs_indexed)),
+                thread_name_prefix="leg-llm",
+            ) as _leg_pool:
+                leg_futures = [
+                    (i, _leg_pool.submit(_build_leg, i, leg, len(rows) + i))
+                    for i, leg in legs_indexed
+                ]
+                leg_results = [(i, fut.result()) for i, fut in leg_futures]
+        else:
+            leg_results = []
+            for i, leg in legs_indexed:
+                done += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        f"Hand {hand.hand_id[:22]} leg {i}/{hand.total}",
+                        done, total_legs,
+                    )
+                leg_results.append((i, _build_leg(i, leg, len(rows) + i)))
+                # Sequential early-stop on failure (saves the later legs'
+                # LLM spend; the parallel path has already paid for them).
+                if leg_results[-1][1][2] is not None:
+                    break
+
+        for i, (row, record, failure, counters, extra) in leg_results:
+            if llm_workers > 1 and len(legs_indexed) > 1:
+                done += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        f"Hand {hand.hand_id[:22]} leg {i}/{hand.total}",
+                        done, total_legs,
+                    )
+            for k, v in extra.items():
+                agg[k] += v
             for k in _LEG_COUNTER_KEYS:
                 agg[k] += counters[k]
             if failure is not None:
