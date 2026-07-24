@@ -15,13 +15,18 @@ notes in memory / ``docs``):
 * ``ev_blob_oop`` / ``ev_blob_ip``: 1326 float32 LE, per-combo EV in **chips**,
   for the OOP / IP player. Use the **acting** player's blob at each node.
 * node strings: ``"r:0"`` is the root (OOP acts first), then ``":c"`` (the passive
-  action -- check OR call), ``":b<chips>"`` (bet/raise **to** ``<chips>`` total this
-  street), ``":f"`` (fold), ``":<card>"`` (a chance card -> next street).
+  action -- check OR call), ``":b<chips>"`` (bet/raise to ``<chips>`` **CUMULATIVE
+  chips committed by that player across the WHOLE postflop line** -- Pio node-string
+  semantics, NOT a fresh per-street amount; confirmed by the vendor July 2026 and
+  verified against the files' bet-size families: a river ``b4968`` after
+  ``b2312:c`` is exactly a 33%-pot bet once the earlier 2312 is subtracted, and
+  every all-in token equals ``eff_stack`` exactly), ``":f"`` (fold),
+  ``":<card>"`` (a chance card -> next street).
 
 **Action labels are unreliable** (the vendor stores a check-back as ``CALL`` and a
 call as ``CHECK``); we derive check-vs-call and bet-vs-raise from the betting
 **state** implied by the node string, never from the ``action`` column. Bet SIZES
-(the ``b<chips>`` token) are reliable.
+(the ``b<chips>`` token) are reliable once read as cumulative.
 
 Builds **flop, turn, and river** decision nodes. A chance-card token (``:2c``)
 ends a street: the walk deals the card onto the board, resets the this-street
@@ -157,6 +162,23 @@ def _node_street(node_id: str) -> str:
     return STREETS[min(n_cards, 2)]
 
 
+def _resolve_street_cap(
+    max_nodes_per_street: int | dict[str, int] | None, street: str,
+) -> int | None:
+    """The node cap for one street. Accepts a single int (same cap on every
+    street -- the historical form), a per-street dict (missing street -> no
+    cap), or None (no cap anywhere). The per-street form exists so the
+    full-hand path can sample the river much deeper than the turn (the river
+    node set is ~130k and a shallow sample strands most barrel lines without
+    their river continuation -- see FULL_HAND_MAX_NODES_PER_STREET)."""
+    if max_nodes_per_street is None:
+        return None
+    if isinstance(max_nodes_per_street, dict):
+        cap = max_nodes_per_street.get(street)
+        return None if cap is None else int(cap)
+    return int(max_nodes_per_street)
+
+
 def _stride_sample(items: list[str], k: int) -> list[str]:
     """``k`` evenly-spaced items from a sorted list (deterministic, order-preserving).
 
@@ -219,10 +241,19 @@ class _Solve:
 # --- the betting walk -------------------------------------------------------
 @dataclass
 class _BettingState:
-    """The running game state as we walk a node string across streets."""
+    """The running game state as we walk a node string across streets.
+
+    ``committed`` is each side's CUMULATIVE postflop chips for the whole line
+    (the quantity the ``b<chips>`` tokens state -- it never resets);
+    ``street_start`` snapshots it at the current street's start, so
+    ``committed[side] - street_start[side]`` is the side's this-street wager.
+    Within a street both sides' street-start values are equal (a street only
+    ends settled), so ``to_call`` computed on cumulative totals is exact.
+    """
 
     pot_chips: float
-    invested: dict[str, float]  # THIS-street chips committed, resets each street
+    committed: dict[str, float]  # CUMULATIVE postflop chips, whole line
+    street_start: dict[str, float]  # committed at the current street's start
     behind: dict[str, float]  # chips remaining behind, carries across streets
     to_act: str  # side to act NEXT
     other: str
@@ -230,7 +261,7 @@ class _BettingState:
     board: list[str]  # community cards revealed so far (grows on chance tokens)
 
     def to_call(self) -> float:
-        return max(self.invested.values()) - self.invested[self.to_act]
+        return max(self.committed.values()) - self.committed[self.to_act]
 
 
 def _token_to_db_name(token: str, node_actions: list[_DBAction]) -> str:
@@ -306,7 +337,7 @@ class SqliteDbAdapter:
         self,
         *,
         streets: tuple[str, ...] = ("flop",),
-        max_nodes_per_street: int | None = None,
+        max_nodes_per_street: int | dict[str, int] | None = None,
         include_ancestors: bool = False,
     ) -> PostflopSolve:
         con = sqlite3.connect(self.db_path)
@@ -324,7 +355,7 @@ class SqliteDbAdapter:
         s: _Solve,
         *,
         streets: tuple[str, ...],
-        max_nodes_per_street: int | None,
+        max_nodes_per_street: int | dict[str, int] | None,
         include_ancestors: bool = False,
     ) -> PostflopSolve:
         requested = tuple(streets)
@@ -367,8 +398,9 @@ class SqliteDbAdapter:
         selected: list[str] = []
         for st in STREETS:  # deterministic street order
             ranked = sorted(by_street[st])
-            if max_nodes_per_street is not None:
-                ranked = _stride_sample(ranked, max_nodes_per_street)
+            cap = _resolve_street_cap(max_nodes_per_street, st)
+            if cap is not None:
+                ranked = _stride_sample(ranked, cap)
             selected.extend(ranked)
 
         # Line-closure for play-through assembly: a down-sampled deep node's
@@ -452,9 +484,13 @@ class SqliteDbAdapter:
         eff_remaining = min(state.behind.values())  # shorter stack, across streets
 
         # 2. Build the display actions (labels/verbs derived from betting state).
+        # The actor's cumulative/street-start committed chips let _derive turn a
+        # cumulative BET_<chips> token into the real wager + this-street total.
         node_actions, token_map = self._node_actions(
             actions, to_call_chips=to_call_chips, pot_before=pot_before,
-            bb=bb, eff_remaining=eff_remaining,
+            bb=bb, actor_behind=state.behind[actor],
+            actor_committed=state.committed[actor],
+            actor_street_start=state.street_start[actor],
         )
 
         actor_reach = reach[actor]
@@ -538,7 +574,8 @@ class SqliteDbAdapter:
     def _walk(self, s, node_id, *, bb, start_pot, eff_flop, base_reach, flop):
         state = _BettingState(
             pot_chips=start_pot,
-            invested={self.oop: 0.0, self.ip: 0.0},
+            committed={self.oop: 0.0, self.ip: 0.0},
+            street_start={self.oop: 0.0, self.ip: 0.0},
             behind={self.oop: eff_flop, self.ip: eff_flop},
             to_act=self.oop,
             other=self.ip,
@@ -555,7 +592,7 @@ class SqliteDbAdapter:
             # contain the dealt card. The pot and chips-behind carry over.
             if _CARD_RE.match(token):
                 state.board.append(token)
-                state.invested = {self.oop: 0.0, self.ip: 0.0}
+                state.street_start = dict(state.committed)
                 state.to_act, state.other = self.oop, self.ip
                 state.street_idx += 1
                 for side in (self.oop, self.ip):
@@ -583,20 +620,23 @@ class SqliteDbAdapter:
             street_name = STREETS[state.street_idx]
             to_call_now = state.to_call()
             if token.startswith("b"):
+                # CUMULATIVE semantics (July 2026, vendor-confirmed): the token
+                # is the actor's total postflop chips committed for the WHOLE
+                # line after this action -- so the fresh wager subtracts what
+                # they already committed on EARLIER streets too, not just this
+                # street. (The old per-street reading inflated every barrel-line
+                # wager/pot/to-call by the earlier streets' commitment, and the
+                # all-in "cap" hack below is now the exact identity: an all-in
+                # token equals eff_stack, so added == behind exactly.)
                 size = float(token[1:])
-                verb = "raise" if to_call_now > 0 else "bet"  # raise TO / bet OF size
-                added_full = size - state.invested[acting]
-                # The vendor encodes an all-in as "bet your FLOP-START stack"
-                # (the eff_stack token), which OVERSTATES the wager by whatever
-                # the actor already put in on earlier streets (e.g. a turn call).
-                # Cap the wager at what the actor actually has behind, so the
-                # all-in size, the opponent's to-call, the pot, and the pot-odds
-                # are all exact (a deep river jam was reading ~2bb too big and the
-                # to-call exceeded the caller's stack). All-in == the token wants
-                # at least the whole remaining stack.
+                verb = "raise" if to_call_now > 0 else "bet"
+                added_full = size - state.committed[acting]
                 all_in = added_full >= state.behind[acting] - 1.0
-                added = state.behind[acting] if all_in else added_full
-                actual_to = state.invested[acting] + added  # true total this street
+                added = min(added_full, state.behind[acting])
+                committed_after = state.committed[acting] + added
+                # History keeps per-street semantics ("raise TO this-street total")
+                # for the renderer/premise/animation walks downstream.
+                actual_to = committed_after - state.street_start[acting]
                 history.append(
                     PostflopStep(
                         street_name, acting, verb, to_bb=round(actual_to / bb, 2),
@@ -604,13 +644,13 @@ class SqliteDbAdapter:
                     )
                 )
                 state.pot_chips += added
-                state.invested[acting] = actual_to
+                state.committed[acting] = committed_after
                 state.behind[acting] -= added
             elif token == "c":
                 if to_call_now > 0:  # call
                     history.append(PostflopStep(street_name, acting, "call"))
                     state.pot_chips += to_call_now
-                    state.invested[acting] += to_call_now
+                    state.committed[acting] += to_call_now
                     state.behind[acting] -= to_call_now
                 else:  # check
                     history.append(PostflopStep(street_name, acting, "check"))
@@ -622,26 +662,57 @@ class SqliteDbAdapter:
         return state, reach, tuple(history)
 
     # -- action label/verb derivation ------------------------------------
-    def _node_actions(self, actions, *, to_call_chips, pot_before, bb, eff_remaining):
+    def _node_actions(
+        self, actions, *, to_call_chips, pot_before, bb,
+        actor_behind, actor_committed, actor_street_start,
+    ):
         facing = to_call_chips > 0
         out = []
         token_map: dict[str, str] = {}  # db_name -> label
         for a in actions:
             label, verb, to_bb, pf = self._derive(
                 a.db_name, facing=facing, pot_before=pot_before, bb=bb,
-                to_call_chips=to_call_chips, eff_remaining=eff_remaining,
+                to_call_chips=to_call_chips, actor_behind=actor_behind,
+                actor_committed=actor_committed,
+                actor_street_start=actor_street_start,
             )
             token_map[a.db_name] = label
             out.append(
                 NodeAction(label=label, verb=verb, freq=0.0, to_bb=to_bb, pot_fraction=pf)
             )
+        # Labels are KEYS (strategy mixes, EVs, options, neutral credit), so two
+        # sizes snapping to the same 0.5bb display label must not merge: the
+        # colliding ones fall back to their exact bb amount.
+        seen: dict[str, int] = {}
+        for na in out:
+            seen[na.label] = seen.get(na.label, 0) + 1
+        if any(n > 1 for n in seen.values()):
+            for i, na in enumerate(out):
+                if seen[na.label] > 1 and na.to_bb is not None:
+                    exact = f"Bet {na.to_bb:g}bb" if na.verb == "bet" else (
+                        f"Raise to {na.to_bb:g}bb"
+                    )
+                    token_map[actions[i].db_name] = exact
+                    out[i] = NodeAction(
+                        label=exact, verb=na.verb, freq=na.freq,
+                        to_bb=na.to_bb, pot_fraction=na.pot_fraction,
+                    )
         return out, token_map
 
     def _label_for(self, a: _DBAction, token_map: dict[str, str]) -> str:
         return token_map[a.db_name]
 
-    def _derive(self, db_name, *, facing, pot_before, bb, to_call_chips, eff_remaining):
-        """(label, verb, to_bb, pot_fraction) for one vendor action, by context."""
+    def _derive(
+        self, db_name, *, facing, pot_before, bb, to_call_chips,
+        actor_behind, actor_committed, actor_street_start,
+    ):
+        """(label, verb, to_bb, pot_fraction) for one vendor action, by context.
+
+        ``BET_<chips>`` amounts are CUMULATIVE whole-line totals (same grammar
+        as the node-string ``b`` tokens): the real wager subtracts the actor's
+        already-committed chips, and the displayed "raise to" amount is the
+        this-street total (cumulative minus the street-start snapshot).
+        """
         if db_name == "FOLD":
             return "Fold", "fold", None, None
         if db_name in ("CHECK", "CALL"):
@@ -649,19 +720,25 @@ class SqliteDbAdapter:
                 return "Call", "call", round(to_call_chips / bb, 2), None
             return "Check", "check", None, None
         if db_name.startswith("BET_"):
-            size = float(db_name[4:])
-            to_bb = round(size / bb, 2)
-            # all-in: the bet commits (about) the whole remaining stack.
-            if size >= eff_remaining - 1:
+            total = float(db_name[4:])  # cumulative committed-for-the-line
+            added = total - actor_committed  # the fresh wager
+            to_this_street = total - actor_street_start  # "raise TO" this street
+            to_bb = round(to_this_street / bb, 2)
+            # all-in: the wager commits (about) the whole remaining stack --
+            # exact under cumulative semantics (the token equals eff_stack).
+            if added >= actor_behind - 1:
                 return "All-in", ("raise" if facing else "bet"), to_bb, None
             # Label bb amount snapped to the 0.5bb display grid (display-only;
             # to_bb field + pot_fraction stay exact for the math).
             disp = round_to_half_bb(to_bb)
             if facing:  # raise TO size
                 return f"Raise to {disp:g}bb", "raise", to_bb, None
-            pf = size / pot_before if pot_before > 0 else None
-            label = f"Bet {round(pf * 100)}%" if pf is not None else f"Bet {disp:g}bb"
-            return label, "bet", to_bb, pf
+            # TEAM RULE (July 23 2026): bet labels state the AMOUNT IN BIG
+            # BLINDS, never the pot percentage -- "Bet 2bb", not "Bet 33%".
+            # The exact pot fraction still rides in the pot_fraction field
+            # (the SOLVER DATA states it so the LLM never computes it).
+            pf = added / pot_before if pot_before > 0 else None
+            return f"Bet {disp:g}bb", "bet", to_bb, pf
         raise ValueError(f"unrecognised vendor action {db_name!r}")
 
 
@@ -867,18 +944,37 @@ def summarize_db(db_path: str) -> DbSolveSummary:
     )
 
 
+# Directory names discovery skips (July 23 2026): a backup/retired copy kept
+# under the solves folder must never surface in the picker -- it shows the
+# SAME filename as the live file, so the user cannot tell which is which and
+# can silently generate from a stale solve. Matched case-insensitively
+# against every path component; dot- and underscore-prefixed dirs skip too.
+_SKIPPED_SOLVE_DIR_TOKENS = ("backup", "archive", "retired", "old", "superseded")
+
+
+def _is_skipped_solve_dir(part: str) -> bool:
+    p = part.lower()
+    return p.startswith((".", "_")) or any(t in p for t in _SKIPPED_SOLVE_DIR_TOKENS)
+
+
 def discover_db_solves(directory: str) -> list[DbSolveSummary]:
     """Every ``.db`` under ``directory`` (recursive), summarised, sorted by path.
 
     Returns ``[]`` when the directory is absent. Unreadable files come back as
     ``ok=False`` summaries rather than being dropped, so the picker can explain
-    why a file isn't usable."""
+    why a file isn't usable. Subdirectories whose name marks them as backups
+    (see ``_SKIPPED_SOLVE_DIR_TOKENS``) are skipped, so a retired copy parked
+    next to the live files can never appear as a duplicate picker entry."""
     from pathlib import Path  # noqa: PLC0415 -- local: module stays import-light
 
     d = Path(directory).expanduser()
     if not d.is_dir():
         return []
-    return [summarize_db(str(p)) for p in sorted(d.rglob("*.db"))]
+    hits = [
+        p for p in sorted(d.rglob("*.db"))
+        if not any(_is_skipped_solve_dir(part) for part in p.relative_to(d).parts[:-1])
+    ]
+    return [summarize_db(str(p)) for p in hits]
 
 
 # Default per-street node cap for a batch load. Flop is tiny (~25 nodes, so the
@@ -886,12 +982,22 @@ def discover_db_solves(directory: str) -> list[DbSolveSummary]:
 # many representative nodes. Plenty of variety for a batch; keeps build bounded.
 DEFAULT_MAX_NODES_PER_STREET = 600
 
+# Full-hand (play-through) per-street caps (July 2026 checkdown-monotony fix).
+# At 600 river nodes the stride sample stranded most turn BARREL lines without
+# their river continuation, so the no-mid-hand-endings rule dropped them (v8
+# measured: 201 barrel hands dropped as illegal mid-hand enders) and river-
+# ending hands collapsed into checkdown shapes. ~2500 river nodes keeps the
+# build bounded while giving barrel lines their river nodes back.
+FULL_HAND_MAX_NODES_PER_STREET: dict[str, int] = {
+    "flop": 600, "turn": 600, "river": 2500,
+}
+
 
 def load_postflop_db(
     db_path: str,
     *,
     streets: tuple[str, ...] = ("flop",),
-    max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
+    max_nodes_per_street: int | dict[str, int] | None = DEFAULT_MAX_NODES_PER_STREET,
     include_ancestors: bool = False,
     **overrides: object,
 ) -> PostflopSolve:
@@ -920,6 +1026,7 @@ def load_postflop_db(
 
 __all__ = [
     "DbSolveSummary",
+    "FULL_HAND_MAX_NODES_PER_STREET",
     "SqliteDbAdapter",
     "derive_scenario",
     "discover_db_solves",
@@ -934,17 +1041,40 @@ __all__ = [
 # remember which files fight back. Matched by filename substring; first hit
 # wins. severity: "warn" renders as a warning, "info" as a note.
 SOLVE_QUALITY_FLAGS: tuple[tuple[str, str, str], ...] = (
+    # July 23 2026: the v7 family is EXONERATED. The "internally
+    # inconsistent" verdict was OUR false positive -- the intake check read
+    # the cumulative bet tokens as per-street amounts, which inflated every
+    # barrel-line pot and made the EVs look wrong. With the corrected walk
+    # (plus rake correction and a low-reach floor) five of the six files
+    # measure ~0; the residuals below are small and named per file.
+    (
+        "SRP_200bb_Kd7s3s_v7",
+        "info",
+        "Production-usable. One small residual from the intake check: on a "
+        "few checkdown-then-river-stab spots (tiny ~10bb pots) the file's "
+        "EVs sit about 3 equity points off its own ranges - roughly a "
+        "0.3bb effect, confined to that one spot shape. Everything else, "
+        "including every barrel line, measures exact.",
+    ),
+    (
+        "SRP_200bb_Ts9s5d_v7",
+        "info",
+        "Good solve (intake checks clean). One quirk to know: its Big "
+        "Blind leads (donk-bets) the flop about half the time (48% on the "
+        "installed July 18 re-solve), far more than typical theory, so "
+        "lead-into-raiser spots are common in its batches. Vendor-confirmed "
+        "July 23 2026: the tree config allows BB donk leads at the flop "
+        "root with the normal sizing families, so this is intended tree "
+        "structure, not an export error.",
+    ),
     (
         "_v7",
-        "warn",
-        "Hard to use: this v7 export is internally inconsistent. The "
-        "strategies and the EVs in the file describe two different solves "
-        "(the vendor exported early, unfinished strategies next to finished "
-        "EVs). That means the Layer-7 checker keeps finding REAL "
-        "contradictions, so batches from this file flag heavily, auto-fix "
-        "churns, and river-barrel answers are suspect. Fine for dry runs "
-        "and testing. For real batches use the v8 solve, and wait for the "
-        "vendor's re-export of the v7 family.",
+        "info",
+        "Good solve (intake checks clean as of the July 23 2026 re-audit). "
+        "An earlier version of the intake check misread the file's bet "
+        "notation and wrongly reported the v7 family as internally "
+        "inconsistent - that is retracted; these files are "
+        "production-usable.",
     ),
     (
         "_v8",

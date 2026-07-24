@@ -28,7 +28,7 @@ from pipeline.postflop.adapters.sqlite_db import (  # noqa: E402
     discover_db_solves,
     summarize_db,
 )
-from pipeline.postflop.solve import PreflopStep  # noqa: E402
+from pipeline.postflop.solve import PostflopStep, PreflopStep  # noqa: E402
 from pipeline.postflop.spot_selection import (  # noqa: E402
     combo_class,
     diversify_spots,
@@ -252,6 +252,7 @@ class _Node:
     actor: str
     street: str = "flop"
     is_facing_bet: bool = False
+    history: tuple = ()
 
 
 @dataclass
@@ -308,8 +309,11 @@ def test_diversify_keeps_turn_river_and_drops_raise_wars() -> None:
         # a re-raise war on the turn -> dropped (3 bets on one street).
         _Spot(_Node("r:0:c:c:2c:b216:b440:b900", "BB", street="turn",
                     is_facing_bet=True), "AcAd", dominant_verb="call"),
-        # an all-in line -> dropped.
-        _Spot(_Node("r:0:c:b9697", "BB", street="flop", is_facing_bet=True),
+        # an all-in line -> dropped (the walk stamps all_in on the history
+        # step; detection is file-agnostic, no longer a "b9697" id match).
+        _Spot(_Node("r:0:c:b9697", "BB", street="flop", is_facing_bet=True,
+                    history=(PostflopStep("flop", "BTN", "bet", to_bb=97.0,
+                                          all_in=True),)),
               "KsKd", dominant_verb="call"),
     ]
     out = diversify_spots(spots)
@@ -319,3 +323,58 @@ def test_diversify_keeps_turn_river_and_drops_raise_wars() -> None:
     # the flop + the three turn/river spots survive, spread across streets.
     assert {s.node.street for s in out} == {"flop", "turn", "river"}
     assert len(out) == 4
+
+
+def test_exciting_spot_needs_big_hand_and_big_action() -> None:
+    """🔥 Exciting-pots toggle (July 23 2026, user ask): a spot qualifies only
+    when hero holds a premium/strong made hand AND the line genuinely heated
+    up (a raise anywhere, or two-plus bets). A routine single c-bet faced,
+    or a big hand in a checked pot, does not qualify; neither does a heated
+    pot with a weak hand."""
+    from types import SimpleNamespace
+
+    from pipeline.postflop.solve import PostflopStep
+    from pipeline.postflop.spot_selection import make_spot_selector, spot_is_exciting
+
+    board = ("2c", "Js", "7s")
+
+    def _spot(hero_cards, history):
+        node = SimpleNamespace(
+            board=board, history=tuple(history), actor="BTN",
+            node_id="r:0:test", street="flop", is_facing_bet=False,
+            to_call_bb=0.0,
+        )
+        return SimpleNamespace(node=node, hero_cards=list(hero_cards))
+
+    set_of_jacks = ["Jd", "Jh"]
+    air = ["Th", "8h"]
+    raise_line = (
+        PostflopStep("flop", "BB", "bet", to_bb=2.0),
+        PostflopStep("flop", "BTN", "raise", to_bb=6.0),
+    )
+    two_bet_line = (
+        PostflopStep("flop", "BB", "bet", to_bb=2.0),
+        PostflopStep("flop", "BTN", "call"),
+        PostflopStep("turn", "BB", "bet", to_bb=5.0),
+    )
+    single_cbet = (PostflopStep("flop", "BB", "bet", to_bb=2.0),)
+    checked = (PostflopStep("flop", "BB", "check"),)
+
+    assert spot_is_exciting(_spot(set_of_jacks, raise_line)) is True
+    assert spot_is_exciting(_spot(set_of_jacks, two_bet_line)) is True
+    assert spot_is_exciting(_spot(set_of_jacks, single_cbet)) is False
+    assert spot_is_exciting(_spot(set_of_jacks, checked)) is False
+    assert spot_is_exciting(_spot(air, raise_line)) is False
+    assert spot_is_exciting(_spot(air, two_bet_line)) is False
+
+    # The selector honors the toggle (composes with the other filters).
+    pool = [
+        _spot(set_of_jacks, raise_line), _spot(set_of_jacks, checked),
+        _spot(air, raise_line),
+    ]
+    for s in pool:
+        s.hero_combo = "".join(s.hero_cards)
+        s.dominant_verb = "bet"
+    kept = make_spot_selector(exciting=True)(pool)
+    assert kept == [pool[0]]
+    assert make_spot_selector()(pool) == pool  # off = untouched

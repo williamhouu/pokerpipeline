@@ -254,6 +254,20 @@ def _parse_labeled_floats(cell: str) -> dict[str, float]:
     return out
 
 
+# Mirrors the artifact all-in rule (pack_allins_realistic): at stacks deeper
+# than this, an all-in is a tree artifact that never surfaces as an option, so
+# the EV-secondary audit must not demand it as the wrong-answer either (July
+# 23 2026: 200bb pack legs false-flagged because the stripped All-in's pack
+# EV beat Call's). Rows whose stack can't be parsed (dollar-denominated cash)
+# are treated as deep -- every such pack in the pipeline is 100bb+.
+_ALLIN_REALISTIC_MAX_BB = 40.0
+
+
+def _row_stack_bb(row: dict) -> float | None:
+    m = re.search(r"([\d.]+)\s*BB\b", row.get("Default Stack") or "", re.I)
+    return float(m.group(1)) if m else None
+
+
 def _check_gto_secondary_by_ev(row: dict) -> list[str]:
     """Check 9 (see cross_check_row): the GTO secondary is EV-ranked."""
     options = [row.get(f"option {i}") or "" for i in (1, 2, 3, 4)]
@@ -276,6 +290,14 @@ def _check_gto_secondary_by_ev(row: dict) -> list[str]:
         return []  # only literal-pure spots force the EV tie-break
     evs = _parse_labeled_floats(row.get("action_ev_bb") or "")
     candidates = {a: v for a, v in evs.items() if a != correct_verb}
+    stack = _row_stack_bb(row)
+    if stack is None or stack > _ALLIN_REALISTIC_MAX_BB:
+        # Deep stacks: the artifact rule strips All-in from every option
+        # surface, so it cannot be the required EV secondary.
+        candidates = {
+            a: v for a, v in candidates.items()
+            if a.lower().replace("-", "").replace(" ", "") != "allin"
+        }
     if not candidates or secondary not in candidates:
         return []  # EV-less pack, or the secondary's EV isn't published
     best = max(candidates, key=lambda a: candidates[a])

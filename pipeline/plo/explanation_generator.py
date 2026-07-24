@@ -43,6 +43,7 @@ from pipeline.explanation_generator import (
 )
 from pipeline.plo.action_history import (
     call_price,
+    display_call_price,
     display_seat,
     format_plo_action_history,
     price_is_live,
@@ -418,8 +419,12 @@ def build_solver_data(
         if still_to_act else "nobody"
     )
     data["your_call_or_fold_closes_the_action"] = closes
-    # The raw pot-odds math (the "show the math" facts): pot, price, and the
+    # The pot-odds math ("show the math" facts): pot, price, and the
     # break-even equity, so price claims in the prose trace to real numbers.
+    # Quotes the DISPLAYED (0.5bb-grid) amounts -- the numbers the player
+    # sees in the Question -- via display_call_price (July 23 2026, user
+    # report; see its invariant). The exact call_price only gates whether a
+    # price exists at all.
     pot_now, to_call = call_price(
         facts.spot.node.history_before, facts.spot.node.actor,
         stack_bb=stack_bb, ante_bb=ante_bb,
@@ -430,10 +435,13 @@ def build_solver_data(
     if to_call > 0 and price_is_live(
         facts.spot.node.history_before, facts.spot.node.actor
     ):
-        break_even = to_call / (pot_now + to_call)
+        disp_pot, disp_call, break_even = display_call_price(
+            facts.spot.node.history_before, facts.spot.node.actor,
+            stack_bb=stack_bb, ante_bb=ante_bb,
+        )
         price: dict[str, Any] = {
-            "pot_bb": round(pot_now, 1),
-            "to_call_bb": round(to_call, 1),
+            "pot_bb": disp_pot,
+            "to_call_bb": disp_call,
             "break_even_equity_pct": round(break_even * _PERCENT),
         }
         eq_now = facts.hero_equity_vs_villain

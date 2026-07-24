@@ -12,7 +12,7 @@ Two shapes, matching the team's existing format:
   ``["Always {less}", "Mostly {less}", "Mostly {more}", "Always {more}"]``
   ordered least-aggressive first. The correct answer is ``"Always {dom}"``
   when the dominant action is ~pure (>=95%) else ``"Mostly {dom}"``.
-* **Multi-action spots** (3+ actions, e.g. Check / Bet 33% / Bet 75%, or
+* **Multi-action spots** (3+ actions, e.g. Check / Bet 2bb / Bet 4.5bb, or
   Fold / Call / Raise): one plain option per action, ordered by aggression;
   the correct answer is the dominant action's plain label.
 
@@ -53,7 +53,8 @@ _NEAR_BINARY_DROP_FREQ = 0.05
 #   * "basic"  -- VERB-ONLY labels (Fold / Check / Call / Bet / Raise /
 #                 All-in). Multiple sizes of one verb merge into one option;
 #                 the size lives in the question prose and SOLVER DATA only.
-#   * "sizing" -- plain action labels WITH sizes (Check / Bet 33% /
+#   * "sizing" -- plain action labels WITH sizes, stated in BIG BLINDS
+#     (team rule July 23 2026: never pot percentages) -- Check / Bet 2bb /
 #                 Raise to 12bb) -- the pre-July-22 "basic".
 #   * "gto"    -- the Always/Mostly spectrum (size-free by the July rule).
 #   * "auto"   -- basic when one action is clearly dominant (>= 80%), else gto.
@@ -73,7 +74,7 @@ ANSWER_STYLE_FROM_RADIO_LABEL: dict[str, str] = {
 
 
 def _aggression_key(action: NodeAction) -> tuple[int, float]:
-    """Sort key: verb rank, then bet size (so Bet 33% precedes Bet 75%)."""
+    """Sort key: verb rank, then bet size (so Bet 2bb precedes Bet 4.5bb)."""
     size = action.pot_fraction if action.pot_fraction is not None else (
         action.to_bb if action.to_bb is not None else 0.0
     )
@@ -131,7 +132,7 @@ def _spectrum_label(action: NodeAction) -> str:
     """The wording one action gets on the Always/Mostly spectrum.
 
     TEAM RULE (July 2026): GTO spectrum options NEVER carry a bet size --
-    "Bet 53%" reads as "Bet", "Raise to 8.5bb" as "Raise" (matching the
+    "Bet 6.5bb" reads as "Bet", "Raise to 8.5bb" as "Raise" (matching the
     preflop pipeline, whose GTO labels have always been canonicalised
     size-free). The LLM still receives the real size in its SOLVER DATA
     block and the Question prose still names sizes; only the option wording

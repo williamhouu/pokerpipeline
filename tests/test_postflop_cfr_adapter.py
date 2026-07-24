@@ -193,9 +193,9 @@ def test_oop_lead_node_geometry_and_strategy() -> None:
     assert node.to_call_bb == 0.0  # first to act
     assert node.pot_bb == 5.5
     labels = {a.label for a in node.actions}
-    assert labels == {"Check", "Bet 40%"}  # 22 into 55 == 40%
+    assert labels == {"Check", "Bet 2bb"}  # 22 chips at 10/bb -> 2bb (bb label rule)
     # Per-combo strategy carried through faithfully.
-    assert node.strategy["JhTd"]["Bet 40%"] == pytest.approx(0.7)
+    assert node.strategy["JhTd"]["Bet 2bb"] == pytest.approx(0.7)
     assert node.strategy["9h8h"]["Check"] == pytest.approx(0.85)
     # Both ranges present, keyed by combo.
     assert set(node.hero_range) == set(_OOP_RANGE)
@@ -220,7 +220,7 @@ def test_per_action_evs_are_wired_and_converted_to_bb() -> None:
     node = solve.nodes["r:0"]
     # combo EVs are chips/bb: JhTd checks 20 chips -> 2.0bb, bets 26 -> 2.6bb.
     assert node.combo_evs["JhTd"]["Check"] == pytest.approx(2.0)
-    assert node.combo_evs["JhTd"]["Bet 40%"] == pytest.approx(2.6)
+    assert node.combo_evs["JhTd"]["Bet 2bb"] == pytest.approx(2.6)
     # Range-aggregate action EV is reach-weighted over the 3 in-range combos.
     by_label = {a.label: a for a in node.actions}
     assert by_label["Check"].ev_bb is not None

@@ -27,14 +27,20 @@ hand exists in the range, NO resolution is attached (never invent a combo
 the range doesn't hold).
 
 INVENTED RESPONSES obey the no-unrealistic-all-in rule: a villain response
-is only ever a call or a fold.
+is only ever a call, a fold, or -- behind a river check -- a check-back.
+The villain never bets: a villain bet would demand a NEW hero decision the
+question never asked.
 
 Hands whose final decision does not actually end the hand (a flop/turn
 call or check with betting still live) get no resolution -- closure there
 would mean inventing whole streets. Endings covered: any-street FOLD, a
 CALL that closes the hand (river, or an all-in on any street -- the
 remaining board is dealt inside the resolution), river BET/RAISE (villain
-response invented), and a river CHECK that closes the action.
+response invented), and ANY river CHECK (July 23 2026, USER STANDING
+RULE: every full hand that reaches its final question must reach a
+showdown -- an out-of-position river check gets the villain's check-back
+invented, the same convention as call-or-fold vs a bet, so the action
+closes and the reveal plays; an in-position check closes by itself).
 
 Deterministic: the villain hand and any runout are drawn from an RNG
 seeded by (hand_id, node_id, hero combo), so regeneration and the
@@ -240,14 +246,20 @@ def build_showdown_resolution(
         return None  # can't animate a wager whose size the node doesn't state
     facing_all_in = bool(node.history) and node.history[-1].all_in
     street = node.street
+    # A river check ALWAYS resolves (July 23 2026, user standing rule --
+    # "there's always supposed to be a showdown for these full hands"): an
+    # in-position check closes the action by itself; an out-of-position
+    # check gets the villain's check-back invented below, the same
+    # convention as the invented call-or-fold behind a bet.
     ends_hand = (
         verb == "fold"
         or (verb == "call" and (street == "river" or facing_all_in))
         or (verb in ("bet", "raise") and street == "river")
-        or (verb == "check" and street == "river" and node.actor == solve.ip_position)
+        or (verb == "check" and street == "river")
     )
     if not ends_hand or not verb:
         return None
+    check_needs_checkback = verb == "check" and node.actor != solve.ip_position
 
     hero = node.actor
     villain = node.villain
@@ -307,6 +319,10 @@ def build_showdown_resolution(
             table.emit("fold", seat=villain)
         else:
             table.call(villain)
+    elif check_needs_checkback:
+        # OOP hero checked: the villain checks BEHIND (never bets -- a bet
+        # would demand a new hero decision), closing the action to showdown.
+        table.emit("check", seat=villain)
 
     for i, card in enumerate(runout):
         table.emit(
@@ -362,6 +378,9 @@ def build_showdown_resolution(
         )
     elif winner == hero:
         summary = f"{v_str}. Your {_possessive(hero_label)} wins the pot."
+    elif verb == "check":
+        checked = "Checking" if check_needs_checkback else "Checking behind"
+        summary = f"{v_str}. {checked} lost the minimum."
     else:
         summary = f"{v_str}. Checking behind lost the minimum."
 

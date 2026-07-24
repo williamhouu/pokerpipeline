@@ -103,7 +103,7 @@ def test_fixture_has_the_four_nodes() -> None:
 def test_sample_spot_normalises_and_finds_dominant() -> None:
     spot = _spot("flop_ip_cbet", "AcJc")
     assert abs(sum(spot.action_frequencies.values()) - 1.0) < 1e-9
-    assert spot.dominant_action == "Bet 75%"
+    assert spot.dominant_action == "Bet 4bb"
     assert spot.dominant_verb == "bet"
 
 
@@ -231,6 +231,53 @@ def test_adapter_node_street_and_sampling() -> None:
     assert _stride_sample(items, 0) == []
 
 
+def test_discover_skips_backup_directories(tmp_path) -> None:
+    """July 23 2026: a backup copy parked under the solves folder surfaced as
+    a DUPLICATE picker entry with the same filename as the live file (no way
+    to tell which is which -> silent generation from a stale solve).
+    Discovery must skip backup-style and dot/underscore-prefixed subdirs."""
+    from pipeline.postflop.adapters.sqlite_db import discover_db_solves
+
+    (tmp_path / "live.db").write_bytes(b"x")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "nested.db").write_bytes(b"x")  # normal subdir: kept
+    for skipped in ("pre_july18_backup", "Archive", "old_solves", "_trash", ".hidden"):
+        d = tmp_path / skipped
+        d.mkdir()
+        (d / "live.db").write_bytes(b"x")  # same name as the live file
+    from pathlib import Path
+
+    rel = sorted(
+        str(Path(s.path).relative_to(tmp_path)) for s in discover_db_solves(str(tmp_path))
+    )
+    assert rel == ["live.db", str(Path("sub") / "nested.db")]
+
+
+def test_per_street_node_caps() -> None:
+    """July 23 2026 (checkdown-monotony fix): the node cap accepts a
+    per-street dict, and the full-hand default samples the river much deeper
+    (2500) than the flat 600 -- a shallow river sample stranded turn barrel
+    lines without their river continuation, so the no-mid-hand-endings rule
+    dropped them and batches over-rotated into checkdowns."""
+    import inspect
+
+    from pipeline.postflop.adapters.sqlite_db import (
+        FULL_HAND_MAX_NODES_PER_STREET,
+        _resolve_street_cap,
+    )
+    from pipeline.postflop.run import generate_full_hand_batch_from_db
+
+    assert _resolve_street_cap(600, "river") == 600
+    assert _resolve_street_cap(None, "river") is None
+    assert _resolve_street_cap({"flop": 600, "river": 2500}, "river") == 2500
+    assert _resolve_street_cap({"flop": 600}, "river") is None  # missing = uncapped
+    assert FULL_HAND_MAX_NODES_PER_STREET["river"] >= 2500  # noqa: PLR2004
+    assert FULL_HAND_MAX_NODES_PER_STREET["river"] > FULL_HAND_MAX_NODES_PER_STREET["turn"]
+    # The full-hand loader defaults to the river-deep mapping.
+    sig = inspect.signature(generate_full_hand_batch_from_db)
+    assert sig.parameters["max_nodes_per_street"].default is FULL_HAND_MAX_NODES_PER_STREET
+
+
 def test_prior_street_context() -> None:
     from pipeline.postflop.facts import _prior_street_context
     from pipeline.postflop.solve import PostflopStep
@@ -284,8 +331,8 @@ def test_street_action_context_tags() -> None:
 # --- options ----------------------------------------------------------------
 def test_options_multi_action_plain_labels() -> None:
     opts, correct = build_options(_spot("flop_ip_cbet", "AcJc"))
-    assert opts == ["Check", "Bet 33%", "Bet 75%"]
-    assert correct == "Bet 75%" and correct in opts
+    assert opts == ["Check", "Bet 2bb", "Bet 4bb"]
+    assert correct == "Bet 4bb" and correct in opts
 
 
 def test_options_binary_gto_is_always_mostly_spectrum() -> None:
@@ -329,7 +376,7 @@ def test_options_styles_basic_gto_auto() -> None:
         assert not any(ch.isdigit() for ch in opt)
     # sizing = the old plain labels WITH sizes, as its own style.
     sizing_opts, sizing_correct = build_options(spot, style="sizing")
-    assert sizing_opts == ["Check", "Bet 33%"]
+    assert sizing_opts == ["Check", "Bet 2bb"]
     assert sizing_correct == spot.dominant_action
     # auto picks basic here (dominant >= 80%), not the spectrum.
     assert spot.dominant_frequency >= 0.80  # noqa: PLR2004
@@ -351,7 +398,7 @@ def test_options_gto_collapses_multisize_to_check_vs_bet() -> None:
     # A multi-SIZE check+bet spot (3 actions, 2 verbs) collapses under gto to a
     # Check-vs-Bet spectrum -- the bet size is dropped from the option.
     from pipeline.postflop.options import frequencies_for_options
-    spot = _spot("flop_ip_cbet", "AcJc")  # Check / Bet 33% / Bet 75%
+    spot = _spot("flop_ip_cbet", "AcJc")  # Check / Bet 2bb / Bet 4bb
     opts, correct = build_options(spot, style="gto")
     assert opts == ["Always Check", "Mostly Check", "Mostly Bet", "Always Bet"]
     assert correct in opts and correct.split()[-1] == "Bet"
@@ -677,7 +724,7 @@ def test_placeholder_passes_hard_validators() -> None:
 
 def test_solver_data_block_has_key_facts() -> None:
     block = build_solver_data_block(_facts_for())
-    assert "HERO EQUITY" in block and "CORRECT ACTION: Bet 75%" in block
+    assert "HERO EQUITY" in block and "CORRECT ACTION: Bet 4bb" in block
     assert "STRATEGIC FRAME (value_bet)" in block
 
 
@@ -2176,13 +2223,25 @@ def test_validate_no_list_formatting_postflop() -> None:
 
 def test_solve_quality_flags_name_the_difficult_files() -> None:
     """July 22 2026 (user ask): the picker must flag known-problem solves
-    with a plain-English reason. The v7 family and the v6 trial are warns;
-    v8 is an informational note; unknown files carry no flag."""
+    with a plain-English reason. July 23 2026: the v7 family is EXONERATED
+    (the "inconsistency" was the intake check's own per-street misread of
+    the cumulative bet tokens) -- v7 files are informational notes now, with
+    per-file residual/quirk notes for the two named SRP files; only the v6
+    trial stays a warn; unknown files carry no flag."""
     from pipeline.postflop.adapters.sqlite_db import solve_quality_flag
 
+    # The one v7 file with a (small) real residual names it specifically.
     sev, text = solve_quality_flag("BTN_vs_BB_SRP_200bb_Kd7s3s_v7.db")
-    assert sev == "warn"
-    assert "inconsistent" in text and "v8" in text
+    assert sev == "info"
+    assert "residual" in text and "Production-usable" in text
+    # The generic v7 entry records the retraction.
+    sev7, text7 = solve_quality_flag("BTN_vs_BB_3BP_200bb_AsKd9h_v7.db")
+    assert sev7 == "info"
+    assert "retracted" in text7
+    # Ts9s5d keeps its flop-lead quirk note.
+    sev_t, text_t = solve_quality_flag("BTN_vs_BB_SRP_200bb_Ts9s5d_v7.db")
+    assert sev_t == "info"
+    assert "leads" in text_t or "donk" in text_t
     sev8, text8 = solve_quality_flag("BTN_vs_BB_SRP_100bb_QsJd9s_v8.db")
     assert sev8 == "info"
     assert "donk" in text8
@@ -2306,3 +2365,37 @@ def test_layer7_second_rewrite_discarded_keeps_round_one_text() -> None:
     second = out.revise_record["second_rewrite"]
     assert second["status"] == "discarded"
     assert second["rejected_reason"]
+
+
+def test_bet_labels_state_bb_amounts_never_pot_percent() -> None:
+    """TEAM STANDING RULE (July 23 2026): answer options that carry a bet
+    size state the amount in BIG BLINDS ("Bet 2bb"), never the percentage
+    of the pot ("Bet 33%"). Enforced at the adapter label (labels are keys
+    everywhere: options, action_frequencies, SOLVER DATA, neutral credit,
+    showdown matching), so every surface inherits it. The exact pot
+    fraction still rides in NodeAction.pot_fraction for the data block."""
+    import re
+
+    from pipeline.postflop.fixtures import (
+        btn_vs_bb_full_hand_2cJs7s,
+        btn_vs_bb_srp_2cJs7s,
+    )
+    from pipeline.postflop.options import build_options
+    from pipeline.postflop.spot_sampler import sample_spot
+
+    pct = re.compile(r"\d+\s*%")
+    for solve in (btn_vs_bb_srp_2cJs7s(), btn_vs_bb_full_hand_2cJs7s()):
+        for node in solve.nodes.values():
+            for action in node.actions:
+                assert not pct.search(action.label), (
+                    f"{node.node_id}: label {action.label!r} carries a pot "
+                    "percentage -- bet labels must state bb amounts"
+                )
+            for combo in node.strategy:
+                spot = sample_spot(node, combo)
+                for style in ("basic", "sizing", "gto", "auto", "blend"):
+                    options, correct = build_options(spot, style=style)
+                    for o in options + [correct]:
+                        assert not pct.search(o), (
+                            f"{style} option {o!r} carries a pot percentage"
+                        )

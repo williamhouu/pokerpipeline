@@ -180,10 +180,13 @@ Resolution events reuse the same grammar plus two new types:
   - `stack_bb` (and `stack_dollars`): the winner's stack AFTER collecting
     the pot; set their stack display to this, same as any chip event.
 
-The sequence in `events` is always: hero's correct action, then (only when
-hero bet or raised) the opponent's invented response (a call or a fold,
-never a raise), then any remaining board cards as `deal` events (an all-in
-call before the river deals out the rest of the board inside the
+The sequence in `events` is always: hero's correct action, then the
+opponent's invented response where one is needed (behind a hero bet or
+raise: a call or a fold, never a raise; behind an out-of-position hero
+CHECK on the river: a check-back -- added July 23 2026 so every full hand
+reaches its showdown; the opponent never bets, since that would demand a
+new hero decision), then any remaining board cards as `deal` events (an
+all-in call before the river deals out the rest of the board inside the
 resolution), then the reveal(s), then `win`. The opponent's hand is always
 revealed, with `"folded": true` when they folded it, so the user sees the
 bluff worked or the fold was right. Hero's hand is revealed only when the
@@ -240,11 +243,14 @@ Notes for full hands specifically:
 4. **All-in call before the river**: the resolution contains the
    remaining `deal` events (turn/river) BEFORE the reveals -- animate the
    runout, then the reveals, then the pot push.
-5. **No resolution at all** (final leg still `"version": 1`): a normal,
-   expected case (roughly: the correct final action does not end the hand,
-   or no honest vindicating hand exists in the opponent's real range). End
-   on the decision + answer explanation; no reveal, no pot push. Do not
-   invent an ending.
+5. **No resolution at all** (final leg still `"version": 1`): rare after
+   July 23 2026 -- every river ender (fold, call, bet/raise, and now BOTH
+   check positions, via the invented check-back) resolves; the remaining
+   version-1 cases are a non-river final action that leaves betting live,
+   or an opponent range holding no honest vindicating hand. End on the
+   decision + answer explanation; no reveal, no pot push. Do not invent
+   an ending. (Batches generated before July 23 2026 still contain
+   version-1 out-of-position river check enders.)
 6. **Ties/chops never appear** (excluded by design), so a split-pot
    animation is not needed.
 7. **The user answered WRONG**: the resolution still plays the CORRECT

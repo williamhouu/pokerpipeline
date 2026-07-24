@@ -274,11 +274,69 @@ def test_row_shows_the_math():
     keys = {n["key"] for n in notes}
     assert {"pot_odds", "hero_equity"} <= keys
     pot_note = next(n for n in notes if n["key"] == "pot_odds")
-    assert "2.5 / (5.0 + 2.5)" in pot_note["note"]
+    # Grid amounts print in the same clean form as the Question prose
+    # ("5", never "5.0" -- July 23 2026).
+    assert "2.5 / (5 + 2.5)" in pot_note["note"]
+    assert "Facing 2.5bb into the 5bb pot" in pot_note["note"]
     # The Show-the-math value is the BARE percentage, not "need 33%" (team,
     # July 2026) -- whether to call at that price is the explanation's job.
     assert pot_note["value"] == "33%"
     assert "need" not in pot_note["value"]
+
+
+def test_pot_odds_note_quotes_the_displayed_sizes_not_the_exact_walk():
+    """USER RULE (July 23 2026): the pot-odds math must quote exactly the
+    numbers the player sees in the Question. MTT pot-relative raise tokens
+    resolve to off-grid sizes (a 72%-pot BB raise over a limp = 3.52bb, a
+    92%-pot 3-bet over it = 11.38bb) which DISPLAY on the 0.5bb grid as
+    3.5bb / 11.5bb -- so the note must say "Facing 8bb into the 16.5bb pot"
+    (the subtraction the player does: 11.5 - 3.5), never the exact
+    "7.9bb into the 16.4bb pot" that shipped and read as an error."""
+    import json
+
+    from pipeline.plo.action_history import call_price, display_call_price
+    from pipeline.plo.difficulty import compute_plo_difficulty
+    from pipeline.plo.format_writer import build_plo_row
+    from pipeline.plo.pack import PloAction, PloActionType
+
+    # The shipped P308 line: LJ/HJ fold, CO limps, BU/SB fold, BB raise72,
+    # CO raise92, back on the BB (25bb MTT, 1bb ante).
+    history = (
+        PloAction("LJ", PloActionType.FOLD),
+        PloAction("HJ", PloActionType.FOLD),
+        PloAction("CO", PloActionType.CALL),
+        PloAction("BU", PloActionType.FOLD),
+        PloAction("SB", PloActionType.FOLD),
+        PloAction("BB", PloActionType.RAISE, 72),
+        PloAction("CO", PloActionType.RAISE, 92),
+    )
+    # The exact walk stays exact (strategic gates keep using it)...
+    pot_exact, call_exact = call_price(
+        history, "BB", stack_bb=25.0, ante_bb=1.0
+    )
+    assert round(pot_exact, 2) == 16.4
+    assert round(call_exact, 2) == 7.86
+    # ...while the displayed price matches the Question's rounded sizes.
+    disp_pot, disp_call, break_even = display_call_price(
+        history, "BB", stack_bb=25.0, ante_bb=1.0
+    )
+    assert (disp_pot, disp_call) == (16.5, 8.0)
+    assert round(break_even * 100) == 33
+
+    facts = _facts(history, "BB", villain_seat="CO", table_size=6, hero_eq=0.55)
+    row = build_plo_row(
+        facts, difficulty=compute_plo_difficulty(facts),
+        options=["Fold", "Call", "All-in"], correct_answer="Call", number=1,
+        stack_bb=25.0, ante_bb=1.0, game_format="tournament",
+    )
+    pot_note = next(
+        n for n in json.loads(row["stat_notes"]) if n["key"] == "pot_odds"
+    )
+    assert pot_note["note"] == (
+        "Facing 8bb into the 16.5bb pot: "
+        "break-even equity = 8 / (16.5 + 8) = 33%."
+    )
+    assert pot_note["value"] == "33%"
 
 
 def test_range_width_renders_right_after_pot_odds(monkeypatch):

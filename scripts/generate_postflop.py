@@ -37,7 +37,8 @@ from pipeline.postflop.spot_selection import (  # noqa: E402
 
 
 def _load_solve(
-    name: str, *, streets: tuple[str, ...], max_nodes_per_street: int | None,
+    name: str, *, streets: tuple[str, ...],
+    max_nodes_per_street: int | dict[str, int] | None,
     include_ancestors: bool = False,
 ):
     """Resolve a solve by name or a vendor-file path.
@@ -93,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         "--llm-workers", type=int, default=1,
         help="full-hands mode: generate a hand's legs with this many "
              "concurrent LLM calls (1 = sequential; ~Nx faster, same cost)",
+    )
+    parser.add_argument(
+        "--exciting", action="store_true",
+        help="full-hands mode: keep only hands whose final decision is a "
+             "big hand (premium/strong) in a genuinely heated pot (a raise "
+             "or two-plus bets in the line); July 23 2026 user toggle",
     )
     parser.add_argument(
         "--no-action-heavy", action="store_true",
@@ -205,6 +212,19 @@ def main(argv: list[str] | None = None) -> int:
     streets = tuple(args.streets)
     if full_hand and streets == ("flop",):
         streets = ("flop", "turn", "river")
+    if full_hand and cap is not None:
+        # River-deep sampling for play-throughs (July 2026): a shallow river
+        # sample strands turn barrel lines without their river continuation,
+        # so the no-mid-hand-endings rule dropped them and batches over-rotated
+        # into checkdowns. A --max-nodes-per-street above the floor wins.
+        from pipeline.postflop.adapters.sqlite_db import (  # noqa: PLC0415
+            FULL_HAND_MAX_NODES_PER_STREET,
+        )
+
+        cap = {
+            "flop": cap, "turn": cap,
+            "river": max(cap, FULL_HAND_MAX_NODES_PER_STREET["river"]),
+        }
     solve = _load_solve(
         args.solve, streets=streets, max_nodes_per_street=cap,
         include_ancestors=full_hand,
@@ -255,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
                 total_hands=args.num, include_villain=args.include_villain,
                 include_preflop=not args.no_preflop_leg,
                 action_heavy=not args.no_action_heavy,
+                exciting_hands=args.exciting,
                 llm_workers=args.llm_workers,
                 # Pack-backed preflop legs from the repo's ranges/ -- the same
                 # root the admin driver (run.py) uses. Without it the legs

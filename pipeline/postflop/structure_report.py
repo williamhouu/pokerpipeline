@@ -114,10 +114,10 @@ def compute_structure_report(db_path: str | Path) -> dict:
         )
         if walked is None:
             continue
-        street, actor, context, pot, invested, behind, to_call = walked
+        street, actor, context, pot, committed, behind, to_call, street_start = walked
         menu = _menu_labels(
             sorted(set(actions)), to_call=to_call, pot=pot,
-            invested=invested, behind=behind,
+            committed=committed, behind=behind, street_start=street_start,
         )
         key = (street, actor, context)
         menus[key][tuple(menu)] += 1
@@ -157,19 +157,25 @@ def compute_structure_report(db_path: str | Path) -> dict:
 
 def _walk_node(node_id: str, *, start_pot: float, eff: float, oop: str, ip: str):
     """Chip-walk one node string. Returns ``(street, actor, context, pot,
-    invested_of_actor, behind_of_actor, to_call)`` or None for a
-    through-a-fold line / beyond-river node."""
+    committed_of_actor, behind_of_actor, to_call)`` or None for a
+    through-a-fold line / beyond-river node.
+
+    ``b<chips>`` tokens are CUMULATIVE whole-line totals (Pio semantics,
+    July 2026 -- same as the sqlite_db adapter walk), so ``committed`` never
+    resets at a street change; both sides' totals are equal whenever a street
+    starts, which keeps the to_call arithmetic exact."""
     tokens = node_id.split(":")[2:]
     pot = start_pot
-    invested = {0: 0.0, 1: 0.0}  # 0 = OOP, 1 = IP
+    committed = {0: 0.0, 1: 0.0}  # 0 = OOP, 1 = IP; cumulative, whole line
     behind = {0: eff, 1: eff}
+    street_start = 0.0  # committed at the current street's start (both sides equal)
     street_idx = 0
     to_act = 0
     seg: list[str] = []  # action tokens on the current street
     for t in tokens:
         if _CARD_RE.match(t):
             street_idx += 1
-            invested = {0: 0.0, 1: 0.0}
+            street_start = committed[0]  # settled street: both totals equal
             to_act = 0
             seg = []
             continue
@@ -177,14 +183,14 @@ def _walk_node(node_id: str, *, start_pot: float, eff: float, oop: str, ip: str)
             return None  # decision nodes never sit beyond a fold
         if t.startswith("b"):
             size = float(t[1:])
-            added = min(size - invested[to_act], behind[to_act])
+            added = min(size - committed[to_act], behind[to_act])
             pot += added
-            invested[to_act] += added
+            committed[to_act] += added
             behind[to_act] -= added
         elif t == "c":
-            need = max(invested.values()) - invested[to_act]
+            need = max(committed.values()) - committed[to_act]
             pot += need
-            invested[to_act] += need
+            committed[to_act] += need
             behind[to_act] -= need
         seg.append(t)
         to_act = 1 - to_act
@@ -192,21 +198,24 @@ def _walk_node(node_id: str, *, start_pot: float, eff: float, oop: str, ip: str)
         return None
     n_bets = sum(1 for t in seg if t.startswith("b"))
     context = _context_label(n_bets, any_action=bool(seg))
-    to_call = max(invested.values()) - invested[to_act]
+    to_call = max(committed.values()) - committed[to_act]
     actor = oop if to_act == 0 else ip
     return (
         _STREETS[street_idx], actor, context, pot,
-        invested[to_act], behind[to_act], to_call,
+        committed[to_act], behind[to_act], to_call, street_start,
     )
 
 
 def _menu_labels(
     actions: list[str], *, to_call: float, pot: float,
-    invested: float, behind: float,
+    committed: float, behind: float, street_start: float,
 ) -> list[str]:
     """Human labels for one node's vendor actions, passive first then bets
     ascending (all-in last). Bets label as % of the pot BEFORE the wager;
-    raises as a multiple of the bet faced."""
+    raises as a multiple of the bet faced. ``BET_<chips>`` amounts are
+    CUMULATIVE whole-line totals (July 2026), so the wager subtracts the
+    actor's committed chips and the street-relative figures (the bet faced,
+    the raise-to) subtract the street-start snapshot."""
     passive: list[str] = []
     wagers: list[tuple[float, str]] = []
     facing = to_call > 0
@@ -218,14 +227,16 @@ def _menu_labels(
             passive.append("Call" if facing else "Check")
         elif a.startswith("BET_"):
             size = float(a[4:])
-            wager = size - invested
+            wager = size - committed
             all_in = wager >= behind - 1
             if facing:
-                top = invested + to_call  # the wager being faced (street total)
-                mult = size / top if top else 0.0
+                # street totals: the bet being faced / the raise-to amount.
+                faced = committed + to_call - street_start
+                raise_to = size - street_start
+                mult = raise_to / faced if faced else 0.0
                 label = "All-in raise" if all_in else f"Raise {mult:.1f}x"
             else:
-                pct = round(size / pot_before * 100) if pot_before > 0 else 0
+                pct = round(wager / pot_before * 100) if pot_before > 0 else 0
                 label = f"All-in ({pct}% pot)" if all_in else f"Bet {pct}%"
             wagers.append((size, label))
     passive.sort(key=lambda s: ("Fold", "Check", "Call").index(s))

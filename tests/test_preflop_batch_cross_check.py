@@ -263,3 +263,26 @@ def test_gto_secondary_check_skips_mixed_spots() -> None:
 def test_gto_secondary_check_skips_ev_less_rows() -> None:
     row = _gto_row(**{"action_ev_bb": ""})
     assert cross_check_row(row, _record()) == []
+
+
+def test_gto_secondary_ignores_artifact_allin_at_deep_stacks() -> None:
+    """July 23 2026 (200bb pack-leg false flags): the artifact rule strips
+    All-in from every option surface at stacks > 40bb, so the EV-secondary
+    audit must not demand it as the wrong answer even when its pack EV beats
+    the shipped secondary's. At realistic short stacks All-in competes."""
+    deep = _gto_row(
+        **{
+            "Default Stack": "200BB",
+            "option 1": "Always Fold",
+            "option 2": "Mostly Fold",
+            "option 3": "Mostly 3-bet",
+            "option 4": "Always 3-bet",
+            "Correct Answer": "Always 3-bet",
+            "action_frequencies": "Fold: 0%, Call: 0%, 3-bet: 100%",
+            "action_ev_bb": "3-bet: +3.72, All-in: +2.76, Fold: +0.00",
+        }
+    )
+    assert cross_check_row(deep, _record()) == []
+    short = dict(deep, **{"Default Stack": "20BB"})
+    issues = cross_check_row(short, _record())
+    assert any("All-in is the better alternative" in i for i in issues)

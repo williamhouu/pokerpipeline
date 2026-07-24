@@ -348,7 +348,7 @@ def _villain_combo_for_line(
 
 def _build_legs(
     solve: PostflopSolve, hero: str, combo: str, nodes: list[PostflopNode],
-    *, include_preflop: bool,
+    *, include_preflop: bool, counters: dict | None = None,
 ) -> list[HandLeg]:
     """The ordered legs for one hero+combo: optional preflop leg(s), then each
     postflop decision node.
@@ -378,27 +378,35 @@ def _build_legs(
         # FORCED-MOVE GUARD (July 2026): a node offering fewer than two
         # actions is not a decision -- solve trees truncate deep lines to
         # check-only, and emitting such a leg ships a one-option "question"
-        # (and pays an LLM call to explain a forced move). Skip it: the next
-        # leg's Question prose narrates the whole line, so the play-through
-        # reads continuously. The hand's SEED decision always survives (the
-        # worthiness window requires a mixed strategy = 2+ actions).
+        # (and pays an LLM call to explain a forced move). July 23 2026
+        # (user catch, same wholeness rule as the artifact-material drop
+        # below): skipping the leg shipped a play-through with a street
+        # HOLE, so the whole hand is dropped instead -- a play-through
+        # pauses on every street or doesn't ship. The hand's SEED decision
+        # always survives (the worthiness window requires a mixed strategy
+        # = 2+ actions), so the pool refills with askable lines.
         if len(n.actions) < 2:
-            continue
+            if counters is not None:
+                counters["hands_dropped_street_hole"] = counters.get("hands_dropped_street_hole", 0) + 1
+            return None
         spot = sample_spot(n, combo)
         # ARTIFACT-STRIP MATERIALITY (July 2026, team standing rule): this
         # combo mixes an unrealistic tree-artifact jam at >= 5% here, so the
         # node's real strategy needs a line we refuse to show -- rendering
         # "Always Call" on a hand that really raises 30% would be a teaching
-        # lie. NEVER asked: a mid-hand node is skipped like a forced move
-        # (the next leg's prose narrates the line through it); a hand can't
-        # END on one (the seed pool already excludes material spots, so this
-        # return only fires for villain-frame lines). Trace-frequency jams
-        # (< 5%) were already stripped inside sample_spot and the leg is
-        # asked honestly on the renormalised strategy.
+        # lie. NEVER asked -- and (July 23 2026, user catch) never SKIPPED
+        # either: narrating through the street shipped play-throughs with a
+        # HOLE (an AhAc 3-bet-pot hand jumped preflop -> turn because AA
+        # mixes a 183bb artifact jam 21% at the flop root). A play-through
+        # may not miss a street, so the WHOLE hand is dropped and the pool
+        # refills -- the same wholeness rule as no-flop-starts and
+        # whole-hand atomicity. Trace-frequency jams (< 5%) were already
+        # stripped inside sample_spot and the leg is asked honestly on the
+        # renormalised strategy.
         if spot.artifact_material:
-            if n is nodes[-1]:
-                return None
-            continue
+            if counters is not None:
+                counters["hands_dropped_street_hole"] = counters.get("hands_dropped_street_hole", 0) + 1
+            return None
         # FOLD-TRUNCATION COHERENCE (July 2026): if the solver's correct
         # action for this combo HERE is Fold, the hand ends HERE -- emitting
         # later legs would teach "the right play was to fold" and then keep
@@ -521,7 +529,8 @@ def assemble_hands(
             continue  # this line shares ancestry with an already-built hand
         for n in line:
             consumed.add((n.node_id, combo))
-        legs = _build_legs(solve, hero, combo, line, include_preflop=include_preflop)
+        legs = _build_legs(solve, hero, combo, line, include_preflop=include_preflop,
+                           counters=counters)
         if legs is None:
             continue  # as-played coherence: divergent line, drop the hand
         if not _ends_legally(legs):
@@ -553,7 +562,8 @@ def assemble_hands(
                 for n in v_nodes:
                     consumed.add((n.node_id, v_combo))
                 v_legs = _build_legs(
-                    solve, villain, v_combo, v_nodes, include_preflop=include_preflop
+                    solve, villain, v_combo, v_nodes,
+                    include_preflop=include_preflop, counters=counters,
                 )
                 if v_legs and not _ends_legally(v_legs):
                     if counters is not None:

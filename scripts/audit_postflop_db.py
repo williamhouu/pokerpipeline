@@ -71,27 +71,57 @@ def _preflop_raise_count(meta: dict) -> int:
     return 1
 
 
-def _ev_vs_strategy_check(con, *, max_nodes: int = 24, max_combos_per_node: int = 60) -> int:
+# [8]: skip nodes whose reconstructed betting range holds fewer combos than
+# this. EVs at barely-reached nodes are the least-trained part of a solve
+# (the vendor's low-reach instability point) and score as noise, not defect.
+_MIN_BETTING_COMBOS = 6
+
+
+def _rake_chips(rake_meta: str, final_pot: float, bb: float) -> float:
+    """Rake taken from ``final_pot`` chips on a showdown win, per the file's
+    ``rake`` metadata ("8% cap 2bb" / "10% cap 3bb (300 chips)"). 0 when
+    absent/unparseable (the check then runs uncorrected)."""
+    import re
+
+    m = re.match(r"\s*([\d.]+)\s*%\s*cap\s*([\d.]+)\s*bb", rake_meta or "")
+    if not m:
+        return 0.0
+    pct, cap_bb = float(m.group(1)) / 100.0, float(m.group(2))
+    return min(pct * final_pot, cap_bb * bb)
+
+
+def _ev_vs_strategy_check(
+    con, *, max_nodes: int = 24, max_combos_per_node: int = 60,
+    min_betting_combos: int = _MIN_BETTING_COMBOS,
+) -> int:
     """[8] EV-vs-strategy consistency on river facing-bet nodes.
 
-    A river call is a pure showdown, so the file's own EV tables imply an exact
-    equity for every hero combo: ``(EV_call - EV_fold + to_call) / (pot + to_call)``.
+    A river call is a pure showdown, so the file's own EV tables imply an
+    exact equity for every hero combo:
+    ``(EV_call - EV_fold + to_call) / (pot + to_call - rake)`` (EVs are net of
+    rake; showdown equity is rake-blind, hence the denominator correction).
     That number must match the exact showdown equity of the same combo against
     the betting range reconstructed from the file's own frequency tables
     (preflop range x the conditional freq blobs along the line, board-masked).
     A systematic gap means the strategy tables and the EV tables describe two
-    DIFFERENT solutions -- the July-2026 v7 defect (purified/late-iterate
-    strategies exported alongside averaged EVs; bluff-catchers looked ~5-7
-    equity points better than they really were, so mixed river calls were
-    ~14bb blunders against the file's own EVs). This check would have caught
-    that at intake.
+    DIFFERENT solutions.
 
-    Two hard checks (measured baselines: v8 clean ~1-2 pts; v7 defective
-    +5-7 pts on barrel lines, opposite-signed on check-check rivers):
+    HISTORY (July 2026): the first version of this check read the ``b<chips>``
+    node tokens as per-street amounts. They are CUMULATIVE for the whole line
+    (Pio semantics, vendor-confirmed), so every barrel-line pot/to-call was
+    inflated and the check reported the v7 family as internally inconsistent
+    (+5-7 pts on barrel lines). That was OUR false positive -- with the
+    cumulative walk, the rake correction, and the low-reach floor, the same
+    files measure ~0 on barrel lines. The check remains valuable at intake:
+    it catches a genuinely inconsistent export (strategies from one profile,
+    EVs from another) with the same thresholds.
+
+    Two hard checks (rake-corrected baselines: v8 ~0 pooled; v7 3BP ~0; the
+    v7 SRP files keep a small residual on tiny checkdown-river stab pots):
     the pooled median gap (> 3.0 pts = FAIL, > 2.0 = WARN) and the share of
     nodes whose per-node median gap exceeds 3 pts (>= 3 nodes and >= 25% =
-    FAIL) - the latter catches a non-converged export whose oppositely-biased
-    lines net the pooled median to ~0.
+    FAIL) - the latter catches an export whose oppositely-biased lines net
+    the pooled median to ~0.
 
     Returns the number of hard failures (0-2).
     """
@@ -135,6 +165,7 @@ def _ev_vs_strategy_check(con, *, max_nodes: int = 24, max_combos_per_node: int 
 
     node_medians: list[tuple[str, float, int]] = []
     pooled: list[float] = []
+    low_reach_skipped = 0
     for nid in _stride_sample(candidates, max_nodes):
         node = adapter._build_node(
             s, nid, bb=bb, start_pot=start_pot, eff_flop=eff_flop,
@@ -157,13 +188,19 @@ def _ev_vs_strategy_check(con, *, max_nodes: int = 24, max_combos_per_node: int 
         to_call = node.to_call_bb * bb
         pot_now = node.pot_bb * bb  # includes the bet hero faces
         board = list(node.board)
+        # EVs are net of rake; showdown equity is rake-blind. Correct the
+        # implied-equity denominator by the winner's rake on the final pot,
+        # or small-pot nodes read a phantom negative bias (~-3.5 pts on a v8
+        # checkdown-river stab at 10% rake; ~0 in big pots via the cap).
+        rake = _rake_chips(s.meta.get("rake", ""), pot_now + to_call, bb)
 
         # Villain's betting range, ranked once per node.
         villain = [
             (set(_split_cards(h)), rank_hand(_split_cards(h) + board), w)
             for h, w in node.villain_range.items() if w > 0
         ]
-        if not villain:
+        if len(villain) < min_betting_combos:  # low-reach node: EVs are noise
+            low_reach_skipped += 1
             continue
 
         biases: list[float] = []
@@ -190,7 +227,7 @@ def _ev_vs_strategy_check(con, *, max_nodes: int = 24, max_combos_per_node: int 
             if tot <= 0:
                 continue
             exact = (win + 0.5 * tie) / tot
-            implied = (call_ev[i] - fold_ev[i] + to_call) / (pot_now + to_call)
+            implied = (call_ev[i] - fold_ev[i] + to_call) / (pot_now + to_call - rake)
             biases.append(implied - exact)
         if biases:
             node_medians.append((nid, statistics.median(biases), len(biases)))
@@ -210,7 +247,9 @@ def _ev_vs_strategy_check(con, *, max_nodes: int = 24, max_combos_per_node: int 
     pooled_warn = 0.02 < abs(med) <= 0.03
     share_ok = not (bad_nodes >= 3 and bad_nodes / len(node_medians) >= 0.25)
     share_warn = share_ok and bad_nodes >= 2
-    print(f"    sampled {len(node_medians)} nodes / {len(pooled)} (node, combo) points")
+    print(f"    sampled {len(node_medians)} nodes / {len(pooled)} (node, combo) points"
+          + (f"  [{low_reach_skipped} low-reach node(s) skipped, "
+             f"< {min_betting_combos} betting combos]" if low_reach_skipped else ""))
     print(f"    pooled median implied-minus-exact equity = {med * 100:+.1f} pts"
           f"{_flag(pooled_ok, warn=pooled_warn)}  (FAIL > 3.0, WARN > 2.0)")
     print(f"    nodes with |median gap| > 3 pts = {bad_nodes}/{len(node_medians)}"

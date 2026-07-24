@@ -147,12 +147,13 @@ def _worthy_seeds(solve, *, lo=0.50, hi=0.99):
     return seeds
 
 
-def test_forced_single_action_legs_are_skipped(tmp_path) -> None:
-    """FORCED-MOVE GUARD (July 2026, seen live on a real v8 batch): a node
-    offering only ONE action (deep lines truncate to check-only in real
-    solve trees) must not become a question leg -- a one-option "question"
-    has nothing to decide, and it costs a real LLM call. The next leg's
-    prose narrates the forced action, so the play-through stays continuous.
+def test_forced_single_action_legs_drop_the_whole_hand(tmp_path) -> None:
+    """FORCED-MOVE GUARD, tightened July 23 2026 (user catch: a hand shipped
+    with a street HOLE -- "1/3 preflop, 2/3 turn", no flop question): a node
+    offering only ONE action still cannot become a question leg, but the
+    hand may no longer skip the street either. A play-through pauses on
+    EVERY street or does not ship, so the whole hand is dropped (counted)
+    and the pool refills with askable lines.
     """
     import dataclasses
 
@@ -167,10 +168,13 @@ def test_forced_single_action_legs_are_skipped(tmp_path) -> None:
     forced = dataclasses.replace(
         node, node_id=node.node_id + ":forced", actions=(node.actions[0],),
     )
+    counters: dict = {}
     legs = _build_legs(
-        solve, "BB", combo, [node, forced], include_preflop=False,
+        solve, "BB", combo, [forced, node], include_preflop=False,
+        counters=counters,
     )
-    assert [leg.node_id for leg in legs] == [node.node_id]
+    assert legs is None
+    assert counters["hands_dropped_street_hole"] == 1
 
     # Batch-level invariant: EVERY emitted full-hand question offers a real
     # choice (option 2 non-empty) -- forced moves never reach the CSV.

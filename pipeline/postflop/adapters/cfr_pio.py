@@ -11,11 +11,16 @@ unchanged -- it runs on :mod:`pipeline.postflop.solve`, never a vendor format.
 What UPI gives us, and how it maps to the IR
 --------------------------------------------
 * **Node string grammar is Pio's own** -- ``r:0`` (the flop OOP decision),
-  ``:c`` (check / call), ``:b<chips>`` (bet/raise TO ``<chips>`` this street),
-  ``:f`` (fold), ``:<card>`` (a chance card -> next street). Identical to the
-  grammar :mod:`sqlite_db` parses (that ``.db`` is a Pio-family export), so the
-  betting-state walk here mirrors that adapter's. Bet/raise vs check/call is
-  derived from the betting STATE the node string implies, never from a label.
+  ``:c`` (check / call), ``:b<chips>`` (bet/raise to ``<chips>`` **CUMULATIVE
+  chips committed by that player across the whole postflop line** -- Pio
+  node-string semantics, vendor-confirmed July 2026; NOT a fresh per-street
+  amount), ``:f`` (fold), ``:<card>`` (a chance card -> next street). Identical
+  to the grammar :mod:`sqlite_db` parses (that ``.db`` is a Pio-family export),
+  so the betting-state walk here mirrors that adapter's cumulative-committed
+  walk. Bet/raise vs check/call is derived from the betting STATE the node
+  string implies, never from a label. (Flop-only v1 is unaffected by the
+  cumulative reading -- there is no earlier-street commitment on the flop --
+  but the turn/river extension depends on it.)
 * **Ranges come straight from the solver.** ``show_range OOP|IP <node>`` returns
   the reach-weighted range at the node directly, so -- unlike the ``.db``
   adapter -- we do NOT reconstruct reach by multiplying action probabilities
@@ -119,10 +124,17 @@ def _actor_side(node_type: str) -> str | None:
 
 @dataclass
 class _BetState:
-    """Running betting state as the node string is walked (chips)."""
+    """Running betting state as the node string is walked (chips).
+
+    ``committed`` is each side's CUMULATIVE postflop chips for the whole line
+    (what the ``b<chips>`` tokens state; never resets); ``street_start``
+    snapshots it at the current street's start, so the difference is the
+    this-street wager. Mirrors the ``.db`` adapter's ``_BettingState``.
+    """
 
     pot: float
-    invested: dict[str, float]  # this-street chips, resets each street
+    committed: dict[str, float]  # CUMULATIVE postflop chips, whole line
+    street_start: dict[str, float]  # committed at the current street's start
     behind: dict[str, float]  # chips remaining behind, carries across streets
     to_act: str
     other: str
@@ -130,7 +142,7 @@ class _BetState:
     board: list[str]
 
     def to_call(self) -> float:
-        return max(self.invested.values()) - self.invested[self.to_act]
+        return max(self.committed.values()) - self.committed[self.to_act]
 
 
 class CfrPioAdapter:
@@ -295,7 +307,7 @@ class CfrPioAdapter:
                 "cfr adapter: %s node-type says %s acts but the walk reached %s; "
                 "trusting node type", node_id, actor, state.to_act,
             )
-        to_call = max(state.invested.values()) - state.invested[actor]
+        to_call = max(state.committed.values()) - state.committed[actor]
         pot_before = state.pot - to_call
         eff_remaining = min(state.behind.values())
 
@@ -310,7 +322,10 @@ class CfrPioAdapter:
 
         labels: list[tuple[str, str, float | None, float | None]] = [
             self._derive(_node_tokens(child)[-1], facing=to_call > 0,
-                         pot_before=pot_before, to_call=to_call, eff_remaining=eff_remaining)
+                         pot_before=pot_before, to_call=to_call,
+                         actor_behind=state.behind[actor],
+                         actor_committed=state.committed[actor],
+                         actor_street_start=state.street_start[actor])
             for child in children
         ]
 
@@ -405,7 +420,8 @@ class CfrPioAdapter:
         reach products (Pio gives ranges directly)."""
         state = _BetState(
             pot=start_pot,
-            invested={self.oop: 0.0, self.ip: 0.0},
+            committed={self.oop: 0.0, self.ip: 0.0},
+            street_start={self.oop: 0.0, self.ip: 0.0},
             behind={self.oop: eff_chips, self.ip: eff_chips},
             to_act=self.oop, other=self.ip, street_idx=0, board=list(flop),
         )
@@ -413,7 +429,7 @@ class CfrPioAdapter:
         for token in _node_tokens(node_id):
             if _is_card(token):  # chance card -> next street (turn/river path)
                 state.board.append(token)
-                state.invested = {self.oop: 0.0, self.ip: 0.0}
+                state.street_start = dict(state.committed)
                 state.to_act, state.other = self.oop, self.ip
                 state.street_idx += 1
                 continue
@@ -421,18 +437,28 @@ class CfrPioAdapter:
             acting = state.to_act
             to_call_now = state.to_call()
             if token.startswith("b"):
+                # b<chips> is CUMULATIVE for the whole line (Pio semantics):
+                # the fresh wager subtracts everything already committed, and
+                # the history step keeps per-street "raise TO" semantics.
                 size = float(token[1:])
                 verb = "raise" if to_call_now > 0 else "bet"
-                history.append(PostflopStep(street, acting, verb, to_bb=round(size / self.bb_chips, 2)))
-                added = size - state.invested[acting]
+                added_full = size - state.committed[acting]
+                all_in = added_full >= state.behind[acting] - 1.0
+                added = min(added_full, state.behind[acting])
+                committed_after = state.committed[acting] + added
+                actual_to = committed_after - state.street_start[acting]
+                history.append(PostflopStep(
+                    street, acting, verb,
+                    to_bb=round(actual_to / self.bb_chips, 2), all_in=all_in,
+                ))
                 state.pot += added
-                state.invested[acting] = size
+                state.committed[acting] = committed_after
                 state.behind[acting] -= added
             elif token == "c":
                 if to_call_now > 0:
                     history.append(PostflopStep(street, acting, "call"))
                     state.pot += to_call_now
-                    state.invested[acting] += to_call_now
+                    state.committed[acting] += to_call_now
                     state.behind[acting] -= to_call_now
                 else:
                     history.append(PostflopStep(street, acting, "check"))
@@ -444,12 +470,15 @@ class CfrPioAdapter:
         return state, tuple(history)
 
     def _derive(
-        self, token: str, *, facing: bool, pot_before: float, to_call: float, eff_remaining: float,
+        self, token: str, *, facing: bool, pot_before: float, to_call: float,
+        actor_behind: float, actor_committed: float, actor_street_start: float,
     ) -> tuple[str, str, float | None, float | None]:
         """``(label, verb, to_bb, pot_fraction)`` for one child action, by context.
 
         Mirrors the ``.db`` adapter's label derivation so both sources produce
-        identical option labels for the same betting state."""
+        identical option labels for the same betting state. ``b<chips>`` amounts
+        are CUMULATIVE whole-line totals: the wager subtracts the actor's
+        already-committed chips; the display "to" is the this-street total."""
         if token == "f":
             return "Fold", "fold", None, None
         if token == "c":
@@ -457,16 +486,18 @@ class CfrPioAdapter:
                 return "Call", "call", round(to_call / self.bb_chips, 2), None
             return "Check", "check", None, None
         if token.startswith("b"):
-            size = float(token[1:])
-            to_bb = round(size / self.bb_chips, 2)
+            total = float(token[1:])  # cumulative committed-for-the-line
+            added = total - actor_committed  # the fresh wager
+            to_bb = round((total - actor_street_start) / self.bb_chips, 2)
             disp = round_to_half_bb(to_bb)  # 0.5bb display grid (label only)
-            if size >= eff_remaining - 1:
+            if added >= actor_behind - 1:
                 return "All-in", ("raise" if facing else "bet"), to_bb, None
             if facing:
                 return f"Raise to {disp:g}bb", "raise", to_bb, None
-            pf = size / pot_before if pot_before > 0 else None
-            label = f"Bet {round(pf * 100)}%" if pf is not None else f"Bet {disp:g}bb"
-            return label, "bet", to_bb, pf
+            # TEAM RULE (July 23 2026): bet labels state the amount in big
+            # blinds, never the pot percentage (mirrors the .db adapter).
+            pf = added / pot_before if pot_before > 0 else None
+            return f"Bet {disp:g}bb", "bet", to_bb, pf
         raise ValueError(f"unrecognised child token {token!r}")
 
     # -- geometry helpers ------------------------------------------------

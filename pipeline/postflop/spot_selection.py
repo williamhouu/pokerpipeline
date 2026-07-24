@@ -43,6 +43,33 @@ def spot_strength_bucket(spot: Any) -> str:
     return classify_hand(spot.hero_cards, list(spot.node.board))["strength_bucket"]
 
 
+# 🔥 "Exciting pots" (July 23 2026, user ask): hero holds a BIG hand and the
+# pot has genuinely heated up. Strength = the top two made-hand buckets; action
+# = a raise anywhere in the postflop line, or two-plus bets/raises (facing a
+# second barrel counts; a routine single c-bet does not).
+EXCITING_STRENGTH_BUCKETS: tuple[str, ...] = ("premium", "strong")
+_EXCITING_MIN_AGGRESSIVE_STEPS = 2
+
+
+def spot_is_exciting(spot: Any) -> bool:
+    """Big hand + big action, both required.
+
+    Pure and cheap (the shared classifier, no equity sim), so it can gate a
+    pool before any compute. Used by the standalone selector AND the
+    full-hand ender test (:func:`pipeline.postflop.hand_quality.
+    is_exciting_hand`)."""
+    if spot_strength_bucket(spot) not in EXCITING_STRENGTH_BUCKETS:
+        return False
+    steps = [
+        s for s in spot.node.history if s.street in ("flop", "turn", "river")
+    ]
+    if any(s.verb == "raise" for s in steps):
+        return True
+    return sum(
+        1 for s in steps if s.verb in ("bet", "raise")
+    ) >= _EXCITING_MIN_AGGRESSIVE_STEPS
+
+
 def spot_decision_type(spot: Any, *, aggressor: str, ip_position: str) -> str:
     """The decision SITUATION hero is in -- the postflop analog of preflop's
     "action faced" filter. Situation-based (never reads hero's chosen action),
@@ -121,7 +148,12 @@ def _spot_bucket(spot: Any, *, max_depth: int) -> str | None:
     a street-aware raise-war filter instead of the flop colon-depth cap (which
     would drop every legitimately-deeper turn/river line)."""
     nid = spot.node.node_id
-    if "b9697" in nid:  # all-in: a poor first question on any street
+    if any(getattr(s, "all_in", False) for s in getattr(spot.node, "history", ()) or ()):
+        # The line already contains an all-in: a poor first question on any
+        # street. File-agnostic (July 2026): the adapter walk stamps ``all_in``
+        # exactly under the cumulative bet-token semantics -- replaces the old
+        # hardcoded v8-only "b9697" node-id match, which never fired on the
+        # 200bb files.
         return None
     if spot.node.street == "flop":
         if (nid.count(":") - 1) > max_depth:
@@ -178,6 +210,7 @@ def make_spot_selector(
     decision_types: Sequence[str] | None = None,
     aggressor: str = "",
     ip_position: str = "",
+    exciting: bool = False,
 ) -> Callable[[Sequence[Any]], list[Any]]:
     """A ``spot_selector`` for ``generate_postflop_batch``.
 
@@ -208,6 +241,8 @@ def make_spot_selector(
                 s, aggressor=aggressor, ip_position=ip_position
             ) not in decision_set:
                 continue
+            if exciting and not spot_is_exciting(s):
+                continue  # 🔥 toggle: big hand + big action only
             pool.append(s)
         if diversify:
             pool = diversify_spots(pool)

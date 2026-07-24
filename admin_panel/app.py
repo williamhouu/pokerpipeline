@@ -97,6 +97,7 @@ import streamlit as st  # noqa: E402
 # Usage helper computes per-batch $ cost from token totals and appends
 # a JSONL log so a lifetime spend total survives admin-panel restarts.
 from admin_panel import (  # noqa: E402
+    approved_balance,
     compare,
     gen_settings,
     jobs,
@@ -1004,6 +1005,7 @@ def _render_generate_page_postflop() -> None:
     # 2026, user ask: "flag the solves that make things difficult so I
     # always remember which ones").
     from pipeline.postflop.adapters.sqlite_db import (  # noqa: PLC0415
+        FULL_HAND_MAX_NODES_PER_STREET,
         solve_quality_flag,
     )
 
@@ -1235,6 +1237,7 @@ def _render_generate_page_postflop() -> None:
     diversify = False
     strength_filter: list[str] = []
     decision_filter: list[str] = []
+    standalone_exciting = False  # 🔥 exciting-pots toggle (spots mode only)
     trap_difficulty = False
     use_ev_gap = False
     min_ev_gap: float | None = None
@@ -1365,6 +1368,21 @@ def _render_generate_page_postflop() -> None:
                 "'action faced'). Empty = all. Situation-based, so it never leaks the "
                 "answer.",
             )
+        standalone_exciting = st.checkbox(
+            "🔥 Exciting pots only (big hands, big action)",
+            value=False,
+            key="postflop_exciting_spots",
+            help=(
+                "Keep only spots where BOTH hold at the moment of the "
+                "decision: you have a premium or strong made hand (a set, "
+                "two pair, an overpair, strong top pair), AND the pot "
+                "heated up before this decision — someone raised, or at "
+                "least two bets went in. One routine c-bet is not enough, "
+                "and a big hand in a quiet pot is not enough. Any street "
+                "can qualify (a flop check-raise pot counts). Composes "
+                "with the filters above; deterministic and free."
+            ),
+        )
 
     # Answer option style — all modes. Sanitize a stale saved label (the
     # July 22 style rework renamed Basic and added Sizing/Blend) so an old
@@ -1381,7 +1399,8 @@ def _render_generate_page_postflop() -> None:
         help=(
             "Basic = verbs only, never a bet size (Fold / Check / Call / "
             "Bet / Raise / All-in). Sizing = labels carry the real sizes "
-            "(Check / Bet 33% / Raise to 12bb). GTO = the Always/Mostly "
+            "(Check / Bet 2bb / Raise to 12bb; sizes in big blinds, team rule). "
+            "GTO = the Always/Mostly "
             "spectrum. Auto = Basic when one action clearly dominates, else "
             "GTO. Blend = a deterministic ~50/50 mix of Basic and Sizing "
             "questions across the batch."
@@ -1750,6 +1769,35 @@ def _render_generate_page_postflop() -> None:
         else:
             pf_action_heavy = True
         if is_full:
+            pf_exciting = st.checkbox(
+                "🔥 Exciting pots only (big hands, big action)",
+                value=False,
+                key="postflop_exciting_hands",
+                help=(
+                    "The test is applied to the hand's FINAL question (the "
+                    "decision the play-through builds to). It must be BOTH: "
+                    "(1) you hold a big made hand there — premium or strong "
+                    "(a set, two pair, an overpair, strong top pair) — AND "
+                    "(2) the pot heated up on the way: someone raised, or at "
+                    "least two bets went in across the streets. A pot with "
+                    "one routine c-bet, or a checked-down pot, never "
+                    "qualifies no matter what you hold. "
+                    "Reaching the river is not literally required, but in "
+                    "practice almost every qualifying hand IS a river hand "
+                    "(pre-river endings are folds by the no-mid-hand rule, "
+                    "and preflop endings never qualify) — so expect a batch "
+                    "with this ON to be nearly all river play-throughs, "
+                    "with much less variety in hand lengths and endings. "
+                    "For the balanced ending mix (preflop folds, turn "
+                    "folds, rivers), leave this OFF and keep 🎬 "
+                    "Action-heavy on. Deterministic and free; a short "
+                    "batch means the solve ran out of qualifying hands "
+                    "(the counters say how many were excluded)."
+                ),
+            )
+        else:
+            pf_exciting = False
+        if is_full:
             st.session_state.setdefault("postflop_llm_workers", 3)
             pf_llm_workers = int(st.select_slider(
                 "⚡ Parallel leg generation (speed)",
@@ -1960,7 +2008,20 @@ def _render_generate_page_postflop() -> None:
                     total_hands=int(total),
                     heroes=tuple(heroes),
                     streets=tuple(streets),
-                    max_nodes_per_street=int(max_nodes),
+                    # Full hands sample the RIVER much deeper than the widget's
+                    # per-street cap (July 2026): a shallow river sample strands
+                    # turn barrel lines without their river continuation, so the
+                    # no-mid-hand-endings rule dropped them and batches
+                    # over-rotated into checkdowns. The widget still governs
+                    # flop/turn, and a widget value ABOVE the river floor wins.
+                    max_nodes_per_street={
+                        "flop": int(max_nodes),
+                        "turn": int(max_nodes),
+                        "river": max(
+                            int(max_nodes),
+                            FULL_HAND_MAX_NODES_PER_STREET["river"],
+                        ),
+                    },
                     include_villain=pf_include_villain,
                     quality_gate=quality_gate,
                     min_premise_freq=min_premise_freq,
@@ -1997,6 +2058,7 @@ def _render_generate_page_postflop() -> None:
                     final_audit=pf_final_audit,
                     strict_clean_hands=pf_strict_clean,
                     action_heavy=pf_action_heavy,
+                    exciting_hands=pf_exciting,
                     llm_workers=pf_llm_workers,
                 )
             elif pf_mode == "preflop":
@@ -2030,6 +2092,7 @@ def _render_generate_page_postflop() -> None:
                     diversify=diversify,
                     strength_buckets=tuple(strength_filter),
                     decision_types=tuple(decision_filter),
+                    exciting=standalone_exciting,
                     quality_gate=quality_gate,
                     min_premise_freq=min_premise_freq,
                     answer_style=answer_style,
@@ -11423,6 +11486,33 @@ def render_plo_review_page() -> None:
             f"**{len(appr_rows)}** approved across all batches (deduped by spot). "
             "Updates live as you grade."
         )
+        # --- approved-pool balance (July 23 2026, user ask) -----------------
+        # Batches are generated balanced, but Layer-7 flags cluster on the
+        # hardest question types (jam spots ~30% clean vs ~78% for fold/call),
+        # so an approve-only-clean workflow un-balances what the APP receives.
+        # This shows the approved pool's live mix; logic is pure + tested in
+        # admin_panel/approved_balance.py (thin-shell rule).
+        for _warn in approved_balance.balance_warnings(appr_rows):
+            st.warning(f"⚖️ {_warn}")
+        with st.expander("📊 Approved pool balance (what the app is getting)"):
+            st.caption(
+                "The mix of the approved pool itself -- NOT of any one batch. "
+                "The Layer-7 audit flags aggressive/harder spots the most, so "
+                "approving only clean questions tends to starve them; use this "
+                "to spot drift while you grade."
+            )
+            for _axis, _buckets in approved_balance.approved_balance_report(
+                appr_rows
+            ):
+                st.markdown(f"**{_axis}**")
+                st.table([
+                    {
+                        _axis: bucket,
+                        "count": count,
+                        "share": f"{share * 100:.0f}%",
+                    }
+                    for bucket, count, share in _buckets
+                ])
         dcol, ccol = st.columns([3, 2])
         dcol.download_button(
             "⬇️  Download approved (CSV)",

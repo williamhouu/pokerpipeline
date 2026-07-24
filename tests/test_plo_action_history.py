@@ -138,6 +138,48 @@ def test_context_bb_and_tournament():
     assert format_plo_context(game_format="tournament").startswith("Tournament.")
 
 
+def test_call_price_uses_the_same_walk_as_the_displayed_sizes():
+    """GROUND TRUTH (July 23 2026, user catch): the pot-odds price must
+    describe the SAME action sequence the question displays. call_price
+    carried its own copy of the betting walk that missed the July-22
+    min-raise fix, so a 2bb min-raise open was PRICED as a 3.5bb pot open:
+    109 shipped 20bb-pack questions said "opens to 2bb" in the prose while
+    the price block (and the explanation repeating it) computed the
+    3.5bb-open line. All three shapes below are real shipped questions.
+    call_price is now a view over the one shared _walk."""
+    from pipeline.plo.action_history import call_price
+
+    def M(seat: str) -> PloAction:
+        return PloAction(seat, PloActionType.MIN_RAISE, None)
+
+    # P356: BB defends vs a HJ 2bb min-raise open. Shipped 2.5bb into 5.0bb
+    # (33%); truth is 1bb into 3.5bb (22%).
+    pot, to_call = call_price(
+        (F("LJ"), M("HJ"), F("CO"), F("BU"), F("SB")), "BB", stack_bb=20.0
+    )
+    assert (pot, to_call) == (3.5, 1.0)
+
+    # P358: SB vs a CO 2bb min-raise open. Shipped 3.0 into 5.0 (38%);
+    # truth is 1.5 into 3.5 (30%).
+    pot, to_call = call_price(
+        (F("LJ"), F("HJ"), M("CO"), F("BU")), "SB", stack_bb=20.0
+    )
+    assert (pot, to_call) == (3.5, 1.5)
+
+    # P355: UTG min-raise opens 2bb, BU pot-3-bets to 7.5bb, blinds fold.
+    # Shipped 8.5 into 17.0; truth is 5.5 into 11.0.
+    pot, to_call = call_price(
+        (M("LJ"), F("HJ"), F("CO"), R("BU"), F("SB"), F("BB")),
+        "LJ",
+        stack_bb=20.0,
+    )
+    assert (pot, to_call) == (11.0, 5.5)
+
+    # Pot-raise-only lines (100bb pack / 9-max grammar) are unchanged.
+    pot, to_call = call_price((R("HJ"),), "BB", stack_bb=100.0)
+    assert (pot, to_call) == (5.0, 2.5)
+
+
 def test_min_raise_resolves_to_the_min_raise_rule_not_a_pot_raise():
     """GROUND TRUTH (July 22 2026, user catch): a preflop first-in min-raise
     goes to exactly 2bb (BB post = the opening bet increment), and a pot

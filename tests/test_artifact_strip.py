@@ -273,7 +273,7 @@ def _turn_anchor_node(strategy: dict) -> PostflopNode:
     )
 
 
-def test_mid_hand_trace_leg_is_asked_material_leg_is_narrated() -> None:
+def test_mid_hand_trace_leg_is_asked_material_leg_drops_the_hand() -> None:
     anchor = _turn_anchor_node({"AsAd": {"Call": 0.7, "Fold": 0.3}})
 
     # TRACE mid leg (99/1): stripped, still asked, reads "Always Bet".
@@ -288,14 +288,18 @@ def test_mid_hand_trace_leg_is_asked_material_leg_is_narrated() -> None:
     _, correct = build_options(legs[0].spot, style="gto")
     assert correct == "Always Bet"
 
-    # MATERIAL mid leg (70/30): skipped like a forced move -- the hand
-    # survives, the line is narrated, no question pauses there.
+    # MATERIAL mid leg (70/30): July 23 2026 (user catch) -- no longer
+    # narrated through, because that shipped a play-through with a street
+    # HOLE (no flop question). The whole hand drops (counted) and the
+    # pool refills; a play-through pauses on every street or doesn't ship.
     flop_material = _flop_cbet_node({"AsAd": {"Bet 60%": 0.70, "All-in": 0.30}})
+    counters: dict = {}
     legs = _build_legs(
         _solve_for(anchor), "BTN", "AsAd", [flop_material, anchor],
-        include_preflop=False,
+        include_preflop=False, counters=counters,
     )
-    assert legs is not None and [leg.node_id for leg in legs] == [anchor.node_id]
+    assert legs is None
+    assert counters["hands_dropped_street_hole"] == 1
 
 
 # --- preflop deep packs: the same rule via pipeline.artifact_strip -----------

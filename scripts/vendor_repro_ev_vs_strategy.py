@@ -12,7 +12,13 @@ What it checks
 On a river facing-bet node a call is a pure showdown, so the file's own EV
 tables imply an exact equity for every combo of the player facing the bet:
 
-    implied_equity = (EV_call - EV_fold + to_call) / (pot_after_bet + to_call)
+    implied_equity = (EV_call - EV_fold + to_call) / (pot_after_bet + to_call - rake)
+
+where ``rake`` is the rake taken from the final pot on a win (parsed from the
+file's ``rake`` metadata, e.g. "10% cap 3bb"): the EV tables are net of rake
+while showdown equity is rake-blind, so an uncorrected denominator reads a
+phantom NEGATIVE bias that is largest in small pots (~-3 to -5 points on a
+checkdown-river stab at 10% rake) and negligible in big pots (the cap).
 
 That number must match the exact showdown equity of the same combo against
 the betting range reconstructed from the file's OWN frequency tables
@@ -30,10 +36,17 @@ File-format assumptions (all verified against the v7/v8 exports):
   * freq_blob: 1326 bytes, 0-255 conditional strategy per combo
   * ev_blob_oop / ev_blob_ip: 1326 float32 LE, EV in chips for OOP / IP
   * node grammar: "r:0" root (OOP first), ":c" passive (check or call),
-    ":b<chips>" bet/raise TO <chips> total this street, ":f" fold,
+    ":b<chips>" bet/raise to <chips> CUMULATIVE chips committed by that player
+    across the WHOLE postflop line (Pio node-string semantics, NOT a fresh
+    per-street amount; e.g. a river b4968 after b2312:c is a 4968-2312 = 2656
+    chip bet, and an all-in token equals eff_stack exactly), ":f" fold,
     ":<card>" chance card -> next street
   * the passive action's LABEL (CHECK vs CALL) varies between exports, so
     check-vs-call is derived from the betting state, never the label.
+
+Nodes whose reconstructed betting range holds fewer than --min-betting-combos
+combos (default 6) are skipped: EVs at barely-reached nodes are the least
+trained part of a solve and score as noise, not as an export defect.
 """
 
 from __future__ import annotations
@@ -154,6 +167,16 @@ class Solve:
                 pass
         return 100.0  # every export to date uses 100 chips/bb
 
+    def rake_chips(self, final_pot):
+        """Rake taken from ``final_pot`` chips on a showdown win, per the
+        file's ``rake`` metadata ("8% cap 2bb" / "10% cap 3bb (300 chips)").
+        0 when absent/unparseable (the check then runs uncorrected)."""
+        m = re.match(r"\s*([\d.]+)\s*%\s*cap\s*([\d.]+)\s*bb", self.meta.get("rake", ""))
+        if not m:
+            return 0.0
+        pct, cap_bb = float(m.group(1)) / 100.0, float(m.group(2))
+        return min(pct * final_pot, cap_bb * self.bb_chips())
+
 
 def walk(s, node_id, oop="BB", ip="BTN"):
     """Walk a node string: betting state + both sides' reach at the node.
@@ -172,7 +195,11 @@ def walk(s, node_id, oop="BB", ip="BTN"):
     }
     pot = float(s.meta["pot"])
     eff = float(s.meta["eff_stack"])
-    invested = {oop: 0.0, ip: 0.0}
+    # committed = each side's CUMULATIVE postflop chips for the whole line (the
+    # quantity the b<chips> tokens state -- it never resets at a street change).
+    # Both sides' totals are equal whenever a street starts, so to_call computed
+    # on cumulative totals is exact within a street.
+    committed = {oop: 0.0, ip: 0.0}
     behind = {oop: eff, ip: eff}
     to_act, other = oop, ip
     board = list(flop)
@@ -181,7 +208,6 @@ def walk(s, node_id, oop="BB", ip="BTN"):
     for token in node_tokens(node_id):
         if CARD_RE.match(token):
             board.append(token)
-            invested = {oop: 0.0, ip: 0.0}
             to_act, other = oop, ip
             for side in (oop, ip):
                 r = reach[side]
@@ -210,25 +236,27 @@ def walk(s, node_id, oop="BB", ip="BTN"):
             total = sum(row[1][i] for row in parent)
             reach[to_act][i] *= (freqs[i] / total) if total > 0 else 0.0
 
-        to_call_now = max(invested.values()) - invested[to_act]
+        to_call_now = max(committed.values()) - committed[to_act]
         if token.startswith("b"):
+            # The token is the actor's cumulative committed-for-the-line total
+            # after this action; the fresh wager subtracts EVERYTHING already
+            # committed, earlier streets included. (An all-in token equals
+            # eff_stack exactly, so the min() clamp is a no-op on well-formed
+            # files.)
             size = float(token[1:])
-            added_full = size - invested[to_act]
-            # An all-in is encoded as "bet your flop-start stack", which can
-            # overstate the wager by chips already committed on earlier streets.
-            added = behind[to_act] if added_full >= behind[to_act] - 1.0 else added_full
+            added = min(size - committed[to_act], behind[to_act])
             pot += added
-            invested[to_act] += added
+            committed[to_act] += added
             behind[to_act] -= added
         elif token == "c" and to_call_now > 0:
             pot += to_call_now
-            invested[to_act] += to_call_now
+            committed[to_act] += to_call_now
             behind[to_act] -= to_call_now
 
         to_act, other = other, to_act
         cur += ":" + token
 
-    to_call = max(invested.values()) - invested[to_act]
+    to_call = max(committed.values()) - committed[to_act]
     return pot, to_call, to_act, reach, board
 
 
@@ -239,7 +267,14 @@ def stride_sample(items, k):
     return [items[int(i * step)] for i in range(k)]
 
 
-def analyse_node(s, nid, oop, ip, max_combos, dump=False):
+# Skip nodes whose reconstructed betting range holds fewer combos than this:
+# EVs at barely-reached nodes are the least-trained part of a solve and score
+# as noise rather than as an export defect.
+MIN_BETTING_COMBOS = 6
+
+
+def analyse_node(s, nid, oop, ip, max_combos, dump=False, min_combos=MIN_BETTING_COMBOS,
+                 stats=None):
     """Per-combo implied-vs-exact gaps at one river facing-bet node, or None."""
     pot, to_call, actor, reach, board = walk(s, nid, oop, ip)
     if to_call <= 0:
@@ -260,12 +295,21 @@ def analyse_node(s, nid, oop, ip, max_combos, dump=False):
         if w > REACH_EPS:
             cards = split_cards(s.idx_to_hand[i])
             villain.append((set(cards), rank7(cards + board), w))
-    if not villain:
+    if len(villain) < min_combos:  # low-reach node: EVs here are noise
+        if stats is not None:
+            stats["low_reach_skipped"] = stats.get("low_reach_skipped", 0) + 1
+        if dump and villain:
+            print(f"\nnode {nid}\n  skipped: only {len(villain)} combos in the "
+                  f"reconstructed betting range (min {min_combos})")
         return None
 
     heroes = sorted(
         s.idx_to_hand[i] for i in range(s.n) if reach[actor][i] > REACH_EPS
     )
+    # EVs are net of rake; showdown equity is rake-blind. Correct the
+    # denominator by the rake the winner pays on the final pot, or the check
+    # reads a phantom negative bias in small pots.
+    rake = s.rake_chips(pot + to_call)
     rows = []
     for h in stride_sample(heroes, max_combos):
         i = s.hand_to_idx[h]
@@ -286,7 +330,7 @@ def analyse_node(s, nid, oop, ip, max_combos, dump=False):
         if tot <= 0:
             continue
         exact = (win + 0.5 * tie) / tot
-        implied = (call_ev[i] - fold_ev[i] + to_call) / (pot + to_call)
+        implied = (call_ev[i] - fold_ev[i] + to_call) / (pot + to_call - rake)
         total_f = call_f[i] + fold_f[i]
         rows.append((h, implied, exact, call_f[i] / total_f))
     if not rows:
@@ -295,7 +339,7 @@ def analyse_node(s, nid, oop, ip, max_combos, dump=False):
         price = to_call / (pot + to_call)
         print(f"\nnode {nid}")
         print(f"  pot after bet = {pot:g} chips, to_call = {to_call:g} chips, "
-              f"call price = {price * 100:.1f}%, actor = {actor}")
+              f"call price = {price * 100:.1f}%, rake = {rake:g} chips, actor = {actor}")
         print(f"  {'combo':6s} {'implied':>8s} {'exact':>8s} {'gap':>7s} {'call%':>6s}")
         for h, implied, exact, cf in sorted(rows, key=lambda r: -abs(r[1] - r[2])):
             print(f"  {h:6s} {implied * 100:7.1f}% {exact * 100:7.1f}% "
@@ -308,6 +352,9 @@ def main():
     ap.add_argument("db")
     ap.add_argument("--max-nodes", type=int, default=24)
     ap.add_argument("--max-combos-per-node", type=int, default=60)
+    ap.add_argument("--min-betting-combos", type=int, default=MIN_BETTING_COMBOS,
+                    help="skip nodes whose reconstructed betting range has fewer "
+                         "combos than this (low-reach nodes score as noise)")
     ap.add_argument("--dump-node", default=None,
                     help="print per-combo implied/exact detail for one node id")
     ap.add_argument("--no-hash", action="store_true",
@@ -328,7 +375,8 @@ def main():
 
     if args.dump_node:
         gaps = analyse_node(s, args.dump_node, oop, ip,
-                            args.max_combos_per_node, dump=True)
+                            args.max_combos_per_node, dump=True,
+                            min_combos=args.min_betting_combos)
         if gaps is None:
             print("  (not a scoreable river facing-bet node)")
         else:
@@ -345,8 +393,10 @@ def main():
 
     node_medians = []
     pooled = []
+    stats: dict = {}
     for nid in stride_sample(candidates, args.max_nodes):
-        gaps = analyse_node(s, nid, oop, ip, args.max_combos_per_node)
+        gaps = analyse_node(s, nid, oop, ip, args.max_combos_per_node,
+                            min_combos=args.min_betting_combos, stats=stats)
         if gaps:
             node_medians.append((nid, statistics.median(gaps), len(gaps)))
             pooled.extend(gaps)
@@ -357,7 +407,9 @@ def main():
     med = statistics.median(pooled)
     bad = sum(1 for _n, m, _k in node_medians if abs(m) > 0.03)
     print(f"\nsampled {len(node_medians)} river facing-bet nodes, "
-          f"{len(pooled)} (node, combo) points")
+          f"{len(pooled)} (node, combo) points"
+          + (f"  [{stats['low_reach_skipped']} low-reach node(s) skipped]"
+             if stats.get("low_reach_skipped") else ""))
     print(f"pooled median (implied minus exact equity) = {med * 100:+.1f} points"
           f"   [a consistent export measures ~1-2 points]")
     print(f"nodes with |median gap| > 3 points          = {bad}/{len(node_medians)}")

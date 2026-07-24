@@ -231,3 +231,33 @@ def test_full_hand_batch_attaches_resolution(tmp_path) -> None:
                 assert payload["version"] == 1
                 assert "resolution" not in payload
     assert attached == meta["counters"]["showdown_resolutions"]
+
+
+def test_oop_river_check_ender_resolves_with_invented_checkback() -> None:
+    """July 23 2026 (USER STANDING RULE): every full hand that reaches its
+    final question must reach a SHOWDOWN. An out-of-position river check
+    used to get NO resolution (the check alone doesn't close the action --
+    the documented fallback the user overruled); now the villain's
+    check-back is invented, the same convention as the invented
+    call-or-fold behind a bet, and the reveal plays. The villain never
+    bets (a bet would demand a new hero decision the question never asked)."""
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    node = solve.nodes["r:0:c:b180:c:2h:c:b635:c:Kd"]  # BB first to act, river
+    assert node.actor != solve.ip_position
+    assert node.to_call_bb == 0
+    combo = next(iter(node.strategy))
+    res = build_showdown_resolution(
+        node, solve, hero_combo=combo, correct_answer="Mostly Check", hand_id="h1",
+    )
+    assert res is not None, "an OOP river check must resolve to showdown"
+    kinds = [e["type"] for e in res["events"]]
+    # Hero checks, villain checks BEHIND, then the reveals and the pot push.
+    assert kinds[0] == "check" and res["events"][0]["seat"] == node.actor
+    assert kinds[1] == "check" and res["events"][1]["seat"] == node.villain
+    assert "reveal" in kinds and kinds[-1] == "win"
+    assert not any(e["type"] in ("bet", "raise") for e in res["events"])
+    # Deterministic like every resolution.
+    res2 = build_showdown_resolution(
+        node, solve, hero_combo=combo, correct_answer="Mostly Check", hand_id="h1",
+    )
+    assert res2 == res

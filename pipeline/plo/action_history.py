@@ -101,18 +101,29 @@ class ResolvedAction:
     to_bb: float | None  # the "raise to" / all-in total in bb; None for fold/call
 
 
-def resolve_pot_limit(
+def _walk(
     history: tuple[PloAction, ...],
     *,
     stack_bb: float = 100.0,
     ante_bb: float = 0.0,
-) -> tuple[tuple[ResolvedAction, ...], float]:
-    """Resolve a prior-action sequence into per-action bb sizes + the pot (bb).
+) -> tuple[tuple[ResolvedAction, ...], float, dict[str, float], float]:
+    """THE pot-limit betting walk -- the single source of truth.
 
-    Walks the actions after posting the blinds, tracking each seat's commitment,
-    the current high bet, and the pot, computing each raise's ``raise_to`` via
-    the pot-limit rule. Raise levels (open / 3-bet / ...) count every aggressive
-    action, including all-ins.
+    Returns ``(resolved_actions, pot_bb, committed_by_seat, high_bet_bb)``.
+
+    INVARIANT (July 23 2026): every consumer of resolved sizes, the pot,
+    per-seat commitments, or the call price MUST derive from this ONE walk.
+    This module used to carry three hand-copied walks (resolve_pot_limit /
+    resolved_commitment_bb / call_price); the July-22 min-raise fix landed
+    in only two of them, so `call_price` kept pricing a 2bb min-raise open
+    as a 3.5bb pot open -- 109 shipped 20bb-pack questions carried pot-odds
+    numbers for a different action sequence than the one displayed. Never
+    reintroduce a parallel walk; extend this one.
+
+    Walks the actions after posting the blinds, tracking each seat's
+    commitment, the current high bet, and the pot, computing each raise's
+    ``raise_to`` via the pot-limit rule. Raise levels (open / 3-bet / ...)
+    count every aggressive action, including all-ins.
 
     ``ante_bb`` (MTT bb-ante packs, July 2026): the BB's dead ante joins the
     pot before any action -- the packs' sized-raise tokens only resolve to
@@ -175,7 +186,24 @@ def resolve_pot_limit(
             out.append(
                 ResolvedAction(seat, _RAISE_LEVEL.get(raise_level, "raise"), raise_to)
             )
-    return tuple(out), pot
+    return tuple(out), pot, committed, high_bet
+
+
+def resolve_pot_limit(
+    history: tuple[PloAction, ...],
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
+) -> tuple[tuple[ResolvedAction, ...], float]:
+    """Resolve a prior-action sequence into per-action bb sizes + the pot (bb).
+
+    A view over :func:`_walk` (see its invariant); feeds the prose, the app
+    tokens, and the animation script.
+    """
+    actions, pot, _committed, _high_bet = _walk(
+        history, stack_bb=stack_bb, ante_bb=ante_bb
+    )
+    return actions, pot
 
 
 def resolved_commitment_bb(
@@ -186,39 +214,11 @@ def resolved_commitment_bb(
     ante_bb: float = 0.0,
 ) -> float:
     """How many bb ``seat`` has voluntarily committed (blind posts included,
-    the dead ante excluded) after ``history`` -- the same walk as
-    :func:`resolve_pot_limit`, exposed for the fold-EV consistency guard."""
-    committed: dict[str, float] = {"SB": _SB_BB, "BB": _BB}
-    high_bet = _BB
-    pot = _SB_BB + _BB + ante_bb
-    last_increment = _BB
-    for action in history:
-        actor = action.seat
-        prev = committed.get(actor, 0.0)
-        if action.action is PloActionType.FOLD:
-            continue
-        if action.action is PloActionType.CALL:
-            pot += high_bet - prev
-            committed[actor] = high_bet
-        elif action.action is PloActionType.ALL_IN:
-            total = stack_bb - ante_bb if actor == "BB" else stack_bb
-            pot += total - prev
-            committed[actor] = total
-            if total > high_bet:
-                last_increment = total - high_bet
-                high_bet = total
-        else:  # RAISE / MIN_RAISE
-            to_call = high_bet - prev
-            if action.action is PloActionType.MIN_RAISE:
-                raise_to = high_bet + last_increment
-            else:
-                raise_to = high_bet + ((action.raise_pct or 100) / 100.0) * (
-                    pot + to_call
-                )
-            last_increment = raise_to - high_bet
-            pot += raise_to - prev
-            committed[actor] = raise_to
-            high_bet = raise_to
+    the dead ante excluded) after ``history`` -- a view over :func:`_walk`,
+    exposed for the fold-EV consistency guard."""
+    _actions, _pot, committed, _high_bet = _walk(
+        history, stack_bb=stack_bb, ante_bb=ante_bb
+    )
     return committed.get(seat, 0.0)
 
 
@@ -423,31 +423,60 @@ def call_price(
     first in unraised (the BB option). Break-even equity =
     ``to_call / (pot + to_call)`` -- the "show the math" numbers for the
     SOLVER DATA block and the stat_notes column.
+
+    A view over :func:`_walk` (July 23 2026). This function used to carry
+    its OWN copy of the walk, which missed the July-22 min-raise fix: every
+    min-raise was still priced as a 100%-pot raise, so the prose said
+    "opens to 2bb" while the price block computed the 3.5bb-open line (109
+    shipped 20bb-pack questions). See the invariant on :func:`_walk`.
     """
-    committed: dict[str, float] = {"SB": _SB_BB, "BB": _BB}
-    high_bet = _BB
-    pot = _SB_BB + _BB + ante_bb
-    for action in history:
-        seat = action.seat
-        prev = committed.get(seat, 0.0)
-        if action.action is PloActionType.FOLD:
-            pass
-        elif action.action is PloActionType.CALL:
-            pot += high_bet - prev
-            committed[seat] = high_bet
-        elif action.action is PloActionType.ALL_IN:
-            total = stack_bb - ante_bb if seat == "BB" else stack_bb
-            pot += total - prev
-            committed[seat] = total
-            high_bet = max(high_bet, total)
-        else:  # RAISE / MIN_RAISE
-            to_call = high_bet - prev
-            pct = (action.raise_pct or 100) / 100.0
-            raise_to = high_bet + pct * (pot + to_call)
-            pot += raise_to - prev
-            committed[seat] = raise_to
-            high_bet = raise_to
+    _actions, pot, committed, high_bet = _walk(
+        history, stack_bb=stack_bb, ante_bb=ante_bb
+    )
     return pot, max(0.0, high_bet - committed.get(hero_seat, 0.0))
+
+
+def display_call_price(
+    history: tuple[PloAction, ...],
+    hero_seat: str,
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
+) -> tuple[float, float, float]:
+    """The pot-odds price AS THE PLAYER SEES IT: ``(pot_bb, to_call_bb,
+    break_even)`` on the 0.5bb display grid.
+
+    Every player-facing surface rounds bb amounts to the 0.5bb display grid
+    (Question prose sizes, the POT column, the app chips), so the pot-odds
+    math must quote THOSE numbers or the panel reads as wrong (user report,
+    July 23 2026: the question said "open to 3.5bb ... 3-bets to 11.5bb"
+    while the note said "facing 7.9bb into the 16.4bb pot" -- the exact
+    resolved sizes are 3.52/11.38). ``to_call`` is the subtraction the
+    player does from the DISPLAYED sizes (rounded high bet minus hero's
+    rounded commitment -- NOT the rounded exact difference, which can land
+    0.5bb away from it); the pot matches the displayed POT column (rounded
+    exact pot); break-even is computed FROM the two displayed numbers so
+    the printed equation is self-checking.
+
+    Display-only: worthiness, difficulty, EV and every strategic gate keep
+    the exact :func:`call_price`. INVARIANT: the SOLVER DATA price block
+    and the CSV pot_odds stat_note MUST both read THIS function -- they
+    used to quote the exact amounts and visibly disagreed with the
+    question on every off-grid (pot-relative MTT) size.
+    """
+    _actions, pot, committed, high_bet = _walk(
+        history, stack_bb=stack_bb, ante_bb=ante_bb
+    )
+    pot_disp = round_to_half_bb(pot)
+    to_call_disp = max(
+        0.0,
+        round_to_half_bb(high_bet)
+        - round_to_half_bb(committed.get(hero_seat, 0.0)),
+    )
+    break_even = (
+        to_call_disp / (pot_disp + to_call_disp) if to_call_disp > 0 else 0.0
+    )
+    return pot_disp, to_call_disp, break_even
 
 
 def price_is_live(history: tuple[PloAction, ...], hero_seat: str) -> bool:
@@ -472,6 +501,7 @@ def price_is_live(history: tuple[PloAction, ...], hero_seat: str) -> bool:
 __all__ = [
     "ResolvedAction",
     "call_price",
+    "display_call_price",
     "display_seat",
     "format_plo_action_history",
     "format_plo_context",

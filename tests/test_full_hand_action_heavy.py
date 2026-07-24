@@ -169,7 +169,9 @@ def test_batch_records_policy_and_counters(tmp_path) -> None:
     for key in (
         "hands_excluded_trivial_fold_ender",
         "hands_excluded_passive_line",
+        "hands_excluded_bluffcatch_checkdown",
         "passive_hands_kept",
+        "bluffcatch_checkdowns_kept",
     ):
         assert key in meta["counters"]
 
@@ -252,10 +254,16 @@ def test_no_hand_ends_early_without_a_fold(tmp_path) -> None:
             )
 
 
-def test_checkdown_into_bluff_catch_is_not_passive() -> None:
-    """July 22 refinement: a checkdown line ending in a REAL bluff-catch
-    (facing a bet, correct action call/raise) is a legitimate story and
-    escapes the passive cap; the same line ending in a fold stays capped."""
+def test_checkdown_into_bluff_catch_is_passive_but_its_own_class() -> None:
+    """July 23 2026 (replaces the July 22 full exemption, which swallowed
+    whole batches -- 6/7 hands shipped as x/x, x/x, river-bet): a checkdown
+    line ending in a REAL bluff-catch (facing a bet, correct action
+    call/raise) IS passive, but it is classified separately so the policy
+    can give it a ~25-30% sub-quota of the river enders instead of the
+    generic passive cap. The same line ending in a fold or a "do you stab?"
+    spot stays in the generic passive class."""
+    from pipeline.postflop.hand_quality import is_bluffcatch_checkdown
+
     checkdown_steps = (
         _step("flop", "check"), _step("flop", "check"),
         _step("turn", "check"), _step("turn", "check"),
@@ -269,6 +277,143 @@ def test_checkdown_into_bluff_catch_is_not_passive() -> None:
         _step("flop", "check"), _step("flop", "check"),
         _step("turn", "check"), _step("turn", "check"),
     ), ender_verb="check", ender_freq=0.75, ender_to_call=0.0)
-    assert is_passive_line(bluff_catch) is False
+    assert is_passive_line(bluff_catch) is True
     assert is_passive_line(fold_ender) is True
     assert is_passive_line(stab_spot) is True
+    assert is_bluffcatch_checkdown(bluff_catch) is True
+    assert is_bluffcatch_checkdown(fold_ender) is False
+    assert is_bluffcatch_checkdown(stab_spot) is False
+    # A line with real earlier action is not passive, hence never in the class.
+    active = _hand(history=(
+        _step("flop", "bet"), _step("flop", "call"),
+        _step("river", "check"), _step("river", "bet"),
+    ), ender_verb="call", ender_to_call=2.0)
+    assert is_bluffcatch_checkdown(active) is False
+
+
+def test_bluffcatch_checkdowns_capped_at_river_share() -> None:
+    """The sub-quota: bluff-catch checkdowns are capped at
+    ceil(BLUFFCATCH_RIVER_SHARE x river_ender_target), separately from the
+    generic passive cap, and the best-scoring ones are the ones kept."""
+    checkdown_steps = (
+        _step("flop", "check"), _step("flop", "check"),
+        _step("turn", "check"), _step("turn", "check"),
+        _step("river", "check"), _step("river", "bet"),
+    )
+    bluffcatches = [
+        _hand(hand_id=f"bc{i}", history=checkdown_steps, ender_verb="call",
+              ender_freq=0.75, ender_to_call=2.0)
+        for i in range(5)
+    ]
+    active = [
+        _hand(hand_id=f"active{i}", history=(
+            _step("flop", "bet"), _step("flop", "call"), _step("river", "bet"),
+        )) for i in range(4)
+    ]
+    # river_ender_target=6 (a river_heavy 8-hand batch) -> cap = ceil(0.3*6)=2.
+    kept, counters = apply_action_heavy_policy(
+        active + bluffcatches, total_hands=8, river_ender_target=6,
+    )
+    ids = [h.hand_id for h in kept]
+    assert sum(1 for i in ids if i.startswith("bc")) == 2
+    assert counters["bluffcatch_checkdowns_kept"] == 2
+    assert counters["hands_excluded_bluffcatch_checkdown"] == 3
+    # The generic passive counters are untouched by the bluff-catch class.
+    assert counters["hands_excluded_passive_line"] == 0
+    assert counters["passive_hands_kept"] == 0
+    # Real-action hands all survive and outrank the kept checkdowns.
+    assert sum(1 for i in ids if i.startswith("active")) == 4
+    assert ids[:4] == [f"active{i}" for i in range(4)]
+
+
+def test_policy_rotates_line_shapes_within_a_street() -> None:
+    """July 23 2026 (from the first paid fix-wave batch): 7/7 postflop hands
+    shipped as the SAME line shape (c-bet call, turn barrel, fold) with
+    different combos — density-identical hands cluster at the top of the
+    street bucket and the quota picks them all. The policy output must
+    rotate distinct shapes to the top of each ending-street bucket."""
+    from pipeline.postflop.hand_quality import line_shape_signature
+
+    barrel_fold = [
+        _hand(hand_id=f"barrel{i}", ending_street="turn", history=(
+            _step("flop", "check"), _step("flop", "bet"), _step("flop", "call"),
+            _step("turn", "check"), _step("turn", "bet"),
+        ), ender_verb="fold", ender_freq=0.80) for i in range(5)
+    ]
+    raise_line = [
+        _hand(hand_id=f"raised{i}", ending_street="turn", history=(
+            _step("flop", "bet"), _step("flop", "raise"), _step("flop", "call"),
+            _step("turn", "bet"),
+        ), ender_verb="call", ender_freq=0.75) for i in range(2)
+    ]
+    donk_line = [
+        _hand(hand_id=f"donk{i}", ending_street="turn", history=(
+            _step("flop", "bet"), _step("flop", "call"), _step("turn", "bet"),
+        ), ender_verb="fold", ender_freq=0.80) for i in range(2)
+    ]
+    assert line_shape_signature(barrel_fold[0]) != line_shape_signature(donk_line[0])
+    kept, _ = apply_action_heavy_policy(
+        barrel_fold + raise_line + donk_line, total_hands=9,
+    )
+    # The first three picks are three DISTINCT shapes (one per group), so a
+    # 3-hand turn quota gets variety instead of three copies of one line.
+    first_three = [line_shape_signature(h) for h in kept[:3]]
+    assert len(set(first_three)) == 3
+    # All hands survive (no cap applies here) and the rotation is complete.
+    assert len(kept) == 9
+
+
+def test_density_ignores_the_ending_streets_own_bet() -> None:
+    """July 23 2026: aggressive_steps/educational_density count only
+    PRE-ender-street bets, so a pure checkdown into a river stab scores no
+    action content -- it can no longer float above genuinely bet lines."""
+    from pipeline.postflop.hand_quality import aggressive_steps
+
+    checkdown_stab = _hand(history=(
+        _step("flop", "check"), _step("flop", "check"),
+        _step("turn", "check"), _step("turn", "check"),
+        _step("river", "check"), _step("river", "bet"),
+    ), ender_verb="call", ender_to_call=2.0)
+    assert aggressive_steps(checkdown_stab) == 0
+    flop_bet_line = _hand(history=(
+        _step("flop", "bet"), _step("flop", "call"),
+        _step("turn", "check"), _step("turn", "check"),
+        _step("river", "check"), _step("river", "bet"),
+    ), ender_verb="call", ender_to_call=2.0)
+    assert aggressive_steps(flop_bet_line) == 1
+    assert educational_density(flop_bet_line) > educational_density(checkdown_stab)
+
+
+def test_exciting_hands_toggle_filters_honestly(tmp_path) -> None:
+    """🔥 Exciting-pots toggle (July 23 2026, user ask): with the toggle on,
+    only hands whose FINAL decision is a big hand (premium/strong) on a
+    heated line (raise, or two-plus bets) survive; the rest are counted,
+    never silently diluted. The fixture's two assemblable hands both fail
+    the bar (the river King demotes the top-pair hands), so the batch
+    honestly ships empty with the exclusions counted. Off = untouched."""
+    import json
+
+    from pipeline.postflop.fixtures import btn_vs_bb_full_hand_2cJs7s
+    from pipeline.postflop.full_hand_batch import generate_full_hand_batch
+
+    out = tmp_path / "exciting.csv"
+    res = generate_full_hand_batch(
+        solve=btn_vs_bb_full_hand_2cJs7s(), output_path=out, total_hands=4,
+        dry_run=True, answer_style="gto", equity_runouts=20,
+        include_villain=True, exciting_hands=True,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert meta["run_settings"]["exciting_hands"] is True
+    assert meta["counters"]["hands_excluded_not_exciting"] == 2
+    assert res.questions_written == 0  # honest shrink, no dilution
+
+    off = tmp_path / "off.csv"
+    res_off = generate_full_hand_batch(
+        solve=btn_vs_bb_full_hand_2cJs7s(), output_path=off, total_hands=4,
+        dry_run=True, answer_style="gto", equity_runouts=20,
+        include_villain=True,
+    )
+    meta_off = json.loads(off.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    assert meta_off["run_settings"]["exciting_hands"] is False
+    assert meta_off["counters"]["hands_excluded_not_exciting"] == 0
+    assert res_off.questions_written > 0

@@ -31,6 +31,7 @@ from pipeline.neutral_credit import format_neutral_credit, neutral_credit_option
 from pipeline.provenance import build_notes
 from pipeline.plo.action_history import (
     call_price,
+    display_call_price,
     display_seat,
     format_plo_action_history,
     format_plo_context,
@@ -338,10 +339,18 @@ def build_plo_row(
         facts.spot.node.history_before, facts.spot.node.actor,
         stack_bb=stack_bb, ante_bb=ante_bb,
     )
+    # The note quotes the DISPLAYED (0.5bb-grid) amounts -- the exact
+    # call_price gates whether the price exists, but the printed numbers
+    # must match the sizes the player just read in the Question (July 23
+    # 2026, user report; see display_call_price's invariant).
+    disp_pot, disp_call, disp_break_even = display_call_price(
+        facts.spot.node.history_before, facts.spot.node.actor,
+        stack_bb=stack_bb, ante_bb=ante_bb,
+    )
     # Same gate as the SOLVER DATA price block (price_is_live): an open
     # decision has no call on the menu, so no pot-odds cells there.
     break_even = (
-        to_call / (pot_now + to_call)
+        disp_break_even
         if to_call > 0
         and price_is_live(facts.spot.node.history_before, facts.spot.node.actor)
         else None
@@ -379,10 +388,12 @@ def build_plo_row(
             # justify a sub-threshold call), matching the preflop/postflop
             # pot-odds rows.
             "value": f"{break_even * 100:.0f}%",
+            # {:g} drops a trailing .0 ("8bb", "16.5bb") -- the same clean
+            # form the Question prose uses for grid amounts.
             "note": (
-                f"Facing {to_call:.1f}bb into the {pot_now:.1f}bb pot: "
-                f"break-even equity = {to_call:.1f} / ({pot_now:.1f} + "
-                f"{to_call:.1f}) = {break_even * 100:.0f}%."
+                f"Facing {disp_call:g}bb into the {disp_pot:g}bb pot: "
+                f"break-even equity = {disp_call:g} / ({disp_pot:g} + "
+                f"{disp_call:g}) = {break_even * 100:.0f}%."
             ),
         })
     # Range width (July 2026, user feedback): "what percent of hands are

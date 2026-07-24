@@ -1790,31 +1790,32 @@ by `test_river_heavy_profile_quotas`. Verified live on three real
 solves (SRP + 3BP): n=4 -> 3 river/1 turn, n=8 -> 5 river/1/1/1, with
 the no-flop-start backfill composing cleanly.
 
-**DATA-QUALITY CORRECTION (July 15 2026): the v7 exports are internally
-inconsistent -- strategies vs EVs.** The July 8 "all clean" audits
-checked structure, not equilibrium consistency. Forensic finding (user
-catch -> raw-blob reconstruction; adapter proven byte-faithful): the v7
-files' freq blobs and EV blobs describe two DIFFERENT profiles -- the
-EVs form a consistent equilibrium, while the exported strategies are
-bluff-light/over-calling (v7 barrel-river lines: implied-vs-exact equity
-bias median +5 to +7.4pts; a bluff replayed vs the exported response =
-a ~17bb blunder; metadata `solve_seconds=29.86` for a 200bb 3BP is the
-tell -- likely purified/late-iterate strategies exported with averaged
-EVs). v8 shows the same test at only ~1-3pts (near-clean). Treat v7
-RIVER-BARREL mixed answers as suspect pending the vendor re-export.
-The EV-vs-strategy INTAKE CHECK IS BUILT (July 15): section [8] of
-`scripts/audit_postflop_db.py` compares EV-implied river-call equity
-(`(EV_call - EV_fold + to_call) / (pot + to_call)` -- exact on a river,
-a call is pure showdown) vs exact showdown equity against the file's
-own reconstructed betting range, on ~24 sampled facing-bet river
-nodes. Two hard prongs: |pooled median| > 3pts, and >= 3 nodes & >=
-25% with |per-node median| > 3pts (the v7 SRP files bias OPPOSITE
-directions per line -- +6 barrels, -4 to -15 check-check rivers -- and
-net the pool to ~0, so the pooled prong alone misses them). Calibrated
-on all six files: all five v7 files hard-fail, v8 CLEAN with WARNs.
+**DATA-QUALITY CORRECTION — OVERTURNED (July 23 2026): the v7
+"internal inconsistency" was OUR false positive.** The July-15 finding
+("strategies vs EVs describe two different solves"; +5 to +7pt biases
+on barrel lines) was an artifact of the walk reading the `b<chips>`
+node tokens as per-street amounts. They are **CUMULATIVE chips
+committed for the whole postflop line** (Pio node-string semantics,
+vendor-confirmed; every all-in token equals `eff_stack` exactly), so
+every barrel-line pot/to-call was inflated and the EVs looked wrong.
+With the cumulative walk + a rake correction (EVs are net of rake,
+showdown equity is rake-blind — the uncorrected check read a phantom
+−3.5pt bias on small checkdown pots) + a low-reach floor (skip nodes
+with <6 betting combos — the vendor's low-reach instability point),
+the July-23 re-audit measures: **v8 0.0 / 0 bad nodes; both 3BP v7
+files ~0; ThTd5c + Ts9s5d SRP clean**. Residuals, honestly small:
+Kd7s3s SRP has 3/12 checkdown-river stab nodes at −3.3pts (~0.3bb on a
+~10bb pot — trips one prong marginally); Ts9s5d's BB leads ~34% of
+flops (a strategy quirk, noted in its picker flag). **All six solves
+are production-usable**; `SOLVE_QUALITY_FLAGS` carries the retraction
++ per-file notes. Section [8] of `scripts/audit_postflop_db.py` (and
+the standalone `scripts/vendor_repro_ev_vs_strategy.py`, verified to
+reproduce it exactly) now implements the corrected check:
+`(EV_call - EV_fold + to_call) / (pot + to_call - rake)` vs exact
+showdown equity against the file's own reconstructed betting range.
 Vendor-label gotcha inside: the facing-bet passive action is CHECK in
 v8 / CALL in v7 -- resolved by betting state, never label. Details in
-the v7-export-inconsistency memory.
+the v7-export-inconsistency memory (marked overturned).
 
 **NO MID-HAND ENDINGS (July 22 2026 late, USER STANDING RULE).** A
 play-through may end BEFORE the river ONLY on a fold — a hand whose last
@@ -1834,7 +1835,57 @@ bucket starved and batches over-rotated into turn-folds; v8 now mixes
 FIXTURE NOTE: `btn_vs_bb_full_hand_2cJs7s` gained a worthy river
 facing-bet mix (70/30) + a BTN river node (`...Kd:c`) so fixture hands
 end legally; tests updated. Tests: the no-mid-hand-endings +
-bluff-catch-carve-out cases in `tests/test_full_hand_action_heavy.py`.
+bluff-catch cases in `tests/test_full_hand_action_heavy.py`.
+**July 23 amendment:** the bluff-catch carve-out is no longer a full
+exemption — see the bet-token wave bullet below (it swallowed whole
+batches once the density ordering also counted the ender-street stab).
+
+**🎯 BET-TOKEN SEMANTICS WAVE (July 23 2026 — v7 EXONERATED, postflop
+un-frozen).** Damon proved the `.db` node `b<chips>` tokens are
+CUMULATIVE committed-for-the-line (Pio semantics), not per-street:
+(1) `sqlite_db._walk`/`_derive` now track cumulative `committed` + a
+`street_start` snapshot (history keeps per-street "raise TO" semantics,
+so every downstream renderer is unchanged; the old all-in "cap" hack is
+now the exact identity — an all-in token equals eff_stack, and a
+caller's to-call equals their remaining stack exactly). Barrel-line
+wager/pot/to-call inflation in prose is gone; later-street bet labels
+were mislabeled too (v8 turn `b656` after `b216:c` = "Bet 40%", was
+"Bet 60%"). `cfr_pio.py` mirrors the same walk (flop-only v1 identical;
+the turn/river extension depends on it); `structure_report._walk_node`
+and `_menu_labels` fixed the same way; the full-hand fixture node ids
+renamed to cumulative tokens (`b455`→`b635`, `b900`→`b1535`);
+`spot_selection`'s all-in drop now reads the history `all_in` flags
+(was a hardcoded v8-only "b9697" match). PRE-FIX BATCHES no longer
+re-verify byte-exact on barrel-line rows — regenerate, don't refresh.
+(2) Intake check corrected (see the OVERTURNED block below): cumulative
+walk + rake correction + <6-combo reach floor in audit section [8] AND
+the standalone vendor repro; 6/6 solves production-usable.
+(3) Checkdown-monotony fixes: full-hand loads sample the river at
+**2500 nodes** (`FULL_HAND_MAX_NODES_PER_STREET`; the adapter cap now
+accepts a per-street dict; admin/CLI pass river=max(widget, 2500)) so
+turn barrel lines keep their river continuation instead of dying to the
+no-mid-hand rule; `educational_density`/`aggressive_steps` count only
+PRE-ender-street bets (the ender-street stab no longer scores as
+"action"); the bluff-catch checkdown carve-out became a **sub-quota**
+(`BLUFFCATCH_RIVER_SHARE` 0.30 × the river-ender target, threaded from
+the length profile; `is_bluffcatch_checkdown`; counters
+`hands_excluded_bluffcatch_checkdown`/`bluffcatch_checkdowns_kept`);
+and the policy output is **shape-rotated within each ending street**
+(`line_shape_signature` = the (street, verb) line sequence + ender
+verb, cards/sizes ignored; `_rotate_shapes_within_streets`, passive
+tier still sinks) — without it the street quotas filled with N copies
+of the densest shape (the first paid fix-wave batch shipped 7/7
+postflop hands as the same c-bet-call/turn-barrel/fold line).
+(4) v8 STRUCTURAL FACT (why river enders on v8 stay checkdown-shaped):
+every v8 river node on a line with ANY earlier bet stores a fully PURE
+strategy (151k combo-strategies scanned, zero mixing; only
+checked-down rivers mix) ⇒ worthy barrel-river enders are impossible
+on v8 regardless of sampling. Vendor asked (likely export/late-pass
+purification); the 200bb v7 files DO mix a little there. Paid
+validation batch (FIXWAVE 8h factorlist v8): re-verifier 0/0 on all 22
+rows, 8/8 hands strict-clean (16/16 flags auto-fixed, 5 second rounds
+all clean), $6.26 — vs $20.96 and 7/8-flagged on the no-instructions
+run; factor-list prompts are the strict-clean production choice.
 
 **⚡ Parallel LLM workers — PLO (July 22 2026 PM, user ask).**
 `generate_plo_batch(llm_workers=1)`: with N>1, up to N questions' LLM
@@ -1896,6 +1947,21 @@ with the policy on the river_heavy quota back-fills toward turn-enders —
 more solves relax this. Measured on v8 (5-hand dry): 21 fold-enders + 133
 checkdowns excluded, every kept hand had 1-2 bets in line, postflop peaks
 1399-2438 (was 804-1000). Tests: `tests/test_full_hand_action_heavy.py`.
+
+**🔥 Exciting-pots toggle (July 23 2026, user ask).** Both postflop
+Generate modes gained an opt-in "🔥 Exciting pots only (big hands, big
+action)" checkbox: keep only spots/hands where hero holds a
+PREMIUM/STRONG made hand AND the line genuinely heated up (a raise
+anywhere in the postflop line, or two-plus bets — a routine single
+c-bet faced does not qualify). Pure + free (the shared classifier, no
+equity sim): `spot_selection.spot_is_exciting` (standalone; a new
+`make_spot_selector(exciting=)` predicate) + `hand_quality.
+is_exciting_hand` (full-hand: judges the FEATURED FINAL decision;
+preflop enders never qualify, quotas backfill honestly). Full-hand
+filter runs on the whole pool BEFORE every quota/policy; counters
+`hands_excluded_not_exciting`; run_settings `exciting_hands`; CLI
+`--exciting`. Honest-shortfall by design: a small qualifying pool
+ships a short batch rather than diluting.
 
 **Second rewrite round vs final-audit flags (July 22 2026 PM, strict-clean
 only).** The final audit was flag-only by design, so strict-clean full-hand

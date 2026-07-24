@@ -273,8 +273,19 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
             f"FACING A BET: must call {round_to_half_bb(f.to_call_bb):g}bb; "
             f"break-even equity {f.break_even_equity * 100:.0f}%"
         )
+    # Bet labels state bb amounts (team rule July 23 2026), so the pot
+    # fraction is stated here explicitly -- the LLM must never compute it.
+    _dom_pf = next(
+        (
+            a.pot_fraction
+            for a in f.spot.node.actions
+            if a.label == f.dominant_action and a.pot_fraction
+        ),
+        None,
+    )
+    _pf_clause = f"{round(_dom_pf * 100)}% of the pot; " if _dom_pf else ""
     lines.extend([
-        f"CORRECT ACTION: {f.dominant_action} (solver frequency "
+        f"CORRECT ACTION: {f.dominant_action} ({_pf_clause}solver frequency "
         f"{f.dominant_frequency:.0%})",
         f"STRATEGIC FRAME ({f.archetype}): "
         f"{POSTFLOP_ARCHETYPE_GUIDANCE.get(f.archetype, '')}",

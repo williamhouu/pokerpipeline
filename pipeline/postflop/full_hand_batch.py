@@ -437,6 +437,7 @@ def generate_full_hand_batch(
     final_audit: bool = False,
     strict_clean_hands: bool = False,
     action_heavy: bool = True,
+    exciting_hands: bool = False,
     llm_workers: int = 1,
     stop_check: Any = None,
     progress_callback: ProgressCallback = None,
@@ -507,11 +508,12 @@ def generate_full_hand_batch(
         # front-loads one actor's longest lines, so a shallow pool can
         # miss the other seat's hands entirely.
         scan_cap = max(60, total_hands * 20)
-    elif action_heavy:
-        # 🎬 The action-heavy policy gates and RANKS the pool (density
-        # ordering, checkdown quota, trivial-fold-ender drop), so the plain
-        # path needs an oversized pool too -- exactly total_hands would
-        # leave it nothing to be picky with. Assembly is cheap (no facts).
+    elif action_heavy or exciting_hands:
+        # 🎬/🔥 These policies gate and RANK the pool (density ordering,
+        # checkdown quota, trivial-fold-ender drop, exciting-only filter),
+        # so the plain path needs an oversized pool too -- exactly
+        # total_hands would leave it nothing to be picky with. Assembly is
+        # cheap (no facts).
         scan_cap = max(60, total_hands * 20)
     else:
         scan_cap = total_hands
@@ -616,6 +618,20 @@ def generate_full_hand_batch(
                 ))
         hands = hands + preflop_ender_hands
 
+    # --- 🔥 exciting pots (July 23 2026, user ask) --------------------------
+    # Toggle: keep only hands whose FEATURED FINAL decision is a big-hand
+    # spot (premium/strong) on a genuinely heated line (a raise, or two-plus
+    # bets). Runs on the whole pool BEFORE every quota/policy, so downstream
+    # selectors draw exclusively from exciting hands; the drop count is
+    # honest, and a small pool ships a short batch rather than diluting.
+    exciting_excluded = 0
+    if exciting_hands:
+        from pipeline.postflop.hand_quality import is_exciting_hand  # noqa: PLC0415
+
+        keep = [h for h in hands if is_exciting_hand(h)]
+        exciting_excluded = len(hands) - len(keep)
+        hands = keep
+
     # --- 🎬 action-heavy policy (July 2026, user ask) ----------------------
     # Runs on the WHOLE candidate pool BEFORE any selection, so the length
     # quotas, the diversify mix, the reserves, and every top-up/backfill all
@@ -625,8 +641,18 @@ def generate_full_hand_batch(
     # every downstream selector preserves input order within its buckets.
     action_heavy_counters: dict[str, int] = {}
     if action_heavy:
+        # The bluff-catch-checkdown sub-quota keys off the RIVER-ender quota
+        # (July 23 2026): under a length profile that's the river weight's
+        # share of the batch; in plain mode any hand could end on the river,
+        # so the target defaults to the whole batch inside the policy.
+        river_target = None
+        if balanced_lengths and not band_set:
+            _weights = LENGTH_PROFILES.get(
+                length_profile, LENGTH_PROFILES["equal"]
+            )
+            river_target = round(_weights.get("river", 0.0) * total_hands)
         hands, action_heavy_counters = apply_action_heavy_policy(
-            hands, total_hands=total_hands,
+            hands, total_hands=total_hands, river_ender_target=river_target,
         )
 
     length_reserve: dict[str, list] = {}
@@ -1100,6 +1126,8 @@ def generate_full_hand_batch(
                 # 🎬 July 2026: density ordering + checkdown quota +
                 # trivial-fold-ender drop + postflop-spine banding.
                 "action_heavy": action_heavy,
+                # 🔥 July 23 2026: big-hand + big-action enders only.
+                "exciting_hands": exciting_hands,
                 # ⚡ July 2026: legs of one hand generate concurrently
                 # (1 = sequential); selection + row order are unaffected.
                 "llm_workers": llm_workers,
@@ -1123,6 +1151,8 @@ def generate_full_hand_batch(
                 # near-pure fold enders, and checkdown lines past the ~15%
                 # cap. passive_hands_kept = the checkdowns that DID ship.
                 **action_heavy_counters,
+                # 🔥 hands the exciting-pots toggle filtered out (0 when off).
+                "hands_excluded_not_exciting": exciting_excluded,
                 "hands_difficulty_filtered": hands_difficulty_filtered,
                 # Band-scan diagnostics (July 2026): the hardest hand seen in
                 # the scan, and whether the scan pool ran out before the

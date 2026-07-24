@@ -106,8 +106,8 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
     # per-combo EVs (combo_evs) refine it for each worthy hero hand.
     cbet_actions = (
         _action("Check", "check", 0.45, ev_bb=2.05),
-        _action("Bet 33%", "bet", 0.40, to_bb=1.8, pot_fraction=0.33, ev_bb=2.30),
-        _action("Bet 75%", "bet", 0.15, to_bb=4.1, pot_fraction=0.75, ev_bb=2.10),
+        _action("Bet 2bb", "bet", 0.40, to_bb=1.8, pot_fraction=0.33, ev_bb=2.30),
+        _action("Bet 4bb", "bet", 0.15, to_bb=4.1, pot_fraction=0.75, ev_bb=2.10),
     )
     cbet = PostflopNode(
         node_id="flop_ip_cbet",
@@ -124,16 +124,16 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
         villain_range=_BB_CALL_RANGE,
         strategy={
             # Top pair top kicker -- wants to bet big; checking clearly worse.
-            "AcJc": {"Bet 75%": 0.70, "Bet 33%": 0.20, "Check": 0.10},
+            "AcJc": {"Bet 4bb": 0.70, "Bet 2bb": 0.20, "Check": 0.10},
             # Air with a backdoor -- give up; betting clearly worse.
-            "9c8c": {"Check": 0.85, "Bet 33%": 0.15},
+            "9c8c": {"Check": 0.85, "Bet 2bb": 0.15},
             # Overpair to the board -- bet for value; size mix but bet-dominant.
-            "QdQh": {"Bet 33%": 0.78, "Bet 75%": 0.12, "Check": 0.10},
+            "QdQh": {"Bet 2bb": 0.78, "Bet 4bb": 0.12, "Check": 0.10},
         },
         combo_evs={
-            "AcJc": {"Bet 75%": 3.2, "Bet 33%": 2.6, "Check": 2.0},
-            "9c8c": {"Check": 0.9, "Bet 33%": 0.3, "Bet 75%": -0.2},
-            "QdQh": {"Bet 33%": 3.6, "Bet 75%": 3.0, "Check": 2.7},
+            "AcJc": {"Bet 4bb": 3.2, "Bet 2bb": 2.6, "Check": 2.0},
+            "9c8c": {"Check": 0.9, "Bet 2bb": 0.3, "Bet 4bb": -0.2},
+            "QdQh": {"Bet 2bb": 3.6, "Bet 4bb": 3.0, "Check": 2.7},
         },
     )
 
@@ -171,7 +171,7 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
     # --- node 3: BB first to act on the flop (lead/check decision) ---------
     lead_actions = (
         _action("Check", "check", 0.80, ev_bb=2.4),
-        _action("Bet 33%", "bet", 0.20, to_bb=1.8, pot_fraction=0.33, ev_bb=2.0),
+        _action("Bet 2bb", "bet", 0.20, to_bb=1.8, pot_fraction=0.33, ev_bb=2.0),
     )
     lead = PostflopNode(
         node_id="flop_oop_lead",
@@ -188,10 +188,10 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
         villain_range=_BTN_SRP_RANGE,
         strategy={
             # Bottom pair + backdoors -- check, betting clearly worse.
-            "7h6h": {"Check": 0.82, "Bet 33%": 0.18},
+            "7h6h": {"Check": 0.82, "Bet 2bb": 0.18},
         },
         combo_evs={
-            "7h6h": {"Check": 1.6, "Bet 33%": 1.0},
+            "7h6h": {"Check": 1.6, "Bet 2bb": 1.0},
         },
     )
 
@@ -201,7 +201,7 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
     turn_board = ("2c", "Js", "7s", "2h")
     turn_actions = (
         _action("Check", "check", 0.70, ev_bb=4.3),
-        _action("Bet 50%", "bet", 0.30, to_bb=4.55, pot_fraction=0.50, ev_bb=3.7),
+        _action("Bet 4.5bb", "bet", 0.30, to_bb=4.55, pot_fraction=0.50, ev_bb=3.7),
     )
     turn = PostflopNode(
         node_id="turn_oop",
@@ -222,10 +222,10 @@ def btn_vs_bb_srp_2cJs7s() -> PostflopSolve:
         villain_range=_BTN_SRP_RANGE,
         strategy={
             # Top pair on a paired turn -- check (pot control), betting worse.
-            "Jh9c": {"Check": 0.72, "Bet 50%": 0.28},
+            "Jh9c": {"Check": 0.72, "Bet 4.5bb": 0.28},
         },
         combo_evs={
-            "Jh9c": {"Check": 4.6, "Bet 50%": 4.0},
+            "Jh9c": {"Check": 4.6, "Bet 4.5bb": 4.0},
         },
     )
 
@@ -258,7 +258,11 @@ def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
     Unlike :func:`btn_vs_bb_srp_2cJs7s` (four illustrative, disconnected nodes),
     this is one coherent runout where BB (the hero) check-calls down: flop
     ``2c Js 7s``, turn ``2h``, river ``Kd``. Node ids use the ``.db`` grammar
-    (``r:0:c:b180:...``) and every node carries the full action ``history``, so
+    with its CUMULATIVE ``b`` tokens (each ``b<chips>`` is the actor's total
+    postflop chips committed for the WHOLE line, Pio semantics -- so the 4.55bb
+    turn barrel after a 1.8bb flop bet is ``b635`` = 180 + 455, and the 9bb
+    river bet is ``b1535`` = 635 + 900) and every node carries the full action
+    ``history``, so
     the assembler's connectivity test -- a node is an ancestor of another when
     its board AND history are prefixes -- is exercised end to end. BB holds
     ``Jh9c`` (a one-pair bluff-catcher) throughout, making five hero decisions
@@ -295,33 +299,33 @@ def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
         )
 
     lead_a = (_action("Check", "check", 0.80, ev_bb=2.4),
-              _action("Bet 33%", "bet", 0.20, to_bb=1.8, pot_fraction=0.33, ev_bb=2.0))
+              _action("Bet 2bb", "bet", 0.20, to_bb=1.8, pot_fraction=0.33, ev_bb=2.0))
     face_a = (_action("Fold", "fold", 0.20, ev_bb=0.0),
               _action("Call", "call", 0.70, to_bb=1.8, ev_bb=0.9),
               _action("Raise to 6bb", "raise", 0.10, to_bb=6.0, pot_fraction=0.82, ev_bb=0.6))
     cbet_a = (_action("Check", "check", 0.40, ev_bb=2.0),
-              _action("Bet 33%", "bet", 0.60, to_bb=1.8, pot_fraction=0.33, ev_bb=2.3))
+              _action("Bet 2bb", "bet", 0.60, to_bb=1.8, pot_fraction=0.33, ev_bb=2.3))
 
     n1 = _node("r:0", "flop", flop, "BB", "BTN", 5.5, 97.5, 0.0, lead_a, (),
-               {hero: {"Check": 0.80, "Bet 33%": 0.20}})
+               {hero: {"Check": 0.80, "Bet 2bb": 0.20}})
     n2 = _node("r:0:c", "flop", flop, "BTN", "BB", 5.5, 97.5, 0.0, cbet_a, (f_check,),
-               {"AcJc": {"Bet 33%": 0.7, "Check": 0.3}})
+               {"AcJc": {"Bet 2bb": 0.7, "Check": 0.3}})
     n3 = _node("r:0:c:b180", "flop", flop, "BB", "BTN", 7.3, 97.5, 1.8, face_a,
                (f_check, f_bet), {hero: {"Call": 0.70, "Fold": 0.20, "Raise to 6bb": 0.10}})
     t_lead = (_action("Check", "check", 0.75, ev_bb=4.3),
-              _action("Bet 50%", "bet", 0.25, to_bb=4.55, pot_fraction=0.50, ev_bb=3.7))
+              _action("Bet 4.5bb", "bet", 0.25, to_bb=4.55, pot_fraction=0.50, ev_bb=3.7))
     n4 = _node("r:0:c:b180:c:2h", "turn", turn_board, "BB", "BTN", 9.1, 95.7, 0.0,
-               t_lead, (f_check, f_bet, f_call), {hero: {"Check": 0.75, "Bet 50%": 0.25}})
+               t_lead, (f_check, f_bet, f_call), {hero: {"Check": 0.75, "Bet 4.5bb": 0.25}})
     t_face = (_action("Fold", "fold", 0.40, ev_bb=0.0),
               _action("Call", "call", 0.60, to_bb=4.55, ev_bb=1.2))
-    n5 = _node("r:0:c:b180:c:2h:c:b455", "turn", turn_board, "BB", "BTN", 18.2, 91.2,
+    n5 = _node("r:0:c:b180:c:2h:c:b635", "turn", turn_board, "BB", "BTN", 18.2, 91.2,
                4.55, t_face, (f_check, f_bet, f_call, t_check, t_bet),
                {hero: {"Call": 0.60, "Fold": 0.40}})
     r_lead = (_action("Check", "check", 0.60, ev_bb=5.0),
-              _action("Bet 50%", "bet", 0.40, to_bb=9.0, pot_fraction=0.50, ev_bb=4.6))
-    n6 = _node("r:0:c:b180:c:2h:c:b455:c:Kd", "river", river_board, "BB", "BTN", 18.2,
+              _action("Bet 9bb", "bet", 0.40, to_bb=9.0, pot_fraction=0.50, ev_bb=4.6))
+    n6 = _node("r:0:c:b180:c:2h:c:b635:c:Kd", "river", river_board, "BB", "BTN", 18.2,
                91.2, 0.0, r_lead, (f_check, f_bet, f_call, t_check, t_bet, t_call),
-               {hero: {"Check": 0.60, "Bet 50%": 0.40}})
+               {hero: {"Check": 0.60, "Bet 9bb": 0.40}})
     # 70/30 (not the old 55/45): the river facing-bet node must be WORTHY
     # (65-99 window) so the fixture's canonical hand is seeded HERE and ends
     # on the river -- the July 22 2026 no-mid-hand-endings rule outlaws
@@ -329,7 +333,7 @@ def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
     # the turn check-lead could no longer assemble a single legal hand.
     r_face = (_action("Fold", "fold", 0.30, ev_bb=0.0),
               _action("Call", "call", 0.70, to_bb=9.0, ev_bb=0.8))
-    n7 = _node("r:0:c:b180:c:2h:c:b455:c:Kd:c:b900", "river", river_board, "BB", "BTN",
+    n7 = _node("r:0:c:b180:c:2h:c:b635:c:Kd:c:b1535", "river", river_board, "BB", "BTN",
                36.2, 82.2, 9.0, r_face,
                (f_check, f_bet, f_call, t_check, t_bet, t_call, r_check, r_bet),
                {hero: {"Call": 0.70, "Fold": 0.30}})
@@ -339,13 +343,13 @@ def btn_vs_bb_full_hand_2cJs7s() -> PostflopSolve:
     # the flop check-back -- a non-fold early ending the no-mid-hand-endings
     # rule rightly drops, which would leave the fixture with a single
     # assemblable hand (and no villain-frame hand at all).
-    n8 = _node("r:0:c:b180:c:2h:c:b455:c:Kd:c", "river", river_board, "BTN", "BB",
+    n8 = _node("r:0:c:b180:c:2h:c:b635:c:Kd:c", "river", river_board, "BTN", "BB",
                18.2, 91.2, 0.0,
                (_action("Check", "check", 0.30, ev_bb=4.4),
-                _action("Bet 50%", "bet", 0.70, to_bb=9.0, pot_fraction=0.50,
+                _action("Bet 9bb", "bet", 0.70, to_bb=9.0, pot_fraction=0.50,
                         ev_bb=5.1)),
                (f_check, f_bet, f_call, t_check, t_bet, t_call, r_check),
-               {"AcJc": {"Bet 50%": 0.70, "Check": 0.30}})
+               {"AcJc": {"Bet 9bb": 0.70, "Check": 0.30}})
 
     return PostflopSolve(
         solve_id="btn_vs_bb_full_hand_2cJs7s",

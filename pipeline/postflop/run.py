@@ -17,6 +17,7 @@ from typing import Any
 
 from pipeline.postflop.adapters.sqlite_db import (
     DEFAULT_MAX_NODES_PER_STREET,
+    FULL_HAND_MAX_NODES_PER_STREET,
     load_postflop_db,
 )
 from pipeline.postflop.batch import PostflopBatchResult, generate_postflop_batch
@@ -48,6 +49,7 @@ def generate_postflop_batch_from_db(
     diversify: bool = False,
     strength_buckets: tuple[str, ...] = (),
     decision_types: tuple[str, ...] = (),
+    exciting: bool = False,
     stakes: str = "$1/$2",
     live_or_online: str = "Live",
     bb_in_dollars: float = 2.0,
@@ -101,6 +103,7 @@ def generate_postflop_batch_from_db(
         decision_types=tuple(decision_types) or None,
         aggressor=preflop_aggressor(solve),
         ip_position=solve.ip_position,
+        exciting=exciting,  # 🔥 big hand + big action only (July 23 2026)
     )
 
     client = None
@@ -219,6 +222,7 @@ def compare_postflop_batches_from_db(
         decision_types=tuple(decision_types) or None,
         aggressor=preflop_aggressor(solve),
         ip_position=solve.ip_position,
+        exciting=exciting,  # 🔥 big hand + big action only (July 23 2026)
     )
 
     client = None
@@ -314,7 +318,13 @@ def generate_full_hand_batch_from_db(
     total_hands: int,
     heroes: tuple[str, ...] = (),
     streets: tuple[str, ...] = ("flop", "turn", "river"),
-    max_nodes_per_street: int | None = DEFAULT_MAX_NODES_PER_STREET,
+    # Full-hand default is RIVER-DEEP (river 2500 vs 600 elsewhere, July 2026):
+    # a shallow river sample strands turn barrel lines without their river
+    # continuation, so the no-mid-hand-endings rule dropped them and batches
+    # over-rotated into checkdown shapes.
+    max_nodes_per_street: int | dict[str, int] | None = (
+        FULL_HAND_MAX_NODES_PER_STREET
+    ),
     include_villain: bool = False,
     include_preflop: bool = True,
     stakes: str = "$1/$2",
@@ -350,6 +360,7 @@ def generate_full_hand_batch_from_db(
     final_audit: bool = False,
     strict_clean_hands: bool = False,
     action_heavy: bool = True,
+    exciting_hands: bool = False,
     llm_workers: int = 1,
     stop_check: Any = None,
     progress_callback: Any = None,
@@ -437,6 +448,7 @@ def generate_full_hand_batch_from_db(
         final_audit=final_audit,
         strict_clean_hands=strict_clean_hands,
         action_heavy=action_heavy,
+        exciting_hands=exciting_hands,
         llm_workers=llm_workers,
         stop_check=stop_check,
         progress_callback=progress_callback,
