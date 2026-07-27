@@ -703,8 +703,16 @@ preflop NLHE and PLO pipelines so work on it can't disturb them. Full docs in
   trailing `pot_odds`/`hero_equity`/`range_equity`/`spr`/`easy_*`
   diagnostics are dropped (values still inside the kept `stat_notes`; the
   admin equity bar and exploit-notes recompute both fall back to it),
-  `hand_id`/`sequence_index`/`sequence_total`/`hand_difficulty` kept;
-  standalone postflop batches keep the full schema;
+  `hand_id`/`sequence_index`/`hand_difficulty` kept (`sequence_total`
+  dropped later — the app derives it from the group size). **July 24 2026:
+  STANDALONE postflop CSVs are trimmed too** — `POSTFLOP_CSV_COLUMNS` now
+  drops the same diagnostics PLUS all four play-through tag columns (always
+  blank on standalone rows), making the standalone postflop layout
+  IDENTICAL to `PREFLOP_CSV_COLUMNS` (one shipped schema for both paths;
+  pinned by the parity test). Row dicts still carry the SUPERSET
+  (`POSTFLOP_ROW_COLUMNS`) — the writers trim, same contract as PLO.
+  Sizing-trainer batches ship the trimmed standalone schema. Pre-trim
+  standalone batches keep their old columns (review-only; regenerate);
   `audit_full_hand_batch.py` updated (0/0 on a real v7 dry-run). (3) Review
   provenance captions: the grouped full-hand preflop-leg card says
   "Preflop leg from range pack: X" (or the entry-ranges fallback) via the
@@ -1241,6 +1249,34 @@ byte-compat intact), 9-max dry batch re-verifies 0/0, real-API 9-max
 batch with the full Layer-7 stack 0/0 (gate flagged+fixed 1/2, correct
 Lojack/UTG+1 prose, pot-limit sizes exact). Tests:
 `tests/test_plo_9max_pack.py`.
+
+**🪤 PLO trap-aware difficulty (July 24 2026 — the NLHE port,
+RE-CALIBRATED).** Opt-in `generate_plo_batch(trap_difficulty=)` (admin
+checkbox "🪤 Trap-aware difficulty" + popover in the PLO Difficulty
+section; persisted `plo_gen_trap`, default OFF). The naive NLHE rule
+misfires in PLO — equities COMPRESS toward 50%, measured on the 6-max
+pack: ordinary worthy folds sit at eq−price median +0.087 / p90 +0.144, so
+every normal fold would flag. `difficulty.plo_trap_margin` therefore
+requires BOTH signals: a FOLD-trap = hand-model strength ∈
+premium/strong AND equity ≥ price + 0.04 margin + rake + a 0.10
+compression cushion (≈ +19pts past the price on the raked cash packs); a
+CONTINUE-trap = equity ≤ price − 0.04 vs an ALL-IN only (no implied odds
+can justify it). Heads-up closes-action spots only (via
+`plo_pending_after_hero` + `plo_active_player_count`); price from the
+shared `call_price` walk; rake parsed from the pack spec via
+`pack.rake_pct_from_note`. Detection needs per-spot equity — the admin
+warns when trap is ON but the equity checkbox is OFF (no spot can fire).
+Floor = the shared `pipeline/trap_grading.graded_trap_floor` (1800–2900,
+never lowers a score), applied BEFORE the band gate; counters
+`trap_floored`; run_settings `trap_difficulty` mirrored by
+`audit_plo_batch.py` (trap-aware batches re-verify without difficulty
+drift). Balanced-pool caveat: the pool pass skips equity so trap can't
+fire there; bands re-rate at commit (documented drift rule). By design
+traps are RARE: measured on the real pack, ~1/80 premium-or-strong
+fold-dominant heads-up candidates fires (a strong double-suited QJ7A-type
+folding ~20pts above the price → graded 2630) and 0/250 random worthy
+spots — the threshold sits past ~p97 of ordinary folds, which is the
+point. Tests: `tests/test_plo_trap_difficulty.py`.
 
 **PLO drops the EV axis (June 2026).** `pipeline/plo/difficulty.py` is
 3-axis — `easy = 0.57 * easy_freq + 0.29 * easy_concept + 0.14 *
@@ -1947,6 +1983,38 @@ with the policy on the river_heavy quota back-fills toward turn-enders —
 more solves relax this. Measured on v8 (5-hand dry): 21 fold-enders + 133
 checkdowns excluded, every kept hand had 1-2 bets in line, postflop peaks
 1399-2438 (was 804-1000). Tests: `tests/test_full_hand_action_heavy.py`.
+
+**📏 Bet-sizing trainer (July 24 2026, user ask) — MULTI-SOLVE fully
+balanced sizing batches.** One prominent toggle at the TOP of the postflop
+Generate page ("📏 Bet-sizing trainer — one balanced batch across ALL
+solves"): pools SIZING-VIABLE spots (menu >= 2 open-bet sizes AND the
+solver's dominant action IS one of those sized bets, worthy 65-99 — so the
+options are Check + the sizes and the question is literally "which size?")
+from EVERY readable `.db` in the folder, then greedy-balances ONE batch on
+seven axes via the shared `pipeline/balanced_select` leaf: flop/solve 1.0 ·
+street 1.0 · difficulty band 0.9 · correct size (small <45% / medium
+45-90% / big-overbet 90%+) 0.8 · situation 0.7 · position 0.5 · strength
+0.25. Module `pipeline/postflop/sizing_batch.py` (selector + class dedupe —
+one combo per (node, hand class), suit twins otherwise fill batches — pool
+scorer, global ordering, per-solve generation through the untouched
+`generate_postflop_batch(answer_style="sizing", spot_selector=...)`, merge
+into ONE CSV + meta in the balanced order with per-question `solve_key`).
+KEY FACT the pool pass exploits: postflop difficulty reads NOTHING derived
+from sampled hero equity (freq/archetype/3 modifier tags/strength only), so
+scoring at reduced runouts gives EXACT bands (pinned by
+`test_pool_difficulty_band_is_exact`); `facts.compute_range_advantage` is
+now memoised per node (`_RANGE_ADV_CACHE`, value-identical, ~0.8s saved per
+spot everywhere). Entry points: `run.generate_sizing_batch_from_paths`
+(subprocess job), CLI `scripts/generate_sizing_batch.py [--dry-run]`;
+`audit_postflop_batch.py` gained the multi-solve path (provenance
+`mode="sizing_multi"` + per-question solve_key; verified 0/0 on a real
+50q/6-solve dry batch). Meta carries `balance_report` (rendered on the
+done panel; honest shortfalls — Hard is structurally scarce in sizing
+pools). TREE LIMITS (measured July 24): barrel streets carry ONE bet size
+in every current solve and raises are single-size/all-in-only, so sizing
+questions today = the FIRST bet of a street (c-bet / probe / stab / lead
+sizes); the 200bb 8h6h5s solve request now requires all sizes on all lines.
+Tests: `tests/test_sizing_batch.py` + the sizing AppTest.
 
 **🔥 Exciting-pots toggle (July 23 2026, user ask).** Both postflop
 Generate modes gained an opt-in "🔥 Exciting pots only (big hands, big

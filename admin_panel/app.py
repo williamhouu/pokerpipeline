@@ -1000,6 +1000,176 @@ def _render_generate_page_postflop() -> None:
                     st.caption(f"`{Path(b.path).name}` — {b.error}")
         return
 
+    # --- 📏 BET-SIZING TRAINER (July 2026, user ask) ------------------------
+    # ONE prominent switch that builds a fully-balanced bet-sizing batch
+    # across EVERY solve in the folder at once (flops / streets / difficulty
+    # / correct size / situation / position / hand strength), bypassing the
+    # single-solve picker entirely. INVARIANT: when the toggle is ON this
+    # panel is the whole page (early return) -- the single-solve flow below
+    # must never render alongside it, or two GENERATE buttons share state.
+    with st.container(border=True):
+        st.markdown(
+            "### 📏 Bet-sizing trainer — one balanced batch across **all** solves"
+        )
+        sizing_on = st.toggle(
+            "Build bet-sizing questions (uses every solve in the folder; "
+            "fully balanced)",
+            value=False,
+            key="postflop_sizing_mode",
+            help=(
+                "One batch of pure bet-SIZING questions: spots where the solver "
+                "faces 2+ bet sizes and clearly prefers one, so the options are "
+                "Check plus the sizes and the question is literally *which "
+                "size?* Drawn across every readable solve in the folder and "
+                "balanced on seven axes at once: flop, street, difficulty, "
+                "correct size (small / medium / big-overbet), situation, "
+                "position, and hand strength. The single-solve picker below is "
+                "not used in this mode."
+            ),
+        )
+        if sizing_on:
+            # STALE-MODULE GUARD: this import is the first NEW pipeline name
+            # the panel touches for this feature. A panel process booted
+            # before the feature landed still holds the OLD module in
+            # sys.modules and raises ImportError here -- the documented
+            # "restart the panel after any pipeline/ edit" trap, which used
+            # to surface as a raw traceback. Fail with instructions instead.
+            try:
+                from pipeline.postflop.run import (  # noqa: PLC0415
+                    generate_sizing_batch_from_paths,
+                )
+            except ImportError:
+                st.error(
+                    "♻️ **The panel is running code older than this feature.** "
+                    "Restart the panel process to load it (running batch jobs "
+                    "survive a restart and re-attach automatically):\n\n"
+                    "```\nkill the streamlit process, then\n"
+                    "./venv/bin/streamlit run admin_panel/app.py "
+                    "--server.port 8501\n```"
+                )
+                return
+
+            sz_cols = st.columns(3)
+            with sz_cols[0]:
+                sz_count = st.number_input(
+                    "Questions", min_value=4, max_value=200, value=50,
+                    key="postflop_sizing_count",
+                )
+            with sz_cols[1]:
+                sz_model_label = st.radio(
+                    "Model",
+                    options=list(_MODEL_LABEL_TO_API),
+                    index=0,
+                    key="postflop_sizing_model",
+                    help="Opus for production; Sonnet for cheap iteration.",
+                )
+            with sz_cols[2]:
+                sz_dry = st.toggle(
+                    "Dry run (no API spend)",
+                    value=False,
+                    key="postflop_sizing_dryrun",
+                    help="Real spots/options/balance with placeholder prose. Free.",
+                )
+            sz_layer7 = st.radio(
+                "Layer 7 mode",
+                options=["Off", "Flag only", "Audit & auto-fix"],
+                index=2,
+                horizontal=True,
+                key="postflop_sizing_layer7",
+                help=(
+                    "Same as the single-solve modes: auto-fix rewrites flagged "
+                    "prose and re-validates it; only the prose can change."
+                ),
+            )
+            # Explanation-prompt picker (July 2026, user ask) -- the same
+            # library selectbox the full-hand mode uses, defaulting to the
+            # ★ active entry. The chosen TEXT ships as system_prompt and the
+            # NAME lands in meta run_settings.prompt_name.
+            sz_prompt_text: str | None = None
+            sz_prompt_name: str | None = None
+            _sz_lib = _postflop_prompt_library()
+            _ensure_postflop_library_seeded(_sz_lib)
+            _sz_entries = _sz_lib.list()
+            if _sz_entries:
+                _sz_active = _sz_lib.active_slug()
+                _sz_slugs = [e.slug for e in _sz_entries]
+                _sz_names = {e.slug: e.name for e in _sz_entries}
+                if st.session_state.get("postflop_sizing_prompt_select") not in _sz_slugs:
+                    st.session_state["postflop_sizing_prompt_select"] = (
+                        _sz_active or _sz_slugs[0]
+                    )
+                _sz_chosen = st.selectbox(
+                    "Explanation prompt",
+                    options=_sz_slugs,
+                    format_func=lambda s: (
+                        f"{_sz_names[s]}  ★ active"
+                        if s == _sz_active else _sz_names[s]
+                    ),
+                    key="postflop_sizing_prompt_select",
+                    help=(
+                        "Which POSTFLOP system prompt writes the sizing "
+                        "explanations. Defaults to the ★ active entry; manage "
+                        "entries on the Prompt page (Postflop mode). The "
+                        "factor-list entry measured ~3x cheaper with far "
+                        "fewer audit flags than the plain-English one."
+                    ),
+                )
+                _sz_entry = _sz_lib.get(_sz_chosen)
+                sz_prompt_text = _sz_entry.text
+                sz_prompt_name = _sz_entry.name
+            else:
+                st.caption("Explanations use the active postflop prompt "
+                           "(Prompt page, Postflop mode).")
+            sz_name = st.text_input(
+                "Output filename",
+                value="",
+                placeholder=f"SIZING TRAINER {int(sz_count)}q <timestamp>.csv",
+                key="postflop_sizing_filename",
+            )
+            st.caption(
+                f"▶ Will pool sizing spots from **{len(usable)} solve(s)**, "
+                "balance them (flop · street · difficulty · correct size · "
+                "situation · position · strength), and generate "
+                f"**{int(sz_count)}** questions. The pool-scoring pre-pass "
+                "runs a few minutes before generation starts."
+            )
+            if not sz_dry and not os.environ.get("ANTHROPIC_API_KEY"):
+                st.warning(
+                    "No `ANTHROPIC_API_KEY` set — the run falls back to "
+                    "dry-run (placeholder prose)."
+                )
+            if st.button(
+                "GENERATE SIZING BATCH",
+                disabled=jobs.has_active_job(),
+                type="primary",
+                use_container_width=True,
+                key="postflop_sizing_generate",
+            ):
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                POSTFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                fname = sz_name.strip() or f"SIZING TRAINER {int(sz_count)}q {stamp}.csv"
+                if not fname.endswith(".csv"):
+                    fname += ".csv"
+                jobs.start_subprocess_job(
+                    generate_sizing_batch_from_paths,
+                    label=(
+                        f"📏 Sizing trainer: {len(usable)} solves "
+                        f"({int(sz_count)} q)"
+                    ),
+                    db_paths=tuple(s.path for s in usable),
+                    output_path=str(POSTFLOP_OUTPUT_DIR / fname),
+                    total_questions=int(sz_count),
+                    model=_MODEL_LABEL_TO_API[sz_model_label],
+                    dry_run=sz_dry,
+                    system_prompt=sz_prompt_text,
+                    prompt_name=sz_prompt_name,
+                    run_claim_checker=sz_layer7 == "Flag only",
+                    revise_pass=sz_layer7 == "Audit & auto-fix",
+                    final_audit=sz_layer7 == "Audit & auto-fix",
+                )
+                st.rerun()
+            return
+
     # 2. Pick a solve (labelled by its own metadata). Known-problem solves
     # carry a ⚠️ in the list and a plain-English explanation below (July 22
     # 2026, user ask: "flag the solves that make things difficult so I
@@ -2215,6 +2385,21 @@ def _render_postflop_result_ui(result: Any) -> None:
             f"Tokens: {result.total_input_tokens:,} in / "
             f"{result.total_output_tokens:,} out · model {result.model_used}"
         )
+    # 📏 Sizing-trainer batches carry a balance report (achieved vs target
+    # per axis) -- render the plain-English lines so shortfalls are visible.
+    _bal = getattr(result, "balance_report", None)
+    if _bal:
+        from pipeline.balanced_select import format_balance_report  # noqa: PLC0415
+
+        with st.expander("🎛️ Balance report", expanded=True):
+            for _line in format_balance_report(_bal):
+                st.caption(_line)
+            _per = getattr(result, "per_solve_written", None)
+            if _per:
+                st.caption(
+                    "Per solve — "
+                    + " · ".join(f"{k} {v}" for k, v in sorted(_per.items()))
+                )
     out = Path(result.output_path)
     st.caption(f"CSV: `{out}`")
     try:
@@ -9914,6 +10099,7 @@ _PLO_GEN_SAVED_KEYS: tuple[str, ...] = (
     "plo_gen_player_counts",
     "plo_difficulty_preset",
     "plo_gen_custom_band",
+    "plo_gen_trap",
     "plo_worthy_min",
     "plo_worthy_max",
     "plo_exclude_ambiguous",
@@ -10018,6 +10204,7 @@ def _seed_plo_generate_settings() -> None:
         # Balanced action mix (July 2026): ON by default -- the raw draw on
         # the 9-max pack is ~all facing-3-bet spots.
         "plo_gen_diversify": _flag(saved.get("plo_gen_diversify"), True),
+        "plo_gen_trap": _flag(saved.get("plo_gen_trap"), False),
         # 🎛️ Fully balanced (July 2026): OFF by default -- a deliberate
         # bigger-batch mode (24-48q recommended).
         "plo_gen_balanced": _flag(saved.get("plo_gen_balanced"), False),
@@ -10610,6 +10797,40 @@ def render_plo_generate_page() -> None:
             "axes still will). Switch the preset to **Mixed** for a third "
             "each of Easy / Medium / Hard."
         )
+    # 🪤 Trap-aware difficulty (July 2026, the NLHE port re-calibrated for
+    # PLO's equity compression -- see pipeline/plo/difficulty.py).
+    trap_cols = st.columns([3, 1])
+    with trap_cols[0]:
+        # key-only, no value= (the documented value-vs-key precedence trap):
+        # _seed_plo_generate_settings owns the default/persisted state.
+        plo_trap = st.checkbox(
+            "🪤 Trap-aware difficulty",
+            key="plo_gen_trap",
+            help=(
+                "Floors a genuinely counterintuitive PURE spot to a graded "
+                "1800–2900 rating: a premium/strong-shaped hand the solver "
+                "FOLDS although its equity clears the pot-odds price by a "
+                "wide, PLO-calibrated margin, or a call of an ALL-IN below "
+                "the price. Score-only — the answer, options, and prose "
+                "never change. Needs the per-spot equity checkbox ON (below, "
+                "section 3) — without equity no spot can fire. Recommended "
+                "for Medium/Hard batches; without it a pure 100%-frequency "
+                "spot can never rate Hard."
+            ),
+        )
+    with trap_cols[1], st.popover("ℹ️ How traps grade"):
+        st.markdown(
+            "A **trap** = the solver's action contradicts the naive "
+            "equity-vs-price read. PLO equities compress toward 50%, so an "
+            "ordinary fold already sits ~9 points above the price (measured "
+            "on the 6-max pack: median +8.7, p90 +14.4) — the detector "
+            "therefore requires a **premium/strong** hand shape AND equity "
+            "clearing the price by margin + rake + a 10-point compression "
+            "cushion before a fold flags. Calls flag only vs an **all-in** "
+            "(no implied odds) with equity clearly below the price. The "
+            "floor grades 1800–2900 by how large the contradiction is "
+            "(`pipeline/trap_grading.py`), and never lowers a score."
+        )
 
     with st.expander(
         "Advanced filters (worthiness window · EV-gap gate)", expanded=True
@@ -10789,6 +11010,15 @@ def render_plo_generate_page() -> None:
         "equity is ~60x heavier than Hold'em). The preview is always "
         "equity-off regardless.",
     )
+    # 🪤 Trap-aware (section 2) detects on equity-vs-price, so it silently
+    # does nothing without per-spot equity -- say so HERE, next to the switch
+    # that fixes it.
+    if st.session_state.get("plo_gen_trap") and not compute_eq:
+        st.warning(
+            "🪤 **Trap-aware difficulty is ON but equity is OFF** — no spot "
+            "can fire without per-spot equity. Tick the equity checkbox "
+            "above for trap detection to work."
+        )
     # --- Layer-7 LLM audit (mirrors the NLHE Generate page; July 2026) ------
     # ONE mutually-exclusive choice; defaults to the MAXIMUM audit per the
     # user's standing request. The auto-fix runs the claim check ITSELF as
@@ -11077,6 +11307,7 @@ def render_plo_generate_page() -> None:
             balanced=balanced,
             min_difficulty=lo,
             max_difficulty=hi,
+            trap_difficulty=plo_trap,
             compute_equity=compute_eq,
             answer_style=style,
             display_in_bb=display_in_bb,

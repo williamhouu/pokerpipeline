@@ -535,10 +535,75 @@ def generate_preflop_entry_batch_from_db(
     )
 
 
+def generate_sizing_batch_from_paths(
+    *,
+    db_paths: tuple[str, ...],
+    output_path: str | Path,
+    total_questions: int = 50,
+    stakes: str = "$1/$2",
+    live_or_online: str = "Live",
+    bb_in_dollars: float = 2.0,
+    display_in_bb: bool = True,
+    model: str = DEFAULT_MODEL,
+    dry_run: bool = False,
+    min_frequency: float = 0.65,
+    max_frequency: float = 0.99,
+    system_prompt: str | None = None,
+    prompt_name: str | None = None,
+    run_claim_checker: bool = False,
+    revise_pass: bool = False,
+    final_audit: bool = False,
+    progress_callback: Any = None,
+) -> Any:
+    """📏 Bet-sizing trainer: ONE fully-balanced batch across ALL the solves.
+
+    The picklable subprocess-job entry for the admin's sizing mode (mirrors
+    :func:`generate_postflop_batch_from_db`): ships the ``.db`` PATHS to the
+    child, which loads every solve there, pools + balances the sizing-viable
+    spots (flops / streets / difficulty / correct size / situation / position
+    / strength), and writes ONE merged CSV + meta. See
+    :mod:`pipeline.postflop.sizing_batch` for the full contract.
+    """
+    from pipeline.postflop.sizing_batch import generate_sizing_batch  # noqa: PLC0415
+
+    client = None
+    if not dry_run and os.environ.get("ANTHROPIC_API_KEY"):
+        from anthropic import Anthropic  # noqa: PLC0415 -- only for a real run
+
+        client = Anthropic()
+
+    resolved_name = prompt_name
+    if system_prompt is None:
+        system_prompt = load_postflop_system_prompt()
+        resolved_name = resolved_name or "(active postflop prompt)"
+
+    return generate_sizing_batch(
+        list(db_paths),
+        output_path,
+        total_questions=total_questions,
+        client=client,
+        model=model,
+        dry_run=dry_run or client is None,
+        display_in_bb=display_in_bb,
+        min_frequency=min_frequency,
+        max_frequency=max_frequency,
+        system_prompt=system_prompt,
+        prompt_name=resolved_name,
+        run_claim_checker=run_claim_checker,
+        revise_pass=revise_pass,
+        final_audit=final_audit,
+        stakes=stakes,
+        live_or_online=live_or_online,
+        bb_in_dollars=bb_in_dollars,
+        progress_callback=progress_callback,
+    )
+
+
 __all__ = [
     "POSTFLOP_OUTPUT_DIR",
     "compare_postflop_batches_from_db",
     "generate_full_hand_batch_from_db",
     "generate_postflop_batch_from_db",
     "generate_preflop_entry_batch_from_db",
+    "generate_sizing_batch_from_paths",
 ]

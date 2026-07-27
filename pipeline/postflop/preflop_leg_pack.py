@@ -54,7 +54,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from pipeline.postflop.animation_script import build_preflop_animation_script
-from pipeline.postflop.format_writer import POSTFLOP_CSV_COLUMNS
+from pipeline.postflop.format_writer import POSTFLOP_ROW_COLUMNS
 from pipeline.postflop.preflop_entry import _open_to_bb
 from pipeline.provenance import build_notes, parse_notes
 from pipeline.postflop.solve import PostflopSolve
@@ -1112,7 +1112,7 @@ def build_pack_preflop_leg_row(
     # SOLVE's so every leg of one hand reads the same game header.
     from pipeline.postflop.action_history import build_context_line  # noqa: PLC0415
 
-    row = {col: preflop_row.get(col, "") for col in POSTFLOP_CSV_COLUMNS}
+    row = {col: preflop_row.get(col, "") for col in POSTFLOP_ROW_COLUMNS}
     # Reuse the preflop writer's enriched Notes parts (chart / situation /
     # node reference), swapping only the provenance sentence below.
     _pre = parse_notes(preflop_row.get("Notes", ""))

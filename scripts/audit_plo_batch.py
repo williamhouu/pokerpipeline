@@ -38,7 +38,7 @@ from pipeline.plo.fact_extractor import extract_plo_facts  # noqa: E402
 from pipeline.plo.format_writer import PLO_CSV_COLUMNS, build_plo_row  # noqa: E402
 from pipeline.plo.node_enumerator import enumerate_plo_nodes  # noqa: E402
 from pipeline.plo.options import build_options  # noqa: E402
-from pipeline.plo.pack import discover_plo_pack  # noqa: E402
+from pipeline.plo.pack import discover_plo_pack, rake_pct_from_note  # noqa: E402
 from pipeline.plo.spot_sampler import (  # noqa: E402
     sample_plo_spot,
     strip_artifact_allins,
@@ -128,7 +128,16 @@ def main() -> int:
             compute_equity=bool(rs["compute_equity"]),
             rng=random.Random(seed),
         )
-        difficulty = compute_plo_difficulty(facts)
+        # 🪤 Mirror the batch's trap-aware flag (run_settings) or the rebuild
+        # false-flags Difficulty Rating on every trap row of a trap-aware
+        # batch -- the same rule as the NLHE re-verifiers.
+        difficulty = compute_plo_difficulty(
+            facts,
+            apply_trap_bump=bool(rs.get("trap_difficulty", False)),
+            stack_bb=stack_bb,
+            ante_bb=float(rs.get("ante_bb", 0.0)),
+            rake_pct=rake_pct_from_note(pack.spec.rake_note),
+        )
         options, correct = build_options(facts, style=rs["answer_style"])
         rebuilt = build_plo_row(
             facts,

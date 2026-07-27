@@ -417,6 +417,21 @@ def discover_plo_packs(bases: tuple[Path, ...]) -> tuple[PloPack, ...]:
     return tuple(packs)
 
 
+def rake_pct_from_note(rake_note: str) -> float:
+    """The rake percentage in a spec's ``rake_note`` ("5% up to 1bb" -> 0.05).
+
+    The notes are documentation strings, so this parses defensively: the
+    first ``<number>%`` found wins; no percentage (e.g. "no rake (MTT)") is
+    0.0. Used by the 🪤 trap detector's fold-side rake cushion -- an
+    under-read (0.0) only makes fold-traps slightly easier to fire, never
+    breaks a batch.
+    """
+    import re  # noqa: PLC0415
+
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", rake_note or "")
+    return float(m.group(1)) / 100.0 if m else 0.0
+
+
 def range_at(pack: PloPack, stem: str) -> list[RngEntry]:
     """Read the range for a node identified by its action-path stem."""
     return read_rng(pack.root / f"{stem}.rng")

@@ -55,7 +55,7 @@ from pipeline.plo.node_enumerator import (
     plo_node_action_context,
 )
 from pipeline.plo.options import build_options
-from pipeline.plo.pack import PloActionType, PloPack
+from pipeline.plo.pack import PloActionType, PloPack, rake_pct_from_note
 from pipeline.plo.position import position_bucket
 from pipeline.plo.question_extractor import (
     MAX_TOP_FREQUENCY,
@@ -266,6 +266,7 @@ def generate_plo_batch(
     pack_label: str | None = None,
     min_difficulty: int = 0,
     max_difficulty: int = 10_000,
+    trap_difficulty: bool = False,
     generate_explanations: bool = False,
     explanation_client: Any = None,
     explanation_model: str = DEFAULT_MODEL,
@@ -362,6 +363,9 @@ def generate_plo_batch(
     # id and the label were the same value for the original 6-max pack).
     if pack_label is None:
         pack_label = pack.pack_id
+    # Rake percentage for the 🪤 trap detector's fold-side cushion, parsed
+    # from the pack registration's rake_note (0.0 for the no-rake MTT packs).
+    pack_rake_pct = rake_pct_from_note(pack.spec.rake_note)
     # Resolve ONE shared client up front for every LLM pass (generation, the
     # claim-check gate, the reviser, the final audit). The reviser treats
     # ``None`` as a no-op by contract, so leaving this to each callee's lazy
@@ -469,6 +473,8 @@ def generate_plo_batch(
     revise_discarded = 0
     revise_unchanged = 0
     soft_flagged_rows = 0
+    # 🪤 committed questions the opt-in trap floor re-rated (0 when off).
+    trap_floored = 0
     explanations_written = 0
     explanations_failed = 0
     explanation_failure_reasons: list[str] = []
@@ -542,6 +548,9 @@ def generate_plo_batch(
                 "stack_bb": stack_bb,
                 "min_difficulty": min_difficulty,
                 "max_difficulty": max_difficulty,
+                # 🪤 mirrored by scripts/audit_plo_batch.py so trap-aware
+                # batches re-verify without false difficulty drift.
+                "trap_difficulty": trap_difficulty,
                 "generate_explanations": generate_explanations,
                 "model": explanation_model if generate_explanations else "",
                 "run_claim_checker": run_claim_checker,
@@ -570,6 +579,8 @@ def generate_plo_batch(
                 "revise_unchanged": revise_unchanged,
                 # Deterministic soft validators (position wording, v1).
                 "soft_flagged_rows": soft_flagged_rows,
+                # 🪤 committed questions the opt-in trap floor re-rated.
+                "trap_floored": trap_floored,
                 # Deep-stack spots whose real strategy mixes the artifact
                 # All-in at >= 5% -- silenced (never asked); trace dust was
                 # stripped + renormalised (per-question artifact_stripped
@@ -652,7 +663,17 @@ def generate_plo_batch(
             ):
                 ev_gap_filtered_out += 1
                 continue
-            pool_diff = compute_plo_difficulty(pool_facts)
+            # NB: the pool pass skips equity (compute_equity=False), so the
+            # 🪤 trap floor cannot fire here -- a trap spot's band ESTIMATE
+            # may read Easy in the pool and re-rate at commit (the report is
+            # recomputed from the real facts, the documented drift rule).
+            pool_diff = compute_plo_difficulty(
+                pool_facts,
+                apply_trap_bump=trap_difficulty,
+                stack_bb=stack_bb,
+                ante_bb=ante_bb,
+                rake_pct=pack_rake_pct,
+            )
             if not min_difficulty <= pool_diff.score <= max_difficulty:
                 difficulty_filtered_out += 1
                 continue
@@ -856,6 +877,7 @@ def generate_plo_batch(
         nonlocal aborted, consecutive_failures, explanations_failed
         nonlocal explanations_written, claim_flagged_rows, soft_flagged_rows
         nonlocal revise_flagged, revise_fixed, revise_discarded, revise_unchanged
+        nonlocal trap_floored
         node = spot.node
         d = res.get("deltas") or {}
         explanations_written += d.get("explanations_written", 0)
@@ -939,6 +961,8 @@ def generate_plo_batch(
         # JSON issue list) -- same convention as the NLHE claim_check.
         row["claim_check"] = claim_check_cell
         rows.append(row)
+        if difficulty.trap_bump_applied:
+            trap_floored += 1
         record: dict[str, Any] = {
             "number": len(rows),
             "node_id": node.node_id,
@@ -1003,8 +1027,16 @@ def generate_plo_batch(
             return None
         # Difficulty-band filter BEFORE the (paid) LLM call, so out-of-band
         # spots cost no API spend -- the same gate the NLHE Generate page
-        # uses.
-        difficulty = compute_plo_difficulty(facts)
+        # uses. The opt-in 🪤 trap floor applies BEFORE the band gate (so a
+        # trap-floored spot can qualify for a Medium/Hard band), exactly
+        # like the NLHE batch.
+        difficulty = compute_plo_difficulty(
+            facts,
+            apply_trap_bump=trap_difficulty,
+            stack_bb=stack_bb,
+            ante_bb=ante_bb,
+            rake_pct=pack_rake_pct,
+        )
         if not min_difficulty <= difficulty.score <= max_difficulty:
             difficulty_filtered_out += 1
             return None

@@ -55,7 +55,10 @@ EXACT_COLS = (
     "Table Size", "Default Stack", "Seats", "POT", "Question", "Question Type",
     "Relative Position", "Position Matchup", "Cash/Tourney", "Live or Online",
     "action_frequencies", "action_ev_bb", "archetype",
-    "board_texture", "pot_odds", "spr", "neutral_credit", "Notes", "ranges",
+    # NB: pot_odds / spr were EXACT-checked while the standalone CSV carried
+    # them; dropped July 2026 with the standalone declutter (values live in
+    # stat_notes). Old batches' extra columns are simply no longer compared.
+    "board_texture", "neutral_credit", "Notes", "ranges",
     # Shared-schema classification columns (deterministic; no MC equity).
     "Preflop Pot Type", "Pot Participant", "Stack Depth",
     # The app's animation timeline (July 2026) -- fully deterministic.
@@ -77,6 +80,17 @@ def _pct(cell: str) -> float | None:
         return None
 
 
+def _load_solve_from_provenance(prov: dict, db_path: str):
+    return load_postflop_db(
+        db_path,
+        streets=tuple(prov.get("streets") or ("flop", "turn", "river")),
+        max_nodes_per_street=prov.get("max_nodes_per_street"),
+        stakes=prov.get("stakes", ""),
+        live_or_online=prov.get("live_or_online", "Online"),
+        bb_in_dollars=prov.get("bb_in_dollars", 1.0),
+    )
+
+
 def audit_batch(csv_path: Path, db_override: str | None) -> int:
     rows = list(csv.DictReader(csv_path.open(encoding="utf-8-sig")))
     meta = json.loads(csv_path.with_suffix(".meta.json").read_text(encoding="utf-8"))
@@ -86,6 +100,39 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:
         return 1
 
     prov = meta.get("provenance", {}) or {}
+    rs = meta.get("run_settings", {})
+
+    # --- 📏 sizing_multi batches (July 2026): rows span SEVERAL solves; each
+    # meta question carries its solve_key and provenance.solves maps key ->
+    # the per-solve load recipe. Group rows by key and audit each group
+    # against its own reloaded solve; the totals aggregate across groups.
+    if prov.get("mode") == "sizing_multi":
+        print("=" * 72)
+        print(f"POSTFLOP SIZING BATCH AUDIT (multi-solve): {csv_path.name}")
+        print("=" * 72)
+        exact_failures = tolerance_notes = 0
+        by_key: dict[str, list[tuple[dict, dict]]] = {}
+        for row, q in zip(rows, questions, strict=True):
+            by_key.setdefault(q.get("solve_key", "?"), []).append((row, q))
+        for key in sorted(by_key):
+            sub_prov = (prov.get("solves") or {}).get(key)
+            db_path = (sub_prov or {}).get("db_path")
+            if not db_path or not Path(db_path).is_file():
+                print(f"  CANNOT AUDIT solve {key!r}: no .db on disk ({db_path!r})")
+                exact_failures += len(by_key[key])
+                continue
+            print(f"--- solve {key} ({len(by_key[key])} rows) ---")
+            solve = _load_solve_from_provenance(sub_prov, db_path)
+            pairs = by_key[key]
+            ef, tn = _audit_rows(
+                [r for r, _ in pairs], [q for _, q in pairs], solve, rs
+            )
+            exact_failures += ef
+            tolerance_notes += tn
+        print(f"\n=== {len(rows)} rows | EXACT failures: {exact_failures} "
+              f"| borderline notes: {tolerance_notes} ===")
+        return 1 if exact_failures else 0
+
     db_path = db_override or prov.get("db_path")
     if not db_path or not Path(db_path).is_file():
         print(
@@ -95,27 +142,31 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:
         )
         return 1
 
-    rs = meta.get("run_settings", {})
-    solve = load_postflop_db(
-        db_path,
-        streets=tuple(prov.get("streets") or ("flop", "turn", "river")),
-        max_nodes_per_street=prov.get("max_nodes_per_street"),
-        stakes=prov.get("stakes", ""),
-        live_or_online=prov.get("live_or_online", "Online"),
-        bb_in_dollars=prov.get("bb_in_dollars", 1.0),
-    )
+    solve = _load_solve_from_provenance(prov, db_path)
     answer_style = rs.get("answer_style", "auto")
     display_in_bb = bool(rs.get("display_in_bb", True))
     equity_runouts = int(rs.get("equity_runouts", DEFAULT_EQUITY_RUNOUTS))
-    # Mirror the batch's trap-aware difficulty flag or the rebuild
-    # false-flags Difficulty Rating on every trap row of a trap-aware batch.
-    trap_difficulty = bool(rs.get("trap_difficulty", False))
 
     print("=" * 72)
     print(f"POSTFLOP BATCH AUDIT: {csv_path.name}")
     print(f"  solve={Path(db_path).name}  rows={len(rows)}  "
           f"style={answer_style}  bb={display_in_bb}  runouts={equity_runouts}")
     print("=" * 72)
+
+    exact_failures, tolerance_notes = _audit_rows(rows, questions, solve, rs)
+    print(f"\n=== {len(rows)} rows | EXACT failures: {exact_failures} "
+          f"| borderline notes: {tolerance_notes} ===")
+    return 1 if exact_failures else 0
+
+
+def _audit_rows(rows: list, questions: list, solve, rs: dict) -> tuple[int, int]:
+    """Diff CSV rows against rebuilds from ``solve``; returns (exact, notes)."""
+    answer_style = rs.get("answer_style", "auto")
+    display_in_bb = bool(rs.get("display_in_bb", True))
+    equity_runouts = int(rs.get("equity_runouts", DEFAULT_EQUITY_RUNOUTS))
+    # Mirror the batch's trap-aware difficulty flag or the rebuild
+    # false-flags Difficulty Rating on every trap row of a trap-aware batch.
+    trap_difficulty = bool(rs.get("trap_difficulty", False))
 
     exact_failures = 0
     tolerance_notes = 0
@@ -192,9 +243,7 @@ def audit_batch(csv_path: Path, db_override: str | None) -> int:
         except (ValueError, KeyError):
             pass
 
-    print(f"\n=== {len(rows)} rows | EXACT failures: {exact_failures} "
-          f"| borderline notes: {tolerance_notes} ===")
-    return 1 if exact_failures else 0
+    return exact_failures, tolerance_notes
 
 
 if __name__ == "__main__":

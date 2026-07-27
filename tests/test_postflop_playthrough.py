@@ -46,12 +46,25 @@ from pipeline.postflop.spot_sampler import enumerate_spots  # noqa: E402
 
 # --- schema -----------------------------------------------------------------
 def test_sequence_columns_in_schema() -> None:
+    # The play-through tags live in the row SUPERSET; the standalone CSV
+    # drops them entirely (July 2026 declutter) and the full-hand CSV keeps
+    # hand_id / sequence_index (sequence_total = the group size, redundant).
+    from pipeline.postflop.format_writer import (
+        FULL_HAND_CSV_COLUMNS,
+        POSTFLOP_ROW_COLUMNS,
+    )
+
     for col in ("hand_id", "sequence_index", "sequence_total"):
-        assert col in POSTFLOP_CSV_COLUMNS
+        assert col in POSTFLOP_ROW_COLUMNS
+        assert col not in POSTFLOP_CSV_COLUMNS
+    assert "hand_id" in FULL_HAND_CSV_COLUMNS
+    assert "sequence_index" in FULL_HAND_CSV_COLUMNS
 
 
-def test_standalone_postflop_batch_leaves_sequence_blank(tmp_path: Path) -> None:
-    """A normal per-spot batch writes the new columns but they stay blank."""
+def test_standalone_postflop_batch_has_no_playthrough_columns(tmp_path: Path) -> None:
+    """A per-spot batch ships the TRIMMED schema: no play-through tags, no
+    diagnostic columns (July 2026 declutter -- they were always blank or
+    duplicated stat_notes on standalone rows)."""
     from pipeline.postflop.batch import generate_postflop_batch
 
     out = tmp_path / "spots.csv"
@@ -60,10 +73,12 @@ def test_standalone_postflop_batch_leaves_sequence_blank(tmp_path: Path) -> None
     )
     rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
     assert rows
-    for r in rows:
-        assert r["hand_id"] == ""
-        assert r["sequence_index"] == ""
-        assert r["sequence_total"] == ""
+    for col in ("hand_id", "sequence_index", "sequence_total", "hand_difficulty",
+                "pot_odds", "hero_equity", "range_equity", "spr",
+                "easy_freq", "easy_ev", "easy_concept", "easy_hand"):
+        assert col not in rows[0], col
+    # The math still ships -- inside stat_notes (the admin panel fallback).
+    assert rows[0]["stat_notes"]
 
 
 # --- preflop entry ----------------------------------------------------------
@@ -117,7 +132,8 @@ def test_preflop_entry_row_schema_and_stage() -> None:
     expl = placeholder_preflop_entry_explanation(facts, opts, correct)
     row = build_preflop_entry_row(facts, expl, 1, hand_id="h1", sequence_index=1,
                                   sequence_total=4)
-    assert set(row) == set(POSTFLOP_CSV_COLUMNS)
+    from pipeline.postflop.format_writer import POSTFLOP_ROW_COLUMNS
+    assert set(row) == set(POSTFLOP_ROW_COLUMNS)
     assert row["Hand Stage"] == "Preflop"
     assert row["Cards on Table"] == ""  # no board preflop
     assert row["hand_id"] == "h1"
@@ -608,7 +624,7 @@ def test_preflop_entry_batch_blank_hand_id(tmp_path: Path) -> None:
     assert res.questions_written > 0
     rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
     for r in rows:
-        assert r["hand_id"] == ""  # standalone: no play-through linkage
+        assert "hand_id" not in r  # standalone CSVs drop the play-through tags
         assert r["Hand Stage"] == "Preflop"
         # worthiness-gated to a real defend (mixed call frequency).
         assert r["Correct Answer"] in ("Call", "Mostly Call", "Always Call")

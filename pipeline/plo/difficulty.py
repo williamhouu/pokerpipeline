@@ -128,6 +128,8 @@ class PloDifficultyResult:
     easy_hand: float
     easy_blend: float
     ev_available: bool = True
+    # True when the opt-in 🪤 trap floor re-rated this spot (see plo_trap_margin).
+    trap_bump_applied: bool = False
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -138,13 +140,113 @@ def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def compute_plo_difficulty(facts: PloFacts) -> PloDifficultyResult:
+# === 🪤 trap-aware floor (opt-in, July 2026 -- the NLHE port, RE-CALIBRATED) =
+# PLO equities COMPRESS toward 50%, so a routinely-correct fold holds equity
+# well above the naive break-even price -- measured on the 6-max 100bb pack
+# (150 worthy heads-up closes-action spots, July 2026): ordinary folds sit at
+# eq - price median +0.087, p90 +0.144, max +0.247. The NLHE fold rule
+# (margin 0.04 + rake) would therefore flag essentially EVERY normal PLO
+# fold. The PLO detector adds a COMPRESSION CUSHION on the fold side and a
+# hand-shape gate (the hand model's own premium/strong bucket -- a
+# pretty-looking hand that folds is the trap being taught), so only the far
+# tail past the ordinary-fold distribution fires. The continue side fires
+# only on an ALL-IN price (call closes all betting -> no implied odds can
+# justify a below-price call), which ordinary continues never approach
+# (measured min -0.011).
+_TRAP_EQUITY_MARGIN: float = 0.04  # same noise margin as NLHE / postflop
+_PLO_FOLD_COMPRESSION_CUSHION: float = 0.10  # past p90 of ordinary folds
+
+
+def plo_trap_margin(
+    facts: PloFacts,
+    *,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
+    rake_pct: float = 0.0,
+) -> float | None:
+    """The naive ``|equity - price|`` margin when this spot is a trap, else None.
+
+    A trap = the solver's dominant action contradicts the equity-vs-price
+    baseline in a way a PLO player would find genuinely counterintuitive:
+
+    * FOLD-trap: a premium/strong-shaped hand folds although its equity
+      clears the price by margin + rake + the compression cushion (see the
+      calibration note above). Both signals must agree -- the hand model
+      says "pretty", the pot odds say "way ahead of the price" -- so PLO's
+      equity compression can't flag ordinary folds.
+    * CONTINUE-trap: the solver calls/raises although equity sits clearly
+      BELOW the price, and the price is an ALL-IN price (villain's action is
+      a jam, so no implied odds exist to justify it).
+
+    HEADS-UP closes-action spots only (mirrors NLHE: the baseline is only
+    well-defined against one live opponent when hero's call/fold ends the
+    betting). Returns None -- never a trap -- when equity wasn't computed
+    (``compute_equity=False``), when no live price exists, or when any gate
+    fails. The returned margin is RAKE-BLIND (what the player naively
+    feels), matching :func:`pipeline.trap_grading.graded_trap_floor`.
+    """
+    from pipeline.plo.action_history import call_price, price_is_live  # noqa: PLC0415
+    from pipeline.plo.fact_extractor import identify_villain  # noqa: PLC0415
+    from pipeline.plo.node_enumerator import (  # noqa: PLC0415
+        PloActionType,
+        plo_active_player_count,
+        plo_pending_after_hero,
+    )
+
+    eq = facts.hero_equity_vs_villain
+    if eq is None:
+        return None
+    node = facts.spot.node
+    if plo_active_player_count(node) != 2:  # noqa: PLR2004 -- heads-up only
+        return None
+    _pending, closes_action = plo_pending_after_hero(node)
+    if not closes_action:
+        return None
+    if not price_is_live(node.history_before, node.actor):
+        return None
+    pot, to_call = call_price(
+        node.history_before, node.actor, stack_bb=stack_bb, ante_bb=ante_bb
+    )
+    if to_call <= 0:
+        return None
+    price = to_call / (pot + to_call)
+    folds = facts.spot.dominant_action.startswith("Fold")
+    if folds:
+        if facts.hand_class.strength not in ("premium", "strong"):
+            return None
+        threshold = (
+            price + _TRAP_EQUITY_MARGIN + rake_pct + _PLO_FOLD_COMPRESSION_CUSHION
+        )
+        return abs(eq - price) if eq >= threshold else None
+    villain = identify_villain(node)
+    if villain is None or villain[1].action is not PloActionType.ALL_IN:
+        return None  # implied odds may justify a below-price call
+    return abs(eq - price) if eq <= price - _TRAP_EQUITY_MARGIN else None
+
+
+def compute_plo_difficulty(
+    facts: PloFacts,
+    *,
+    apply_trap_bump: bool = False,
+    stack_bb: float = 100.0,
+    ante_bb: float = 0.0,
+    rake_pct: float = 0.0,
+) -> PloDifficultyResult:
     """Compute the PLO difficulty rating with its per-axis breakdown.
 
     Three axes (freq / concept / hand); the EV axis is intentionally NOT part of
     the blend (see the module docstring for why). ``easy_ev`` and ``ev_available``
     are still computed and returned, but only for the CSV diagnostic and possible
     future re-introduction -- they do not affect ``score``.
+
+    ``apply_trap_bump`` (opt-in) floors a counterintuitive spot (see
+    :func:`plo_trap_margin`) to its GRADED trap floor
+    (:func:`pipeline.trap_grading.graded_trap_floor`), so a pure-but-deceptive
+    spot rates Medium-to-Hard. Requires the batch to have computed equity
+    (``compute_equity=True``, the default) -- without equity no spot can fire.
+    ``stack_bb`` / ``ante_bb`` / ``rake_pct`` come from the pack spec and feed
+    the price walk + the fold-side rake cushion. Default off = byte-identical
+    to the pre-trap behaviour.
     """
     # axis 1: freq
     easy_freq = _clip01((facts.spot.dominant_frequency - _FREQ_FLOOR) / _FREQ_SPAN)
@@ -175,6 +277,19 @@ def compute_plo_difficulty(facts: PloFacts) -> PloDifficultyResult:
     easy_blend = W_FREQ * easy_freq + W_CONCEPT * easy_concept + W_HAND * easy_hand
 
     score = round(_clip(_LINEAR_CEILING - easy_blend * _LINEAR_SPAN, _HARD_FLOOR, _HARD_CEILING))
+
+    trap_applied = False
+    if apply_trap_bump:
+        margin = plo_trap_margin(
+            facts, stack_bb=stack_bb, ante_bb=ante_bb, rake_pct=rake_pct
+        )
+        if margin is not None:
+            from pipeline.trap_grading import graded_trap_floor  # noqa: PLC0415
+
+            trap_applied = True
+            # Floor, never lower: a trap can't rate below its natural score.
+            score = max(score, graded_trap_floor(margin))
+
     return PloDifficultyResult(
         score=score,
         easy_freq=easy_freq,
@@ -183,6 +298,7 @@ def compute_plo_difficulty(facts: PloFacts) -> PloDifficultyResult:
         easy_hand=easy_hand,
         easy_blend=easy_blend,
         ev_available=ev_available,
+        trap_bump_applied=trap_applied,
     )
 
 
@@ -195,4 +311,5 @@ __all__ = [
     "W_FREQ",
     "W_HAND",
     "compute_plo_difficulty",
+    "plo_trap_margin",
 ]

@@ -294,7 +294,7 @@ def test_full_hand_csv_uses_trimmed_schema(tmp_path, monkeypatch) -> None:
     from pipeline.postflop.format_writer import (
         _FULL_HAND_DROPPED_COLUMNS,
         FULL_HAND_CSV_COLUMNS,
-        POSTFLOP_CSV_COLUMNS,
+        POSTFLOP_ROW_COLUMNS,
     )
 
     assert _FULL_HAND_DROPPED_COLUMNS == frozenset({
@@ -304,7 +304,7 @@ def test_full_hand_csv_uses_trimmed_schema(tmp_path, monkeypatch) -> None:
         # sequence_index; a leg count is just the group size.
         "sequence_total",
     })
-    assert set(POSTFLOP_CSV_COLUMNS) - set(FULL_HAND_CSV_COLUMNS) == set(
+    assert set(POSTFLOP_ROW_COLUMNS) - set(FULL_HAND_CSV_COLUMNS) == set(
         _FULL_HAND_DROPPED_COLUMNS
     )
     # The trailing columns read: ...sequence tags, then the hand selector.

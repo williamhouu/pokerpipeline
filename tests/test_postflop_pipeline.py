@@ -58,6 +58,7 @@ from pipeline.postflop.facts import (  # noqa: E402
 from pipeline.postflop.fixtures import btn_vs_bb_srp_2cJs7s  # noqa: E402
 from pipeline.postflop.format_writer import (  # noqa: E402
     POSTFLOP_CSV_COLUMNS,
+    POSTFLOP_ROW_COLUMNS,
     build_postflop_row,
 )
 from pipeline.postflop.options import build_options  # noqa: E402
@@ -825,7 +826,10 @@ def test_postflop_schema_prefix_matches_preflop() -> None:
     pre = list(PREFLOP_CSV_COLUMNS)
     post = list(POSTFLOP_CSV_COLUMNS)
     assert post[: len(pre)] == pre, "shared prefix drifted from the preflop schema"
-    assert len(post) > len(pre), "postflop should add extra columns after the prefix"
+    # July 2026 standalone declutter: the postflop extras (play-through tags +
+    # diagnostics) are all trimmed from the standalone CSV, so the two shipped
+    # layouts are now IDENTICAL -- the app reads one schema for both paths.
+    assert post == pre, "standalone postflop schema should equal the preflop one"
     # The four shared-schema classification columns are now part of the prefix.
     for col in ("Preflop Pot Type", "Pot Participant", "Stack Depth", "exploit_notes"):
         assert col in pre and col in post
@@ -836,7 +840,8 @@ def test_build_row_has_all_columns() -> None:
     opts, correct = build_options(facts.spot)
     g = placeholder_explanation(facts, opts, correct)
     row = build_postflop_row(facts, g, SOLVE, compute_difficulty(facts), 1)
-    assert set(row) == set(POSTFLOP_CSV_COLUMNS)
+    # Row dicts carry the SUPERSET; the writer trims to the shipped schema.
+    assert set(row) == set(POSTFLOP_ROW_COLUMNS)
     # Cards on Table is now the app's rank-suitword board token (was emoji),
     # so the CSV feeds the app's board renderer directly.
     assert row["Cards on Table"] == "2-clubs, J-spades, 7-spades"
@@ -1209,7 +1214,8 @@ def test_range_equity_column_present() -> None:
         facts, placeholder_explanation(facts, opts, correct), SOLVE,
         compute_difficulty(facts), 1,
     )
-    assert "range_equity" in POSTFLOP_CSV_COLUMNS
+    assert "range_equity" in POSTFLOP_ROW_COLUMNS  # superset; CSV drops it
+    assert "range_equity" not in POSTFLOP_CSV_COLUMNS
     assert row["range_equity"].endswith("%")
 
 
@@ -2399,3 +2405,30 @@ def test_bet_labels_state_bb_amounts_never_pot_percent() -> None:
                         assert not pct.search(o), (
                             f"{style} option {o!r} carries a pot percentage"
                         )
+
+
+def test_range_advantage_node_cache_is_transparent() -> None:
+    """The per-node memo must return byte-identical values to a fresh call.
+
+    INVARIANT (facts.py _RANGE_ADV_CACHE): caching may never change a value --
+    batches and the re-verifiers depend on compute_range_advantage being a
+    pure function of the node. A recycled id() must not alias a different
+    node (the node object is pinned in the cache entry).
+    """
+    from pipeline.postflop import facts as facts_mod
+    from pipeline.postflop.fixtures import btn_vs_bb_srp_2cJs7s
+
+    solve = btn_vs_bb_srp_2cJs7s()
+    node = next(iter(solve.nodes.values()))
+    facts_mod._RANGE_ADV_CACHE.clear()
+    fresh = facts_mod.compute_range_advantage(node)
+    assert id(node) in facts_mod._RANGE_ADV_CACHE
+    cached = facts_mod.compute_range_advantage(node)
+    assert cached == fresh
+    # The pinned object guards against id-reuse aliasing.
+    pinned, value = facts_mod._RANGE_ADV_CACHE[id(node)]
+    assert pinned is node and value == fresh
+    # A stale entry whose pinned object differs is ignored, not returned.
+    facts_mod._RANGE_ADV_CACHE[id(node)] = (object(), ("bogus",) * 5)
+    assert facts_mod.compute_range_advantage(node) == fresh
+    facts_mod._RANGE_ADV_CACHE.clear()

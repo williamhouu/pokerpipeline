@@ -166,3 +166,42 @@ def test_approved_pool_remove_and_clear_controls() -> None:
     finally:
         csv_path.unlink(missing_ok=True)
         sidecar.unlink(missing_ok=True)
+
+
+def test_sizing_trainer_mode_renders_and_hides_picker() -> None:
+    """📏 Bet-sizing trainer: toggling the mode ON renders its own controls
+    and suppresses the single-solve picker flow (INVARIANT in
+    _render_generate_page_postflop: sizing mode is the whole page)."""
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+    at = AppTest.from_file(str(_APP), default_timeout=120)
+    at.session_state["nav_page"] = "Generate"
+    at.session_state["generate_mode"] = "Postflop"
+    at.session_state["postflop_sizing_mode"] = True
+    at.run()
+    assert not at.exception, at.exception
+    # The sizing panel rendered its own count widget...
+    assert any(
+        n.key == "postflop_sizing_count" for n in at.number_input
+    ), "sizing count widget missing"
+    # ...including the explanation-prompt picker (July 2026, user ask)...
+    assert any(
+        getattr(s, "key", None) == "postflop_sizing_prompt_select"
+        for s in at.selectbox
+    ), "sizing prompt picker missing"
+    # ...and the single-solve picker did NOT render (early return).
+    assert not any(
+        getattr(s, "key", None) == "postflop_pick_solve" for s in at.selectbox
+    ), "single-solve picker rendered alongside sizing mode"
+
+
+def test_plo_generate_page_renders_with_trap_checkbox() -> None:
+    """🪤 The PLO Generate page renders with the trap-aware checkbox wired
+    (key plo_gen_trap, persisted + seeded like its sibling toggles)."""
+    AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+    at = AppTest.from_file(str(_APP), default_timeout=240)
+    at.session_state["nav_page"] = "PLO Generate"
+    at.run()
+    assert not at.exception, at.exception
+    assert any(
+        getattr(c, "key", None) == "plo_gen_trap" for c in at.checkbox
+    ), "trap-aware checkbox missing from the PLO Generate page"

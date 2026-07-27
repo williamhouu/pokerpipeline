@@ -328,6 +328,20 @@ def compute_currently_ahead(
     return ahead / total, behind / total, (total - ahead - behind) / total
 
 
+# Per-NODE memo for compute_range_advantage (July 2026 perf): the result is a
+# property of the two ranges on the board -- identical for every hero combo at
+# the node -- yet it was recomputed (~0.8s of fixed-seed sim) once per SPOT.
+# Keyed on id(node) with the node object pinned in the value so a recycled id
+# can never alias a different node. INVARIANT: the cached value must be
+# byte-identical to a fresh call (same fixed seed, same inputs), so batches
+# and the re-verifiers stay byte-exactly reproducible; nothing here may
+# depend on call order. Bounded: cleared wholesale if it ever grows past
+# _RANGE_ADV_CACHE_MAX entries (a long-lived admin process loading many
+# solves), which only costs recomputation.
+_RANGE_ADV_CACHE: dict[int, tuple[object, tuple[float, str, float, float, str]]] = {}
+_RANGE_ADV_CACHE_MAX = 50_000
+
+
 def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
     """Node-level range-vs-range stats for the actor (hero) vs the villain.
 
@@ -335,8 +349,12 @@ def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
     villain_nut_share, nut_advantage)``. This is a property of the two RANGES on
     the board -- identical for every hero combo at the node -- so it is the
     grounded "who is ahead here" fact. Deterministic (fixed seed) so the batch
-    re-verifier reproduces it exactly.
+    re-verifier reproduces it exactly. Memoised per node object (see
+    ``_RANGE_ADV_CACHE`` above) because every spot at a node shares the value.
     """
+    cached = _RANGE_ADV_CACHE.get(id(node))
+    if cached is not None and cached[0] is node:
+        return cached[1]
     board = list(node.board)
     hero_eq = range_vs_range_equity(
         dict(node.hero_range),
@@ -349,7 +367,11 @@ def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
     hero_nut = _range_strong_share(node.hero_range, board)
     villain_nut = _range_strong_share(node.villain_range, board)
     nut_adv = _advantage_label(hero_nut, villain_nut, _NUT_ADV_MARGIN)
-    return hero_eq, range_adv, hero_nut, villain_nut, nut_adv
+    result = (hero_eq, range_adv, hero_nut, villain_nut, nut_adv)
+    if len(_RANGE_ADV_CACHE) >= _RANGE_ADV_CACHE_MAX:
+        _RANGE_ADV_CACHE.clear()
+    _RANGE_ADV_CACHE[id(node)] = (node, result)
+    return result
 
 
 def preflop_aggressor(solve: PostflopSolve) -> str:
