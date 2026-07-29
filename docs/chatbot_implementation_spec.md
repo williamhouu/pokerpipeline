@@ -287,9 +287,15 @@ tooling.
 ## Rollout notes
 
 - `chat_context` exists on every row generated since June 2026, in all four
-  question types (NLHE preflop, postflop, full-hand legs, PLO). Older rows in
-  the app database predate the column; for those, either hide the chat
-  button or backfill by regenerating the batch.
+  question types (NLHE preflop, postflop, full-hand legs, PLO). The rule on
+  your side is simple: **show the chat button if and only if the question
+  has a non-empty `chat_context`**. Older rows are our problem, not yours:
+  most older pipeline-generated batches can have the column backfilled
+  deterministically (it's computed from solver data, no AI involved, and
+  the reviewed question text never changes) -- send us the list of any old
+  batches you want covered. The original hand-written questions (pre-
+  pipeline) will never get chat: there is no solver data behind them, and
+  a chatbot without grounded data would invent numbers.
 - For full-hand play-throughs, each leg carries its own `chat_context`; open
   the chat scoped to the leg the user is viewing. Known v1 limitation: a
   question about a DIFFERENT street of the same hand ("why did we call the
