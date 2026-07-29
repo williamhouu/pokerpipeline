@@ -73,6 +73,29 @@ _BLOCKER_MARGIN = 0.03
 # "who is the preflop aggressor").
 _RAISE_VERBS = frozenset({"open", "raise", "3-bet", "4-bet", "5-bet"})
 
+# --- per-size range composition thresholds (July 2026, the sizing-prose fact).
+# A sized bet only earns a composition entry when it carries a real share of
+# the node's BETTING mass (>= 5% of all sized-bet weight); below that the
+# "range" is a convergence sliver and any character claim would be noise.
+# Deliberately NOT a share-of-whole-range floor: a rarely-taken line (a BB
+# lead) still has a real betting range worth characterizing. Measured July
+# 2026 across all 6 solves: no sizing spot's CORRECT size falls under this
+# floor (0/259), so a shipped answer's size always has its composition line.
+_SIZE_MIN_SHARE_OF_BETS = 0.05
+# Character verdict cutoffs on the betting range's bucket shares. Checked in
+# order: a range that is >= 70% strong made hands is VALUE-HEAVY (calling it
+# "polarized" just because the middle is thin would mislead); >= 70% air is
+# BLUFF-HEAVY; then the medium share decides polarized (thin middle) vs merged
+# (fat middle) vs mixed.
+_SIZE_VALUE_HEAVY = 0.70
+_SIZE_BLUFF_HEAVY = 0.70
+_SIZE_POLAR_MIDDLE_MAX = 0.30
+_SIZE_MERGED_MIDDLE_MIN = 0.50
+# How much lower the bigger size's medium share must be (in absolute share)
+# before we call it "the more polarized size" (and vice versa). Below the
+# margin the honest verdict is "similar" -- the LLM must not single one out.
+_SIZE_COMPARE_MARGIN = 0.08
+
 # The street immediately before each decision street (flop has none).
 _PREV_STREET = {"turn": "flop", "river": "turn"}
 
@@ -95,6 +118,32 @@ def _prior_street_context(
     ]
     hero_bet_prev = any(s.position == hero for s in prev_bets)
     return hero_bet_prev, not prev_bets
+
+
+@dataclass(frozen=True)
+class SizeComposition:
+    """What hero's WHOLE range looks like at one sized bet (node-level fact).
+
+    The solver-derived replacement for "the big bet is polarized" LLM theory:
+    the betting range at a size is every hero combo weighted by (reach x how
+    often it picks this size), and its bucket shares resolve the size's
+    CHARACTER in Python. ``value_pct`` / ``middle_pct`` / ``air_pct`` are
+    shares OF THIS SIZE'S BETTING RANGE (they sum to ~1); ``draw_pct`` is the
+    share of that betting range holding a real draw (semi-bluff content);
+    ``freq`` is the share of hero's whole range that uses this size.
+    ``character`` is the resolved verdict the LLM mirrors:
+    ``value_heavy`` / ``bluff_heavy`` / ``polarized`` / ``merged`` / ``mixed``.
+    """
+
+    label: str
+    to_bb: float | None
+    pot_fraction: float | None
+    freq: float
+    value_pct: float
+    middle_pct: float
+    air_pct: float
+    draw_pct: float
+    character: str
 
 
 @dataclass(frozen=True)
@@ -174,6 +223,17 @@ class PostflopFacts:
     blocked_value_pct: float = 0.0
     blocked_bluff_pct: float = 0.0
     blocker_effect: str = "neutral"
+
+    # --- per-size range composition (node-level; the sizing-prose fact).
+    # Populated ONLY when the node's menu offers a size CHOICE (>= 2 sized
+    # open bets) -- exactly the sizing-trainer spots where the LLM would
+    # otherwise theorize which size is "the polarized one". Holds one entry
+    # per size the range REALLY uses (sliver sizes omitted), live-menu
+    # filtered. size_comparison ∈ "" / "bigger_more_polarized" /
+    # "bigger_more_merged" / "similar" is the resolved cross-size verdict the
+    # LLM mirrors ("" when fewer than two real sizes exist to compare).
+    size_compositions: tuple[SizeComposition, ...] = ()
+    size_comparison: str = ""
 
     # --- pot context (for tags / writer) ---
     preflop_raise_count: int = 1
@@ -374,6 +434,159 @@ def compute_range_advantage(node) -> tuple[float, str, float, float, str]:
     return result
 
 
+def _characterize_size(value_pct: float, middle_pct: float, air_pct: float) -> str:
+    """Resolve one sized bet's range character from its bucket shares.
+
+    The single place a size's character *conclusion* is decided -- in Python,
+    never the LLM. Checked in order: a dominant value (or air) share names the
+    range for what it mostly is; only then does the medium share separate
+    polarized (thin middle) from merged (fat middle) from mixed.
+    """
+    if value_pct >= _SIZE_VALUE_HEAVY:
+        return "value_heavy"
+    if air_pct >= _SIZE_BLUFF_HEAVY:
+        return "bluff_heavy"
+    if middle_pct <= _SIZE_POLAR_MIDDLE_MAX:
+        return "polarized"
+    if middle_pct >= _SIZE_MERGED_MIDDLE_MIN:
+        return "merged"
+    return "mixed"
+
+
+def compare_size_compositions(entries: tuple[SizeComposition, ...]) -> str:
+    """The resolved cross-size verdict: which size is the more polarized one.
+
+    Compares the SMALLEST vs the BIGGEST sized bet by medium-hand share (the
+    polarity axis: a polarized range is exactly one that thins out its middle).
+    Returns ``"bigger_more_polarized"`` / ``"bigger_more_merged"`` /
+    ``"similar"`` (below the margin -- the LLM must not single a size out),
+    or ``""`` when there is no size choice to compare.
+    """
+    if len(entries) < 2:
+        return ""
+
+    def _size_key(e: SizeComposition) -> float:
+        # to_bb first: every sized bet carries it, and it is always on one
+        # scale (an all-in's pot_fraction can be None).
+        if e.to_bb is not None:
+            return e.to_bb
+        return e.pot_fraction or 0.0
+
+    smallest = min(entries, key=_size_key)
+    biggest = max(entries, key=_size_key)
+    diff = smallest.middle_pct - biggest.middle_pct
+    if diff >= _SIZE_COMPARE_MARGIN:
+        return "bigger_more_polarized"
+    if diff <= -_SIZE_COMPARE_MARGIN:
+        return "bigger_more_merged"
+    return "similar"
+
+
+# Per-NODE memo for compute_size_composition, mirroring _RANGE_ADV_CACHE: the
+# result is a property of hero's range + strategy at the node -- identical for
+# every hero combo -- and classifying a whole range is the expensive part.
+# Same INVARIANT: the cached value must be byte-identical to a fresh call.
+_SIZE_COMP_CACHE: dict[int, tuple[object, tuple[SizeComposition, ...]]] = {}
+_SIZE_COMP_CACHE_MAX = 50_000
+
+
+def compute_size_composition(node) -> tuple[SizeComposition, ...]:
+    """Per-size range composition for every sized OPEN BET on the node's menu.
+
+    For each "Bet X" action carrying a size, the betting range at that size is
+    every hero combo weighted by ``reach_weight x P(combo picks this size)``.
+    Each combo is classified ONCE (the shared pure classifier); the shares of
+    that betting range that are strong made hands (premium/strong bucket),
+    medium (everything between), and air -- plus the share holding a real
+    draw -- resolve the size's character via :func:`_characterize_size`.
+
+    Node-level and deterministic (pure arithmetic, no runouts), memoised per
+    node object. Returns ``()`` when the menu offers fewer than two sized
+    bets -- the fact exists to ground SIZE-CHOICE prose, so a single-size menu
+    computes nothing. Sizes carrying < 5% of the node's sized-bet mass are
+    omitted as slivers. Raise sizes are deliberately out of scope for v1 (current
+    solves carry a single raise size, so there is no raise-size choice to
+    characterize).
+    """
+    sized_bets = [a for a in node.actions if a.verb == "bet" and a.to_bb]
+    if len(sized_bets) < 2:
+        return ()
+    cached = _SIZE_COMP_CACHE.get(id(node))
+    if cached is not None and cached[0] is node:
+        return cached[1]
+
+    board = list(node.board)
+    board_set = set(board)
+    labels = [a.label for a in sized_bets]
+    totals = dict.fromkeys(labels, 0.0)
+    value_w = dict.fromkeys(labels, 0.0)
+    middle_w = dict.fromkeys(labels, 0.0)
+    air_w = dict.fromkeys(labels, 0.0)
+    draw_w = dict.fromkeys(labels, 0.0)
+    range_total = 0.0
+    for combo, weight in node.hero_range.items():
+        if weight <= 0:
+            continue
+        cards = [combo[:2], combo[2:]]
+        if set(cards) & board_set:
+            continue  # not a real hero holding on this board
+        strat = node.strategy.get(combo)
+        if not strat:
+            continue
+        strat_total = sum(strat.values())
+        if strat_total <= 0:
+            continue
+        # freq denominator = the mass the solver actually assigns actions to
+        # (== the reach range in a real solve; robust to partial fixtures).
+        range_total += weight
+        hand = classify_hand(cards, board)
+        bucket = hand["strength_bucket"]
+        has_draw = any(d in _STRONG_DRAW_TYPES for d in hand["draws"])
+        for label in labels:
+            w = weight * strat.get(label, 0.0) / strat_total
+            if w <= 0:
+                continue
+            totals[label] += w
+            if bucket in _VALUE_BUCKETS:
+                value_w[label] += w
+            elif bucket in _BLUFF_BUCKETS:
+                air_w[label] += w
+            else:
+                middle_w[label] += w
+            if has_draw:
+                draw_w[label] += w
+
+    entries = []
+    bet_mass = sum(totals.values())
+    for action in sized_bets:
+        label = action.label
+        total = totals[label]
+        freq = total / range_total if range_total else 0.0
+        if bet_mass <= 0 or total / bet_mass < _SIZE_MIN_SHARE_OF_BETS:
+            continue
+        value_pct = value_w[label] / total
+        middle_pct = middle_w[label] / total
+        air_pct = air_w[label] / total
+        entries.append(
+            SizeComposition(
+                label=label,
+                to_bb=action.to_bb,
+                pot_fraction=action.pot_fraction,
+                freq=freq,
+                value_pct=value_pct,
+                middle_pct=middle_pct,
+                air_pct=air_pct,
+                draw_pct=draw_w[label] / total,
+                character=_characterize_size(value_pct, middle_pct, air_pct),
+            )
+        )
+    result = tuple(entries)
+    if len(_SIZE_COMP_CACHE) >= _SIZE_COMP_CACHE_MAX:
+        _SIZE_COMP_CACHE.clear()
+    _SIZE_COMP_CACHE[id(node)] = (node, result)
+    return result
+
+
 def preflop_aggressor(solve: PostflopSolve) -> str:
     """Position of the last preflop raiser (the c-bet "aggressor"). '' if none."""
     aggressor = ""
@@ -477,6 +690,18 @@ def extract_facts(
         hero_cards, dict(node.villain_range), board
     )
 
+    # --- per-size range composition (only when the menu offers a size choice)
+    # Filtered to the spot's LIVE menu (the artifact-strip invariant: no
+    # shipped surface may describe a stripped jam). A single surviving entry
+    # still renders -- on a size-choice menu where the range genuinely uses one
+    # size, that size's character IS the reason it is right -- but the
+    # cross-size comparison only exists with two real entries.
+    live_labels = {a.label for a in spot.live_actions}
+    size_entries = tuple(
+        e for e in compute_size_composition(node) if e.label in live_labels
+    )
+    size_cmp = compare_size_compositions(size_entries)
+
     # --- archetype + concept tags ---
     hero_bet_prev, prev_checked_through = _prior_street_context(
         node.history, node.actor, node.street
@@ -546,6 +771,8 @@ def extract_facts(
         blocked_value_pct=blocked_value_pct,
         blocked_bluff_pct=blocked_bluff_pct,
         blocker_effect=blocker_effect,
+        size_compositions=size_entries,
+        size_comparison=size_cmp,
         preflop_raise_count=n_raises,
         n_players=len(solve.positions),
     )
@@ -554,9 +781,12 @@ def extract_facts(
 __all__ = [
     "DEFAULT_EQUITY_RUNOUTS",
     "PostflopFacts",
+    "SizeComposition",
+    "compare_size_compositions",
     "compute_blocker_decomposition",
     "compute_currently_ahead",
     "compute_range_advantage",
+    "compute_size_composition",
     "extract_facts",
     "preflop_aggressor",
     "preflop_raise_count",

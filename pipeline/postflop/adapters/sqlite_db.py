@@ -1076,8 +1076,30 @@ SOLVE_QUALITY_FLAGS: tuple[tuple[str, str, str], ...] = (
         "inconsistent - that is retracted; these files are "
         "production-usable.",
     ),
+    # July 28 2026: the 8h6h5s 200bb delivery (the "all sizes on all lines"
+    # request). Listed BEFORE the QsJd9s pattern: its filename also contains
+    # "_v8", and first-match-wins would otherwise hand it QsJd9s's donk note.
     (
-        "_v8",
+        "8h6h5s",
+        "info",
+        "Good solve (intake-audited clean July 28 2026). This is the "
+        "upgraded tree the sizing trainer was waiting for: two to three "
+        "bet sizes on EVERY betting line (turn and river barrels "
+        "included), real sized raises (about 2.7x) on turn and river, and "
+        "rivers reached through betting genuinely mix - so barrel-line "
+        "sizing questions and barrel-river enders work here. 8-max, "
+        "200bb, BTN vs BB single-raised pot. Flop leads and c-bet "
+        "frequencies are textbook. ONE TREE GAP (July 28, from our own "
+        "spec wording - 'one check-raise size' on the flop): facing a "
+        "flop DONK-LEAD the Button has no raise branch (call/fold "
+        "only), so vs-lead flop questions can never offer a raise - "
+        "fine for draws and bluff-catchers, but a very strong hand "
+        "facing a flop lead is best avoided from this file until a "
+        "config with the vs-lead raise ships. Check-raises, turn "
+        "raise-vs-lead, and river raises are all present and normal.",
+    ),
+    (
+        "QsJd9s",
         "info",
         "Good solve (intake checks clean). One quirk to know: its Big Blind "
         "donk-bets the flop about 70% of the time, more than typical "

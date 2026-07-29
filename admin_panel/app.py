@@ -140,11 +140,14 @@ from pipeline.scenario_config import COMMON_STAKE_LEVELS_BB_DOLLARS  # noqa: E40
 
 # Map admin-panel model-radio labels to Anthropic API model identifiers.
 # Display strings stay human-readable; the API call needs the ID string.
-# Opus 4.7 first = the default everywhere (June 2026) and the production
-# model for every batch. Sonnet 4.6 is the cheap/fast option for iterating
-# on prompts before committing to a real batch.
+# Opus 5 first = the default everywhere (July 28 2026) and the production
+# model for every batch -- same $5/$25 price as Opus 4.7, run thinking-OFF
+# by the shared call seam so it behaves like the validated 4.7 setup.
+# Opus 4.7 stays selectable (the previous production model); Sonnet 4.6 is
+# the cheap/fast option for iterating on prompts before a real batch.
 _MODEL_LABEL_TO_API: dict[str, str] = {
-    "Opus 4.7 (high fidelity, the default)": "claude-opus-4-7",
+    "Opus 5 (newest, the default)": "claude-opus-5",
+    "Opus 4.7 (previous production model)": "claude-opus-4-7",
     "Sonnet 4.6 (cheapest, fastest)": "claude-sonnet-4-6",
 }
 
@@ -10069,8 +10072,10 @@ _PLO_DIFFICULTY_BANDS = {
     "Hard": (2100, 3200),
     "Mixed": (400, 3200),
 }
-# Opus first = the default in every PLO picker (Generate + both Compare sides).
-_PLO_MODELS = ["claude-opus-4-7", "claude-sonnet-4-6"]
+# Opus 5 first = the default in every PLO picker (Generate + both Compare
+# sides). Saved settings that still carry claude-opus-4-7 are honored (the
+# seeding _choice keeps any value that is a valid option).
+_PLO_MODELS = ["claude-opus-5", "claude-opus-4-7", "claude-sonnet-4-6"]
 
 # --- PLO Generate settings persistence ---------------------------------------
 # The page's widget state is snapshotted to disk when a batch launches and
@@ -10226,7 +10231,7 @@ def _seed_plo_generate_settings() -> None:
             else "plo_batch"
         ),
         "plo_gen_model": _choice(
-            saved.get("plo_gen_model"), _PLO_MODELS, "claude-opus-4-7"
+            saved.get("plo_gen_model"), _PLO_MODELS, "claude-opus-5"
         ),
         "plo_gen_llm_workers": _num(
             saved.get("plo_gen_llm_workers"), 1, 4, 3, int
@@ -10256,7 +10261,8 @@ def _seed_plo_generate_settings() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 _PLO_MODEL_NAMES = {
-    "claude-opus-4-7": "Opus 4.7 (high fidelity)",
+    "claude-opus-5": "Opus 5 (newest, the default)",
+    "claude-opus-4-7": "Opus 4.7 (previous production model)",
     "claude-sonnet-4-6": "Sonnet 4.6 (cheapest, fastest)",
 }
 

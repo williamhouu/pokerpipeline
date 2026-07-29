@@ -75,6 +75,14 @@ def _preflop_raise_count(meta: dict) -> int:
 # this. EVs at barely-reached nodes are the least-trained part of a solve
 # (the vendor's low-reach instability point) and score as noise, not defect.
 _MIN_BETTING_COMBOS = 6
+# ... AND fewer combo-EQUIVALENTS of probability mass than this. The count
+# floor alone is not enough: a deep raise line can hold 57 distinct combos
+# each at microscopic reach weight (total mass ~0.01 of one combo), and its
+# EVs are untrained noise. Measured on the 8h6h5s 200bb intake (July 2026):
+# every node with mass >= 0.08 scored ~0.0 pts; every over-3pt offender sat
+# at mass <= 0.04. 0.25 gives a 6x margin over the worst offender. Without
+# this floor the check FALSE-FAILED that (internally consistent) export.
+_MIN_BETTING_MASS = 0.25
 
 
 def _rake_chips(rake_meta: str, final_pot: float, bb: float) -> float:
@@ -199,7 +207,13 @@ def _ev_vs_strategy_check(
             (set(_split_cards(h)), rank_hand(_split_cards(h) + board), w)
             for h, w in node.villain_range.items() if w > 0
         ]
-        if len(villain) < min_betting_combos:  # low-reach node: EVs are noise
+        # Low-reach node: EVs are noise. Both floors must hold -- enough
+        # DISTINCT combos and enough probability MASS (see _MIN_BETTING_MASS;
+        # 57 combos at ~0.0002 weight each is still an unreached line).
+        if (
+            len(villain) < min_betting_combos
+            or sum(w for _c, _r, w in villain) < _MIN_BETTING_MASS
+        ):
             low_reach_skipped += 1
             continue
 
@@ -249,7 +263,8 @@ def _ev_vs_strategy_check(
     share_warn = share_ok and bad_nodes >= 2
     print(f"    sampled {len(node_medians)} nodes / {len(pooled)} (node, combo) points"
           + (f"  [{low_reach_skipped} low-reach node(s) skipped, "
-             f"< {min_betting_combos} betting combos]" if low_reach_skipped else ""))
+             f"< {min_betting_combos} betting combos or "
+             f"< {_MIN_BETTING_MASS} reach mass]" if low_reach_skipped else ""))
     print(f"    pooled median implied-minus-exact equity = {med * 100:+.1f} pts"
           f"{_flag(pooled_ok, warn=pooled_warn)}  (FAIL > 3.0, WARN > 2.0)")
     print(f"    nodes with |median gap| > 3 pts = {bad_nodes}/{len(node_medians)}"
@@ -314,9 +329,16 @@ def audit(path: str) -> int:  # noqa: C901 - a linear report
         ev_len_ok = ev_len_ok and len(eo) == 4 * len(idx2hand) and len(ei) == 4 * len(idx2hand)
     inrange = [i for i, s in persum.items() if s > 0]
     sums = [persum[i] for i in inrange]
-    scale_ok = maxbyte == 255 and (max(sums) <= 256)
+    # Scale invariant: per-combo action sums cluster at ~255 (the adapter
+    # normalises per combo, so +/-1 rounding is fine). maxbyte==255 exactly is
+    # NOT an invariant -- a node where every combo mixes tops out at 254 (the
+    # 8h6h5s intake, July 2026); >= 250 still catches a 0-100 or 0-127 scale.
+    scale_ok = (
+        maxbyte >= 250 and min(sums) >= 250 and max(sums) <= 258
+    )
     print("\n[3] FORMAT INTEGRITY")
-    print(f"    freq blob 0-255 conditional{_flag(scale_ok)}: maxbyte={maxbyte}, per-combo action-sum<= {max(sums)}")
+    print(f"    freq blob 0-255 conditional{_flag(scale_ok)}: maxbyte={maxbyte}, "
+          f"per-combo action-sums in [{min(sums)}, {max(sums)}] (expect ~255)")
     print(f"    EV blobs present (1326 float32 each){_flag(ev_len_ok)}")
     bad_mask = [idx2hand[i] for i in inrange if (idx2hand[i][:2] in board or idx2hand[i][2:] in board)]
     print(f"    board mask clean{_flag(not bad_mask)}: {len(bad_mask)} board-card combos with nonzero freq (expect 0)")

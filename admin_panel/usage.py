@@ -30,6 +30,7 @@ PRICING_PER_M_TOKENS: dict[str, dict[str, float]] = {
     # Opus 4.x list price is $5/$25 -- the old $15/$75 here was the
     # Opus-4.1-era price (corrected June 2026; earlier Opus batches were
     # over-counted ~3x in the lifetime-spend metric).
+    "claude-opus-5": {"input": 5.0, "output": 25.0},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0},
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},

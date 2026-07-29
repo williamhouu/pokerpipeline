@@ -48,11 +48,14 @@ from pipeline.fact_extractor.archetypes import (
 )
 from pipeline.fact_extractor.spot_data import SpotData
 
-# Default Anthropic model. Opus 4.7 is the default (June 2026, the team's
-# call) and the production model for every batch. Callers (admin panel,
-# scripts) can override `model` with Sonnet 4.6 as the cheap/fast option for
-# iterating on prompts before committing to a real batch.
-DEFAULT_MODEL = "claude-opus-4-7"
+# Default Anthropic model. Opus 5 is the default (July 28 2026, the team's
+# call) and the production model for every batch -- same $5/$25 pricing as
+# Opus 4.7 and configured below to run WITHOUT thinking, exactly like the
+# Opus 4.7 setup every kept batch was validated on. Callers (admin panel,
+# scripts) can override `model` with Opus 4.7 (the previous production
+# model) or Sonnet 4.6 as the cheap/fast option for iterating on prompts
+# before committing to a real batch.
+DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_TEMPERATURE = 0.3                  # tight enough to stay on-voice
 DEFAULT_MAX_TOKENS = 2000                  # 4 short options + a multi-paragraph explanation
 GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"
@@ -61,23 +64,58 @@ GOLD_EXAMPLE_COUNT = 8                     # brief: "8-12 gold examples"
 # Anthropic API returns 400 invalid_request_error if you include
 # `temperature` when calling any of these. We drop the param at call time
 # and let the model use its default sampling. Add new entries as
-# deprecations land. (Opus 4.x also removes top_p/top_k -- we never send
+# deprecations land. (Opus 4.x/5 also removes top_p/top_k -- we never send
 # those.)
 MODELS_WITHOUT_TEMPERATURE: frozenset[str] = frozenset({
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-5",
 })
+
+# Models where THINKING IS ON BY DEFAULT and must be explicitly disabled to
+# match our validated production behaviour. On Opus 4.x, omitting the
+# `thinking` parameter runs WITHOUT thinking -- which is how every batch has
+# ever been generated. Opus 5 flips that default (omitting = adaptive
+# thinking), which would (a) spend billed thinking tokens on every call and
+# (b) count thinking against max_tokens, risking truncated explanations.
+# INVARIANT: generation on these models must behave like Opus 4.7 --
+# thinking disabled, prose-only output. Disabling is only legal at effort
+# `high` or below; we never send `effort`, so the default (`high`) applies.
+MODELS_THINKING_ON_BY_DEFAULT: frozenset[str] = frozenset({
+    "claude-opus-5",
+})
+
+# Internal/XML-ish tag detector shared by every pipeline's hard validators.
+# Opus 5 run with thinking disabled (our production config, above) is
+# documented to occasionally leak internal tags like "<thinking>" into the
+# visible text. Explanation prose legitimately never contains angle-bracket
+# tags, so ANY match is a leak; math like "equity < 30%" can't match (the
+# "<" must be immediately followed by a letter or "/"). Enforced as a
+# validator (generation's corrective retry fixes it) rather than a prompt
+# rule -- naming thinking tags in prompts is documented to make leakage
+# WORSE, and a deterministic check can't be ignored.
+INTERNAL_XML_TAG_RE = re.compile(r"</?[A-Za-z][\w-]*(?:\s[^<>]*)?/?>")
+
+
+def find_internal_xml_tag(text: str) -> str | None:
+    """The first internal/XML-style tag in ``text``, or None when clean."""
+    m = INTERNAL_XML_TAG_RE.search(text or "")
+    return m.group(0) if m else None
 
 
 def call_messages_create(client, *, model, max_tokens, temperature, system, messages):
     """Wrapper around ``client.messages.create`` that handles per-model
     parameter compatibility.
 
-    One quirk today: Opus 4.x removed ``temperature`` -- including it 400s
-    the whole batch. We drop the param for models in
+    Two quirks today: Opus 4.x/5 removed ``temperature`` -- including it
+    400s the whole batch -- so we drop the param for models in
     :data:`MODELS_WITHOUT_TEMPERATURE` (passed through unchanged for Sonnet
-    etc.).
+    etc.). And Opus 5 turns thinking ON when the ``thinking`` parameter is
+    omitted (Opus 4.x ran without thinking on omission), so for models in
+    :data:`MODELS_THINKING_ON_BY_DEFAULT` we explicitly disable it --
+    keeping generation byte-for-byte equivalent to the validated Opus 4.7
+    behaviour and keeping thinking tokens from eating ``max_tokens``.
 
     Lives here (not in batch.py or per-call site) so every Layer 6
     entry point -- postflop, preflop full, preflop answer-only, PLO --
@@ -92,6 +130,8 @@ def call_messages_create(client, *, model, max_tokens, temperature, system, mess
     }
     if model not in MODELS_WITHOUT_TEMPERATURE:
         kwargs["temperature"] = temperature
+    if model in MODELS_THINKING_ON_BY_DEFAULT:
+        kwargs["thinking"] = {"type": "disabled"}
     return client.messages.create(**kwargs)
 GOLD_XLSX = (Path(__file__).resolve().parent.parent
              / "docs" / "output_format_examples.xlsx")

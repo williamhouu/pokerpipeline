@@ -140,3 +140,52 @@ def test_opus_and_sonnet_get_no_thinking_or_output_config() -> None:
         assert "thinking" not in kw
         assert "output_config" not in kw
         assert kw["max_tokens"] == 1500  # noqa: PLR2004
+
+
+def test_opus_5_drops_temperature_and_disables_thinking() -> None:
+    """Opus 5 (production default July 28 2026): temperature must be dropped
+    (400s otherwise) AND thinking must be explicitly disabled -- Opus 5 turns
+    thinking ON when the param is omitted, unlike Opus 4.x, which would spend
+    billed thinking tokens inside max_tokens and risk truncated prose.
+    INVARIANT: generation on Opus 5 behaves like the validated Opus 4.7
+    setup (no thinking)."""
+    client, calls = _record_only_client()
+    call_messages_create(
+        client,
+        model="claude-opus-5",
+        max_tokens=1500,
+        temperature=0.3,
+        system=[],
+        messages=[{"role": "user", "content": "x"}],
+    )
+    assert "temperature" not in calls[0]
+    assert calls[0]["thinking"] == {"type": "disabled"}
+
+
+def test_opus_4_x_still_omits_thinking_param() -> None:
+    """On Opus 4.x, omitting `thinking` already means no thinking -- sending
+    an explicit disable is unnecessary; the param must stay absent."""
+    client, calls = _record_only_client()
+    call_messages_create(
+        client,
+        model="claude-opus-4-7",
+        max_tokens=1500,
+        temperature=0.3,
+        system=[],
+        messages=[{"role": "user", "content": "x"}],
+    )
+    assert "thinking" not in calls[0]
+
+
+def test_default_model_is_opus_5_and_fully_configured() -> None:
+    """The production default is Opus 5 and it appears on BOTH compatibility
+    lists (temperature dropped, thinking disabled) -- a default model missing
+    from either list would 400 or silently burn thinking tokens."""
+    from pipeline.explanation_generator import (
+        DEFAULT_MODEL,
+        MODELS_THINKING_ON_BY_DEFAULT,
+    )
+
+    assert DEFAULT_MODEL == "claude-opus-5"
+    assert DEFAULT_MODEL in MODELS_WITHOUT_TEMPERATURE
+    assert DEFAULT_MODEL in MODELS_THINKING_ON_BY_DEFAULT

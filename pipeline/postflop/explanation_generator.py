@@ -38,7 +38,9 @@ from pipeline.postflop.facts import PostflopFacts
 from pipeline.postflop.solve import PostflopSolve
 from pipeline.postflop.validators import run_postflop_audit_validators
 
-DEFAULT_MODEL = "claude-opus-4-7"
+# Opus 5 (July 28 2026): same pricing as Opus 4.7, run thinking-OFF via the
+# shared call_messages_create seam so behaviour matches the validated setup.
+DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_TOKENS = 700
 
@@ -133,6 +135,11 @@ ahead. Describe them only as "X% of your/their range is two pair or \
 better", or leave them out. Rough map: ~33% = about a third of the pot, ~50-60% = about half \
 the pot, ~66-80% = about two-thirds pot, ~100% = a pot-sized bet, 110%+ = an \
 overbet.
+14. Size character: describe what a bet size's RANGE looks like (polarized, \
+merged, value-heavy, bluff-heavy) ONLY as the SIZE COMPOSITION lines state, \
+and say one size is the more polarized or more merged one ONLY as the SIZE \
+COMPARISON line says. If there are no SIZE COMPOSITION lines, do not \
+characterize any size's range composition.
 Return only the explanation text, no preamble, no headings.
 """
 
@@ -192,6 +199,26 @@ _ADVANTAGE_PHRASE = {
 def _advantage_phrase(label: str) -> str:
     return _ADVANTAGE_PHRASE.get(label, "roughly even (neither player)")
 
+
+# Render the resolved per-size range character for the data block -- the exact
+# vocabulary the LLM may quote (rule 14 binds size-character prose to these).
+_SIZE_CHARACTER_PHRASE = {
+    "value_heavy": "VALUE-HEAVY (mostly strong made hands)",
+    "bluff_heavy": "BLUFF-HEAVY (mostly weak hands and bluffs)",
+    "polarized": "POLARIZED (strong hands plus bluffs, few medium hands)",
+    "merged": "MERGED (many medium-strength hands use this size)",
+    "mixed": "MIXED (no single character)",
+}
+
+# Render the resolved cross-size verdict (which size is the polarized one).
+_SIZE_COMPARISON_PHRASE = {
+    "bigger_more_polarized": "the BIGGER size is the more polarized one "
+    "(the smaller size keeps more medium hands)",
+    "bigger_more_merged": "the BIGGER size is the more merged one "
+    "(it keeps more medium hands than the small size)",
+    "similar": "the sizes have similar composition -- do NOT single one out "
+    "as the polarized one",
+}
 
 # Precise, unambiguous names for each draw type the hand classifier emits. The
 # composite hand_label flattens an open-ended draw to "...with straight draw",
@@ -273,6 +300,31 @@ def build_solver_data_block(facts: PostflopFacts) -> str:
             f"FACING A BET: must call {round_to_half_bb(f.to_call_bb):g}bb; "
             f"break-even equity {f.break_even_equity * 100:.0f}%"
         )
+    # Per-size range composition -- present only on a genuine size choice
+    # (>= 2 live sized bets). Resolved in Python; the LLM mirrors the stated
+    # character and the comparison verdict, never derives its own.
+    if f.size_compositions:
+        lines.append(
+            "SIZE COMPOSITION (how your WHOLE range splits at each bet size "
+            "-- mirror these; never invent a size's character):"
+        )
+        for e in f.size_compositions:
+            pf = (
+                f" ({round(e.pot_fraction * 100)}% pot)"
+                if e.pot_fraction
+                else ""
+            )
+            lines.append(
+                f"  {e.label}{pf}: {e.value_pct * 100:.0f}% strong made hands, "
+                f"{e.middle_pct * 100:.0f}% medium, {e.air_pct * 100:.0f}% weak/air "
+                f"({e.draw_pct * 100:.0f}% of this betting range holds a real draw) "
+                f"-> {_SIZE_CHARACTER_PHRASE.get(e.character, e.character)}"
+            )
+        if f.size_comparison:
+            lines.append(
+                f"SIZE COMPARISON: "
+                f"{_SIZE_COMPARISON_PHRASE.get(f.size_comparison, f.size_comparison)}"
+            )
     # Bet labels state bb amounts (team rule July 23 2026), so the pot
     # fraction is stated here explicitly -- the LLM must never compute it.
     _dom_pf = next(

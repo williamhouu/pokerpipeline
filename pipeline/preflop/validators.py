@@ -78,6 +78,7 @@ from dataclasses import dataclass
 from pipeline.explanation_generator import (
     BANNED_LITERAL_PHRASES,
     GeneratedExplanation,
+    find_internal_xml_tag,
 )
 from pipeline.preflop.fact_extractor import PreflopFacts
 from pipeline.preflop.grammars.types import PreflopActionType
@@ -1452,6 +1453,27 @@ def validate_no_list_formatting(
     return PreflopValidationResult.ok()
 
 
+
+def validate_no_internal_xml(
+    generated: GeneratedExplanation,
+    facts: PreflopFacts,  # noqa: ARG001
+) -> PreflopValidationResult:
+    """Reject internal/XML-style tags leaked into the prose (e.g. <thinking>).
+
+    Guards the Opus 5 thinking-disabled failure mode (July 2026); prose never
+    legitimately contains angle-bracket tags. Shared detector:
+    :func:`pipeline.explanation_generator.find_internal_xml_tag`.
+    """
+    tag = find_internal_xml_tag(generated.answer_explanation or "")
+    if tag is not None:
+        return PreflopValidationResult.fail(
+            f"explanation contains an internal tag {tag!r}. Do not include "
+            "internal or system XML tags in your response -- return only the "
+            "explanation prose."
+        )
+    return PreflopValidationResult.ok()
+
+
 # --- runner -----------------------------------------------------------------
 def run_preflop_audit_validators(
     generated: GeneratedExplanation,
@@ -1485,6 +1507,7 @@ def run_preflop_audit_validators(
         validate_no_postflop_on_allin,
         validate_banned_phrases,
         validate_no_list_formatting,
+        validate_no_internal_xml,
         validate_card_suit_consistency,
         validate_blocker_claims,
         validate_terminology,

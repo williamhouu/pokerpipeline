@@ -1,5 +1,13 @@
 # Per-Question AI Chat — Implementation Spec for the App Team
 
+> **Read this first: nothing in this document is set in stone.** It is a
+> guideline that may help, not a contract. You know the app, its stack, and
+> its users better than we do — where your judgment differs from a
+> recommendation here, use your judgment. Whatever you build, test it
+> yourself end to end until you're satisfied it works well; the specifics
+> below (model choice, caps, prompt wording, caching setup) are our best
+> starting points, and every one of them is yours to adjust.
+
 *(July 2026. Written by the pipeline side. The `chat_context` column referenced
 throughout ships in every question CSV since June 2026 — one self-contained
 JSON blob per question, built deterministically from solver output. It is the
@@ -137,6 +145,21 @@ def chat_turn(chat_context_json: str, history: list, user_message: str):
         # log final.usage + final._request_id for cost tracking / support
 ```
 
+**Two things the app must inject into the FIRST user message** (they are
+app-side state the pipeline data cannot contain, and they belong in the
+message — NOT in the system blocks, so the cached system+context prefix
+stays shared across every user chatting on the same question):
+
+1. **The user's answer.** The data has the correct answer and the
+   partial-credit list, but not what this user picked — without it, "why
+   was I wrong?" can't be answered specifically. Prepend one line, e.g.
+   `[The user answered: Mostly Call. Correct answer: Call.]`
+2. **The showdown reveal, when one played** (full-hand final legs). The
+   user may have just watched the villain table a specific hand; the bot
+   only knows villain's range and could appear to contradict the screen.
+   Prepend e.g. `[At showdown the Big Blind revealed K♠️J♦️.]` — read it
+   from the animation_script's resolution reveal.
+
 Error handling: the SDK retries rate limits and server errors twice on its
 own. On a final failure, show "coach is unavailable, try again" — never a raw
 error. Log `_request_id` on failures.
@@ -220,6 +243,35 @@ Boundaries:
    QA feed.
 4. **Feedback**: thumbs up/down on each bot reply. This is the cheapest
    quality signal you can collect.
+5. **Cancel upstream on disconnect**: when the user closes the chat panel,
+   abort the Anthropic stream server-side — otherwise you pay for the full
+   reply nobody will read.
+6. **Keep question + blob atomic**: key the `chat_context` blob by your
+   question id at import, and when a question is ever re-imported or
+   regenerated, replace the blob in the same operation. A stale blob
+   quietly contradicting a newer explanation is the worst failure mode.
+
+## Admin controls (build these into the app's admin panel)
+
+Three controls we want available from day one, all admin-panel-side:
+
+1. **Real-time spend display.** Every API response carries exact token
+   usage (`final.usage` in the request code above — you're already logging
+   it). Surface it in the admin panel as a running cost view: spend today,
+   spend this month, cost per conversation, conversations per day. Compute
+   cost as `input_tokens x $3 + output_tokens x $15` per million, with
+   cache reads at 0.1x input price. No polling of Anthropic needed — your
+   own logs are the source of truth, and the display can update live as
+   requests complete.
+2. **Kill switch.** A toggle in the admin panel that turns the chat feature
+   off instantly, at any time: the backend checks the flag before every
+   chat request (off -> return the "coach is unavailable" message and hide
+   the chat button in the app). This is the emergency brake if spend spikes
+   or quality misbehaves — it must not require a deploy.
+3. **API key management.** The Anthropic API key should be entered and
+   rotatable from the admin panel (stored server-side only — never in
+   client code or the app bundle). Removing the key is a second, harder
+   form of the kill switch, and rotation shouldn't require a deploy either.
 
 ## QA loop (how we keep it honest)
 
@@ -239,7 +291,12 @@ tooling.
   the app database predate the column; for those, either hide the chat
   button or backfill by regenerating the batch.
 - For full-hand play-throughs, each leg carries its own `chat_context`; open
-  the chat scoped to the leg the user is viewing.
+  the chat scoped to the leg the user is viewing. Known v1 limitation: a
+  question about a DIFFERENT street of the same hand ("why did we call the
+  flop?") is outside that leg's data and the bot will say so. The clean
+  upgrade when wanted: include all of the hand's legs' `chat_context` blobs
+  in the system block (~1.2K tokens each, so a 4-leg hand stays cheap and
+  cache-friendly); until then the honest refusal is correct behavior.
 - The blob is one JSON string in the CSV column exactly as shipped; pass it
   through untouched (do not reformat or prettify it; byte-identical pass-through
   keeps the cache stable).

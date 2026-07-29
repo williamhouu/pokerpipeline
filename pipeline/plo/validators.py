@@ -28,7 +28,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from pipeline.explanation_generator import GeneratedExplanation
+from pipeline.explanation_generator import (
+    GeneratedExplanation,
+    find_internal_xml_tag,
+)
 from pipeline.plo.explanation_generator import (
     _banned_present,
     _fabricated_cards,
@@ -85,6 +88,25 @@ def validate_no_list_formatting(
     error = _list_formatting_error(generated.answer_explanation or "")
     if error:
         return PloValidationResult.fail(error)
+    return PloValidationResult.ok()
+
+
+def validate_no_internal_xml(
+    generated: GeneratedExplanation, facts: PloFacts  # noqa: ARG001
+) -> PloValidationResult:
+    """Reject internal/XML-style tags leaked into the prose (e.g. <thinking>).
+
+    Guards the Opus 5 thinking-disabled failure mode (July 2026); prose never
+    legitimately contains angle-bracket tags. Shared detector:
+    :func:`pipeline.explanation_generator.find_internal_xml_tag`.
+    """
+    tag = find_internal_xml_tag(generated.answer_explanation or "")
+    if tag is not None:
+        return PloValidationResult.fail(
+            f"explanation contains an internal tag {tag!r}. Do not include "
+            "internal or system XML tags in your response -- return only the "
+            "explanation prose."
+        )
     return PloValidationResult.ok()
 
 
@@ -161,6 +183,7 @@ def run_plo_audit_validators(
     checks = [
         validate_banned_phrases,
         validate_no_list_formatting,
+        validate_no_internal_xml,
         validate_card_fabrication,
         validate_terminology,
         validate_shape_claims,
@@ -269,6 +292,7 @@ __all__ = [
     "soft_validate_position_words",
     "validate_banned_phrases",
     "validate_card_fabrication",
+    "validate_no_internal_xml",
     "validate_no_list_formatting",
     "validate_shape_claims",
 ]

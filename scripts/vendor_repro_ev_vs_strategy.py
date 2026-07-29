@@ -271,6 +271,12 @@ def stride_sample(items, k):
 # EVs at barely-reached nodes are the least-trained part of a solve and score
 # as noise rather than as an export defect.
 MIN_BETTING_COMBOS = 6
+# ... and fewer combo-EQUIVALENTS of total probability mass than this. A deep
+# raise line can hold 57 distinct combos each at microscopic weight (total
+# ~0.01 of one combo) -- still an effectively unreached line whose EVs are
+# untrained. Measured July 2026 on the 8h6h5s 200bb file: nodes with mass
+# >= 0.08 score ~0.0 pts; every over-3pt node sat at mass <= 0.04.
+MIN_BETTING_MASS = 0.25
 
 
 def analyse_node(s, nid, oop, ip, max_combos, dump=False, min_combos=MIN_BETTING_COMBOS,
@@ -295,12 +301,15 @@ def analyse_node(s, nid, oop, ip, max_combos, dump=False, min_combos=MIN_BETTING
         if w > REACH_EPS:
             cards = split_cards(s.idx_to_hand[i])
             villain.append((set(cards), rank7(cards + board), w))
-    if len(villain) < min_combos:  # low-reach node: EVs here are noise
+    vmass = sum(w for _c, _r, w in villain)
+    if len(villain) < min_combos or vmass < MIN_BETTING_MASS:
+        # low-reach node (too few combos OR too little mass): EVs are noise
         if stats is not None:
             stats["low_reach_skipped"] = stats.get("low_reach_skipped", 0) + 1
         if dump and villain:
-            print(f"\nnode {nid}\n  skipped: only {len(villain)} combos in the "
-                  f"reconstructed betting range (min {min_combos})")
+            print(f"\nnode {nid}\n  skipped: {len(villain)} combos / "
+                  f"{vmass:.2f} combo-equivalents of mass in the reconstructed "
+                  f"betting range (min {min_combos} / {MIN_BETTING_MASS})")
         return None
 
     heroes = sorted(

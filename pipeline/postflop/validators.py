@@ -22,7 +22,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from pipeline.explanation_generator import BANNED_LITERAL_PHRASES, GeneratedExplanation
+from pipeline.explanation_generator import (
+    BANNED_LITERAL_PHRASES,
+    GeneratedExplanation,
+    find_internal_xml_tag,
+)
 from pipeline.postflop.facts import PostflopFacts
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
@@ -121,6 +125,26 @@ def validate_no_list_formatting(
             "explanation uses bulleted or numbered list formatting. The team's "
             "voice is flowing coaching prose (2-5 sentences), never a list. "
             "Rewrite the same content as normal sentences."
+        )
+    return PostflopValidationResult.ok()
+
+
+def validate_no_internal_xml(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,  # noqa: ARG001
+) -> PostflopValidationResult:
+    """Reject internal/XML-style tags leaked into the prose (e.g. <thinking>).
+
+    Guards the Opus 5 thinking-disabled failure mode (July 2026); prose never
+    legitimately contains angle-bracket tags. Shared detector:
+    :func:`pipeline.explanation_generator.find_internal_xml_tag`.
+    """
+    tag = find_internal_xml_tag(generated.answer_explanation or "")
+    if tag is not None:
+        return PostflopValidationResult.fail(
+            f"explanation contains an internal tag {tag!r}. Do not include "
+            "internal or system XML tags in your response -- return only the "
+            "explanation prose."
         )
     return PostflopValidationResult.ok()
 
@@ -320,6 +344,7 @@ def run_postflop_audit_validators(
         validate_correct_answer,
         validate_banned_phrases,
         validate_no_list_formatting,
+        validate_no_internal_xml,
         validate_card_suit_consistency,
         validate_no_garbled_card_glyphs,
         validate_hero_hand_name,
