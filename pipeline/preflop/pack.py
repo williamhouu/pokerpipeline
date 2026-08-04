@@ -93,6 +93,27 @@ class PreflopPack:
     # rake (and, at depth, realisation) make it -EV -- is not mislabelled a
     # "trap". None/0 = no cushion. Not (yet) applied to displayed pot odds.
     rake_pct: float | None = None
+    # Big-blind ante in bb (MTT bb-ante formats, Aug 2026). Dead money: it
+    # joins the pot (resolve_preflop_history's Monker pot-relative sizing and
+    # every pot/price consumer include it) but never changes the bet level a
+    # caller must match. 0.0 = no ante (all cash packs). Anchored per pack by
+    # scripts/audit_mtt8_pack.py (the 40043 open resolves to 2.5bb ONLY with
+    # the ante in the pot).
+    ante_bb: float = 0.0
+    # "cash" or "tournament" -- the pack's native framing. Batch callers may
+    # still override the cosmetic game_format columns, but MTT packs default
+    # the whole render (Context, Cash/Tourney, animation) to tournament.
+    game_format: str = "cash"
+    # Absolute raise-TO sizes for special Monker tokens, as a tuple of
+    # (token, bb) pairs (tuple: the dataclass is frozen+hashable). The MTT
+    # 8-max packs use small-int tokens (14/15/16/18) whose sizes were
+    # anchored from fold-EV bookkeeping; the grammar encodes them via
+    # ``grammars.types.encode_fixed_bb`` so the node cache round-trips them.
+    fixed_raise_tokens_bb: tuple[tuple[str, float], ...] | None = None
+    # Explicit override for pack_allins_realistic (None = the <=40bb default).
+    # MTT packs at 50/75bb set True: a 5-bet jam at those depths is a real
+    # tournament line, not a tree artifact.
+    allins_realistic: bool | None = None
 
     def __post_init__(self) -> None:
         if not 2 <= self.table_size <= 10:
@@ -147,6 +168,10 @@ class PreflopPackSignature:
     description: str = ""
     ev_units_per_bb: float | None = None
     rake_pct: float | None = None
+    ante_bb: float = 0.0
+    game_format: str = "cash"
+    fixed_raise_tokens_bb: tuple[tuple[str, float], ...] | None = None
+    allins_realistic: bool | None = None
 
 
 # Known packs ship pre-registered here. Adding a new pack = appending a
@@ -358,6 +383,139 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
             "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
         ),
     ),
+    # NLH MTT 8-max BB-ante Monker packs (Aug 2026, MonkerGuy "NLH MTT 8max
+    # (BB ANTE)" exports; gitignored sibling dirs mtt8_<depth>_ranges/). Shared
+    # conventions, all anchored by scripts/audit_mtt8_pack.py from the files'
+    # own EV bookkeeping: EVs milli-SMALL-blind (2000/bb; SB open-fold reads
+    # -1000 = -0.5bb); the 1bb BB ante is IN the pot for Monker's pot-relative
+    # sizing (the 75/300bb `40043` open anchors at 2.505bb = formula WITH ante;
+    # 2.075 without) but SUNK in the EV baseline (BB fold vs an open reads
+    # -1bb, the blind alone). Chip-EV, no ICM, no rake -- honest scope is
+    # deep-field tournament play. Special small-int tokens are absolute
+    # raise-TO sizes (fixed_raise_tokens_bb), each anchored by an
+    # opener-later-folds EV probe. The excluded sibling depths (40/100/200bb)
+    # were a deliberate scope cut (user call, Aug 2026).
+    PreflopPackSignature(
+        pack_id="monker_mtt8_10bb",
+        relative_pack_root="../mtt8_10bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=10,
+        # Jam-or-fold tree (tokens 0/1/3 only): the "open" is the 10bb jam.
+        open_size_bb=10.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        description=(
+            "NLH MTT 8-max 10bb (BB ante 1bb) Monker pack -- jam-or-fold "
+            "tree; vendor folder '10bb(vs50bb)', verified 10bb effective."
+        ),
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_15bb",
+        relative_pack_root="../mtt8_15bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=15,
+        open_size_bb=2.0,  # the `5` min-raise open
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        # 14 = the SB first-in raise AND the BB iso over an SB limp (both
+        # anchor at 2.5bb); 15 = the SB/BB iso over a BTN limp (3bb).
+        fixed_raise_tokens_bb=(("14", 2.5), ("15", 3.0)),
+        description="NLH MTT 8-max 15bb (BB ante 1bb) Monker pack -- 2bb opens.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_20bb",
+        relative_pack_root="../mtt8_20bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=20,
+        open_size_bb=2.0,  # the `5` min-raise open
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        # 16 = the SB iso over a BTN limp (3.5bb); 18 = the BB iso over a
+        # BTN limp after the SB folds (4.5bb).
+        fixed_raise_tokens_bb=(("16", 3.5), ("18", 4.5)),
+        description="NLH MTT 8-max 20bb (BB ante 1bb) Monker pack -- 2bb opens.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_30bb",
+        relative_pack_root="../mtt8_30bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=30,
+        open_size_bb=2.0,  # the `5` min-raise open
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        description="NLH MTT 8-max 30bb (BB ante 1bb) Monker pack -- 2bb opens.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_50bb",
+        relative_pack_root="../mtt8_50bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=50,
+        # The `40034` open resolves to 2.19bb with the ante in the pot and
+        # renders 2bb on the 0.5bb display grid (the pot math follows the
+        # rounded game, per the pack-wide convention).
+        open_size_bb=2.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        allins_realistic=True,  # a 5-bet jam at 50bb is a real MTT line
+        description="NLH MTT 8-max 50bb (BB ante 1bb) Monker pack.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_75bb",
+        relative_pack_root="../mtt8_75bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=75,
+        open_size_bb=2.5,  # the `40043` open = 2.505bb -> 2.5bb on the grid
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        allins_realistic=True,  # stacking off pre at 75bb is still a real line
+        description="NLH MTT 8-max 75bb (BB ante 1bb) Monker pack.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_300bb",
+        relative_pack_root="../mtt8_300bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=300,
+        open_size_bb=2.5,  # the `40043` open = 2.505bb -> 2.5bb on the grid
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        # 300bb preflop jams are tree artifacts (default <=40bb rule applies).
+        description="NLH MTT 8-max 300bb (BB ante 1bb) Monker pack.",
+    ),
 )
 
 
@@ -447,6 +605,10 @@ def discover_packs(
             description=sig.description,
             ev_units_per_bb=sig.ev_units_per_bb,
             rake_pct=sig.rake_pct,
+            ante_bb=sig.ante_bb,
+            game_format=sig.game_format,
+            fixed_raise_tokens_bb=sig.fixed_raise_tokens_bb,
+            allins_realistic=sig.allins_realistic,
         )
         register_pack(pack)
         found.append(pack)

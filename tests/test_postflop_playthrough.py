@@ -308,7 +308,11 @@ class _LifecycleClient:
             self.gen, self.revised, self.flag = gen, revised, flag
 
         def create(self, **kw):
+            # The shared call seam wraps a string system into a cache block
+            # list (July 2026) -- unwrap before sniffing.
             system = kw.get("system", "")
+            if isinstance(system, list):
+                system = "".join(b.get("text", "") for b in system)
             user = kw["messages"][0]["content"]
             if "poker editor" in system:
                 if not self.flag or self.revised in user:

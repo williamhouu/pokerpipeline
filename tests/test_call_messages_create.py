@@ -177,6 +177,48 @@ def test_opus_4_x_still_omits_thinking_param() -> None:
     assert "thinking" not in calls[0]
 
 
+def test_string_system_is_wrapped_as_cached_block() -> None:
+    """PROMPT CACHING (July 2026): a plain-string system prompt is wrapped
+    into a single cache-controlled text block, so every call site passing a
+    string (postflop generation, claim checkers, revisers, PLO) gets prompt
+    caching for free. INVARIANT: the text reaches the API verbatim."""
+    client, calls = _record_only_client()
+    call_messages_create(
+        client,
+        model="claude-opus-5",
+        max_tokens=700,
+        temperature=0.3,
+        system="You are the postflop explanation writer.",
+        messages=[{"role": "user", "content": "x"}],
+    )
+    assert calls[0]["system"] == [
+        {
+            "type": "text",
+            "text": "You are the postflop explanation writer.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def test_block_list_system_passes_through_unwrapped() -> None:
+    """A system that is already a block list (the preflop generator's
+    two-breakpoint payload) must pass through UNTOUCHED -- double-wrapping
+    would corrupt the payload and add a phantom cache breakpoint."""
+    client, calls = _record_only_client()
+    payload = [
+        {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}},
+    ]
+    call_messages_create(
+        client,
+        model="claude-opus-5",
+        max_tokens=700,
+        temperature=0.3,
+        system=payload,
+        messages=[{"role": "user", "content": "x"}],
+    )
+    assert calls[0]["system"] is payload
+
+
 def test_default_model_is_opus_5_and_fully_configured() -> None:
     """The production default is Opus 5 and it appears on BOTH compatibility
     lists (temperature dropped, thinking disabled) -- a default model missing

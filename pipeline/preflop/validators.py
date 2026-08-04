@@ -1391,17 +1391,21 @@ def soft_validate_fold_as_equity_favorite(
 
 def soft_validate_no_ante_mention(
     generated: GeneratedExplanation,
-    facts: PreflopFacts,  # noqa: ARG001 -- text-only check
+    facts: PreflopFacts,
 ) -> list[str]:
-    """Flag prose that mentions antes -- every registered preflop pack is a
-    no-ante cash game (``has_ante=0`` in the vendor solves; the Ryan/Monker
-    packs likewise), so "you pick up the blinds and antes" is an LLM invention
-    (QC 2026-07-01, A2s open on the 8-max 100bb pack). Revisit the
-    unconditional flag if an ante game is ever registered."""
+    """Flag prose that mentions antes on a NO-ANTE pack -- there, "you pick
+    up the blinds and antes" is an LLM invention (QC 2026-07-01, A2s open on
+    the 8-max 100bb pack). The MTT bb-ante packs (Aug 2026) DO have a 1bb
+    ante stamped on the facts, and their prose is supposed to cite it -- the
+    flag is gated on ``facts.ante_bb`` accordingly (this is the "revisit if
+    an ante game is ever registered" note coming due; the unconditional
+    version false-flagged 30/60 rows of the first MTT production batches)."""
+    if getattr(facts, "ante_bb", 0.0) > 0:
+        return []
     text = generated.answer_explanation.lower()
     if re.search(r"\bantes?\b", text):
         return [
-            "the explanation mentions antes, but every current preflop pack is "
+            "the explanation mentions antes, but this pack is "
             "a no-ante cash game -- the ante is invented. Remove the mention."
         ]
     return []

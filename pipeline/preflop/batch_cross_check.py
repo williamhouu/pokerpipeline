@@ -108,8 +108,29 @@ def cross_check_row(
             f"vs {villain or 'the field'}"
         )
 
-    # 3. BvB skill hygiene.
-    if {hero, villain or ""} == {"SB", "BB"}:
+    # 3. BvB skill hygiene -- only when the pot is ACTUALLY blind-vs-blind:
+    # folded TO the blinds, no non-blind seat ever put chips in. The MTT
+    # packs' limpy multiway lines produce SB-vs-BB *matchups* in pots that
+    # merely COLLAPSED to the blinds (e.g. a BB squeeze folding out the
+    # field) -- those are squeeze/defense spots, not "Blind vs. Blind Play"
+    # (Aug 2026). Participants are read from the prior_action bet-level
+    # narration (a non-blind seat with any verb other than "folds" was in
+    # the pot) plus the live-hands list.
+    others = sd.get("other_players_still_in_hand") or []
+    non_blind_live = any(
+        str(p).split(" ")[0] not in ("SB", "BB") for p in others
+    )
+    non_blind_participant = False
+    for clause in str(sd.get("prior_action") or "").split(","):
+        words = clause.strip().split()
+        if len(words) >= 2 and words[0] not in ("SB", "BB") and words[1] != "folds":
+            non_blind_participant = True
+            break
+    if (
+        {hero, villain or ""} == {"SB", "BB"}
+        and not non_blind_live
+        and not non_blind_participant
+    ):
         if "Blind vs. Blind Play" not in skills:
             issues.append("blind-vs-blind spot missing the 'Blind vs. "
                           "Blind Play' skill")

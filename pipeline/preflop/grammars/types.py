@@ -21,12 +21,37 @@ from pathlib import Path
 # would force a node-cache schema bump).
 MIN_RAISE_PCT: float = -1.0
 
+# Base for the fixed-bb sentinel family (MTT 8-max packs, Aug 2026): some
+# Monker tokens (``14``/``15``/``16``/``18``) are absolute raise-TO sizes in
+# bb, anchored per pack from the solve's own fold-EV bookkeeping (a raiser
+# who later folds is out exactly the raise size). They are encoded into
+# ``raise_size_pct`` as ``FIXED_BB_BASE - bb`` (e.g. 2.5bb -> -1002.5) so the
+# value survives the node cache's plain-float descriptors unchanged -- same
+# reasoning as MIN_RAISE_PCT, and unambiguous because real pot-% tokens are
+# positive and MIN_RAISE_PCT is -1.0.
+FIXED_BB_BASE: float = -1000.0
+
+
+def encode_fixed_bb(raise_to_bb: float) -> float:
+    """Encode an absolute raise-TO size (bb) into the sentinel float."""
+    if raise_to_bb <= 0:
+        raise ValueError(f"raise_to_bb must be > 0, got {raise_to_bb}")
+    return FIXED_BB_BASE - raise_to_bb
+
+
+def decode_fixed_bb(raise_size_pct: float | None) -> float | None:
+    """The absolute bb size carried by a fixed-bb sentinel, else ``None``."""
+    if raise_size_pct is not None and raise_size_pct <= FIXED_BB_BASE:
+        return FIXED_BB_BASE - raise_size_pct
+    return None
+
 
 def render_raise_size_token(raise_size_pct: float | None) -> str:
     """Human/debug rendering of a raise's size token.
 
     Returns ``"min"`` for the min-raise sentinel (:data:`MIN_RAISE_PCT`),
-    otherwise the percent-of-pot form (``"60%"``). Used everywhere a raise
+    ``"<n>bb"`` for a fixed-bb sentinel (:func:`decode_fixed_bb`), otherwise
+    the percent-of-pot form (``"60%"``). Used everywhere a raise
     is labelled -- option labels, node ids, villain action labels -- so the
     sentinel never leaks as ``"-1%"`` and the labels stay mutually
     consistent. (The premise-realism gate in ``pipeline.preflop.batch``
@@ -35,6 +60,9 @@ def render_raise_size_token(raise_size_pct: float | None) -> str:
     """
     if raise_size_pct == MIN_RAISE_PCT:
         return "min"
+    fixed = decode_fixed_bb(raise_size_pct)
+    if fixed is not None:
+        return f"{fixed:g}bb"
     return f"{raise_size_pct:g}%"
 
 

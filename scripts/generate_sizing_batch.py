@@ -52,6 +52,9 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-layer7", action="store_true",
                     help="skip the claim gate / auto-fix / final audit")
+    ap.add_argument("--llm-workers", type=int, default=1,
+                    help="concurrent question LLM chains (1 = sequential; "
+                         "~Nx faster, same cost, identical output)")
     args = ap.parse_args()
 
     if not args.dry_run:
@@ -77,6 +80,7 @@ def main() -> None:
         run_claim_checker=layer7,
         revise_pass=layer7,
         final_audit=layer7,
+        llm_workers=args.llm_workers,
     )
     print(f"rows: {result.questions_written}/{result.requested_questions} -> {out}")
     print(f"pool scored: {result.pool_scored} | per-solve: {result.per_solve_written}")

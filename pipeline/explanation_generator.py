@@ -121,7 +121,30 @@ def call_messages_create(client, *, model, max_tokens, temperature, system, mess
     entry point -- postflop, preflop full, preflop answer-only, PLO --
     routes through one place. Adding a new compatibility quirk is a
     one-line update.
+
+    PROMPT CACHING (July 2026): a plain-string ``system`` is wrapped into a
+    single cache-controlled block, so every call site that passes its system
+    prompt as a string (postflop generation, all claim checkers, the
+    revisers, PLO generation) gets Anthropic prompt caching for free -- the
+    system prompt is identical across a batch's hundreds-to-thousands of
+    calls, and it was the largest fully-uncached block on the July-28 $73
+    batch. Prompts under Anthropic's minimum cacheable length simply don't
+    cache (no error). A ``system`` that is already a block LIST passes
+    through untouched -- the preflop generator builds its own two-breakpoint
+    payload (system + gold examples) and must not be double-wrapped.
+    INVARIANT (THE USAGE RULE): callers that account spend must read
+    ``usage.cache_creation_input_tokens`` / ``usage.cache_read_input_tokens``
+    off the response as well as input/output -- with caching on, plain
+    ``input_tokens`` is only the uncached remainder.
     """
+    if isinstance(system, str):
+        system = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
     kwargs = {
         "model": model,
         "max_tokens": max_tokens,

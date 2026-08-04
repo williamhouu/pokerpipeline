@@ -56,7 +56,7 @@ from pipeline.postflop.solve import PostflopNode, PostflopSolve
 _RAISE_VERBS = ("open", "raise", "3-bet", "4-bet", "5-bet")
 
 
-def _table(solve: PostflopSolve) -> AnimationTable:
+def _table(solve: PostflopSolve, *, display_dollars: bool = False) -> AnimationTable:
     return AnimationTable(
         table_size=solve.table_size,
         starting_stack_bb=float(solve.effective_stack_bb),
@@ -64,6 +64,9 @@ def _table(solve: PostflopSolve) -> AnimationTable:
             float(solve.bb_in_dollars)
             if solve.game_format != "tournament" else None
         ),
+        # "display": "dollars" header when this ROW renders in dollars (Aug
+        # 2026): the app must render the same currency on every surface.
+        display_dollars=display_dollars,
     )
 
 
@@ -139,11 +142,13 @@ def _walk_postflop(table: AnimationTable, node: PostflopNode) -> None:
     table.emit("decision", seat=node.actor, street=node.street)
 
 
-def build_postflop_animation_script(node: PostflopNode, solve: PostflopSolve) -> str:
+def build_postflop_animation_script(
+    node: PostflopNode, solve: PostflopSolve, *, display_dollars: bool = False
+) -> str:
     """The full timeline for a postflop question: the whole preflop line
     (folds + blinds synthesized), each street's deal + actions, ending at
     the decision the question asks."""
-    table = _table(solve)
+    table = _table(solve, display_dollars=display_dollars)
     _walk_preflop(table, solve, stop_before_step=None)
     _walk_postflop(table, node)
     return table.render(node.actor)

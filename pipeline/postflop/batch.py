@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -78,6 +81,11 @@ class PostflopBatchResult:
     meta_path: Path | None = None
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    # Prompt-cache tokens (July 2026): with the shared call seam caching the
+    # system prompt, `input_tokens` is only the UNCACHED remainder -- these
+    # carry the rest so the spend ledger stays honest (THE USAGE RULE).
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
 
 
 def _collect_worthy(
@@ -264,6 +272,7 @@ def generate_postflop_batch(
     write_meta: bool = True,
     spot_selector: Callable[[list[Any]], list[Any]] | None = None,
     provenance: dict[str, Any] | None = None,
+    llm_workers: int = 1,
 ) -> PostflopBatchResult:
     """Generate up to ``total_questions`` postflop questions from ``solve``.
 
@@ -271,6 +280,13 @@ def generate_postflop_batch(
     deterministic placeholder and no API key is needed. Returns a
     :class:`PostflopBatchResult`; writes the CSV and (unless ``write_meta`` is
     False) a ``<stem>.meta.json`` sidecar.
+
+    ``llm_workers`` (⚡ July 2026, ported from the PLO batch): with N > 1, up
+    to N questions' LLM chains (generation + the opt-in Layer-7 gate/reviser/
+    final audit -- sequential PER question) run concurrently; wall-clock is
+    ~N-fold faster at identical cost. All deterministic work stays on the
+    main thread in draw order and results commit strictly in submission
+    order, so the CSV/meta output is byte-identical to a sequential run.
 
     ``spot_selector`` (optional) receives the full worthy-spot list and returns
     the curated/ordered subset to actually generate -- used to diversify a
@@ -307,7 +323,7 @@ def generate_postflop_batch(
     failures: list[dict[str, Any]] = []
     attempted = 0
     soft_flagged = 0
-    in_tokens = out_tokens = 0
+    in_tokens = out_tokens = cache_c_tokens = cache_r_tokens = 0
     # Layer-7 LLM audit tallies (move only when the opt-in passes run):
     #   claim_flagged -- shipped rows the claim checker flagged (flag-only path);
     #   revise_* -- the auto-fix lifecycle (flagged = fixed + discarded + unchanged).
@@ -342,29 +358,73 @@ def generate_postflop_batch(
         solve.oop_position: "call",
     }
 
-    def _record_usage(usage: object) -> None:
-        nonlocal in_tokens, out_tokens
-        in_tokens += int(getattr(usage, "input_tokens", 0) or 0)
-        out_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+    # ⚡ llm_workers > 1 reports usage from worker threads; the lock keeps
+    # the totals exact (THE USAGE RULE: an uncounted call is invisible spend).
+    _usage_lock = threading.Lock()
 
-    for spot in worthy:
-        if len(rows) >= total_questions:
-            break
-        attempted += 1
-        if progress_callback is not None:
-            progress_callback(
-                f"Generating {len(rows) + 1}/{total_questions} "
-                f"({spot.node.node_id} / {spot.hero_combo})",
-                len(rows),
-                total_questions,
+    def _record_usage(usage: object) -> None:
+        nonlocal in_tokens, out_tokens, cache_c_tokens, cache_r_tokens
+        with _usage_lock:
+            in_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+            out_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+            # THE USAGE RULE: with prompt caching on, input_tokens excludes the
+            # cached prefix -- count the cache tokens too or the ledger drifts.
+            cache_c_tokens += int(
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+            cache_r_tokens += int(
+                getattr(usage, "cache_read_input_tokens", 0) or 0
             )
 
+    def _prepare(spot) -> tuple[Any, ...]:
+        """All deterministic pre-LLM work for one spot -- MAIN THREAD ONLY,
+        in draw order (facts RNG seeding + counter order must match a
+        sequential run exactly)."""
+        nonlocal trap_floored
         facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
         options, correct = build_options(spot, style=answer_style)
+        if not display_in_bb:
+            # CURRENCY-CONSISTENCY RULE (Aug 2026): dollar prose must never
+            # ship bb option labels. Applied HERE (before the LLM prompt +
+            # validators + row build) so every surface sees the same display
+            # labels; internal joins stay on bb labels and
+            # frequencies_for_options transforms its keys to match.
+            from pipeline.postflop.options import dollarize_options  # noqa: PLC0415
+
+            options, correct = dollarize_options(
+                options, correct, bb_in_dollars=solve.bb_in_dollars
+            )
         difficulty = compute_difficulty(facts, apply_trap_bump=trap_difficulty)
         if difficulty.trap_bump_applied:
             trap_floored += 1
+        solver_data_block = build_solver_data_block(facts)
+        # The action-history narrative (the SAME string the reader + the writer
+        # see). The data block never restates the line, so the Layer-7 checker /
+        # reviser need this to verify line references (a donk-lead, a check-raise)
+        # instead of false-flagging them as invented action history.
+        question_text = format_question(
+            facts.spot, solve, display_in_bb=display_in_bb
+        )
+        return facts, options, correct, difficulty, solver_data_block, question_text
 
+    # ⚡ One question's WHOLE LLM chain (Layer 6 + the opt-in Layer-7 gate /
+    # reviser / final audit + the deterministic soft validators), free of any
+    # shared-state mutation except the locked usage totals, so it can run on
+    # a worker thread (llm_workers). Returns the shipped pieces plus counter
+    # DELTAS -- applied at commit time, in submission order, on the main
+    # thread -- or a "failed" result with the failure record.
+    def _run_llm_chain(
+        spot, facts, options, correct, solver_data_block, question_text
+    ) -> dict[str, Any]:
+        from pipeline.postflop.validators import (  # noqa: PLC0415
+            run_postflop_soft_validators,
+        )
+
+        out: dict[str, Any] = {
+            "ok": True, "explanation": None, "claim_check_json": "",
+            "claim_issues": [], "revise_record": None,
+            "remaining_issues": [], "soft_warnings": [], "deltas": {},
+        }
         try:
             if use_placeholder:
                 explanation = placeholder_explanation(facts, options, correct)
@@ -376,29 +436,20 @@ def generate_postflop_batch(
                     usage_callback=_record_usage,
                 )
         except ExplanationValidationError as exc:
-            failures.append({
-                "node_id": spot.node.node_id,
-                "hero_combo": spot.hero_combo,
-                "error_message": str(exc),
-                "attempt_text": exc.last_attempt_text,
-            })
-            continue
-
-        solver_data_block = build_solver_data_block(facts)
-        # The action-history narrative (the SAME string the reader + the writer
-        # see). The data block never restates the line, so the Layer-7 checker /
-        # reviser need this to verify line references (a donk-lead, a check-raise)
-        # instead of false-flagging them as invented action history.
-        question_text = format_question(facts.spot, solve, display_in_bb=display_in_bb)
+            return {
+                "ok": False,
+                "failure": {
+                    "node_id": spot.node.node_id,
+                    "hero_combo": spot.hero_combo,
+                    "error_message": str(exc),
+                    "attempt_text": exc.last_attempt_text,
+                },
+            }
 
         # --- Layer-7 LLM audit / revise passes (opt-in extra LLM calls) ------
         # Shared with the full-hand driver (pipeline.postflop.layer7) so a leg
-        # gets the same QA as a standalone spot. Real runs only (a placeholder is
-        # never checked/revised).
-        claim_check_json = ""
-        claim_issues: list[str] = []
-        revise_record: dict[str, Any] | None = None
-        remaining_issues: list[str] = []
+        # gets the same QA as a standalone spot. Real runs only (a placeholder
+        # is never checked/revised).
         if not use_placeholder and (run_claim_checker or revise_pass):
             l7 = run_layer7_audit(
                 explanation, facts,
@@ -410,23 +461,45 @@ def generate_postflop_batch(
                 final_audit=final_audit, usage_callback=_record_usage,
             )
             explanation = l7.explanation  # possibly the rewrite
-            claim_check_json = l7.claim_check_json
-            claim_issues = l7.claim_issues
-            revise_record = l7.revise_record
-            remaining_issues = l7.remaining_issues
-            claim_flagged += l7.claim_flagged
-            revise_flagged += l7.revise_flagged
-            revise_fixed += l7.revise_fixed
-            revise_discarded += l7.revise_discarded
-            revise_unchanged += l7.revise_unchanged
-
-        from pipeline.postflop.validators import run_postflop_soft_validators
+            out["claim_check_json"] = l7.claim_check_json
+            out["claim_issues"] = l7.claim_issues
+            out["revise_record"] = l7.revise_record
+            out["remaining_issues"] = l7.remaining_issues
+            out["deltas"] = {
+                "claim_flagged": l7.claim_flagged,
+                "revise_flagged": l7.revise_flagged,
+                "revise_fixed": l7.revise_fixed,
+                "revise_discarded": l7.revise_discarded,
+                "revise_unchanged": l7.revise_unchanged,
+            }
 
         # Soft validators run on the FINAL (possibly revised) explanation.
-        soft_warnings = (
+        out["soft_warnings"] = (
             [] if use_placeholder
             else run_postflop_soft_validators(explanation, facts)
         )
+        out["explanation"] = explanation
+        return out
+
+    def _commit(spot, facts, options, correct, difficulty,
+                solver_data_block, chain: dict[str, Any]) -> None:
+        """Apply one finished chain -- MAIN THREAD ONLY, strictly in
+        submission order, so row numbering and every counter match a
+        sequential run over the same draws."""
+        nonlocal soft_flagged, claim_flagged, revise_flagged, revise_fixed
+        nonlocal revise_discarded, revise_unchanged
+        if not chain["ok"]:
+            failures.append(chain["failure"])
+            return
+        deltas = chain["deltas"]
+        claim_flagged += deltas.get("claim_flagged", 0)
+        revise_flagged += deltas.get("revise_flagged", 0)
+        revise_fixed += deltas.get("revise_fixed", 0)
+        revise_discarded += deltas.get("revise_discarded", 0)
+        revise_unchanged += deltas.get("revise_unchanged", 0)
+        explanation = chain["explanation"]
+        soft_warnings = chain["soft_warnings"]
+        remaining_issues = chain["remaining_issues"]
         status = "flagged" if (soft_warnings or remaining_issues) else "draft"
         if soft_warnings:
             soft_flagged += 1
@@ -435,7 +508,7 @@ def generate_postflop_batch(
             facts, explanation, solve, difficulty, len(rows) + 1,
             validation_status=status, display_in_bb=display_in_bb,
         )
-        row["claim_check"] = claim_check_json
+        row["claim_check"] = chain["claim_check_json"]
         rows.append(row)
 
         record: dict[str, Any] = {
@@ -479,10 +552,10 @@ def generate_postflop_batch(
             record["prior_street_label"] = _prior_node.street
         if soft_warnings:
             record["validator_warnings"] = soft_warnings
-        if claim_issues:
-            record["claim_check_issues"] = claim_issues
-        if revise_record is not None:
-            record["revise"] = revise_record
+        if chain["claim_issues"]:
+            record["claim_check_issues"] = chain["claim_issues"]
+        if chain["revise_record"] is not None:
+            record["revise"] = chain["revise_record"]
         # Artifact-strip transparency (July 2026): what trace-frequency jam
         # mass was removed and renormalised away before this question was
         # built, so a reviewer can see the strip happened.
@@ -492,6 +565,78 @@ def generate_postflop_batch(
                 "freq": round(spot.stripped_artifact_freq, 4),
             }
         question_records.append(record)
+
+    def _draw(spot_iter) -> tuple[Any, ...] | None:
+        """Draw + prepare the next spot (main thread). None when exhausted."""
+        nonlocal attempted
+        spot = next(spot_iter, None)
+        if spot is None:
+            return None
+        attempted += 1
+        if progress_callback is not None:
+            progress_callback(
+                f"Generating {len(rows) + 1}/{total_questions} "
+                f"({spot.node.node_id} / {spot.hero_combo})",
+                len(rows),
+                total_questions,
+            )
+        return (spot, *_prepare(spot))
+
+    # ⚡ Parallel LLM workers (July 2026, ported from the PLO batch): with
+    # workers > 1, up to N questions' LLM chains run concurrently while ALL
+    # deterministic work (facts extraction, options, difficulty, row building)
+    # stays on the main thread in draw order, and results commit strictly in
+    # SUBMISSION order (head-of-line) -- so CSV/meta output is byte-identical
+    # to a sequential run and the re-verifier needs no knowledge of the
+    # worker count. Dry runs stay sequential (no LLM to parallelize).
+    workers = 1 if use_placeholder else max(1, int(llm_workers or 1))
+    spot_iter = iter(worthy)
+    if workers == 1:
+        # The classic sequential path -- behaviour identical to before.
+        while len(rows) < total_questions:
+            drawn = _draw(spot_iter)
+            if drawn is None:
+                break
+            spot, facts, options, correct, difficulty, sdb, qtext = drawn
+            _commit(
+                spot, facts, options, correct, difficulty, sdb,
+                _run_llm_chain(spot, facts, options, correct, sdb, qtext),
+            )
+    else:
+        # Bounded pipeline: keep up to ``workers`` chains in flight, never
+        # more than the questions still needed; a failed chain frees a slot
+        # and the fill loop draws a replacement, exactly like sequential
+        # would have drawn the next spot.
+        inflight: deque[tuple[Any, ...]] = deque()
+        exhausted = False
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="postflop-llm"
+        ) as pool_exec:
+            while True:
+                while (
+                    not exhausted
+                    and len(inflight) < workers
+                    and len(rows) + len(inflight) < total_questions
+                ):
+                    drawn = _draw(spot_iter)
+                    if drawn is None:
+                        exhausted = True
+                        break
+                    spot, facts, options, correct, difficulty, sdb, qtext = drawn
+                    inflight.append((
+                        spot, facts, options, correct, difficulty, sdb,
+                        pool_exec.submit(
+                            _run_llm_chain, spot, facts, options, correct,
+                            sdb, qtext,
+                        ),
+                    ))
+                if not inflight:
+                    break
+                spot, facts, options, correct, difficulty, sdb, fut = (
+                    inflight.popleft()
+                )
+                _commit(spot, facts, options, correct, difficulty, sdb,
+                        fut.result())
 
     output_path = Path(output_path)
     write_postflop_csv(output_path, rows)
@@ -527,6 +672,7 @@ def generate_postflop_batch(
                 "run_claim_checker": run_claim_checker,
                 "revise_pass": revise_pass,
                 "final_audit": final_audit and revise_pass,
+                "llm_workers": llm_workers,
             },
             "counters": {
                 "worthy_spots_available": worthy_total,
@@ -566,6 +712,8 @@ def generate_postflop_batch(
         meta_path=meta_path,
         total_input_tokens=in_tokens,
         total_output_tokens=out_tokens,
+        total_cache_creation_tokens=cache_c_tokens,
+        total_cache_read_tokens=cache_r_tokens,
     )
 
 

@@ -245,6 +245,8 @@ class SizingBatchResult:
     model_used: str = ""
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    total_cache_read_tokens: int = 0
     solves_skipped: dict[str, str] = field(default_factory=dict)
     # Compat with the admin done-panel (_render_postflop_result_ui reads these
     # off every postflop result): the sizing "worthy pool" is the scored pool.
@@ -261,6 +263,7 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
     model: str = DEFAULT_MODEL,
     dry_run: bool = False,
     display_in_bb: bool = True,
+    display_split: bool = False,
     min_frequency: float = 0.65,
     max_frequency: float = 0.99,
     system_prompt: str | None = None,
@@ -275,6 +278,7 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
     bb_in_dollars: float = 1.0,
     progress_callback: Callable[[str, int, int], None] | None = None,
     solves_loaded: Mapping[str, PostflopSolve] | None = None,
+    llm_workers: int = 1,
 ) -> SizingBatchResult:
     """One fully-balanced bet-sizing batch across ``db_paths`` (see module doc).
 
@@ -360,7 +364,23 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
         for i, (key, spot) in enumerate(pool)
     }
     intended = ranked[:total_questions]
-    targets = collections.Counter(key for key, _spot in intended)
+    # 💵/bb EVEN SPLIT (Aug 2026, user ask): alternate the display currency
+    # down the GLOBAL balanced order, so the shipped batch is ~half big
+    # blinds and ~half dollars (and backfill after failures keeps
+    # alternating). Each question's currency is recorded in its meta record;
+    # options are dollarized at build time by the currency-consistency rule.
+    currency_by_rank = {
+        rk: (rk % 2 == 0) if display_split else display_in_bb
+        for rk in range(len(ranked))
+    }
+    in_bb_of = {
+        (key, spot.node.node_id, spot.hero_combo): currency_by_rank[rk]
+        for rk, (key, spot) in enumerate(ranked)
+    }
+    targets = collections.Counter(
+        (key, in_bb_of[(key, spot.node.node_id, spot.hero_combo)])
+        for key, spot in intended
+    )
 
     # --- 5. generate per solve through the standard batch -------------------
     sub_rows: list[tuple[int, dict[str, str]]] = []  # (global rank, row)
@@ -368,18 +388,25 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
     failures: list[dict[str, Any]] = []
     per_solve_written: dict[str, int] = {}
     counters_sum: collections.Counter = collections.Counter()
-    in_tokens = out_tokens = 0
+    in_tokens = out_tokens = cache_c_tokens = cache_r_tokens = 0
     model_used = ""
     sub_run_settings: dict[str, Any] = {}
     done_so_far = 0
 
     with tempfile.TemporaryDirectory(prefix="sizing_batch_") as tmp:
-        for key in sorted(targets):
+        for key, group_in_bb in sorted(targets):
             db_path, solve = sources[key]
-            target = targets[key]
-            # This solve's spots in global balanced order: the intended picks
-            # first, then its remainder as balanced backfill after failures.
-            mine = [spot for k, spot in ranked if k == key]
+            target = targets[(key, group_in_bb)]
+            # This solve's spots in global balanced order, THIS currency
+            # group only: the intended picks first, then its remainder as
+            # balanced backfill after failures.
+            mine = [
+                spot
+                for k, spot in ranked
+                if k == key
+                and in_bb_of[(k, spot.node.node_id, spot.hero_combo)]
+                == group_in_bb
+            ]
             pick_keys = [(spot.node.node_id, spot.hero_combo) for spot in mine]
             pick_index = {pk: i for i, pk in enumerate(pick_keys)}
 
@@ -400,7 +427,7 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
             ) -> None:
                 _progress(msg, _offset + done, total_questions)
 
-            sub_out = Path(tmp) / f"{len(per_solve_written)}.csv"
+            sub_out = Path(tmp) / f"{len(sub_rows)}_{key}_{int(group_in_bb)}.csv"
             result = generate_postflop_batch(
                 solve=solve,
                 output_path=sub_out,
@@ -409,13 +436,14 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
                 model=model,
                 dry_run=dry_run,
                 answer_style="sizing",
-                display_in_bb=display_in_bb,
+                display_in_bb=group_in_bb,
                 min_frequency=min_frequency,
                 max_frequency=max_frequency,
                 system_prompt=system_prompt,
                 run_claim_checker=run_claim_checker,
                 revise_pass=revise_pass,
                 final_audit=final_audit,
+                llm_workers=llm_workers,
                 spot_selector=_selector,
                 progress_callback=_sub_progress,
                 provenance={
@@ -426,12 +454,17 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
                     "stakes": stakes,
                     "live_or_online": live_or_online,
                     "bb_in_dollars": bb_in_dollars,
+                    "display_in_bb": group_in_bb,
                 },
             )
-            per_solve_written[key] = result.questions_written
+            per_solve_written[key] = (
+                per_solve_written.get(key, 0) + result.questions_written
+            )
             done_so_far += result.questions_written
             in_tokens += result.total_input_tokens
             out_tokens += result.total_output_tokens
+            cache_c_tokens += result.total_cache_creation_tokens
+            cache_r_tokens += result.total_cache_read_tokens
             model_used = result.model_used
 
             sub_meta = json.loads(
@@ -453,7 +486,9 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
                 # mean the sub-batch generated something we never picked.
                 assert rk is not None, (key, q["node_id"], q["hero_combo"])
                 sub_rows.append((rk, row))
-                sub_questions.append((rk, {**q, "solve_key": key}))
+                sub_questions.append(
+                    (rk, {**q, "solve_key": key, "display_in_bb": group_in_bb})
+                )
 
     # --- 6. merge in the global balanced order + renumber -------------------
     sub_rows.sort(key=lambda t: t[0])
@@ -504,6 +539,8 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
         },
         "run_settings": {
             **sub_run_settings,
+            "display_in_bb": display_in_bb,
+            "display_split": display_split,
             "total_questions": total_questions,
             "sizing_mode": True,
             # Which explanation prompt wrote this batch (the admin picker's
@@ -540,6 +577,8 @@ def generate_sizing_batch(  # noqa: PLR0912, PLR0915 -- one linear orchestration
         model_used=model_used,
         total_input_tokens=in_tokens,
         total_output_tokens=out_tokens,
+        total_cache_creation_tokens=cache_c_tokens,
+        total_cache_read_tokens=cache_r_tokens,
         solves_skipped=skipped,
         worthy_spots_available=len(pool),
         soft_flagged_rows=int(counters_sum.get("soft_flagged_rows", 0)),

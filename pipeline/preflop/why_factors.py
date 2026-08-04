@@ -88,6 +88,7 @@ _ARCHETYPE_REASON: dict[str, str] = {
     "fold_outranged": "outranged in this spot",
     "call_for_implied_odds": "a speculative call playing for implied odds",
     "sb_complete": "completing cheaply from the small blind",
+    "open_limp": "limping in to see a cheap flop",
     "call_allin": "a pot-odds call of the jam",
     "bb_check": "a free check in an unraised pot",
 }

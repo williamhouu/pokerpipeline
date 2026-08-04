@@ -219,14 +219,22 @@ def build_app_table_columns(
     fmt = lambda c: _fmt_chips(  # noqa: E731
         c, is_tournament=is_tournament, bb_unit=bb_unit)
 
-    def _remaining(invested: float) -> str:
+    # The BB ante (MTT bb-ante formats): TOTAL dead chips, posted by the BB
+    # alone -- it reduces the BB's remaining stack and joins the pot, same
+    # convention as the shared prose walker (`hand["ante"]` = total chips).
+    ante_chips = float(hand.get("ante") or 0.0)
+
+    def _remaining(invested: float, seat: str | None = None) -> str:
+        dead = ante_chips if seat == "BB" else 0.0
         if is_tournament:
-            return _fmt_bb(stack_chips - invested / bb_unit, allow_zero=True)
-        return "$" + str(_round_half_up(stack_chips - invested))
+            return _fmt_bb(
+                stack_chips - (invested + dead) / bb_unit, allow_zero=True
+            )
+        return "$" + str(_round_half_up(stack_chips - invested - dead))
 
     # --- hero seat (User Seat) ------------------------------------------
     hero_info = info.get(hero_pos)
-    user_seat = f"{hero_pos}-{_remaining(money_in.get(hero_pos, 0.0))}"
+    user_seat = f"{hero_pos}-{_remaining(money_in.get(hero_pos, 0.0), hero_pos)}"
     hero_acted = (
         hero_info is not None
         and not hero_info["folded"]
@@ -256,7 +264,7 @@ def build_app_table_columns(
         if pos_info is None and not is_blind and not is_behind_hero:
             continue  # folded earlier / not involved
 
-        seat_str = f"{pos}-{_remaining(money_in.get(pos, 0.0))}"
+        seat_str = f"{pos}-{_remaining(money_in.get(pos, 0.0), pos)}"
         sort_amt = 0.0
         if pos_info is not None:
             if pos_info["action"] == "FOLD":
@@ -291,9 +299,10 @@ def build_app_table_columns(
 
     # --- pot + the trivial columns --------------------------------------
     pot_chips = sum(money_in.values())
-    ante = hand.get("ante") or 0
-    if is_tournament and ante:
-        pot_chips += ante * table_size
+    # `hand["ante"]` is the TOTAL ante contribution (shared-walker contract;
+    # a 1bb BB ante adds 1bb once) -- NOT a per-seat amount to multiply.
+    if ante_chips:
+        pot_chips += ante_chips
     pot = (_fmt_bb(pot_chips / bb_unit, allow_zero=True)
            if is_tournament else "$" + _trim_num(pot_chips))
 

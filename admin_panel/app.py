@@ -621,35 +621,79 @@ def _default_postflop_venue(table_size: int | None) -> str:
     return "Live" if (table_size or 9) >= 8 else "Online"  # noqa: PLR2004
 
 
+def _pack_format(pack: PreflopPack) -> str:
+    """"cash" or "tournament" for the format pre-filter (Aug 2026)."""
+    return (
+        "tournament"
+        if getattr(pack, "game_format", "cash") == "tournament"
+        else "cash"
+    )
+
+
 def _select_preflop_pack(widget_key: str) -> PreflopPack | None:
-    """Render the pack selector and return the chosen pack.
+    """Render the format pre-filter + pack selector; return the chosen pack.
+
+    The pack list outgrew a single dropdown when the seven MTT bb-ante
+    packs landed (Aug 2026), so a Cash / Tournament radio narrows it
+    first (rendered only when both formats exist on disk). INVARIANT:
+    the pack dropdown must only list packs of the chosen format, and a
+    saved selection from the OTHER format must be reset to the filtered
+    list's first entry -- a stale session value not in the selectbox
+    options crashes Streamlit.
 
     With a single discovered pack there is no choice to make -- show a
     caption and return it. The widget's session value persists across
     pages that share ``widget_key``; the Generate page additionally
     snapshots it to disk on launch.
     """
-    packs = _cached_preflop_packs()
-    if not packs:
+    all_packs = _cached_preflop_packs()
+    if not all_packs:
         return None
 
+    formats = {_pack_format(p) for p in all_packs}
+    fmt = next(iter(formats)) if len(formats) == 1 else "cash"
+    if len(formats) > 1:
+        fmt_choice = st.radio(
+            "Format",
+            options=["Cash", "Tournament (MTT)"],
+            horizontal=True,
+            key=f"{widget_key}_format",
+            help=(
+                "Cash packs render dollar stakes and rake; tournament packs "
+                "(the 8-max MTT bb-ante family) render everything in big "
+                "blinds with the 1bb ante in every pot number."
+            ),
+        )
+        fmt = "tournament" if fmt_choice.startswith("Tournament") else "cash"
+    packs = [p for p in all_packs if _pack_format(p) == fmt]
+
     def _label(pack_id: str) -> str:
-        p = next(pk for pk in packs if pk.pack_id == pack_id)
-        return f"{p.table_size}-max · {p.stack_depth_bb}bb · {p.pack_id}"
+        # TOTAL on purpose: Streamlit can call format_func with a stale id
+        # from the other format while a reset is in flight -- returning the
+        # raw id for one frame beats a StopIteration crash.
+        p = next((pk for pk in packs if pk.pack_id == pack_id), None)
+        if p is None:
+            return pack_id
+        mtt = " MTT (BB ante)" if _pack_format(p) == "tournament" else ""
+        return f"{p.table_size}-max · {p.stack_depth_bb}bb{mtt} · {p.pack_id}"
 
     if len(packs) == 1:
         st.caption(f"Range pack: **{_label(packs[0].pack_id)}**")
         return packs[0]
     ids = [p.pack_id for p in packs]
+    # Reset a stale selection from the other format (see INVARIANT above).
+    if st.session_state.get(widget_key) not in ids:
+        st.session_state[widget_key] = ids[0]
     choice = st.selectbox(
         "Range pack",
         options=ids,
         format_func=_label,
         key=widget_key,
         help=(
-            "Which preflop solve the batch samples from. 6-max = Ryan's "
-            "PioViewer pack (rake 4%/0.3bb); 9-max = the Monker pack "
-            "(rake 10%/3bb -- visibly tighter ranges)."
+            "Which preflop solve the batch samples from. Cash: 6-max = "
+            "Ryan's PioViewer pack (rake 4%/0.3bb), 9-max = the Monker pack "
+            "(rake 10%/3bb -- visibly tighter ranges), 8-max = the live "
+            "deep-cash packs. Tournament: the MTT bb-ante depths."
         ),
     )
     return next(p for p in packs if p.pack_id == choice)
@@ -1123,6 +1167,36 @@ def _render_generate_page_postflop() -> None:
             else:
                 st.caption("Explanations use the active postflop prompt "
                            "(Prompt page, Postflop mode).")
+            st.session_state.setdefault("postflop_sizing_llm_workers", 3)
+            sz_llm_workers = int(st.select_slider(
+                "⚡ Parallel questions (speed)",
+                options=[1, 2, 3, 4],
+                key="postflop_sizing_llm_workers",
+                help=(
+                    "Run several questions' LLM chains at the same time "
+                    "(July 2026). Commits stay in draw order, so the CSV is "
+                    "identical to a sequential run at identical cost, "
+                    "roughly Nx faster. 1 = classic sequential."
+                ),
+            ))
+            sz_display = st.radio(
+                "Display amounts as",
+                options=[
+                    "Even split (half bb, half dollars)",
+                    "Big blinds",
+                    "Dollars",
+                ],
+                index=0,
+                horizontal=True,
+                key="postflop_sizing_display",
+                help=(
+                    "Even split (Aug 2026, the default): the display "
+                    "currency alternates down the balanced order, so about "
+                    "half the questions render in big blinds and half in "
+                    "dollars -- question prose AND answer options always "
+                    "match (the currency-consistency rule)."
+                ),
+            )
             sz_name = st.text_input(
                 "Output filename",
                 value="",
@@ -1169,6 +1243,9 @@ def _render_generate_page_postflop() -> None:
                     run_claim_checker=sz_layer7 == "Flag only",
                     revise_pass=sz_layer7 == "Audit & auto-fix",
                     final_audit=sz_layer7 == "Audit & auto-fix",
+                    llm_workers=sz_llm_workers,
+                    display_in_bb=sz_display == "Big blinds",
+                    display_split=sz_display.startswith("Even split"),
                 )
                 st.rerun()
             return
@@ -1986,6 +2063,24 @@ def _render_generate_page_postflop() -> None:
                     "sequential run. 1 = classic sequential."
                 ),
             ))
+        elif is_spots:
+            # ⚡ Standalone parallelism (July 2026, ported from PLO/full-hand):
+            # N questions' LLM chains run concurrently; commits stay in draw
+            # order, so the CSV is byte-identical to a sequential run.
+            st.session_state.setdefault("postflop_standalone_llm_workers", 3)
+            pf_llm_workers = int(st.select_slider(
+                "⚡ Parallel questions (speed)",
+                options=[1, 2, 3, 4],
+                key="postflop_standalone_llm_workers",
+                help=(
+                    "Run several questions' LLM chains at the same time "
+                    "(July 2026). Each question's generation + audit still "
+                    "runs in order internally, and results commit in the "
+                    "same order as a sequential run — identical CSV, "
+                    "identical cost, roughly Nx faster wall-clock. "
+                    "1 = classic sequential."
+                ),
+            ))
         else:
             pf_llm_workers = 1
         if pf_run_claim_checker or pf_revise_pass:
@@ -2283,6 +2378,7 @@ def _render_generate_page_postflop() -> None:
                     claim_checker_prompt=pf_claim_checker_prompt,
                     revise_pass=pf_revise_pass,
                     final_audit=pf_final_audit,
+                    llm_workers=pf_llm_workers,
                 )
             st.rerun()
         except RuntimeError as exc:
@@ -2384,9 +2480,15 @@ def _render_postflop_result_ui(result: Any) -> None:
     cols[2].metric("Flagged", result.soft_flagged_rows)
     cols[3].metric("Failed", len(result.failures))
     if not result.dry_run and (result.total_input_tokens or result.total_output_tokens):
+        _cc = int(getattr(result, "total_cache_creation_tokens", 0) or 0)
+        _cr = int(getattr(result, "total_cache_read_tokens", 0) or 0)
+        _cache_bit = (
+            f" · cache: {_cr:,} read / {_cc:,} write" if (_cc or _cr) else ""
+        )
         st.caption(
             f"Tokens: {result.total_input_tokens:,} in / "
-            f"{result.total_output_tokens:,} out · model {result.model_used}"
+            f"{result.total_output_tokens:,} out{_cache_bit} · "
+            f"model {result.model_used}"
         )
     # 📏 Sizing-trainer batches carry a balance report (achieved vs target
     # per axis) -- render the plain-English lines so shortfalls are visible.
@@ -2454,6 +2556,7 @@ def _render_postflop_result_ui(result: Any) -> None:
 # every restart silently reset style + filters to defaults -- which is how a
 # batch ends up on Basic style + all-player-counts when GTO was picked).
 _PREFLOP_GEN_SAVED_KEYS: tuple[str, ...] = (
+    "preflop_fully_balanced",
     "preflop_gen_pack",
     "preflop_gen_positions",
     "preflop_gen_contexts",
@@ -2505,6 +2608,14 @@ def _seed_preflop_generate_settings(
         ),
         "preflop_answer_style": _choice(
             saved.get("preflop_answer_style"), style_labels, style_labels[0]
+        ),
+        # The 🎛️ Fully balanced checkbox (Aug 2026): restore the last run's
+        # choice; default ON for a fresh install (bool sanitize -- a stale
+        # non-bool value falls back to True).
+        "preflop_fully_balanced": (
+            saved.get("preflop_fully_balanced")
+            if isinstance(saved.get("preflop_fully_balanced"), bool)
+            else True
         ),
     }
     for key, value in restored.items():
@@ -2637,6 +2748,38 @@ def _render_generate_page_preflop() -> None:
         f"{pack.stack_depth_bb}bb · {pack.open_size_bb}x open · "
         f"{pack.description}"
     )
+    # 🏆 All-depths mode (Aug 2026, bet-sizing-trainer pattern): a toggle
+    # right at the pack section that repurposes the main GENERATE button to
+    # queue ONE batch per MTT depth. Every setting below (count-per-depth,
+    # prompt, style, Layer-7, balanced) still applies to each batch -- the
+    # toggle changes WHAT the button launches, never what you can configure.
+    all_depths_mode = False
+    if _pack_format(pack) == "tournament":
+        all_depths_mode = st.toggle(
+            "🏆 All tournament depths — one balanced batch per depth",
+            key="preflop_all_depths_toggle",
+            help=(
+                "ON: the GENERATE button queues one batch per MTT depth, "
+                "back to back on the job queue, each using the exact "
+                "settings you configure below (prompt, answer style, "
+                "count, audit mode...). The question count applies to EACH "
+                "depth. OFF: generate only the pack selected above."
+            ),
+        )
+        if all_depths_mode:
+            _all_mtt_packs = sorted(
+                (
+                    p_
+                    for p_ in _cached_preflop_packs()
+                    if _pack_format(p_) == "tournament"
+                ),
+                key=lambda p_: p_.stack_depth_bb,
+            )
+            st.caption(
+                "Will queue "
+                + ", ".join(f"{p_.stack_depth_bb:g}bb" for p_ in _all_mtt_packs)
+                + " — the pack picked above is ignored while this is on."
+            )
 
     # Metadata only (context + player count per node, grouped by actor) --
     # the Generate page never needs full node objects, so it stays off the
@@ -2824,22 +2967,46 @@ def _render_generate_page_preflop() -> None:
     with st.popover("ℹ️  What is Razor's-edge difficulty?"):
         _render_razor_difficulty_explainer()
 
+    # 🎛️ Fully balanced (Aug 2026 -- the preflop twin of the PLO / full-hand
+    # buttons, wired to generate_preflop_batch(balanced=)): greedy marginal
+    # balance across situation / answer verb / hero seat PLUS difficulty
+    # terciles (Easy/Medium/Hard) enforced at commit with an honest-shortfall
+    # reserve. Supersedes the plain diversify round-robin when ON.
+    fully_balanced = st.checkbox(
+        "🎛️ Fully balanced batch — situations, answers, seats & difficulty "
+        "thirds",
+        value=True,
+        key="preflop_fully_balanced",
+        help=(
+            "ON (default) = one click, production-ready mix: the batch is "
+            "greedy-balanced across situations (opens / facing raises / "
+            "3-bet+ pots), answer verbs (fold-call-raise), hero seats, and "
+            "difficulty thirds (Easy/Medium/Hard, honest shortfall when a "
+            "band is scarce). The meta records an achieved-vs-target "
+            "balance report. Same machinery as the PLO and full-hand "
+            "balanced buttons. Never changes any answer or difficulty -- "
+            "only WHICH worthy spots are picked."
+        ),
+    )
+
     # Situation diversification. The worthy pool is walked in order until N
     # rows are collected, so a fill-to-N batch (especially Hard trap-aware)
     # collapses onto the most common situation -- every question an ace-high
     # fold facing a blind 3-bet. ON round-robins the pool across
     # seat / action-context / dominant-action / hand-category buckets so the
-    # batch spreads across positions, hands, and actions. Default ON.
+    # batch spreads across positions, hands, and actions. Superseded by the
+    # Fully balanced button above when that is ON.
     diversify = st.checkbox(
         "🎲 Diversify situations — spread the batch across seats, hands & actions",
         value=True,
         key="preflop_diversify",
+        disabled=bool(fully_balanced),
         help=(
-            "ON (default) = round-robin the eligible spots across situation "
-            "buckets, so a batch isn't a run of near-identical spots (e.g. all "
-            "ace-high folds vs a blind 3-bet). Especially important with "
-            "Trap-aware on. OFF = the old flat-random fill. Never changes any "
-            "answer or difficulty — only WHICH worthy spots are picked."
+            "Included in 🎛️ Fully balanced (which also balances difficulty "
+            "thirds) — this toggle only matters when Fully balanced is OFF. "
+            "ON = round-robin the eligible spots across situation buckets. "
+            "OFF = the old flat-random fill. Never changes any answer or "
+            "difficulty — only WHICH worthy spots are picked."
         ),
     )
 
@@ -3126,15 +3293,28 @@ def _render_generate_page_preflop() -> None:
 
     # --- 7. Output options ---
     st.subheader("7. Output")
+    # Tournament packs (MTT bb-ante): no dollars, no stakes, no venue --
+    # amounts are bb by definition and generate_preflop_batch enforces the
+    # tournament framing regardless, so the display widgets would be
+    # misleading no-ops. One caption replaces them.
+    _is_mtt_pack = _pack_format(pack) == "tournament"
     col1, col2 = st.columns(2)
     with col1:
-        _currency = st.radio(
-            "Display amounts as",
-            options=["Dollars ($1.25)", "Big blinds (2.5 bb)"],
-            index=1,  # bb is more common for preflop discussion
-            horizontal=True,
-            key="preflop_currency",
-        )
+        if _is_mtt_pack:
+            st.caption(
+                "🏆 Tournament pack: all amounts render in big blinds, the "
+                "1bb big-blind ante is in every pot number, and the "
+                "Live-or-Online column is blank. No stakes/venue apply."
+            )
+            _currency = "Big blinds (2.5 bb)"
+        else:
+            _currency = st.radio(
+                "Display amounts as",
+                options=["Dollars ($1.25)", "Big blinds (2.5 bb)"],
+                index=1,  # bb is more common for preflop discussion
+                horizontal=True,
+                key="preflop_currency",
+            )
     with col2:
         _out_filename = st.text_input(
             "Output filename (prefix)",
@@ -3165,35 +3345,42 @@ def _render_generate_page_preflop() -> None:
         return f"{sb_str}/{bb_str}"
 
     _default_venue, _stake_default = _pack_display_framing(pack)
-    col3, col4 = st.columns(2)
-    with col3:
-        _stake_bb = st.selectbox(
-            "Stakes (rendered in output)",
-            options=list(COMMON_STAKE_LEVELS_BB_DOLLARS),
-            index=list(COMMON_STAKE_LEVELS_BB_DOLLARS).index(_stake_default),
-            format_func=_stake_label_preflop,
-            key=f"preflop_stakes_{pack.pack_id}",
-            help=(
-                "Cosmetic: dollar amounts in the Question/Seats/POT scale "
-                "to this stake; the underlying solve is stake-independent "
-                "(all math in bb). The 9-max pack's rake (10% capped 3bb) "
-                "matches a $1/$2 live cap of $6, so $1/$2 reads most "
-                "coherent there."
-            ),
-        )
-    with col4:
-        _venue = st.radio(
-            "Venue (Live or Online column)",
-            options=["Online", "Live"],
-            index=["Online", "Live"].index(_default_venue),
-            horizontal=True,
-            key=f"preflop_venue_{pack.pack_id}",
-            help=(
-                "Cosmetic framing for the CSV's 'Live or Online' + Context "
-                "columns. The 9-max pack (9-handed, 4x opens, heavy capped "
-                "rake) is shaped like a live low-stakes game."
-            ),
-        )
+    if _is_mtt_pack:
+        # Framing is fixed for tournaments (see the caption above); the
+        # batch override in generate_preflop_batch wins anyway -- these
+        # values are just placeholders for the call signature.
+        _stake_bb = _stake_default
+        _venue = ""
+    else:
+        col3, col4 = st.columns(2)
+        with col3:
+            _stake_bb = st.selectbox(
+                "Stakes (rendered in output)",
+                options=list(COMMON_STAKE_LEVELS_BB_DOLLARS),
+                index=list(COMMON_STAKE_LEVELS_BB_DOLLARS).index(_stake_default),
+                format_func=_stake_label_preflop,
+                key=f"preflop_stakes_{pack.pack_id}",
+                help=(
+                    "Cosmetic: dollar amounts in the Question/Seats/POT scale "
+                    "to this stake; the underlying solve is stake-independent "
+                    "(all math in bb). The 9-max pack's rake (10% capped 3bb) "
+                    "matches a $1/$2 live cap of $6, so $1/$2 reads most "
+                    "coherent there."
+                ),
+            )
+        with col4:
+            _venue = st.radio(
+                "Venue (Live or Online column)",
+                options=["Online", "Live"],
+                index=["Online", "Live"].index(_default_venue),
+                horizontal=True,
+                key=f"preflop_venue_{pack.pack_id}",
+                help=(
+                    "Cosmetic framing for the CSV's 'Live or Online' + Context "
+                    "columns. The 9-max pack (9-handed, 4x opens, heavy capped "
+                    "rake) is shaped like a live low-stakes game."
+                ),
+            )
 
     st.divider()
 
@@ -3447,7 +3634,15 @@ def _render_generate_page_preflop() -> None:
     )
     job_active = jobs.has_active_job()
 
-    if job_active:
+    _gen_label = (
+        f"🏆 GENERATE ALL TOURNAMENT DEPTHS ({int(total)} questions each, "
+        "queued back to back)"
+        if all_depths_mode
+        else "GENERATE BATCH"
+    )
+    if job_active and not all_depths_mode:
+        # All-depths mode may QUEUE behind the active job -- that is the
+        # point of the queue; single mode keeps the guard.
         st.button(
             "GENERATE BATCH  (a job is already running -- see panel above)",
             disabled=True,
@@ -3457,7 +3652,7 @@ def _render_generate_page_preflop() -> None:
         )
     elif not can_generate:
         st.button(
-            "GENERATE BATCH",
+            _gen_label,
             disabled=True,
             type="primary",
             use_container_width=True,
@@ -3469,7 +3664,7 @@ def _render_generate_page_preflop() -> None:
             "match at least one node."
         )
     elif st.button(
-        "GENERATE BATCH",
+        _gen_label,
         type="primary",
         use_container_width=True,
         key="preflop_generate_btn",
@@ -3483,46 +3678,77 @@ def _render_generate_page_preflop() -> None:
             PREFLOP_GEN_SETTINGS_PATH,
             {k: st.session_state.get(k) for k in _PREFLOP_GEN_SAVED_KEYS},
         )
-        _start_preflop_job(
-            pack=pack,
-            hero_positions=list(hero_positions),
-            action_contexts=list(action_contexts),
-            player_counts=list(player_counts),
-            freq_min=freq_low / 100.0,
-            freq_max=freq_high / 100.0,
-            exclude_ambiguous_band=exclude_ambiguous_band,
-            exclude_near_pure_band=exclude_near_pure_band,
-            min_difficulty=int(band_low),
-            max_difficulty=int(band_high),
-            trap_difficulty=bool(trap_difficulty),
-            razor_difficulty=bool(razor_difficulty),
-            diversify=bool(diversify),
-            min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
-            min_villain_line_pct=(
-                None if min_villain_pct == 0.0 else float(min_villain_pct)
-            ),
-            min_hero_premise_freq=(
-                None if min_premise_pct == 0.0 else float(min_premise_pct) / 100.0
-            ),
-            display_in_bb=_currency.startswith("Big blinds"),
-            stakes_bb_dollars=float(_stake_bb),
-            live_or_online=_venue,
-            total_questions=int(total),
-            output_filename=_out_filename,
-            model_label=_model,
-            dry_run=bool(_dry_run),
-            answer_style=answer_style_canonical,
-            system_prompt=_prompt_text,
-            prompt_name=_prompt_name,
-            random_seed=_seed_val,
-            temperature=_temp_val,
-            run_claim_checker=run_claim_checker,
-            claim_checker_prompt=claim_checker_prompt,
-            revise_pass=revise_pass,
-            final_audit=final_audit,
-            run_sanity_audit=bool(run_sanity_audit),
-            equity_runouts=equity_runouts,
+        # All-depths mode: queue one batch per MTT pack with the SAME
+        # settings; the first starts now, the rest run back to back.
+        _target_packs = (
+            sorted(
+                (
+                    p_
+                    for p_ in _cached_preflop_packs()
+                    if _pack_format(p_) == "tournament"
+                ),
+                key=lambda p_: p_.stack_depth_bb,
+            )
+            if all_depths_mode
+            else [pack]
         )
+        for _target_pack in _target_packs:
+            _start_preflop_job(
+                pack=_target_pack,
+                hero_positions=list(hero_positions),
+                action_contexts=list(action_contexts),
+                player_counts=list(player_counts),
+                freq_min=freq_low / 100.0,
+                freq_max=freq_high / 100.0,
+                exclude_ambiguous_band=exclude_ambiguous_band,
+                exclude_near_pure_band=exclude_near_pure_band,
+                min_difficulty=int(band_low),
+                max_difficulty=int(band_high),
+                trap_difficulty=bool(trap_difficulty),
+                razor_difficulty=bool(razor_difficulty),
+                diversify=bool(diversify),
+                balanced=bool(fully_balanced),
+                min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+                min_villain_line_pct=(
+                    None if min_villain_pct == 0.0 else float(min_villain_pct)
+                ),
+                min_hero_premise_freq=(
+                    None
+                    if min_premise_pct == 0.0
+                    else float(min_premise_pct) / 100.0
+                ),
+                display_in_bb=_currency.startswith("Big blinds"),
+                stakes_bb_dollars=float(_stake_bb),
+                live_or_online=_venue,
+                total_questions=int(total),
+                # All-depths: each batch self-names by depth; single mode
+                # keeps the filename box's value.
+                output_filename=(
+                    f"MTT {_target_pack.stack_depth_bb:g}bb balanced "
+                    f"{int(total)}q"
+                    if all_depths_mode
+                    else _out_filename
+                ),
+                model_label=_model,
+                dry_run=bool(_dry_run),
+                answer_style=answer_style_canonical,
+                system_prompt=_prompt_text,
+                prompt_name=_prompt_name,
+                random_seed=_seed_val,
+                temperature=_temp_val,
+                run_claim_checker=run_claim_checker,
+                claim_checker_prompt=claim_checker_prompt,
+                revise_pass=revise_pass,
+                final_audit=final_audit,
+                run_sanity_audit=bool(run_sanity_audit),
+                equity_runouts=equity_runouts,
+                # Queue (rather than fail) when a job is already active, and
+                # rerun ONCE after the loop -- a mid-loop rerun would abandon
+                # the remaining depths.
+                enqueue=all_depths_mode,
+                rerun_after=False,
+            )
+        st.rerun()
 
 
 def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-through
@@ -3540,6 +3766,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     trap_difficulty: bool,
     razor_difficulty: bool,
     diversify: bool,
+    balanced: bool,
     min_ev_gap_bb: float | None,
     min_villain_line_pct: float | None,
     min_hero_premise_freq: float | None,
@@ -3561,8 +3788,14 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     final_audit: bool = False,
     run_sanity_audit: bool = False,
     equity_runouts: int = 400,
+    enqueue: bool = False,
+    rerun_after: bool = True,
 ) -> None:
     """Kick off a preflop batch on a background thread and rerun.
+
+    ``enqueue=True`` routes through the FIFO job queue instead of failing
+    when another job is active -- the ALL-DEPTHS tournament button queues
+    one batch per pack and they run back to back (Aug 2026).
 
     Before this refactor the batch ran inline in the Streamlit script
     thread, so any rerun (sidebar click, tab switch, button press)
@@ -3608,7 +3841,10 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
         # interpreter so it never contends with the Streamlit UI for the
         # GIL. All kwargs below are picklable; the child re-creates the
         # Anthropic client itself from ANTHROPIC_API_KEY in the env.
-        jobs.start_subprocess_job(
+        launcher = (
+            jobs.enqueue_subprocess_job if enqueue else jobs.start_subprocess_job
+        )
+        launcher(
             generate_preflop_batch,
             label=label,
             pack=pack,
@@ -3626,6 +3862,7 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
             trap_difficulty=trap_difficulty,
             razor_difficulty=razor_difficulty,
             diversify=diversify,
+            balanced=balanced,
             min_ev_gap_bb=min_ev_gap_bb,
             min_villain_line_pct=min_villain_line_pct,
             min_hero_premise_freq=min_hero_premise_freq,
@@ -3654,7 +3891,10 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
         return
 
     # Re-run immediately so the job panel takes over the next render.
-    st.rerun()
+    # (The ALL-DEPTHS loop passes rerun_after=False and reruns ONCE after
+    # queueing every pack -- a rerun mid-loop would abandon the rest.)
+    if rerun_after:
+        st.rerun()
 
 
 def _render_razor_difficulty_explainer() -> None:
@@ -4437,10 +4677,10 @@ def _maybe_log_completed_job(job: jobs.Job[BatchResult], result: BatchResult) ->
 def _maybe_log_completed_postflop_job(job: jobs.Job[Any], result: Any) -> None:
     """Append a POSTFLOP batch's token spend to the lifetime usage log, once.
 
-    The postflop ``PostflopBatchResult`` has no cache-token fields (postflop
-    doesn't prompt-cache the way preflop does), so they log as 0. Dry-runs and
-    zero-token results are skipped. Idempotent via the same module-level
-    logged-id set as the preflop path."""
+    Cache tokens are read off the result (July 2026: the shared call seam
+    prompt-caches system prompts, so ``input_tokens`` alone is only the
+    uncached remainder). Dry-runs and zero-token results are skipped.
+    Idempotent via the same module-level logged-id set as the preflop path."""
     logged = _logged_job_ids()
     if job.id in logged:
         return
@@ -4451,17 +4691,22 @@ def _maybe_log_completed_postflop_job(job: jobs.Job[Any], result: Any) -> None:
         return
     in_tok = int(getattr(result, "total_input_tokens", 0) or 0)
     out_tok = int(getattr(result, "total_output_tokens", 0) or 0)
-    if not (in_tok or out_tok):
+    cache_c = int(getattr(result, "total_cache_creation_tokens", 0) or 0)
+    cache_r = int(getattr(result, "total_cache_read_tokens", 0) or 0)
+    if not (in_tok or out_tok or cache_c or cache_r):
         return
-    cost = usage.compute_cost_usd(model=model, input_tokens=in_tok, output_tokens=out_tok)
+    cost = usage.compute_cost_usd(
+        model=model, input_tokens=in_tok, output_tokens=out_tok,
+        cache_creation_tokens=cache_c, cache_read_tokens=cache_r,
+    )
     out_path = getattr(result, "output_path", None)
     usage.append_log_entry(
         USAGE_LOG_PATH,
         model=model,
         input_tokens=in_tok,
         output_tokens=out_tok,
-        cache_creation_tokens=0,
-        cache_read_tokens=0,
+        cache_creation_tokens=cache_c,
+        cache_read_tokens=cache_r,
         cost_usd=cost,
         questions_written=int(getattr(result, "questions_written", 0) or 0),
         output_filename=out_path.name if out_path else "",
@@ -4650,6 +4895,28 @@ def _render_preflop_result_ui(result: BatchResult) -> None:
     share the same view. Pure render -- no side effects beyond Streamlit
     output and reading the CSV from disk.
     """
+    # 🎛️ Balance report (balanced batches only): achieved-vs-target shares
+    # per axis, read from the batch's meta sidecar (same panel the PLO and
+    # full-hand balanced modes show).
+    try:
+        if result.output_path and str(result.output_path).endswith(".csv"):
+            _meta_path = Path(
+                str(result.output_path)[: -len(".csv")] + ".meta.json"
+            )
+            if _meta_path.exists():
+                import json as _json  # noqa: PLC0415
+
+                _br = _json.load(_meta_path.open()).get("balance_report")
+                if _br:
+                    from pipeline.balanced_select import (  # noqa: PLC0415
+                        format_balance_report,
+                    )
+
+                    with st.expander("🎛️ Balance report (achieved vs target)"):
+                        for line in format_balance_report(_br):
+                            st.caption(line)
+    except Exception:  # noqa: BLE001 -- a report render must never kill the panel
+        pass
     # Cost ticker first so it sits next to the success banner. Dry-runs
     # have ``model_used=""`` and skip this block (no API was called).
     if result.model_used:
@@ -9111,18 +9378,22 @@ def render_postflop_compare_page() -> None:
                             _mdl = str(res.get(f"model_{side}", "") or "")
                             _in = int(res.get(f"{side}_in_tokens", 0) or 0)
                             _out = int(res.get(f"{side}_out_tokens", 0) or 0)
-                            if _mdl.startswith("(") or not (_in or _out):
+                            _cc = int(res.get(f"{side}_cache_creation_tokens", 0) or 0)
+                            _cr = int(res.get(f"{side}_cache_read_tokens", 0) or 0)
+                            if _mdl.startswith("(") or not (_in or _out or _cc or _cr):
                                 continue
                             usage.append_log_entry(
                                 USAGE_LOG_PATH,
                                 model=_mdl,
                                 input_tokens=_in,
                                 output_tokens=_out,
-                                cache_creation_tokens=0,
-                                cache_read_tokens=0,
+                                cache_creation_tokens=_cc,
+                                cache_read_tokens=_cr,
                                 cost_usd=usage.compute_cost_usd(
                                     model=_mdl, input_tokens=_in,
                                     output_tokens=_out,
+                                    cache_creation_tokens=_cc,
+                                    cache_read_tokens=_cr,
                                 ),
                                 questions_written=int(
                                     res.get(f"{side}_written", 0) or 0

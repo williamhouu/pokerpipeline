@@ -55,6 +55,7 @@ Guarantees you can build against:
 | `sb_bb`, `bb_bb` | number | Blind sizes in bb (0.5 / 1.0 today). |
 | `starting_stack_bb` | number | Every player's starting stack in bb. |
 | `bb_dollars` | number | Dollar value of 1bb. **Cash games only; absent on tournaments.** Its presence is also your signal for whether `*_dollars` twins exist on events. |
+| `display` | string (optional) | **The row's display currency.** Present and `"dollars"` when this question's prose and answer options render in dollars: render the `_dollars` twins on every animated surface (pot, stacks, wagers). Absent = render big blinds everywhere. Never mix currencies across surfaces of one question -- the question text, answer options, and table must always agree (Aug 2026). |
 | `events` | object[] | The ordered timeline. Ends at a `decision` event. |
 
 ## Events

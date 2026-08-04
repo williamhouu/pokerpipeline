@@ -305,7 +305,13 @@ class _CapturingMessages:
         self.systems: list[str] = []
 
     def create(self, **kw: object) -> _Resp:
-        self.systems.append(str(kw.get("system", "")))
+        # The shared call seam wraps a string system into a cache-controlled
+        # block list (July 2026); record the TEXT so the assertion stays
+        # about "the prompt reached the call verbatim".
+        sys = kw.get("system", "")
+        if isinstance(sys, list):
+            sys = "".join(b.get("text", "") for b in sys)
+        self.systems.append(str(sys))
         return _Resp('{"answer_explanation": "Call here. It plays well in position."}')
 
 

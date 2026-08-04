@@ -147,3 +147,18 @@ def test_all_options_are_check_plus_sizes(tmp_path: Path) -> None:
         opts = [r[f"option {i}"] for i in (1, 2, 3, 4) if r.get(f"option {i}")]
         assert any(o.startswith("Bet ") for o in opts), opts
         assert r["Correct Answer"].startswith("Bet "), r["Correct Answer"]
+
+
+# --- currency consistency + even split (Aug 2026) ----------------------------
+def test_dollarize_options_matches_prose_convention():
+    from pipeline.postflop.options import dollarize_label, dollarize_options
+
+    opts, corr = dollarize_options(
+        ["Check", "Bet 11.5bb", "Bet 23bb", ""], "Bet 11.5bb", bb_in_dollars=2.0
+    )
+    assert opts == ["Check", "Bet $23", "Bet $46", ""]
+    assert corr == "Bet $23"
+    # Cents kept when not whole (the make_amount_fmt convention).
+    assert dollarize_label("Raise to 2.17bb", 2.0) == "Raise to $4.34"
+    # Verb-only labels untouched.
+    assert dollarize_label("All-in", 2.0) == "All-in"

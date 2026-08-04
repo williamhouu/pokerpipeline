@@ -1021,16 +1021,23 @@ def generate_full_hand_batch(
                 hands[_out_idx] = _cand
                 balance_swaps_made += 1
 
-    in_tokens = out_tokens = 0
+    in_tokens = out_tokens = cache_c_tokens = cache_r_tokens = 0
     # ⚡ llm_workers > 1 reports usage from leg worker threads; the lock
-    # keeps the totals exact (THE USAGE RULE).
+    # keeps the totals exact (THE USAGE RULE). Cache tokens counted too:
+    # with prompt caching on, input_tokens is only the uncached remainder.
     _usage_lock = threading.Lock()
 
     def _usage(usage: object) -> None:
-        nonlocal in_tokens, out_tokens
+        nonlocal in_tokens, out_tokens, cache_c_tokens, cache_r_tokens
         with _usage_lock:
             in_tokens += int(getattr(usage, "input_tokens", 0) or 0)
             out_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+            cache_c_tokens += int(
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+            cache_r_tokens += int(
+                getattr(usage, "cache_read_input_tokens", 0) or 0
+            )
 
     rows: list[dict[str, str]] = []
     records: list[dict[str, Any]] = []
@@ -1582,6 +1589,8 @@ def generate_full_hand_batch(
         meta_path=meta_path,
         total_input_tokens=in_tokens,
         total_output_tokens=out_tokens,
+        total_cache_creation_tokens=cache_c_tokens,
+        total_cache_read_tokens=cache_r_tokens,
     )
 
 
@@ -1627,12 +1636,14 @@ def generate_preflop_entry_batch(
     worthy = [f for f in in_window if standalone_entry_is_reliable(f)]
     premium_excluded = len(in_window) - len(worthy)
 
-    in_tokens = out_tokens = 0
+    in_tokens = out_tokens = cache_c_tokens = cache_r_tokens = 0
 
     def _usage(usage: object) -> None:
-        nonlocal in_tokens, out_tokens
+        nonlocal in_tokens, out_tokens, cache_c_tokens, cache_r_tokens
         in_tokens += int(getattr(usage, "input_tokens", 0) or 0)
         out_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+        cache_c_tokens += int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        cache_r_tokens += int(getattr(usage, "cache_read_input_tokens", 0) or 0)
 
     rows: list[dict[str, str]] = []
     records: list[dict[str, Any]] = []
@@ -1699,6 +1710,8 @@ def generate_preflop_entry_batch(
         meta_path=meta_path,
         total_input_tokens=in_tokens,
         total_output_tokens=out_tokens,
+        total_cache_creation_tokens=cache_c_tokens,
+        total_cache_read_tokens=cache_r_tokens,
     )
 
 

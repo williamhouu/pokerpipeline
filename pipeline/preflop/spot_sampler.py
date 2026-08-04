@@ -307,6 +307,68 @@ def strip_artifact_allins(spot: PreflopSpot) -> PreflopSpot:
     )
 
 
+def merge_allin_call_off(spot: PreflopSpot, pack) -> PreflopSpot:
+    """Merge the AllIn branch into Call when they are the SAME action.
+
+    Facing an all-in at (or beyond) effective-stack depth, calling already
+    commits hero's whole stack -- Monker's tree still carries a separate
+    re-jam branch, but chips-in and showdown are identical, so offering
+    both "Call" and "All-in" as answer options is a distinction no player
+    can act on (Aug 2026, user catch: SB JJ vs a 10bb jam showed both).
+    The AllIn mass is folded into Call and the AllIn label leaves the
+    strategy entirely, so options, frequencies, the SOLVER DATA block,
+    difficulty, and the answer all see ONE call-off action. EVs need no
+    merge: chip-identical actions have the same EV, and every EV surface
+    reads the surviving Call label.
+
+    A no-op unless the node offers BOTH actions and the current bet level
+    is >= the effective stack. Applied identically by generation
+    (collect_worthy_spots) and the batch re-verifier -- INVARIANT: the two
+    must stay in lockstep or rebuilt rows drift.
+    """
+    from pipeline.preflop.action_history import (  # noqa: PLC0415
+        resolve_preflop_history,
+    )
+    from pipeline.preflop.grammars.types import PreflopActionType  # noqa: PLC0415
+
+    menu_types = {opt.action_type for opt in spot.node.actions}
+    if not (
+        PreflopActionType.CALL in menu_types
+        and PreflopActionType.ALL_IN in menu_types
+    ):
+        return spot
+    state = resolve_preflop_history(spot.node.history_before, pack)
+    if state.high_bet_bb < float(pack.stack_depth_bb) - 1e-6:
+        return spot
+
+    call_labels = {
+        opt.label for opt in spot.node.actions
+        if opt.action_type is PreflopActionType.CALL
+    }
+    allin_labels = {
+        opt.label for opt in spot.node.actions
+        if opt.action_type is PreflopActionType.ALL_IN
+    }
+    freqs = dict(spot.action_frequencies)
+    moved = 0.0
+    for label in allin_labels:
+        moved += freqs.pop(label, 0.0)
+    if moved <= 0.0 and not any(label in freqs for label in allin_labels):
+        # Nothing to move and nothing offered -- keep the spot untouched.
+        pass
+    call_label = next(iter(call_labels))
+    freqs[call_label] = freqs.get(call_label, 0.0) + moved
+    dominant_label, dominant_freq = (
+        max(freqs.items(), key=lambda kv: kv[1]) if freqs else ("", 0.0)
+    )
+    return replace(
+        spot,
+        action_frequencies=freqs,
+        dominant_action=dominant_label,
+        dominant_frequency=dominant_freq,
+    )
+
+
 def enumerate_spots_for_node(
     node: PreflopDecisionNode,
     *,

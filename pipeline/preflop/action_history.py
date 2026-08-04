@@ -38,6 +38,7 @@ from pipeline.preflop.grammars.types import (
     MIN_RAISE_PCT,
     ParsedAction,
     PreflopActionType,
+    decode_fixed_bb,
 )
 from pipeline.preflop.pack import PreflopPack
 
@@ -143,17 +144,22 @@ class ResolvedPreflopState:
             the pot).
         high_bet_bb: The current bet level a caller must match.
         raise_level: Aggressive actions so far (1 = open, 2 = 3-bet, ...).
+        dead_bb: Extra dead money in the pot that no seat can be asked to
+            match -- the MTT big-blind ante (``pack.ante_bb``). It is part
+            of ``pot_bb`` (so every price/pot consumer sees it) but never
+            part of ``committed_bb`` (so call-matching math is untouched).
     """
 
     sizes_bb: tuple[float | None, ...]
     committed_bb: dict[str, float]
     high_bet_bb: float
     raise_level: int
+    dead_bb: float = 0.0
 
     @property
     def pot_bb(self) -> float:
         """Chips in the middle: every seat's commitment, dead money included."""
-        return sum(self.committed_bb.values())
+        return sum(self.committed_bb.values()) + self.dead_bb
 
     def call_cost_bb(self, position: str) -> float:
         """What ``position`` must add to match the current bet."""
@@ -181,6 +187,7 @@ def _monker_raise_to_bb(
     committed: dict[str, float],
     high_bet: float,
     position: str,
+    dead_bb: float = 0.0,
 ) -> float:
     """Monker's pot-relative raise rule, in bb.
 
@@ -190,10 +197,14 @@ def _monker_raise_to_bb(
     sizing rule across games; NLHE just isn't capped at 100%). First-in at
     a 9-max table: ``1 + 1.2 × (1.5 + 1) = 4.0`` -- the pack's 40120 token
     is the documented 4bb open.
+
+    ``dead_bb`` is the MTT big-blind ante: it is part of the pot for this
+    formula (anchored on the MTT 8-max packs: the ``40043`` open resolves
+    to 2.505bb = ``1 + 0.43 × (2.5 + 1)`` ONLY with the 1bb ante counted).
     """
     prev = committed.get(position, 0.0)
     to_call = high_bet - prev
-    pot = sum(committed.values())
+    pot = sum(committed.values()) + dead_bb
     return high_bet + (raise_size_pct / 100.0) * (pot + to_call)
 
 
@@ -229,6 +240,9 @@ def resolve_preflop_history(
     is_monker = pack.grammar_name == _MONKER_GRAMMAR
     is_bb_native = pack.grammar_name == _BB_NATIVE_GRAMMAR
     committed: dict[str, float] = {"SB": pack.sb_to_bb_ratio, "BB": 1.0}
+    # The MTT big-blind ante: dead money in the pot from the first action on,
+    # never part of the bet level (see ResolvedPreflopState.dead_bb).
+    dead_bb = float(getattr(pack, "ante_bb", 0.0) or 0.0)
     high_bet = 1.0  # everyone has to match the BB to enter
     raise_level = 0
     sizes: list[float | None] = []
@@ -250,7 +264,12 @@ def resolve_preflop_history(
             sizes.append(stack)
             continue
         # RAISE
-        if is_bb_native:
+        fixed_bb = decode_fixed_bb(parsed.raise_size_pct)
+        if fixed_bb is not None:
+            # A pack-registered absolute raise-TO size (the MTT packs'
+            # 14/15/16/18 tokens) -- anchored in bb, no formula needed.
+            raise_to = _quantize_raise(fixed_bb, pack)
+        elif is_bb_native:
             # This pack stores raise sizes directly in bb (raise TO X bb), so
             # the token IS the bb amount -- no pot-fraction or lookup needed.
             raise_to = _quantize_raise(float(parsed.raise_size_pct or 0.0), pack)
@@ -266,6 +285,7 @@ def resolve_preflop_history(
                         committed=committed,
                         high_bet=high_bet,
                         position=pos,
+                        dead_bb=dead_bb,
                     ),
                     pack,
                 )
@@ -279,6 +299,7 @@ def resolve_preflop_history(
         committed_bb=committed,
         high_bet_bb=high_bet,
         raise_level=raise_level,
+        dead_bb=dead_bb,
     )
 
 
@@ -374,6 +395,10 @@ def raise_to_bb(
     to 13.5bb" matches what the prose would say if taken); PioViewer
     packs hit the token lookup at ``state.raise_level + 1``.
     """
+    fixed_bb = decode_fixed_bb(raise_size_pct)
+    if fixed_bb is not None:
+        # Pack-registered absolute raise-TO size (MTT fixed tokens).
+        return _quantize_raise(fixed_bb, pack)
     if pack.grammar_name == _BB_NATIVE_GRAMMAR:
         # Token is already the bb amount to raise TO.
         return _quantize_raise(float(raise_size_pct or 0.0), pack)
@@ -388,6 +413,7 @@ def raise_to_bb(
                 committed=state.committed_bb,
                 high_bet=state.high_bet_bb,
                 position=position,
+                dead_bb=state.dead_bb,
             ),
             pack,
         )
@@ -505,7 +531,12 @@ def build_hand_dict(
         "venue": live_or_online.lower(),
         "stage": None,
         "buy_in": None,
-        "ante": 0,
+        # TOTAL ante chips in the pot (the shared walker's documented
+        # convention -- a 1bb BB ante and standard antes are equivalent as
+        # pot contributions). In the display unit, like every other amount.
+        "ante": round(
+            float(getattr(pack, "ante_bb", 0.0) or 0.0) * bb_amount_multiplier, 2
+        ),
         "table_size": pack.table_size,
         "effective_stack": eff_stack,
         "hero_position": facts.spot.node.actor,

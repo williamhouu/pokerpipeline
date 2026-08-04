@@ -182,7 +182,7 @@ def _plo_notes(facts: PloFacts, pack_label: str) -> str:
 
 def _plo_animation_script(
     facts: PloFacts, *, stack_bb: float, stakes_bb_dollars: float,
-    game_format: str, ante_bb: float = 0.0,
+    game_format: str, ante_bb: float = 0.0, display_in_bb: bool = False,
 ) -> str:
     """The app's animation timeline for a PLO preflop question.
 
@@ -216,6 +216,9 @@ def _plo_animation_script(
         bb_in_dollars=(
             float(stakes_bb_dollars) if game_format != "tournament" else None
         ),
+        # "display": "dollars" header when this row renders in dollars (Aug
+        # 2026 app fix): every animated surface must match the row currency.
+        display_dollars=(not display_in_bb and game_format != "tournament"),
     )
     walk_explicit_preflop(
         table, actions, decision_seat=display_seat(node.actor, table_size=ts),
@@ -544,6 +547,7 @@ def build_plo_row(
         "animation_script": _plo_animation_script(
             facts, stack_bb=stack_bb, stakes_bb_dollars=stakes_bb_dollars,
             game_format=game_format, ante_bb=ante_bb,
+            display_in_bb=display_in_bb,
         ),
         "chat_context": _plo_chat_context(
             facts,

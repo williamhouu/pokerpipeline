@@ -99,3 +99,10 @@ test_output/*
 
 # Disk cache of enumerated preflop pack nodes (pipeline.preflop.node_cache)
 .node_cache/
+mtt8_10bb_ranges/
+mtt8_15bb_ranges/
+mtt8_20bb_ranges/
+mtt8_30bb_ranges/
+mtt8_50bb_ranges/
+mtt8_75bb_ranges/
+mtt8_300bb_ranges/

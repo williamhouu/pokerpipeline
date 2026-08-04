@@ -929,9 +929,16 @@ def build_pack_preflop_leg_row(
     pre_usage_cb = None
     if usage_cb is not None:
         def pre_usage_cb(
-            _model: str, in_t: int, out_t: int, _cache_c: int, _cache_r: int
+            _model: str, in_t: int, out_t: int, cache_c: int, cache_r: int
         ) -> None:
-            usage_cb(SimpleNamespace(input_tokens=in_t, output_tokens=out_t))
+            # Cache tokens forwarded too (July 2026): the preflop generator
+            # prompt-caches, so dropping cache_c/cache_r here made pack-leg
+            # cache spend invisible to the batch totals (THE USAGE RULE).
+            usage_cb(SimpleNamespace(
+                input_tokens=in_t, output_tokens=out_t,
+                cache_creation_input_tokens=cache_c,
+                cache_read_input_tokens=cache_r,
+            ))
 
     try:
         if use_placeholder:

@@ -1068,6 +1068,126 @@ def test_batch_real_path_with_mock_client(tmp_path: Path) -> None:
     assert result.total_output_tokens > 0
 
 
+def test_batch_counts_prompt_cache_tokens(tmp_path: Path) -> None:
+    """THE USAGE RULE (July 2026): with the shared call seam prompt-caching
+    the system prompt, `usage.input_tokens` is only the UNCACHED remainder --
+    the batch result must carry cache_creation/cache_read totals or the
+    lifetime spend ledger silently undercounts."""
+
+    class _CachedUsage:
+        input_tokens = 100
+        output_tokens = 50
+        cache_creation_input_tokens = 1200
+        cache_read_input_tokens = 300
+
+    class _CachedResp:
+        def __init__(self, text: str) -> None:
+            self.content = [_Block(text)]
+            self.usage = _CachedUsage()
+
+    class _CachedMessages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):  # noqa: ARG002
+            self.calls += 1
+            return _CachedResp("This is the play for value with a strong hand.")
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    client = SimpleNamespace(messages=_CachedMessages())
+    out = tmp_path / "postflop_cached.csv"
+    result = generate_postflop_batch(
+        solve=SOLVE, output_path=out, total_questions=2, client=client,
+    )
+    n = client.messages.calls
+    assert n >= 2
+    assert result.total_input_tokens == 100 * n
+    assert result.total_output_tokens == 50 * n
+    assert result.total_cache_creation_tokens == 1200 * n
+    assert result.total_cache_read_tokens == 300 * n
+
+
+# --- ⚡ parallel LLM workers (July 2026, ported from the PLO batch) ----------
+# llm_workers > 1 runs each question's LLM chain on a worker thread while ALL
+# deterministic work (facts, options, difficulty, row building) stays on the
+# main thread in draw order, with strictly in-order commits -- so the CSV and
+# meta question records must come out IDENTICAL to a sequential run, and the
+# usage totals must stay exact under concurrency (THE USAGE RULE).
+
+def test_parallel_workers_match_sequential_output(tmp_path: Path) -> None:
+    out_seq = tmp_path / "seq.csv"
+    out_par = tmp_path / "par.csv"
+    r1 = generate_postflop_batch(
+        solve=SOLVE, output_path=out_seq, total_questions=4,
+        client=_MockClient(["This is the play for value with a strong hand."]),
+        llm_workers=1,
+    )
+    r3 = generate_postflop_batch(
+        solve=SOLVE, output_path=out_par, total_questions=4,
+        client=_MockClient(["This is the play for value with a strong hand."]),
+        llm_workers=3,
+    )
+    assert r1.questions_written == r3.questions_written == 4  # noqa: PLR2004
+    assert out_seq.read_bytes() == out_par.read_bytes()
+    meta_seq = json.loads(r1.meta_path.read_text())
+    meta_par = json.loads(r3.meta_path.read_text())
+    assert meta_seq["questions"] == meta_par["questions"]
+    assert meta_seq["counters"] == meta_par["counters"]
+    assert meta_par["run_settings"]["llm_workers"] == 3  # noqa: PLR2004
+
+
+def test_parallel_usage_totals_stay_exact(tmp_path: Path) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    class _FixedUsage:
+        input_tokens = 100
+        output_tokens = 40
+        cache_creation_input_tokens = 7
+        cache_read_input_tokens = 3
+
+    class _UsageResp:
+        def __init__(self) -> None:
+            self.content = [
+                _Block("This is the play for value with a strong hand.")
+            ]
+            self.usage = _FixedUsage()
+
+    class _UsageMessages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):  # noqa: ARG002
+            self.calls += 1
+            return _UsageResp()
+
+    client = SimpleNamespace(messages=_UsageMessages())
+    result = generate_postflop_batch(
+        solve=SOLVE, output_path=tmp_path / "usage.csv", total_questions=4,
+        client=client, llm_workers=4,
+    )
+    n = client.messages.calls
+    assert result.questions_written == 4  # noqa: PLR2004
+    assert result.total_input_tokens == 100 * n
+    assert result.total_output_tokens == 40 * n
+    assert result.total_cache_creation_tokens == 7 * n
+    assert result.total_cache_read_tokens == 3 * n
+
+
+def test_parallel_failures_recorded_and_batch_continues(tmp_path: Path) -> None:
+    """Chains that fail validation (here: an em dash, twice) land in
+    ``failures`` and free their pipeline slot -- the run terminates with the
+    worthy pool exhausted rather than hanging or crashing."""
+    bad = "This play — the banned em dash — fails the hard validators."
+    result = generate_postflop_batch(
+        solve=SOLVE, output_path=tmp_path / "fail.csv", total_questions=3,
+        client=_MockClient([bad]), llm_workers=3,
+    )
+    assert result.questions_written == 0
+    assert result.questions_attempted == result.worthy_spots_available
+    assert len(result.failures) == result.questions_attempted
+
+
 def test_compare_mechanism_two_batches_share_identical_spots(tmp_path: Path) -> None:
     # The postflop Compare page's core invariant: two batches on the SAME solve +
     # the SAME deterministic selector see byte-identical spots (no shared RNG seed
@@ -1353,6 +1473,17 @@ def test_reviser_threads_question_through() -> None:
 
 
 # --- #1: batch lifecycle (claim check / auto-fix) ---------------------------
+def _system_text(kw: dict) -> str:
+    """The system prompt TEXT from a captured messages.create kwargs dict.
+
+    The shared call seam wraps a string system into a cache-controlled block
+    list (July 2026), so content-routing mocks must unwrap before sniffing."""
+    system = kw.get("system", "")
+    if isinstance(system, list):
+        return "".join(b.get("text", "") for b in system)
+    return str(system)
+
+
 class _LifecycleMessages:
     """Content-aware mock: a claim-check call (system has 'poker editor') flags
     the ORIGINAL prose and clears the REVISED; a revise call (user has 'AUDIT
@@ -1364,7 +1495,7 @@ class _LifecycleMessages:
 
     def create(self, **kw):
         self.calls += 1
-        system = kw.get("system", "")
+        system = _system_text(kw)
         user = kw["messages"][0]["content"]
         if "poker editor" in system:  # claim-check call
             if not self.flag or self.revised in user:
@@ -2277,7 +2408,7 @@ class _TwoRoundMessages:
         self.revise_calls = 0
 
     def create(self, **kw):
-        system = kw.get("system", "")
+        system = _system_text(kw)
         user = kw["messages"][0]["content"]
         if "poker editor" in system:  # claim-check call
             if self.revised2 in user:

@@ -114,6 +114,12 @@ def audit_batch(csv_path: Path) -> int:
     display_in_bb = rows[0]["POT"].endswith("BB")
     live_or_online = rows[0]["Live or Online"]
     stakes = 2.0 if live_or_online == "Live" else 0.50  # only affects $ mode
+    # Game format: meta records the RESOLVED value (Aug 2026); older batches
+    # fall back to the CSV's own Cash/Tourney column (byte-derived, so the
+    # rebuild mirrors whatever the batch actually wrote).
+    game_format = meta.get("run_settings", {}).get("game_format") or (
+        "tournament" if rows[0].get("Cash/Tourney") == "Tournament" else "cash"
+    )
 
     exact_failures = 0
     tolerance_notes = 0
@@ -134,7 +140,43 @@ def audit_batch(csv_path: Path) -> int:
         # on every artifact-jam node. (Material spots never ship rows.)
         if not pack_allins_realistic(pack):
             spot = strip_artifact_allins(spot)
-        facts = extract_facts(spot, pack, equity_runouts=300)
+        # Mirror generation's call-off merge (Aug 2026): facing a
+        # full-effective-stack all-in, the AllIn branch is folded into Call.
+        from pipeline.preflop.spot_sampler import (  # noqa: PLC0415
+            merge_allin_call_off,
+        )
+
+        spot = merge_allin_call_off(spot, pack)
+        # Mirror the batch's equity sample count (recorded in run_settings):
+        # equity is seeded per spot, so SAME runouts = byte-identical numbers.
+        # A mismatch only surfaced when a borderline TRAP spot flipped its
+        # graded floor on re-estimate (Aug 2026, the 20bb balanced dry run).
+        facts = extract_facts(
+            spot,
+            pack,
+            equity_runouts=int(
+                meta.get("run_settings", {}).get("equity_runouts") or 300
+            ),
+        )
+        # Mirror generation's price enrichment (batch.py does the same replace
+        # before computing difficulty): the TRAP detector reads
+        # facts.break_even_equity + rake_pct, so without this no trap can
+        # refire on rebuild and every trap-floored row false-drifts (Aug 2026,
+        # first surfaced by the 20bb balanced dry run's KTo trap spot).
+        from dataclasses import replace as _replace  # noqa: PLC0415
+
+        from pipeline.preflop.ev_engine import (  # noqa: PLC0415
+            compute_price_geometry,
+        )
+
+        _pot, _call, _be = compute_price_geometry(facts, pack)
+        facts = _replace(
+            facts,
+            break_even_equity=_be,
+            price_pot_bb=_pot,
+            price_call_bb=_call,
+            rake_pct=pack.rake_pct or 0.0,
+        )
         # Mirror generation: the solver's own per-action EVs (Monker packs),
         # analytic fallback only for EV-less packs. Must match batch.py or this
         # re-verification false-flags ev_gap_bb on every Monker row.
@@ -151,16 +193,20 @@ def audit_batch(csv_path: Path) -> int:
         ev_gap_for_difficulty = ev_gap
         if spot.dominant_frequency >= _NEAR_PURE_DOMINANT_FREQ:
             ev_gap_for_difficulty = _NEAR_PURE_EV_CREDIT_BB
-        # Infer the batch's answer style from the option shape (meta does
-        # not record it -- noted as a gap): the gto style is the 4-option
-        # Always/Mostly spectrum.
-        csv_opts_probe = [row[f"option {i}"] for i in (1, 2, 3, 4) if row[f"option {i}"]]
-        style = (
-            "gto"
-            if csv_opts_probe
-            and all(o.startswith(("Always ", "Mostly ")) for o in csv_opts_probe)
-            else "auto"
-        )
+        # The batch's answer style: meta records it (run_settings.answer_style,
+        # Aug 2026); older batches fall back to inferring from the option
+        # shape (the gto style is the 4-option Always/Mostly spectrum).
+        style = meta.get("run_settings", {}).get("answer_style") or ""
+        if not style:
+            csv_opts_probe = [
+                row[f"option {i}"] for i in (1, 2, 3, 4) if row[f"option {i}"]
+            ]
+            style = (
+                "gto"
+                if csv_opts_probe
+                and all(o.startswith(("Always ", "Mostly ")) for o in csv_opts_probe)
+                else "auto"
+            )
         options, correct = build_options(facts, style=style, pack=pack)
         rebuilt = build_preflop_row(
             facts,
@@ -176,6 +222,7 @@ def audit_batch(csv_path: Path) -> int:
             stakes_bb_dollars=stakes,
             live_or_online=live_or_online,
             display_in_bb=display_in_bb,
+            game_format=game_format,
         )
 
         # 1. EXACT column diffs.

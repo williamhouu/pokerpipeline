@@ -316,10 +316,21 @@ def build_postflop_row(
     )
     # Neutral-credit options from the hand's own action mix (the 20-point rule);
     # computed once, reused by the neutral_credit column + the chatbot context.
+    # When the batch renders in dollars, the option strings were dollarized
+    # at build time -- transform the frequency KEYS with the same function so
+    # the neutral-credit lookup still matches (bb labels otherwise).
+    _freq_source = facts.spot.action_frequencies
+    if not display_in_bb:
+        from pipeline.postflop.options import dollarize_label  # noqa: PLC0415
+
+        _freq_source = {
+            dollarize_label(k, solve.bb_in_dollars): v
+            for k, v in _freq_source.items()
+        }
     neutral_list = neutral_credit_options(
         explanation.options(),
         explanation.correct_answer,
-        frequencies_for_options(facts.spot.action_frequencies, explanation.options()),
+        frequencies_for_options(_freq_source, explanation.options()),
     )
     row = {
         "No": str(number),
@@ -417,7 +428,12 @@ def build_postflop_row(
             display_in_bb=display_in_bb, neutral=neutral_list,
         ),
         # The app's animation timeline; see the schema note above.
-        "animation_script": build_postflop_animation_script(node, solve),
+        "animation_script": build_postflop_animation_script(
+            node, solve,
+            display_dollars=(
+                not display_in_bb and solve.game_format != "tournament"
+            ),
+        ),
         # "" = the Layer-7 claim checker did not run for this row. The batch
         # overwrites this with the checker's JSON when the opt-in pass runs.
         "claim_check": "",

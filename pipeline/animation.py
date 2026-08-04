@@ -44,13 +44,21 @@ class AnimationTable:
     def __init__(
         self, *, table_size: int, starting_stack_bb: float,
         bb_in_dollars: float | None = None, seats: list[str] | None = None,
-        ante_bb: float = 0.0,
+        ante_bb: float = 0.0, display_dollars: bool = False,
     ):
         self.table_size = table_size
         self.seats = list(seats) if seats is not None else preflop_order(table_size)
         self.starting_stack_bb = float(starting_stack_bb)
         self.ante_bb = float(ante_bb)
         self.dollars = bb_in_dollars
+        # The question's DISPLAY currency (Aug 2026, the app's bb/$ mixed-
+        # rendering bug): when True the header carries "display": "dollars",
+        # telling the renderer this row's prose + answer options are in
+        # dollars, so EVERY animated surface must render the _dollars twins.
+        # Absent = render bb everywhere (the default; keeps every existing
+        # bb/tournament batch byte-identical). ADDITIVE -- version unchanged,
+        # per the format's render-what-you-understand rule.
+        self.display_dollars = bool(display_dollars)
         self.stacks = {s: self.starting_stack_bb for s in self.seats}
         self.committed = {s: 0.0 for s in self.seats}  # this street's chips
         self.pot = 0.0
@@ -129,6 +137,8 @@ class AnimationTable:
             payload["ante_bb"] = _r2(self.ante_bb)
         if self.dollars is not None:
             payload["bb_dollars"] = _r2(self.dollars)
+        if self.display_dollars:
+            payload["display"] = "dollars"
         return json.dumps(payload, separators=(",", ":"))
 
 

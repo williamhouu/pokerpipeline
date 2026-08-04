@@ -125,6 +125,7 @@ from pipeline.preflop.spot_sampler import (
     enumerate_spots_for_node,
     sample_spot,
     strip_artifact_allins,
+    merge_allin_call_off,
 )
 from pipeline.preflop.validators import run_preflop_soft_validators
 
@@ -417,6 +418,7 @@ def collect_worthy_spots(
     exclude_ambiguous_band: bool = False,
     exclude_near_pure_band: bool = False,
     strip_artifacts: bool = False,
+    pack: "PreflopPack | None" = None,
     counters: dict[str, int] | None = None,
 ) -> list[tuple[PreflopSpot, PreflopQuestionEvaluation]]:
     """Enumerate every (node, hand class) spot and keep the worthy ones.
@@ -449,6 +451,12 @@ def collect_worthy_spots(
                             counters.get("artifact_material_spots_skipped", 0) + 1
                         )
                     continue
+            if pack is not None:
+                # Call-off merge (Aug 2026): facing a full-effective-stack
+                # all-in, the AllIn branch IS a call -- fold it into Call so
+                # the options can never show both. Mirrored by the batch
+                # re-verifier; see spot_sampler.merge_allin_call_off.
+                spot = merge_allin_call_off(spot, pack)
             evaluation = evaluate_spot(
                 spot,
                 min_frequency=min_frequency,
@@ -926,6 +934,7 @@ def generate_preflop_batch(
     trap_difficulty: bool = False,
     razor_difficulty: bool = False,
     diversify: bool = False,
+    balanced: bool = False,
     min_ev_gap_bb: float | None = None,
     min_villain_line_pct: float | None = 0.25,
     min_hero_premise_freq: float | None = 0.05,
@@ -1014,6 +1023,17 @@ def generate_preflop_batch(
         per-spot failure messages, and intermediate-stage counts.
     """
     out_path = Path(output_path)
+    # TOURNAMENT packs (the MTT 8-max bb-ante family) own their framing: the
+    # pack's game_format wins over the caller's cosmetic default, amounts
+    # render in bb (a tournament has no dollar stakes), and the Live-or-Online
+    # column is blank for tournaments (July 2026 team rule, from the PLO MTT
+    # wave). A caller that wants different cosmetics can pass
+    # game_format="tournament" plus its own venue text explicitly.
+    if getattr(pack, "game_format", "cash") == "tournament":
+        game_format = "tournament"
+        display_in_bb = True
+        if live_or_online == "Online":  # the untouched default
+            live_or_online = ""
     rng = random.Random(random_seed)
 
     # 1. Enumerate the pack's nodes once.
@@ -1039,6 +1059,7 @@ def generate_preflop_batch(
         exclude_ambiguous_band=exclude_ambiguous_band,
         exclude_near_pure_band=exclude_near_pure_band,
         strip_artifacts=not pack_allins_realistic(pack),
+        pack=pack,
         counters=_collect_counters,
     )
     artifact_material_spots_skipped = _collect_counters.get(
@@ -1063,7 +1084,37 @@ def generate_preflop_batch(
     # fill-to-N batch spreads across seats/hands/actions rather than collapsing
     # onto one over-represented situation (the "all ace-high folds vs a blind
     # 3-bet" problem on Hard trap-aware batches).
-    if diversify:
+    if balanced:
+        # 🎛️ Fully balanced (Aug 2026, the preflop adapter of the shared
+        # pipeline/balanced_select leaf): seeded shuffle for tie variety,
+        # then greedy marginal balance over the CHEAP axes (action context /
+        # answer verb / hero seat -- no equity needed). Difficulty terciles
+        # are enforced later at commit time (facts are too expensive to
+        # score the whole pool up front); quota-skipped spots go to a
+        # reserve that backfills unbalanced if the pool runs dry -- honest
+        # shortfall, never a stall.
+        from pipeline.balanced_select import answer_verb, balanced_order  # noqa: PLC0415
+
+        rng.shuffle(worthy)
+        _attrs = [
+            {
+                "context": node_action_context(sp.node),
+                "verb": answer_verb(sp.dominant_action),
+                "position": sp.node.actor,
+            }
+            for sp, _ev in worthy
+        ]
+        _axes = [
+            ("context", "Situation", 1.0),
+            ("verb", "Answer verb", 0.9),
+            ("position", "Hero seat", 0.5),
+        ]
+        _order = balanced_order(
+            _attrs, _axes,
+            spread_keys=[sp.node.node_id for sp, _ev in worthy],
+        )
+        worthy = [worthy[i] for i in _order]
+    elif diversify:
         worthy = _diversify_spots(worthy, rng)
     else:
         rng.shuffle(worthy)
@@ -1163,9 +1214,32 @@ def generate_preflop_batch(
         from anthropic import Anthropic  # noqa: PLC0415
 
         client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    # Difficulty terciles for the balanced mode: Easy/Medium/Hard commit
+    # quotas (ceil(total/3)); spots whose band is full go to the reserve and
+    # are retried quota-free once the main pool is exhausted (their facts
+    # are recomputed -- cheaper than scoring the whole pool up front).
+    _band_quota = -(-total_questions // 3) if balanced else None
+    _band_counts = {"easy": 0, "medium": 0, "hard": 0}
+    _quota_reserve: list = []
+    _balance_attrs: list[dict[str, str]] = []  # committed rows, for the report
+
+    def _difficulty_band(score: int) -> str:
+        if score < 1300:  # noqa: PLR2004 -- the admin presets' band edges
+            return "easy"
+        if score <= 2100:  # noqa: PLR2004
+            return "medium"
+        return "hard"
+
+    def _spot_stream():
+        for item in worthy:
+            yield item[0], item[1], True
+        # Reserve pass: quota-skipped spots, quotas off (honest backfill).
+        for item in _quota_reserve:
+            yield item[0], item[1], False
+
     # ``_evaluation`` carried the pre-facts freq-only difficulty; we
     # discard it and recompute the canonical 4-axis rating below.
-    for spot, _evaluation in worthy:
+    for spot, _evaluation, _enforce_quota in _spot_stream():
         if len(rows) >= total_questions:
             break
         # --- convergence guard (skip unconverged solver nodes) -----------
@@ -1299,6 +1373,12 @@ def generate_preflop_batch(
                 and ev_gap < min_ev_gap_bb):
             difficulty_filtered_out += 1
             continue
+        # --- balanced-mode difficulty tercile quota (pre-LLM) -------------
+        if _band_quota is not None and _enforce_quota:
+            _b = _difficulty_band(difficulty.score)
+            if _band_counts[_b] >= _band_quota:
+                _quota_reserve.append((spot, _evaluation))
+                continue
         # --- EV-coherence guard (skip incoherent "mixed" spots) ----------
         # A mix whose meaningfully-played actions are far apart in the solver's
         # own per-action EV is unconverged-node noise, not a real mixed
@@ -1487,6 +1567,18 @@ def generate_preflop_batch(
 
             # Append the parallel per-row lists together so they stay aligned.
             rows.append((facts, explanation, difficulty))
+            if balanced:
+                from pipeline.balanced_select import answer_verb  # noqa: PLC0415
+
+                _band_counts[_difficulty_band(difficulty.score)] += 1
+                _balance_attrs.append(
+                    {
+                        "context": node_action_context(spot.node),
+                        "verb": answer_verb(spot.dominant_action),
+                        "position": spot.node.actor,
+                        "difficulty": _difficulty_band(difficulty.score),
+                    }
+                )
             claim_checks.append(claim_check_json)
             row_statuses.append(
                 "flagged"
@@ -1619,13 +1711,21 @@ def generate_preflop_batch(
                 "display_in_bb": display_in_bb,
                 "stakes_bb_dollars": stakes_bb_dollars,
                 "live_or_online": live_or_online,
+                # The RESOLVED game format (a tournament pack overrides the
+                # caller's cosmetic default) -- the re-verifier mirrors this.
+                "game_format": game_format,
+                "balanced": balanced,
             },
             # Outcome counters (June 2026 round-2 audit, finding #6: the
             # gate settings were recorded but the skip COUNTS were UI-only,
             # so an audit couldn't confirm the gates fired from the meta
             # alone). run_settings = inputs; counters = what happened.
+            balance_report=(
+                _balance_report_for_meta(_balance_attrs) if balanced else None
+            ),
             counters={
                 "worthy_spots_available": len(worthy),
+                "balanced_quota_deferred": len(_quota_reserve) if balanced else 0,
                 "nodes_after_filter": len(filtered_nodes),
                 "difficulty_filtered_out": difficulty_filtered_out,
                 "trap_floored": trap_floored,
@@ -1711,6 +1811,24 @@ def _prompt_record(spot: PreflopSpot, parts: dict[str, object]) -> dict[str, obj
     }
 
 
+def _balance_report_for_meta(
+    attrs: list[dict[str, str]],
+) -> dict[str, object]:
+    """Achieved-vs-target balance report over the committed rows' axes
+    (context / verb / position / difficulty band), via the shared leaf."""
+    from pipeline.balanced_select import balance_report  # noqa: PLC0415
+
+    axes = [
+        ("context", "Situation", 1.0),
+        ("verb", "Answer verb", 0.9),
+        ("position", "Hero seat", 0.5),
+        ("difficulty", "Difficulty band", 1.0),
+    ]
+    # pool == selected: the report shows the achieved shares (targets are
+    # uniform over the values present among the committed rows).
+    return balance_report(attrs, attrs, axes)
+
+
 def _build_batch_meta(
     *,
     prompt_name: str,
@@ -1725,6 +1843,7 @@ def _build_batch_meta(
     run_settings: dict[str, object] | None = None,
     counters: dict[str, object] | None = None,
     failures: list[PreflopFailure] | None = None,
+    balance_report: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Assemble the ``<stem>.meta.json`` payload for one batch.
 
@@ -1748,6 +1867,9 @@ def _build_batch_meta(
         "table_size": pack.table_size if pack else None,
         "run_settings": run_settings or {},
         "counters": counters or {},
+        # Balanced-mode achieved-vs-target shares per axis (None when the
+        # batch wasn't balanced) -- same shape as the PLO/postflop reports.
+        "balance_report": balance_report,
         "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "questions": prompt_records,
         # Spots that didn't make the CSV (validation rejected after the retry

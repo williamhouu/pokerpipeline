@@ -269,6 +269,14 @@ class PreflopFacts:
     # 0.0 = no cushion (unchanged behaviour). See difficulty._is_counterintuitive_spot.
     rake_pct: float = 0.0
 
+    # Game-situation facts stamped from the pack (Aug 2026, the MTT 8-max
+    # packs). The Layer-6 framing + SOLVER DATA cite these so a 15bb
+    # tournament spot is never narrated with 100bb cash assumptions (the
+    # PLO July-21 situation-line lesson, applied at the source here).
+    stack_depth_bb: float = 100.0
+    ante_bb: float = 0.0
+    game_format: str = "cash"
+
     # EV gap (in bb) between the dominant action and the second-best action --
     # the cost of taking the tempting wrong answer. Populated by the batch
     # (compute_ev_gap_bb, which needs the pack). None for raise-involved spots
@@ -609,6 +617,11 @@ def extract_facts(
         fails, returns a valid PreflopFacts with None fields rather than
         raising -- a malformed villain spot doesn't bring down a batch.
     """
+    situation = {
+        "stack_depth_bb": float(pack.stack_depth_bb),
+        "ante_bb": float(getattr(pack, "ante_bb", 0.0) or 0.0),
+        "game_format": str(getattr(pack, "game_format", "cash") or "cash"),
+    }
     villain = identify_villain(spot.node)
     if villain is None:
         # First-to-act spot: hero is opening or facing only folds. There's
@@ -619,7 +632,7 @@ def extract_facts(
         # handles villain=None (its open/fold branch). (June 2026 fix: this
         # branch used to return early without an archetype.)
         return PreflopFacts(
-            spot=spot, archetype=classify_archetype(spot, None, None)
+            spot=spot, archetype=classify_archetype(spot, None, None), **situation
         )
 
     try:
@@ -630,7 +643,7 @@ def extract_facts(
                 spot.node.node_id,
                 villain_path.name,
             )
-            return PreflopFacts(spot=spot)
+            return PreflopFacts(spot=spot, **situation)
 
         villain_stats = compute_villain_range_stats(
             villain,
@@ -703,6 +716,7 @@ def extract_facts(
             top_value_combo_count=top_value_count,
             archetype=archetype,
             villain_played_classes=villain_played_classes,
+            **situation,
         )
     except (ValueError, OSError) as exc:
         logger.warning(
@@ -710,7 +724,7 @@ def extract_facts(
             spot.node.node_id,
             exc,
         )
-        return PreflopFacts(spot=spot)
+        return PreflopFacts(spot=spot, **situation)
 
 
 def _compute_multiway_field_equity(
@@ -1016,6 +1030,12 @@ def classify_archetype(
             return "bb_check"
         if spot.node.actor == "SB" and dominant == "Call":
             return "sb_complete"
+        if dominant == "Call":
+            # A non-blind first-in CALL is an open limp (the MTT 8-max packs
+            # offer BTN limps at 15-30bb; cash packs never reach here). Without
+            # this branch it fell through to "unclassified", handing Layer 6 no
+            # frame at all -- the PLO July-21 lesson, ported.
+            return "open_limp"
         if "Raise" in dominant:
             return "open_for_value"
         if "AllIn" in dominant:

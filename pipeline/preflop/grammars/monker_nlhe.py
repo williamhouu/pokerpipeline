@@ -60,6 +60,7 @@ from pipeline.preflop.grammars.types import (
     ParsedAction,
     ParsedRangeFile,
     PreflopActionType,
+    encode_fixed_bb,
 )
 from pipeline.preflop.pack import PreflopPack
 
@@ -80,8 +81,20 @@ _SPECIAL_TOKENS: dict[str, PreflopActionType] = {
 _CONTINUES = (PreflopActionType.CALL, PreflopActionType.RAISE)
 
 
-def _decode_token(token: str, filename: str) -> tuple[PreflopActionType, float | None]:
-    """Map one Monker action token to ``(ActionType, optional raise %)``."""
+def _decode_token(
+    token: str,
+    filename: str,
+    fixed_bb: dict[str, float] | None = None,
+) -> tuple[PreflopActionType, float | None]:
+    """Map one Monker action token to ``(ActionType, optional raise %)``.
+
+    ``fixed_bb`` (from ``pack.fixed_raise_tokens_bb``) maps pack-specific
+    small-int tokens to absolute raise-TO sizes in bb (the MTT 8-max packs'
+    14/15/16/18, anchored by scripts/audit_mtt8_pack.py). It is consulted
+    FIRST so a pack can override the legacy hardcoded ``14`` decode.
+    """
+    if fixed_bb and token in fixed_bb:
+        return PreflopActionType.RAISE, encode_fixed_bb(fixed_bb[token])
     special = _SPECIAL_TOKENS.get(token)
     if special is not None:
         return special, None
@@ -90,14 +103,16 @@ def _decode_token(token: str, filename: str) -> tuple[PreflopActionType, float |
         # resolved relative to the running bet in resolve_preflop_history.
         return PreflopActionType.RAISE, MIN_RAISE_PCT
     if token == "14":
-        # BB iso-raise over a single SB limp == 75% pot (see module docstring).
+        # BB iso-raise over a single SB limp == 75% pot (see module docstring;
+        # the 6-max short-stack packs -- MTT packs override via fixed_bb).
         return PreflopActionType.RAISE, _BB_ISO_OVER_LIMP_PCT
     if token.startswith("40") and token[2:].isdigit() and int(token[2:]) > 0:
         return PreflopActionType.RAISE, float(int(token[2:]))
     raise ValueError(
         f"monker_nlhe: unrecognised action token {token!r} in {filename!r}. "
         "Expected 0 (fold), 1 (call), 3 (all-in), 5 (min-raise), 14 (BB "
-        "iso over a limp), or 40<pct> (raise)."
+        "iso over a limp), a pack-registered fixed-size token, or 40<pct> "
+        "(raise)."
     )
 
 
@@ -122,6 +137,11 @@ def parse(filename: Path, pack: PreflopPack) -> ParsedRangeFile:
     """
     stem = filename.stem
     queue = list(preflop_order(pack.table_size))
+    fixed_bb = (
+        dict(pack.fixed_raise_tokens_bb)
+        if getattr(pack, "fixed_raise_tokens_bb", None)
+        else None
+    )
     actions: list[ParsedAction] = []
     for token in stem.split("."):
         if not queue:
@@ -130,7 +150,7 @@ def parse(filename: Path, pack: PreflopPack) -> ParsedRangeFile:
                 f"to act in {filename.name!r}"
             )
         position = queue.pop(0)
-        action_type, raise_pct = _decode_token(token, filename.name)
+        action_type, raise_pct = _decode_token(token, filename.name, fixed_bb)
         actions.append(
             ParsedAction(
                 position=position,

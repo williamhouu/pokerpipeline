@@ -813,6 +813,10 @@ def _context_column(
     ``"Live · 20bb · Rake 5% / 0.5bb cap"``.
     """
     parts: list[str] = []
+    # Tournaments lead with the format word (team ask Aug 2026: the Context
+    # reads "Tournament · <stack> · <ante>"); cash keeps the venue lead.
+    if game_format == "tournament":
+        parts.append("Tournament")
     if live_or_online in ("Online", "Live"):
         parts.append(live_or_online)
     if game_format == "cash" and not display_in_bb:
@@ -821,6 +825,10 @@ def _context_column(
     # Stack depth when it isn't the assumed 100bb (in bb, stake-independent).
     if round(pack.stack_depth_bb) != 100:  # noqa: PLR2004
         parts.append(f"{pack.stack_depth_bb:g}bb")
+    # The MTT big-blind ante (readers assume none, so it must be said).
+    ante = float(getattr(pack, "ante_bb", 0.0) or 0.0)
+    if ante > 0:
+        parts.append(f"{ante:g}bb ante")
     rake = _PACK_RAKE_NOTES.get(pack.pack_id, "")
     if rake:
         parts.append(f"Rake {rake}")
@@ -905,7 +913,7 @@ def _preflop_notes(facts: PreflopFacts, pack: PreflopPack) -> str:
 
 def _preflop_animation_script(
     facts: PreflopFacts, pack: PreflopPack, *,
-    stakes_bb_dollars: float, game_format: str,
+    stakes_bb_dollars: float, game_format: str, display_in_bb: bool = False,
 ) -> str:
     """The app's animation timeline for a standalone preflop question.
 
@@ -942,6 +950,12 @@ def _preflop_animation_script(
         bb_in_dollars=(
             float(stakes_bb_dollars) if game_format != "tournament" else None
         ),
+        # MTT bb-ante packs: one dead `post` event with ante: true (shared
+        # walk, same convention as the PLO MTT packs).
+        ante_bb=float(getattr(pack, "ante_bb", 0.0) or 0.0),
+        # "display": "dollars" header when this row renders in dollars (Aug
+        # 2026 app fix): every animated surface must match the row currency.
+        display_dollars=(not display_in_bb and game_format != "tournament"),
     )
     walk_explicit_preflop(table, actions, decision_seat=node.actor)
     return table.render(node.actor)
@@ -1202,7 +1216,7 @@ def build_preflop_row(
         # Per-question chatbot context (all deterministic facts as one JSON blob).
         "animation_script": _preflop_animation_script(
             facts, pack, stakes_bb_dollars=stakes_bb_dollars,
-            game_format=game_format,
+            game_format=game_format, display_in_bb=display_in_bb,
         ),
         "chat_context": _preflop_chat_context(
             facts, explanation, pack, difficulty,

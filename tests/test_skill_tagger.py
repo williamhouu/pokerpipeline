@@ -391,13 +391,29 @@ def test_in_position_play_late_pos_facing_raise() -> None:
     assert _has(
         "In Position Play",
         _ctx(hero_position="BTN", n_prior_raises=1,
-             concept_tags=frozenset({"facing_single_raise"})),
+             concept_tags=frozenset({"facing_single_raise"}),
+             hero_relative_position="In Position"),
     )
+
+
+def test_position_skills_follow_relative_position_not_seat() -> None:
+    """Aug 2026 contract: the In/Out of Position Play skills mirror the
+    computed Relative Position value, never a seat heuristic. A CO caller
+    facing a BTN 3-bet is OOP despite the 'late' seat (the exact mistagging
+    the old heuristic produced -- the July-16 PLO catch, ported)."""
+    ctx = _ctx(
+        hero_position="CO",
+        n_prior_raises=2,
+        concept_tags=frozenset({"facing_3bet"}),
+        hero_relative_position="Out of Position",
+    )
+    assert _has("Out of Position Play", ctx)
+    assert not _has("In Position Play", ctx)
 
 
 def test_in_position_play_negative_opening() -> None:
     """BTN opening = no IP play to teach (no villain in pot yet)."""
-    assert not _has("In Position Play", _ctx(hero_position="BTN", n_prior_raises=0))
+    assert not _has("In Position Play", _ctx(hero_position="BTN", n_prior_raises=0, hero_relative_position="In Position"))
 
 
 def test_out_of_position_play_blinds_facing_raise() -> None:
@@ -407,6 +423,7 @@ def test_out_of_position_play_blinds_facing_raise() -> None:
             hero_position="BB",
             n_prior_raises=1,
             concept_tags=frozenset({"big_blind", "facing_single_raise"}),
+            hero_relative_position="Out of Position",
         ),
     )
 
@@ -420,6 +437,8 @@ def test_bvb_small_blind_is_out_of_position() -> None:
         hero_position="SB",
         n_prior_raises=2,
         concept_tags=frozenset({"small_blind", "facing_3bet", "bvb_spot"}),
+        # The value pipeline.preflop.position computes for BvB SB.
+        hero_relative_position="Out of Position",
     )
     assert _has("Out of Position Play", ctx)
     assert not _has("In Position Play", ctx)
@@ -433,6 +452,8 @@ def test_bvb_big_blind_is_in_position() -> None:
         hero_position="BB",
         n_prior_raises=1,
         concept_tags=frozenset({"big_blind", "facing_single_raise", "bvb_spot"}),
+        # The value pipeline.preflop.position computes for BvB BB.
+        hero_relative_position="In Position",
     )
     assert _has("In Position Play", ctx)
     assert not _has("Out of Position Play", ctx)
@@ -445,6 +466,7 @@ def test_small_blind_vs_nonblind_open_is_out_of_position() -> None:
         hero_position="SB",
         n_prior_raises=1,
         concept_tags=frozenset({"small_blind", "facing_single_raise"}),
+        hero_relative_position="Out of Position",
     )
     assert _has("Out of Position Play", ctx)
     assert not _has("In Position Play", ctx)

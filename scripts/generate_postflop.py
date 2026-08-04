@@ -92,8 +92,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--llm-workers", type=int, default=1,
-        help="full-hands mode: generate a hand's legs with this many "
-             "concurrent LLM calls (1 = sequential; ~Nx faster, same cost)",
+        help="generate with this many concurrent LLM calls (full-hands: a "
+             "hand's legs; standalone: whole questions). 1 = sequential; "
+             "~Nx faster, same cost, byte-identical output",
     )
     parser.add_argument(
         "--exciting", action="store_true",
@@ -339,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         revise_pass=args.revise,
         final_audit=args.final_audit and args.revise,
         progress_callback=lambda msg, done, total: print(f"  {msg}", file=sys.stderr),
+        llm_workers=args.llm_workers,
         **kwargs,
     )
     print(

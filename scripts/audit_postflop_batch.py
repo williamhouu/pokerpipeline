@@ -184,10 +184,21 @@ def _audit_rows(rows: list, questions: list, solve, rs: dict) -> tuple[int, int]
         spot = sample_spot(node, combo)
         facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
         options, correct = build_options(spot, style=answer_style)
+        # Per-question display currency (the sizing trainer's even bb/$ split
+        # records it per question, Aug 2026); batch-level flag otherwise.
+        row_display = bool(q.get("display_in_bb", display_in_bb))
+        if not row_display:
+            # Mirror generation's currency-consistency rule (Aug 2026):
+            # dollar batches dollarized their option labels at build time.
+            from pipeline.postflop.options import dollarize_options  # noqa: PLC0415
+
+            options, correct = dollarize_options(
+                options, correct, bb_in_dollars=solve.bb_in_dollars
+            )
         rebuilt = build_postflop_row(
             facts, placeholder_explanation(facts, options, correct),
             solve, compute_difficulty(facts, apply_trap_bump=trap_difficulty),
-            int(no), display_in_bb=display_in_bb,
+            int(no), display_in_bb=row_display,
         )
 
         # 1. EXACT column diffs.

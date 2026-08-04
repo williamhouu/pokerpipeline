@@ -242,6 +242,53 @@ via the admin Generate/Compare/Ranges pack selector (choice persists to
   9-max batches default to **Live $1/$2** framing (stakes/venue
   selectors in Generate §7; bb display drops stakes from Context).
 
+### NLH MTT 8-max BB-ante packs (Aug 2026: SEVEN depths)
+
+MonkerGuy "NLH MTT 8max (BB ANTE)" MonkerViewer exports, extracted to
+gitignored `mtt8_<depth>_ranges/` sibling dirs and registered as
+`monker_mtt8_{10,15,20,30,50,75,300}bb` (40/100/200bb deliberately not
+extracted — user call). Intake audit: `scripts/audit_mtt8_pack.py`
+(re-runnable; ALL sections clean on all seven depths Aug 3 2026 —
+token/ante/unit locks, completeness incl. the CEV-rejection missing-file
+scan, clean-line premium-inversion scan, render slices; node-count
+landmarks pinned). Conventions, all EV-anchored from the files' own fold
+bookkeeping:
+
+- **EVs in milli-SMALL-blinds** (2000/bb — like the 6-max short-stack
+  packs, NOT the 9-max's milli-bb).
+- **1bb BB ante: IN the pot** for Monker's pot-relative sizing (the
+  75/300bb `40043` open = 2.505bb ONLY with ante counted) and for every
+  price/pot consumer via `ResolvedPreflopState.dead_bb` (+ `pot_bb`),
+  but **SUNK in the EV baseline** (BB fold vs open = −1bb, blind alone).
+  `PreflopPack.ante_bb`/`game_format` are the pack fields; a tournament
+  pack overrides batch framing (bb display, blank Live-or-Online,
+  Cash/Tourney=Tournament) in `generate_preflop_batch`.
+- **Fixed-size tokens** (absolute raise-TO bb, per-pack
+  `fixed_raise_tokens_bb`, encoded via `grammars.types.encode_fixed_bb`
+  −1000-base sentinel so the node cache round-trips them): 15bb `14`=2.5
+  `15`=3.0; 20bb `16`=3.5 `18`=4.5. Opens: 10bb jam-or-fold; 15-30bb
+  min-raise (2bb); 50bb `40034`→2bb grid; 75/300bb `40043`→2.5bb.
+- **Limps are real lines** (BTN limps 26% at 15bb; SB limps everywhere):
+  non-blind first-in call = the new `open_limp` archetype (guidance +
+  ease 0.75 + why-factor + exploit-skip, the PLO port).
+- The **`10bb(vs50bb)`** folder is verified 10bb-effective symmetric
+  (jam-or-fold); the vendor name's "(vs50bb)" is solver-internal.
+- **Multiway jam-called lines are unconverged tail** (six players
+  flatting a jam) — same class as the PLO 9-max; the premise-realism
+  gates handle them at generation, and the audit's canary/inversion
+  scans exclude them by construction.
+- **Skills fix that came out of intake**: the shared tagger's In/Out of
+  Position Play rules now key off `hero_relative_position` (the SAME
+  value as the Relative Position column) instead of the old seat
+  heuristic — the July-16 PLO fix ported to NLHE (a CO caller facing a
+  BTN 3-bet was tagged In Position). Old cash batches drift on `skills`
+  → regenerate, don't refresh. The batch cross-check's BvB rules now
+  require a genuinely folded-to-the-blinds pot (participants, not
+  survivors — a BB squeeze that folds out the field is a squeeze spot,
+  not Blind vs. Blind Play).
+- Tests: `tests/test_mtt8_packs.py`; re-verifier + cross-check proven
+  0/0 + 0-problems on 15bb and 300bb dry batches.
+
 ### Admin-panel node cache (June 2026 perf fix)
 
 Walking the 9-max pack (93,235 files → 44,058 nodes) takes ~6s, and it
@@ -1922,6 +1969,48 @@ validation batch (FIXWAVE 8h factorlist v8): re-verifier 0/0 on all 22
 rows, 8/8 hands strict-clean (16/16 flags auto-fixed, 5 second rounds
 all clean), $6.26 — vs $20.96 and 7/8-flagged on the no-instructions
 run; factor-list prompts are the strict-clean production choice.
+
+**💰 Prompt caching at the shared call seam (July 29 2026 — the first
+Opus-5 cost lever).** `call_messages_create` now wraps a plain-STRING
+`system` into one `cache_control: ephemeral` block, so every call site
+that passes its system prompt as a string gets Anthropic prompt caching
+for free: postflop generation, ALL five claim checkers, the three
+revisers, PLO generation, the sanity checker. A `system` that is already
+a block LIST passes through untouched (the preflop generator's own
+two-breakpoint payload — system + gold block — must not be double-
+wrapped). Context: the July-28 $73 Opus-5 batch paid full price on 11.5M
+input tokens; the system prompts (production factor-list ~4k tokens,
+postflop checker ~1.8k) repeat identically across a batch's hundreds of
+calls, and cache reads bill at 0.1x. Prompts under Anthropic's 1024-token
+minimum silently don't cache (harmless). THE USAGE RULE extension:
+with caching on, `usage.input_tokens` is only the UNCACHED remainder, so
+the postflop accumulators (batch, full-hand, preflop-entry, sizing sum)
+now also read `cache_creation_input_tokens`/`cache_read_input_tokens`;
+`PostflopBatchResult`/`SizingBatchResult` carry
+`total_cache_creation_tokens`/`total_cache_read_tokens`; the pack-leg
+usage adapter forwards the cache fields it used to drop (pack-leg cache
+spend was invisible); the postflop admin sweep + Compare sweep price and
+log them (PLO/preflop already did). Tests: the wrap/passthrough cases in
+`tests/test_call_messages_create.py` + the cache-token accumulation case
+in `tests/test_postflop_pipeline.py`.
+
+**⚡ Parallel LLM workers — STANDALONE postflop (July 29 2026, the PLO
+port).** `generate_postflop_batch(llm_workers=1)`: with N>1, up to N
+questions' LLM chains (generation + Layer-7 gate/reviser/final audit —
+sequential PER question) run on a ThreadPoolExecutor; deterministic work
+(facts, options, difficulty, row building) stays on the MAIN thread in
+draw order and results commit strictly in SUBMISSION order, so CSV/meta
+are byte-identical to sequential (test-pinned) and the re-verifier needs
+no knowledge of the worker count. Failed chains free their slot and the
+fill loop draws a replacement, matching sequential counter semantics.
+Usage totals under a lock. Dry runs stay sequential. Threaded through
+`run.generate_postflop_batch_from_db` + the sizing trainer
+(`generate_sizing_batch(llm_workers=)` → per-solve sub-batches) + admin
+("⚡ Parallel questions (speed)" slider on the standalone spots mode,
+default 3, and on the sizing panel) + CLI `--llm-workers` on
+`generate_postflop.py` (now standalone too) and
+`generate_sizing_batch.py`; `run_settings.llm_workers`. Still sequential:
+NLHE preflop batches, standalone preflop-entry mode.
 
 **⚡ Parallel LLM workers — PLO (July 22 2026 PM, user ask).**
 `generate_plo_batch(llm_workers=1)`: with N>1, up to N questions' LLM

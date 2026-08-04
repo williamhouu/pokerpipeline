@@ -70,6 +70,7 @@ def generate_postflop_batch_from_db(
     revise_pass: bool = False,
     final_audit: bool = False,
     progress_callback: Any = None,
+    llm_workers: int = 1,
 ) -> PostflopBatchResult:
     """Load the ``.db`` solve, curate spots, and generate a batch.
 
@@ -143,6 +144,7 @@ def generate_postflop_batch_from_db(
         revise_pass=revise_pass,
         final_audit=final_audit,
         progress_callback=progress_callback,
+        llm_workers=llm_workers,
         spot_selector=selector,
         # Provenance for the batch re-verifier (scripts/audit_postflop_batch.py):
         # how to reload THIS exact solve (same streets + down-sampling cap).
@@ -308,6 +310,12 @@ def compare_postflop_batches_from_db(
         "a_out_tokens": res_a.total_output_tokens,
         "b_in_tokens": res_b.total_input_tokens,
         "b_out_tokens": res_b.total_output_tokens,
+        # Prompt-cache tokens (July 2026): input_tokens above is only the
+        # uncached remainder once the shared call seam caches system prompts.
+        "a_cache_creation_tokens": res_a.total_cache_creation_tokens,
+        "a_cache_read_tokens": res_a.total_cache_read_tokens,
+        "b_cache_creation_tokens": res_b.total_cache_creation_tokens,
+        "b_cache_read_tokens": res_b.total_cache_read_tokens,
     }
 
 
@@ -544,6 +552,7 @@ def generate_sizing_batch_from_paths(
     live_or_online: str = "Live",
     bb_in_dollars: float = 2.0,
     display_in_bb: bool = True,
+    display_split: bool = False,
     model: str = DEFAULT_MODEL,
     dry_run: bool = False,
     min_frequency: float = 0.65,
@@ -554,6 +563,7 @@ def generate_sizing_batch_from_paths(
     revise_pass: bool = False,
     final_audit: bool = False,
     progress_callback: Any = None,
+    llm_workers: int = 1,
 ) -> Any:
     """📏 Bet-sizing trainer: ONE fully-balanced batch across ALL the solves.
 
@@ -585,6 +595,7 @@ def generate_sizing_batch_from_paths(
         model=model,
         dry_run=dry_run or client is None,
         display_in_bb=display_in_bb,
+        display_split=display_split,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         system_prompt=system_prompt,
@@ -596,6 +607,7 @@ def generate_sizing_batch_from_paths(
         live_or_online=live_or_online,
         bb_in_dollars=bb_in_dollars,
         progress_callback=progress_callback,
+        llm_workers=llm_workers,
     )
 
 

@@ -244,6 +244,49 @@ def _collapsed_spectrum_options(
     return options, f"{prefix} {dom}"
 
 
+_BB_AMOUNT_RE = None  # compiled lazily (module stays import-light)
+
+
+def dollarize_label(label: str, bb_in_dollars: float) -> str:
+    """Render a size-carrying option label in DOLLARS ("Bet 11.5bb" ->
+    "Bet $23"), using the SAME dollar convention as the question prose
+    (make_amount_fmt: whole values bare, cents to 2 places).
+
+    CURRENCY-CONSISTENCY RULE (Aug 2026, user report): the answer options
+    must always match the question's display currency -- dollar prose with
+    bb options is never acceptable. Verb-only labels pass through unchanged,
+    so this is safe to apply to any option list.
+    """
+    global _BB_AMOUNT_RE  # noqa: PLW0603 -- lazy compile
+    if _BB_AMOUNT_RE is None:
+        import re  # noqa: PLC0415
+
+        _BB_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)bb\b")
+
+    def _sub(m) -> str:
+        d = float(m.group(1)) * bb_in_dollars
+        return f"${round(d):g}" if abs(d - round(d)) < 0.005 else f"${d:.2f}"  # noqa: PLR2004
+
+    return _BB_AMOUNT_RE.sub(_sub, label)
+
+
+def dollarize_options(
+    options: list[str], correct: str, *, bb_in_dollars: float
+) -> tuple[list[str], str]:
+    """Apply :func:`dollarize_label` to a whole option set + correct answer.
+
+    Applied by the batch AFTER build_options whenever the batch renders in
+    dollars, so the LLM prompt, the validators' exact-match rule, and the
+    CSV all see the same display labels. Internal joins (frequencies, EVs)
+    stay on the bb labels; frequencies_for_options transforms its keys with
+    the same function at lookup time.
+    """
+    return (
+        [dollarize_label(o, bb_in_dollars) if o else o for o in options],
+        dollarize_label(correct, bb_in_dollars),
+    )
+
+
 def frequencies_for_options(
     action_frequencies: dict[str, float], options: list[str]
 ) -> dict[str, float]:

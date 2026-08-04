@@ -78,6 +78,23 @@ class SkillContext:
     n_calls_after_open: int = 0  # calls that occurred AFTER the open AND
     # BEFORE any subsequent raise (used for facing-squeeze detection)
 
+    # True when the latest aggression hero faces is an ALL-IN: no postflop
+    # play remains, so implied-odds skills (either direction) must not fire
+    # (Aug 2026 -- the cross-check caught 'Reverse Implied Odds' on a 10bb
+    # MTT jam-call spot via the dominated+offsuit fallback path, which
+    # bypassed the concept tag's own all-in exclusion).
+    facing_all_in: bool = False
+
+    # Hero's IP/OOP standing vs the decision-point villain -- the SAME value
+    # as the CSV's "Relative Position" column (pipeline.preflop.position.
+    # hero_relative_position). "" when unknown (postflop path / no facts).
+    # The In/Out of Position Play skills key off THIS, never a seat
+    # heuristic, so skills can't contradict the column (Aug 2026 -- the
+    # July-16 PLO fix ported to NLHE after the MTT packs' multiway lines
+    # exposed the same contradiction, e.g. the BB tagged 'Out of Position
+    # Play' while the column read 'In Position' vs an SB 4-bettor).
+    hero_relative_position: str = ""
+
     # Postflop-only fields, filled in by from_postflop_spot_data.
     # Defaults keep preflop rules from accidentally tripping on these.
     board_texture: str = ""
@@ -132,6 +149,17 @@ def from_preflop_facts(
         elif seen_first_raise and a.action_type is PreflopActionType.CALL:
             n_calls_after_open += 1
 
+    # Same source as the "Relative Position" CSV column -- the invariant the
+    # In/Out of Position Play rules depend on (see the catalog comment).
+    from pipeline.preflop.position import hero_relative_position  # noqa: PLC0415
+
+    # Latest aggression is an all-in (same rule as concept_tags._facing_all_in).
+    facing_all_in = False
+    for a in reversed(history):
+        if a.action_type in (PreflopActionType.RAISE, PreflopActionType.ALL_IN):
+            facing_all_in = a.action_type is PreflopActionType.ALL_IN
+            break
+
     return SkillContext(
         path="preflop",
         street="Preflop",
@@ -143,6 +171,8 @@ def from_preflop_facts(
         stack_depth_bb=stack_depth_bb,
         n_prior_raises=n_prior_raises,
         n_calls_after_open=n_calls_after_open,
+        hero_relative_position=hero_relative_position(facts),
+        facing_all_in=facing_all_in,
     )
 
 
@@ -346,14 +376,20 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     # Disjoint from Implied Odds by construction: the concept tag itself never
     # fires on call_for_implied_odds, and the FOLD gate excludes call archetypes.
     "Reverse Implied Odds": lambda c: (
-        "reverse_implied_odds_call" in c.concept_tags
-        or (
-            c.archetype in _ARCHETYPES_FOLD
-            and (
-                "reverse_implied_odds" in c.concept_tags
-                or (
-                    "dominated" in c.concept_tags
-                    and "unconnected_offsuit" in c.concept_tags
+        # Never on an all-in: no postflop play -> no implied odds either way
+        # (the fallback path below used to bypass the concept tag's own
+        # exclusion; cross-check catch, Aug 2026).
+        not c.facing_all_in
+        and (
+            "reverse_implied_odds_call" in c.concept_tags
+            or (
+                c.archetype in _ARCHETYPES_FOLD
+                and (
+                    "reverse_implied_odds" in c.concept_tags
+                    or (
+                        "dominated" in c.concept_tags
+                        and "unconnected_offsuit" in c.concept_tags
+                    )
                 )
             )
         )
@@ -393,27 +429,19 @@ SKILL_CATALOG: dict[str, SkillRule] = {
     "Range Polarization": lambda c: "villain_polarized" in c.concept_tags,
 
     # --- Section 6: Positional & Situational (4) ---
-    # In Position: hero acts after villain postflop. Preflop, that's late
-    # position vs an open/3-bet (BTN/CO), PLUS the blind-vs-blind case: at a
-    # ring table the BvB SB acts FIRST on every postflop street, so the BB
-    # is the seat IN position (July 2026 bugfix -- an earlier version had
-    # this exactly backwards, claiming the SB "is the dealer"; that is only
-    # true at a literal 2-player table. Mirrors pipeline.preflop.position
-    # and the "Relative Position" column).
+    # In/Out of Position key off hero_relative_position -- the SAME computed
+    # value as the CSV's "Relative Position" column -- gated on facing at
+    # least one raise (an open has no positional matchup yet). INVARIANT:
+    # these two skills must never contradict the Relative Position column;
+    # the batch cross-check audits exactly that. (Aug 2026: replaced the old
+    # late-seat/blind-tag heuristic, which tagged a CO caller facing a BTN
+    # 3-bet as In Position and the multiway BB facing an SB 4-bet as Out of
+    # Position -- the same bug class the July-16 PLO fix removed.)
     "In Position Play": lambda c: (
-        (c.hero_position in _LATE_POS and c.n_prior_raises >= 1)
-        or (
-            c.hero_position == "BB"
-            and "bvb_spot" in c.concept_tags
-            and c.n_prior_raises >= 1
-        )
+        c.hero_relative_position == "In Position" and c.n_prior_raises >= 1
     ),
     "Out of Position Play": lambda c: (
-        # Blinds defending, or earlier positions in a non-RFI spot --
-        # EXCEPT the BB in a BvB pot, which is in position (see above).
-        bool(c.concept_tags & _BLIND_TAGS)
-        and c.n_prior_raises >= 1
-        and not (c.hero_position == "BB" and "bvb_spot" in c.concept_tags)
+        c.hero_relative_position == "Out of Position" and c.n_prior_raises >= 1
     ),
     "Multiway Pot Strategy": lambda c: "multiway_pot" in c.concept_tags,
     # TODO Phase 4: Drawing Hand Strategy is postflop-specific and needs

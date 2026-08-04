@@ -313,6 +313,16 @@ PREFLOP_ARCHETYPE_GUIDANCE: dict[str, str] = {
         "cheap flop to building a pot by raising -- it is a call of half a "
         "blind, not a fold and not a check."
     ),
+    "open_limp": (
+        "Hero is first in (not from the blinds) and LIMPS -- calls the big "
+        "blind rather than raising or folding. This is a real solver line "
+        "at tournament stack depths with a big-blind ante (the ante fattens "
+        "the pot enough that seeing a cheap flop with a playable hand beats "
+        "folding, while raising would build a pot this hand doesn't want). "
+        "Frame it as limp vs raise vs fold; never call it a mistake or "
+        "'passive play', and never frame it around a calling price -- there "
+        "is only the 1bb to match."
+    ),
     "fold_dominated": (
         "Hero is facing a raise with a hand dominated by villain's range. "
         "Frame the explanation around domination: villain's continuing "
@@ -657,8 +667,26 @@ def _question_framing_preflop(facts: PreflopFacts) -> str:
     )
     history_str = _render_history_bet_levels(node)
 
+    # Game situation, stated whenever it differs from the assumed default
+    # (100bb cash, no ante) -- the MTT packs' tournament framing. Without
+    # this the model narrates a 15bb bb-ante spot with 100bb cash
+    # assumptions (the PLO July-21 situation-line lesson).
+    situation_bits: list[str] = []
+    if facts.game_format == "tournament":
+        situation_bits.append("tournament")
+    if round(facts.stack_depth_bb) != 100:  # noqa: PLR2004
+        situation_bits.append(f"{facts.stack_depth_bb:g}bb effective stacks")
+    if facts.ante_bb > 0:
+        situation_bits.append(
+            f"{facts.ante_bb:g}bb big-blind ante (already counted in every "
+            "pot number below)"
+        )
+    situation_str = (
+        f" Game: {', '.join(situation_bits)}." if situation_bits else ""
+    )
+
     framing = (
-        f"Stage: preflop. Hero ({hero_pos}) is holding "
+        f"Stage: preflop.{situation_str} Hero ({hero_pos}) is holding "
         f"{spot.hero_hand_class} ({spot.hero_card_combo}). Prior action: "
         f"{history_str}. Decision-point villain: {villain_pos}. "
         f"Full solver strategy at this node: {strategy_str}. "
@@ -738,6 +766,28 @@ def _trim_facts_for_prompt(facts: PreflopFacts) -> dict[str, Any]:
         "hand_class": spot.hero_hand_class,
         "hero_card_combo": spot.hero_card_combo,
         "actor": spot.node.actor,
+        # Game situation (MTT packs): tournament / stack depth / bb ante.
+        # Stated only when it differs from the assumed 100bb-cash default,
+        # mirroring the framing sentence.
+        **(
+            {
+                "game_situation": {
+                    "format": facts.game_format,
+                    "effective_stack_bb": facts.stack_depth_bb,
+                    "big_blind_ante_bb": facts.ante_bb,
+                    "note": (
+                        "The ante is dead money already included in every "
+                        "pot and price number in this block."
+                    ),
+                }
+            }
+            if (
+                facts.game_format != "cash"
+                or facts.ante_bb > 0
+                or round(facts.stack_depth_bb) != 100  # noqa: PLR2004
+            )
+            else {}
+        ),
         # The canonical bet-level-labeled strategy (Call / 3-bet / 4-bet /
         # Fold / All-in), INCLUDING 0%-frequency actions so the LLM knows
         # which actions the solver never takes. Raw Pio tokens ("Raise 50%")

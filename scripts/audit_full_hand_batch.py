@@ -92,6 +92,14 @@ def _rebuild_postflop(row, q, solve, *, answer_style, display_in_bb,
     spot = sample_spot(node, q["hero_combo"])
     facts = extract_facts(spot, solve, equity_runouts=equity_runouts)
     options, correct = build_options(spot, style=answer_style)
+    if not display_in_bb:
+        # Mirror generation's currency-consistency rule (Aug 2026):
+        # dollar batches dollarized their option labels at build time.
+        from pipeline.postflop.options import dollarize_options  # noqa: PLC0415
+
+        options, correct = dollarize_options(
+            options, correct, bb_in_dollars=solve.bb_in_dollars
+        )
     rebuilt = build_postflop_row(
         facts, placeholder_explanation(facts, options, correct), solve,
         compute_difficulty(facts, apply_trap_bump=trap_difficulty),
