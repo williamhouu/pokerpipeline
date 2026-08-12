@@ -286,6 +286,30 @@ def validate_hero_hand_name(
             wider = text[max(0, i - 4):i + len(name) + 4]
             if name != "top two pair" and "top two pair" in wider:
                 continue
+            # Range-share idiom, not a hand name (Aug 2026, v9-FULL audit
+            # batch false positives): "your range makes two pair or better
+            # 36% of the time" quotes the nut-advantage SOLVER DATA line.
+            # A trailing "or better" always marks a range bucket, never
+            # hero's actual holding.
+            if text[i + len(name):].lstrip().startswith("or better"):
+                continue
+            # List-of-outdraws idiom (same batch): "you might be running
+            # into a straight or two pair" -- a hand name preceded by
+            # "or "/"into " is a hypothetical/villain holding in a list,
+            # not hero's hand.
+            if text[max(0, i - 6):i].endswith(("or ", "into ")):
+                continue
+            # Future-improvement idiom (Aug 2026, 5-hand rerun): "your hand
+            # can also improve to a full house" describes a possible LATER
+            # hand, not the current one.
+            if "improve" in text[max(0, i - 30):i]:
+                continue
+            # Negation idiom (Aug 2026, panel batch): "your queens are NOT
+            # an overpair on this board" TEACHES the misread -- the exact
+            # opposite of committing it.
+            if any(neg in text[max(0, i - 18):i] for neg in
+                   ("not ", "n't ", "no longer ", "never ")):
+                continue
             if token not in allowed:
                 return PostflopValidationResult.fail(
                     f"prose calls hero's hand '{name}' but the solver "
@@ -312,12 +336,24 @@ def validate_no_impossible_hands(
     9-paired board -- impossible hands the audit kept flagging in prose.
     """
     text = generated.answer_explanation
+    lower = text.lower()
     seen: dict[str, int] = {}
     hero = facts.spot.hero_combo
     for card in list(facts.board) + [hero[:2], hero[2:]]:
         r = card[0].upper()
         seen[r] = seen.get(r, 0) + 1
     for m in _HAND_TOKEN_RE.finditer(text):
+        # Blocker/removal context is EXEMPT (Aug 2026, v9-FULL audit batch
+        # false positives): "holding two kings removes their AK and KK" names
+        # an impossible combo precisely BECAUSE it is impossible -- that is
+        # the blocker fact stated correctly, not a claim villain holds it.
+        # Only bare mentions ("pairs like 99 keep calling") stay flagged.
+        ctx = lower[max(0, m.start() - 80):m.end() + 40]
+        if any(cue in ctx for cue in (
+            "block", "remove", "gone", "less likely", "unlikely",
+            "can't have", "cannot have", "no longer", "impossible", "dead",
+        )):
+            continue
         r1, r2 = m.group(1), m.group(2)
         if r1 == r2:  # pocket pair token like "99"
             if 4 - seen.get(r1, 0) < 2:
@@ -564,6 +600,107 @@ def soft_validate_raw_percent_size(
     return []
 
 
+# --- EV-superiority claims vs the per-action EVs (Aug 2026) ------------------
+# Built from a live miss: prose said "folding is the higher-EV choice" while
+# the row's per-action EVs had Call +0.11 over Fold 0.00 -- and BOTH LLM audit
+# passes let it through. Ranking per-action EVs is plain arithmetic, so per the
+# founding rule it moves down into a deterministic check. Conservative matcher:
+# only an explicit EV-superiority phrase attributed to a NAMED action fires.
+_EV_CLAIM_RE = re.compile(
+    r"\b(?:higher|highest|best|more)[-\s]ev\b|\bmaximi[sz]es?\s+ev\b",
+    re.IGNORECASE,
+)
+_EV_ACTION_WORD = re.compile(
+    r"\b(fold(?:ing|s)?|call(?:ing|s)?|check(?:ing|s)?|bet(?:ting|s)?"
+    r"|rais(?:e|es|ing)|jam(?:ming|s)?|shov(?:e|es|ing)|all[- ]in)\b",
+    re.IGNORECASE,
+)
+# "The highest-EV play is to fold": the action follows the phrase.
+_EV_AFTER_ATTR = re.compile(
+    r"^[\s\w,]{0,24}?\b(?:is|would be)\s+(?:to\s+)?"
+    r"(fold|call|check|bet|rais|jam|shov|all[- ]in)",
+    re.IGNORECASE,
+)
+# Near-ties must not flag: a mixed-strategy spot is EV-parity by construction,
+# so tiny gaps are noise, not a wrong claim.
+_EV_TIE_EPSILON_BB = 0.05
+
+
+def _ev_claim_verb(word: str) -> str:
+    w = word.lower()
+    if w.startswith("fold"):
+        return "fold"
+    if w.startswith("call"):
+        return "call"
+    if w.startswith("check"):
+        return "check"
+    if w.startswith("bet"):
+        return "bet"
+    if w.startswith("rais"):
+        return "raise"
+    return "all-in"  # jam / shove / all-in
+
+
+def soft_validate_ev_ranking(
+    generated: GeneratedExplanation,
+    facts: PostflopFacts,
+) -> list[str]:
+    """Flag an EV-superiority claim for an action that is NOT the EV max.
+
+    For each sentence containing an EV-superiority phrase ("higher EV",
+    "highest EV", "best EV", "more EV", "maximizes EV"), the named action is
+    the nearest action word BEFORE the phrase (else an "is to <action>" right
+    after it); no named action = no flag. The claim passes when that action's
+    best per-action EV is within :data:`_EV_TIE_EPSILON_BB` of the overall
+    max (near-ties are genuine indifference); otherwise it is flagged with
+    both numbers. Skips silently when the solve exposes no per-action EVs.
+    """
+    from pipeline.postflop.spot_sampler import spot_action_evs_bb  # noqa: PLC0415 - leaf util
+
+    text = generated.answer_explanation or ""
+    if not text:
+        return []
+    evs = spot_action_evs_bb(facts.spot)
+    if not evs or len(evs) < 2:
+        return []
+    # verb -> the best EV among that verb's labels (a superiority claim about
+    # "betting" is right if ANY bet size is the max). "All-in" labels also
+    # register under "all-in" for jam/shove prose.
+    verb_best: dict[str, tuple[float, str]] = {}
+    for label, ev in evs.items():
+        action = facts.spot.node.action_by_label(label)
+        keys = {(action.verb if action is not None else label.split()[0]).lower()}
+        if label.strip().lower().replace(" ", "-") == "all-in":
+            keys.add("all-in")
+        for key in keys:
+            if key not in verb_best or ev > verb_best[key][0]:
+                verb_best[key] = (ev, label)
+    best_label = max(evs, key=lambda lbl: evs[lbl])
+    best_ev = evs[best_label]
+    for sentence in _SENTENCE_SPLIT.split(text):
+        for m in _EV_CLAIM_RE.finditer(sentence):
+            words = _EV_ACTION_WORD.findall(sentence[:m.start()])
+            if words:
+                named = words[-1]
+            else:
+                after = _EV_AFTER_ATTR.match(sentence[m.end():])
+                if after is None:
+                    continue  # no attributed action: stay conservative
+                named = after.group(1)
+            claim = verb_best.get(_ev_claim_verb(named))
+            if claim is None:
+                continue  # named action not on the EV menu: cannot verify
+            claimed_ev, claimed_label = claim
+            if best_ev - claimed_ev > _EV_TIE_EPSILON_BB:
+                return [
+                    f"prose claims {named!r} is the higher/highest-EV action, "
+                    f"but the per-action EVs rank {best_label} "
+                    f"({best_ev:+.2f}bb) above {claimed_label} "
+                    f"({claimed_ev:+.2f}bb). Review the EV claim."
+                ]
+    return []
+
+
 def run_postflop_soft_validators(
     generated: GeneratedExplanation,
     facts: PostflopFacts,
@@ -575,6 +712,7 @@ def run_postflop_soft_validators(
         soft_validate_equity_vs_data,
         soft_validate_blocker_direction,
         soft_validate_raw_percent_size,
+        soft_validate_ev_ranking,
     ):
         warnings.extend(check(generated, facts))
     return warnings
@@ -586,6 +724,7 @@ __all__ = [
     "run_postflop_soft_validators",
     "soft_validate_blocker_direction",
     "soft_validate_equity_vs_data",
+    "soft_validate_ev_ranking",
     "soft_validate_raw_percent_size",
     "soft_validate_verdict_vs_answer",
     "validate_banned_phrases",

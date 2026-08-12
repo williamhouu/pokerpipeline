@@ -720,3 +720,42 @@ def test_gto_pick_secondary_never_picks_a_hidden_all_in(monkeypatch) -> None:
     assert correct == "Always Raise"
     assert "Mostly Call" in options
     assert not any("All-in" in o for o in options)
+
+
+# --- Always/Mostly qualifier helper (Aug 2026 balanced-batch axis) -----------
+def test_answer_qualifier_matches_the_gto_rendered_prefix() -> None:
+    """PARITY PIN: the balanced-batch qualifier axis reads
+    answer_qualifier(spot.dominant_frequency) -- it must equal the prefix
+    build_options_gto actually renders on the correct answer, so the two
+    can never drift (single source of truth:
+    pipeline.explanation_generator.frequency_to_verb_prefix)."""
+    from pipeline.preflop.options import answer_qualifier
+
+    for freqs in (
+        {"Call": 0.6, "Fold": 0.4},
+        {"Raise 60%": 0.72, "Fold": 0.28},
+        {"Fold": 0.94, "Call": 0.06},
+    ):
+        facts = _facts_with_strategy(freqs)
+        _opts, correct = build_options_gto(facts)
+        prefix = correct.split()[0]
+        assert prefix in ("Always", "Mostly")
+        assert prefix == answer_qualifier(facts.spot.dominant_frequency)
+
+
+def test_answer_qualifier_delegates_to_frequency_to_verb_prefix() -> None:
+    from pipeline.explanation_generator import frequency_to_verb_prefix
+    from pipeline.preflop.options import answer_qualifier
+
+    for freq in (1.0, 0.9999, 0.999, 0.95, 0.65, 0.05, 0.01):
+        assert answer_qualifier(freq) == frequency_to_verb_prefix(freq)
+    assert answer_qualifier(1.0) == "Always"
+    assert answer_qualifier(0.99) == "Mostly"
+
+
+def test_qualifier_axis_active_only_for_gto_capable_styles() -> None:
+    from pipeline.preflop.options import qualifier_axis_active
+
+    assert qualifier_axis_active("gto")
+    assert qualifier_axis_active("auto")  # may fall to the GTO spectrum
+    assert not qualifier_axis_active("basic")

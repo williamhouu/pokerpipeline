@@ -21,6 +21,10 @@ Usage::
     venv/bin/python scripts/audit_preflop_batch.py "test_output/preflop_batches/AUDIT BATCH_20260612_104653.csv"
 
 Prints a per-row report; exits 1 if any EXACT check failed.
+
+Merged "all tournament depths" batches (Aug 2026) are supported: their
+meta stamps each question record with its source ``pack_id``, and every
+row is rebuilt against its own pack (one enumeration per pack, cached).
 """
 
 from __future__ import annotations
@@ -96,8 +100,28 @@ def audit_batch(csv_path: Path) -> int:
 
     clear_registry()
     discover_packs(Path(__file__).resolve().parent.parent / "ranges")
-    pack = get_pack(meta["pack_id"])
-    nodes_by_id = {n.node_id: n for n in enumerate_nodes([pack])}
+    # MULTI-PACK batches (the merged "all tournament depths" mode, Aug 2026):
+    # run_settings carries all_depths/pack_ids and every question record is
+    # stamped with its own pack_id, so each row rebuilds against ITS pack.
+    # Single-pack batches keep the old one-pack path byte-identically (their
+    # records have no pack_id -> the top-level meta pack_id resolves once).
+    multi_pack = bool(meta.get("run_settings", {}).get("all_depths")) or any(
+        isinstance(q, dict) and q.get("pack_id") for q in questions
+    )
+    default_pack = None if multi_pack else get_pack(meta["pack_id"])
+    _nodes_cache: dict[str, dict[str, object]] = {}
+
+    def pack_for_question(q: dict) -> object:
+        pid = str(q.get("pack_id") or "")
+        return get_pack(pid) if pid else default_pack
+
+    def nodes_for_pack(pack) -> dict[str, object]:
+        # One enumeration per referenced pack, cached for the whole audit.
+        if pack.pack_id not in _nodes_cache:
+            _nodes_cache[pack.pack_id] = {
+                n.node_id: n for n in enumerate_nodes([pack])
+            }
+        return _nodes_cache[pack.pack_id]
 
     # Mirror the batch's trap-aware + razor's-edge difficulty flags (recorded
     # in meta) or the rebuild false-flags Difficulty Rating drift on every
@@ -125,7 +149,8 @@ def audit_batch(csv_path: Path) -> int:
     tolerance_notes = 0
     for row, q in zip(rows, questions, strict=True):
         no = row["No"]
-        node = nodes_by_id.get(q["node_id"])
+        pack = pack_for_question(q)
+        node = nodes_for_pack(pack).get(q["node_id"])
         header = f"--- #{no} {q['hand_class']} @ {q['node_id'][:70]}"
         print(header)
         if node is None:

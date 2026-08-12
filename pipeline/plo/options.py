@@ -71,6 +71,30 @@ def _freq_prefix(freq: float) -> str:
     return ""
 
 
+def answer_qualifier(dominant_freq: float) -> str:
+    """The ``Always``/``Mostly`` qualifier the GTO option path renders for a
+    dominant action at this solver frequency.
+
+    SINGLE SOURCE OF TRUTH: delegates to :func:`_freq_prefix` -- the exact
+    mapping :func:`build_options_gto` applies to the correct answer -- so a
+    consumer (e.g. the 🎛️ fully-balanced qualifier axis) can never drift
+    from the rendered option prefix. Returns ``""`` only for a dominant
+    below 5% (never a worthy spot).
+    """
+    return _freq_prefix(dominant_freq)
+
+
+def qualifier_axis_active(style: str) -> bool:
+    """True when this answer style can render Always/Mostly qualifiers.
+
+    ``gto`` always renders them; ``auto`` may (it falls to the GTO spectrum
+    on mixed spots). ``basic`` never does, so the balanced qualifier axis
+    must stay OFF there -- including it would change basic-style selection
+    for a distinction the player can never see.
+    """
+    return style in ("gto", "auto")
+
+
 def _action_aggression(label: str) -> int:
     if not label:
         return 99
@@ -171,6 +195,40 @@ def integer_percentages(strategy: dict[str, float]) -> dict[str, int]:
             give = min(-overflow, 99 - out[label])
             out[label] += give
             overflow += give
+    if overflow < 0:
+        # Residual clamp deficit (Aug 2026 bugfix, found by the chart
+        # export): a dominant in [0.9998, 0.9999) with EVERY other label a
+        # sub-0.0001 sliver leaves out = {dominant: 99, others: 0} -- the
+        # loop above finds nothing in (0, 99) to give the point to, and the
+        # function returned a sum of 99. The sum-to-100 contract is hard
+        # (the CSV cross-check audits it); showing 1 for a genuinely-taken
+        # sliver is house-sanctioned (the clamp's own present-action rule),
+        # so give the deficit to the largest present-but-zero labels.
+        # overflow is -1 by construction (only one label can be clamped
+        # from 100), but loop defensively.
+        for label, v in by_freq:
+            if overflow == 0:
+                break
+            if out[label] == 0 and v > 0.0:
+                out[label] += 1
+                overflow += 1
+    if overflow > 0:
+        # Mirror residual (same Aug 2026 wave): caller shares are usually
+        # ratios (mass / total), so the exact values can sum to 1 + 1ulp.
+        # At the purity boundary that yields a dominant that KEEPS 100
+        # (exact >= _PURE_STRATEGY_PREFIX) while a sliver still clears the
+        # present-floor promote to 1 -- sum 101, and the loop above cannot
+        # take from a pure dominant. Demote the smallest promoted slivers
+        # back to 0: the dominant's exact says "Always", so 100/0 is the
+        # display consistent with the qualifier.
+        for label, _v in reversed(by_freq):
+            if overflow == 0:
+                break
+            if out[label] == 1:
+                out[label] = 0
+                overflow -= 1
+    # INVARIANT: every return path sums to exactly 100 (aggregate asserts,
+    # the batch cross-check, and the chart exports all rely on it).
     return out
 
 
@@ -330,6 +388,7 @@ def build_options(facts: PloFacts, *, style: str = "auto") -> tuple[list[str], s
 
 __all__ = [
     "ANSWER_STYLES",
+    "answer_qualifier",
     "build_options",
     "build_options_auto",
     "build_options_basic",
@@ -337,4 +396,5 @@ __all__ = [
     "canonicalize_action_label",
     "canonicalize_strategy",
     "is_check_spot",
+    "qualifier_axis_active",
 ]

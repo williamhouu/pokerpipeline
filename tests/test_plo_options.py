@@ -229,3 +229,73 @@ def test_integer_percentages_never_hide_a_real_mix_as_100_0():
     # A zero-frequency listed option stays 0 (options list zero-freq actions).
     ints0 = integer_percentages({"Check": 0.995, "Raise": 0.005, "Fold": 0.0})
     assert ints0["Fold"] == 0 and sum(ints0.values()) == 100
+
+
+def test_integer_percentages_clamp_deficit_still_sums_100():
+    """REGRESSION (Aug 2026, found by the PLO chart export): a dominant in
+    [0.9998, 0.9999) whose OTHER labels are all sub-0.0001 slivers used to
+    return a sum of 99 -- the honesty clamp took the dominant 100 -> 99 and
+    the repair loop found no label in (0, 99) to give the point to. The
+    deficit now goes to the largest present-but-zero sliver (showing 1 for a
+    genuinely-taken action is the clamp's own present-action rule)."""
+    from pipeline.plo.options import integer_percentages
+
+    ints = integer_percentages({"fold": 0.00006, "call": 0.00006, "raise": 0.99988})
+    assert sum(ints.values()) == 100
+    assert ints["raise"] == 99  # a mixed dominant still never shows 100
+    assert ints["fold"] == 1  # the deficit lands on a REAL sliver
+    assert ints["call"] == 0
+    # A zero-frequency label can never receive the deficit point.
+    ints2 = integer_percentages({"fold": 0.0, "call": 0.00012, "raise": 0.99988})
+    assert sum(ints2.values()) == 100
+    assert ints2["fold"] == 0 and ints2["call"] == 1 and ints2["raise"] == 99
+    # MIRROR case (same wave): ratio-derived shares can sum to 1 + 1ulp, so
+    # a dominant AT the purity boundary keeps 100 while a boundary sliver
+    # still promotes to 1 -- used to return sum 101. The sliver demotes
+    # back to 0 (the dominant's exact says "Always", so 100/0 is the
+    # qualifier-consistent display).
+    ints3 = integer_percentages(
+        {"call": 0.9999, "fold": 0.00010000000000000602, "raise": 0.0}
+    )
+    assert ints3 == {"call": 100, "fold": 0, "raise": 0}
+
+
+# --- Always/Mostly qualifier helper (Aug 2026 balanced-batch axis) -----------
+def test_answer_qualifier_matches_the_gto_rendered_prefix():
+    """PARITY PIN: the balanced-batch qualifier axis reads
+    answer_qualifier(spot.dominant_frequency) -- it must equal the prefix
+    build_options_gto actually renders on the correct answer, so the two
+    can never drift (single source of truth: _freq_prefix)."""
+    from pipeline.plo.options import answer_qualifier
+
+    for freqs in (
+        {"Call": 0.6, "Raise 100%": 0.4},
+        {"Fold": 0.72, "Call": 0.28},
+        {"Call": 0.94, "Fold": 0.06},
+    ):
+        facts = _facts(freqs, history=(PloAction("LJ", R, 100),))
+        _opts, correct = build_options(facts, style="gto")
+        prefix = correct.split()[0]
+        assert prefix in ("Always", "Mostly")
+        assert prefix == answer_qualifier(facts.spot.dominant_frequency)
+
+
+def test_answer_qualifier_thresholds_are_the_option_builders():
+    from pipeline.plo.options import (
+        _PURE_STRATEGY_PREFIX,
+        answer_qualifier,
+    )
+
+    assert answer_qualifier(1.0) == "Always"
+    assert answer_qualifier(_PURE_STRATEGY_PREFIX) == "Always"
+    assert answer_qualifier(0.99) == "Mostly"  # worthy spots top out here
+    assert answer_qualifier(0.05) == "Mostly"
+    assert answer_qualifier(0.01) == ""  # never a worthy dominant
+
+
+def test_qualifier_axis_active_only_for_gto_capable_styles():
+    from pipeline.plo.options import qualifier_axis_active
+
+    assert qualifier_axis_active("gto")
+    assert qualifier_axis_active("auto")  # may fall to the GTO spectrum
+    assert not qualifier_axis_active("basic")

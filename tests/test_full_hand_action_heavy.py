@@ -417,3 +417,248 @@ def test_exciting_hands_toggle_filters_honestly(tmp_path) -> None:
     assert meta_off["run_settings"]["exciting_hands"] is False
     assert meta_off["counters"]["hands_excluded_not_exciting"] == 0
     assert res_off.questions_written > 0
+
+
+# --- class-street twin demotion (Aug 2026, user ask) --------------------------
+def _twin_hand(hero, combo, street, *, fold=False, hid=""):
+    leg = SimpleNamespace(street=street, terminal_fold=fold)
+    return SimpleNamespace(
+        hero=hero, hero_combo=combo, hand_id=hid or f"{hero}_{combo}_{street}",
+        legs=(leg,), ending_street=street, ends_with_fold=fold,
+    )
+
+
+def test_demote_class_street_twins_moves_twins_to_tail() -> None:
+    """AcKc + AhKh river hands (the observed 5-hand-batch repeat) are twins:
+    the first keeps its slot, the later one moves to the TAIL (never
+    dropped), everything else keeps relative order."""
+    from pipeline.postflop.play_through import demote_class_street_twins
+
+    a = _twin_hand("UTG", "AcKc", "river")
+    b = _twin_hand("UTG", "QsQh", "flop")
+    c = _twin_hand("UTG", "AhKh", "river")   # twin of a (AKs, river, no fold)
+    d = _twin_hand("SB", "8h7h", "preflop")
+    counters: dict = {}
+    out = demote_class_street_twins([a, b, c, d], counters=counters)
+    assert out == [a, b, d, c]               # c demoted, order otherwise kept
+    assert counters["hands_demoted_class_twins"] == 1
+
+
+def test_demote_class_street_twins_key_boundaries() -> None:
+    """NOT twins: different ending street, different hero seat, suited vs
+    offsuit, and fold-ender vs continue-ender of the same class (opposite
+    lessons -- the quotas treat correct-fold endings as their own bucket)."""
+    from pipeline.postflop.play_through import demote_class_street_twins
+
+    hands = [
+        _twin_hand("UTG", "AcKc", "river"),
+        _twin_hand("UTG", "AhKh", "turn"),            # different street
+        _twin_hand("SB", "AdKd", "river"),            # different hero
+        _twin_hand("UTG", "AsKd", "river"),           # AKo, not AKs
+        _twin_hand("UTG", "AdKh", "river", fold=True),  # fold-ender AKo
+    ]
+    counters: dict = {}
+    out = demote_class_street_twins(hands, counters=counters)
+    assert out == hands
+    assert "hands_demoted_class_twins" not in counters
+
+
+def test_demote_never_shrinks_the_pool() -> None:
+    """All-twins pool: one stays in place, the rest demote -- pool size
+    unchanged so a class-starved batch can still fill from the tail."""
+    from pipeline.postflop.play_through import demote_class_street_twins
+
+    hands = [_twin_hand("UTG", c, "river", hid=c)
+             for c in ("AcKc", "AhKh", "AdKd", "AsKs")]
+    out = demote_class_street_twins(hands, counters=None)
+    assert len(out) == 4 and out[0] is hands[0]
+    assert out[1:] == hands[1:]              # demoted tail keeps order
+
+
+# --- batch-level rank-class cap (Aug 8 2026, user ask) ------------------------
+def test_cap_class_repeats_demotes_third_telling() -> None:
+    """The observed failure: QQ x5 across streets/enders (each a distinct
+    street-twin key). The cap keeps the first TWO tellings of a class in
+    the head, demotes the rest to the tail in order -- pool size unchanged."""
+    from pipeline.postflop.play_through import cap_class_repeats
+
+    qq = [_twin_hand("UTG", "QsQh", "flop"),
+          _twin_hand("UTG", "QsQc", "turn", fold=True),
+          _twin_hand("SB", "QhQd", "river"),
+          _twin_hand("UTG", "QsQd", "river", fold=True),
+          _twin_hand("UTG", "QdQc", "river")]
+    ak = _twin_hand("UTG", "AcKc", "river")
+    counters: dict = {}
+    out = cap_class_repeats(qq + [ak], counters=counters)
+    assert out == [qq[0], qq[1], ak, qq[2], qq[3], qq[4]]
+    assert counters["hands_demoted_class_cap"] == 3
+    assert len(out) == 6  # never drops
+
+
+def test_cap_class_repeats_two_or_fewer_untouched() -> None:
+    from pipeline.postflop.play_through import cap_class_repeats
+
+    hands = [_twin_hand("UTG", "QsQh", "flop"),
+             _twin_hand("SB", "QdQc", "river"),
+             _twin_hand("UTG", "AcKc", "river")]
+    counters: dict = {}
+    assert cap_class_repeats(hands, counters=counters) == hands
+    assert "hands_demoted_class_cap" not in counters
+
+
+# --- post-quota class-variety swap (Aug 8 2026, user ask) ---------------------
+def test_swap_replaces_excess_class_from_other_street_reserve() -> None:
+    """The observed failure: QQ-only flop/turn buckets tail-fill QQ past the
+    cap. The two lowest-priority excess QQ swap for river-reserve hands of
+    under-cap classes; batch size unchanged; reserve consumed."""
+    from pipeline.postflop.play_through import swap_for_class_variety
+
+    selected = [
+        _twin_hand("UTG", "QsQh", "flop"),
+        _twin_hand("UTG", "QsQc", "turn", fold=True),
+        _twin_hand("SB", "QhQd", "turn", fold=True),
+        _twin_hand("UTG", "QsQd", "river"),
+        _twin_hand("UTG", "AcKc", "river"),
+    ]
+    reserve = {
+        "river": [_twin_hand("SB", "AhAc", "river"),
+                  _twin_hand("UTG", "KhKc", "river")],
+    }
+    counters: dict = {}
+    out = swap_for_class_variety(selected, reserve, counters=counters)
+    assert len(out) == 5
+    classes = [h.hero_combo[0] + h.hero_combo[2] for h in out]
+    assert classes.count("QQ") == 2
+    assert counters["hands_swapped_for_class_variety"] == 2
+    assert reserve["river"] == []              # consumed, no double-serve
+    # highest-priority QQ tellings (earliest in mix order) are the keepers
+    assert out[0] is selected[0] and out[1] is selected[1]
+
+
+def test_swap_stops_honestly_when_reserve_lacks_variety() -> None:
+    """Reserve holding only more of the SAME class cannot fix anything:
+    ship over-cap honestly, count only real swaps."""
+    from pipeline.postflop.play_through import swap_for_class_variety
+
+    selected = [_twin_hand("UTG", c, "river") for c in
+                ("QsQh", "QsQc", "QhQd")]
+    reserve = {"river": [_twin_hand("SB", "QdQc", "river")]}
+    counters: dict = {}
+    out = swap_for_class_variety(selected, reserve, counters=counters)
+    assert out == selected
+    assert "hands_swapped_for_class_variety" not in counters
+
+
+def test_swap_noop_when_under_cap() -> None:
+    from pipeline.postflop.play_through import swap_for_class_variety
+
+    selected = [_twin_hand("UTG", "QsQh", "flop"),
+                _twin_hand("UTG", "AcKc", "river")]
+    reserve = {"river": [_twin_hand("SB", "AhAc", "river")]}
+    out = swap_for_class_variety(selected, reserve, counters=None)
+    assert out == selected and len(reserve["river"]) == 1
+
+
+# --- class-aware backfill pull (Aug 8 2026, THE monoculture root fix) ---------
+def test_pull_prefers_under_cap_class_over_reserve_head() -> None:
+    """The observed funnel: the coherence gate drops varied combos and the
+    old head-pop backfill returned the densest COHERENT hand -- always a
+    premium. With QQ already at cap, the pull must skip coherent QQ and
+    return the under-cap TT even though QQ sits first."""
+    from pipeline.postflop.play_through import pull_replacement_class_aware
+
+    qq = _twin_hand("UTG", "QdQc", "river")
+    tt = _twin_hand("UTG", "ThTc", "river")
+    reserve = {"river": [qq, tt]}
+    got = pull_replacement_class_aware(
+        reserve, ("river", "turn", "flop", "preflop"),
+        lambda h: h, {"QQ": 2},
+    )
+    assert got is tt
+    assert reserve["river"] == [qq]          # over-cap stays for pass 2
+
+
+def test_pull_falls_back_to_over_cap_for_fullness() -> None:
+    from pipeline.postflop.play_through import pull_replacement_class_aware
+
+    qq = _twin_hand("UTG", "QdQc", "river")
+    reserve = {"river": [qq]}
+    got = pull_replacement_class_aware(
+        reserve, ("river",), lambda h: h, {"QQ": 2},
+    )
+    assert got is qq                          # fullness beats variety
+
+
+def test_pull_consumes_refused_candidates_for_good() -> None:
+    """A coherence-refused candidate can never pass later: it must be
+    consumed even when skipped-over classes are in play, and the pull
+    continues to the next viable hand."""
+    from pipeline.postflop.play_through import pull_replacement_class_aware
+
+    bad = _twin_hand("UTG", "6h5h", "river", hid="bad")
+    good = _twin_hand("UTG", "ThTc", "river", hid="good")
+    reserve = {"river": [bad, good]}
+    got = pull_replacement_class_aware(
+        reserve, ("river",), lambda h: None if h.hand_id == "bad" else h, {},
+    )
+    assert got is good
+    assert reserve["river"] == []             # bad consumed, good returned
+
+
+def test_pull_prefers_unseen_combo_when_repeat_forced() -> None:
+    """Tier 1: when every reserve class is at cap, a suit-sibling repeat
+    (KhKd) beats the literal same combo (KsKc) already in the batch."""
+    from pipeline.postflop.play_through import pull_replacement_class_aware
+
+    same = _twin_hand("UTG", "KsKc", "river")
+    sibling = _twin_hand("UTG", "KhKd", "river")
+    reserve = {"river": [same, sibling]}
+    got = pull_replacement_class_aware(
+        reserve, ("river",), lambda h: h, {"KK": 2},
+        seen_combos={"KsKc"},
+    )
+    assert got is sibling
+    # ...and the literal duplicate still ships when it is ALL that's left.
+    got2 = pull_replacement_class_aware(
+        reserve, ("river",), lambda h: h, {"KK": 2},
+        seen_combos={"KsKc"},
+    )
+    assert got2 is same
+
+
+def test_pull_matches_legacy_when_nothing_over_cap() -> None:
+    """Drop-free batches must stay byte-identical: with no class at cap,
+    pass 1 consumes the queue exactly like the old head-pop."""
+    from pipeline.postflop.play_through import pull_replacement_class_aware
+
+    first = _twin_hand("UTG", "QdQc", "river")
+    reserve = {"river": [first, _twin_hand("UTG", "ThTc", "river")]}
+    got = pull_replacement_class_aware(
+        reserve, ("river",), lambda h: h, {"QQ": 1},
+    )
+    assert got is first
+
+
+# --- plain-path total_hands cap (Aug 2026 regression) -------------------------
+def test_plain_path_honors_total_hands(tmp_path) -> None:
+    """REGRESSION (Aug 2026): with action_heavy on (the default) the pool is
+    assembled oversized (20x) for the policy to rank, and the plain path --
+    no balanced lengths, no diversify, no difficulty band -- used to ship
+    the WHOLE gated pool instead of trimming back (-n 4 shipped 22 hands on
+    a real solve). The fixture assembles 2 hands; total_hands=1 must ship
+    exactly 1, and the density-desc order means it is the policy's top pick."""
+    import json
+
+    from pipeline.postflop.fixtures import btn_vs_bb_full_hand_2cJs7s
+    from pipeline.postflop.full_hand_batch import generate_full_hand_batch
+
+    out = tmp_path / "capped.csv"
+    res = generate_full_hand_batch(
+        solve=btn_vs_bb_full_hand_2cJs7s(), output_path=out, total_hands=1,
+        dry_run=True, answer_style="gto", equity_runouts=20,
+        include_villain=True,
+    )
+    assert res.questions_written > 0
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    hand_ids = {q["hand_id"] for q in meta["questions"] if q.get("hand_id")}
+    assert len(hand_ids) == 1

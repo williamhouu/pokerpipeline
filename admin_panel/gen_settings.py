@@ -82,4 +82,40 @@ def worthiness_bounds(
     return v_min, v_max
 
 
-__all__ = ["load_settings", "save_settings", "worthiness_bounds"]
+def seed_heroes_for_solve(
+    state: dict,
+    *,
+    key: str,
+    tag_key: str,
+    solve_tag: str,
+    options: list[str],
+) -> None:
+    """Keep the hero-seat multiselect ALL-SELECTED per solve (Aug 2026,
+    user ask).
+
+    A ``st.multiselect`` with a fixed ``key`` ignores ``default=`` once the
+    key exists in session state, and Streamlit silently DROPS stored picks
+    that are not in the current options -- so switching e.g. a BTN/BB solve
+    to a UTG/SB solve left the picker empty (or stale) and the user had to
+    reselect seats every time. Called BEFORE the widget renders:
+
+    * different solve than last rerun -> select every seat of THIS solve;
+    * same solve -> leave the user's picks alone (a deliberate subset
+      sticks), except stored seats that don't exist for this solve are
+      repaired to all seats (defensive: a renamed/edited state file).
+
+    Pure dict-in/dict-out (no Streamlit import) so it is browser-lessly
+    unit-testable, per the project's UI-seam rule.
+    """
+    stale = set(state.get(key) or []) - set(options)
+    if state.get(tag_key) != solve_tag or stale:
+        state[tag_key] = solve_tag
+        state[key] = list(options)
+
+
+__all__ = [
+    "load_settings",
+    "save_settings",
+    "seed_heroes_for_solve",
+    "worthiness_bounds",
+]

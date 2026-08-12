@@ -344,6 +344,9 @@ def generate_full_hand_batch_from_db(
     dry_run: bool = False,
     min_frequency: float = MIN_FREQUENCY,
     max_frequency: float = MAX_FREQUENCY,
+    # Fold-truncation ender floor (Aug 2026): independent of the batch
+    # window; 0.55 = the brief's original worthiness floor.
+    truncation_min_frequency: float = 0.55,
     min_ev_gap_bb: float | None = None,
     quality_gate: bool = True,
     min_premise_freq: float | None = DEFAULT_MIN_PREMISE_FREQ,
@@ -433,6 +436,7 @@ def generate_full_hand_batch_from_db(
         include_preflop=include_preflop,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
+        truncation_min_frequency=truncation_min_frequency,
         min_ev_gap_bb=min_ev_gap_bb,
         quality_gate=quality_gate,
         min_premise_freq=min_premise_freq,

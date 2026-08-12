@@ -90,6 +90,11 @@ POOL_CAP = 400
 _BAND_EDGES = ((1300, "Easy"), (2100, "Medium"))
 
 # (attr key, plain-English label, weight). Order = display order.
+# NB: the Aug-2026 Always/Mostly QUALIFIER axis (balanced_hands / PLO /
+# preflop) deliberately does NOT apply here -- sizing batches force
+# answer_style="sizing", whose options are plain sized labels ("Bet 2bb")
+# and never carry an Always/Mostly qualifier, so there is nothing to
+# balance on.
 SIZING_BALANCE_AXES: tuple[Axis, ...] = (
     ("flop", "Flop", 1.00),
     ("street", "Street", 1.00),

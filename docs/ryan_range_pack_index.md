@@ -72,11 +72,23 @@ already been built. The pack's tokens for *standard preflop actions* are:
 | 3-bet by SB vs BTN open    | `150%`                             |
 | 3-bet by BB vs UTG open    | `155%`                             |
 | 3-bet by BB vs HJ/CO/BTN open | `182%`                          |
+| 3-bet by BTN with TWO callers behind the opener | `81%`         |
+| 3-bet by BB (IP) vs SB's BvB open | `99%`                        |
 | 4-bet by HJ/CO/BTN over 3-bet | `50%` (and `95%` if CO 4-bets) |
 | 4-bet by UTG over BB's 3-bet | `49%`                            |
 | 4-bet by BB over SB 3-bet (in 3-way after BTN open) | `54%` |
-| Squeeze by SB after open + call    | `85%`                      |
-| Squeeze by BB after open + multi calls | `162%`, `198%`         |
+| 4-bet by the opener over SB's 3-bet after BB folds | `57%`      |
+| Cold 4-bet by BB over a 3-bet, opener still live | `75%`        |
+| Cold 4-bet by SB over a 3-bet / over BB's squeeze | `85%` (level 3 only) |
+| 4-bet by SB (BvB) over BB's 3-bet | `105%`                      |
+| Squeeze by SB after open + 1 call  | `162%`                     |
+| Squeeze by SB after open + 2-3 calls | `165%`                   |
+| Squeeze by BB after open + 1 call  | `195%`                     |
+| Squeeze by BB after open + multi calls | `198%`                 |
+
+*(Correction, Aug 2026: a full-pack filename scan showed `85%` never occurs
+at 3-bet level — the "SB squeeze after open + call" is actually `162%`; `85%`
+only appears as an SB cold 4-bet. The table above reflects the scan.)*
 
 **Sizing tokens are not portable across scenarios.** When integrating a new
 scenario, do not assume the 3-bet size is `77%` — look up which token the
@@ -271,6 +283,28 @@ rules in the grammar section.
 (b) the chip-amount formula PioViewer uses to convert the `N%` token to a raise
 amount on each node. Once locked, encode it in
 `pipeline.scenario_spec.SolverSpec.bet_sizes_by_actor` for each scenario.
+
+**Aug 2026 addendum — provisional sizes for the eight rare tokens.** The
+last eight unregistered `(token, level)` combos are now in
+`pipeline/preflop/action_history.py:_RYAN_PACK_RAISE_SIZES_BB` with sizes
+derived by analogy to the registered anchors (no single pot-relative
+formula reproduces the anchors, so a formula was not an option):
+
+| Token, level | Context | Registered bb | Anchor |
+|---|---|---:|---|
+| `81%`, 3-bet | BTN 3-bet, open + 2 callers | 10.0 | `77%`→8 (0 callers), `79%`→9 (1 caller): +1bb per caller |
+| `99%`, 3-bet | BB 3-bet IP vs SB 3bb open | 9.0 | 3x the open (standard IP BvB) |
+| `165%`, 3-bet | SB squeeze, open + 2-3 calls | 13.0 | `162%`→12 (1 call) + 1bb |
+| `195%`, 3-bet | BB squeeze, open + 1 call | 12.0 | `198%`→13 (2+ calls) − 1bb |
+| `57%`, 4-bet | opener 4-bets vs SB 10bb 3-bet | 22.0 | `49%`/`54%`: 4-bet over a 10bb 3-bet = 22 |
+| `75%`, 4-bet | BB cold 4-bet vs 8-10bb 3-bet | 22.0 | `54%` (BB cold 4-bet) = 22 |
+| `85%`, 4-bet | SB cold 4-bet vs 3-bet/12bb squeeze | 22.0 | `54%` = 22; ≥ min-raise (21.5) in the worst case |
+| `105%`, 4-bet | SB BvB 4-bet vs BB 9bb 3-bet | 22.0 | every registered 4-bet over ~10bb = 22 |
+
+When Ryan confirms the PioViewer chip amounts, correct any drift in the
+lookup table AND regenerate any shipped questions that traverse these
+lines (the sizes feed the Question prose pot math, the `ranges` column,
+and the chart export).
 
 ## How to use this doc when wiring a new scenario
 

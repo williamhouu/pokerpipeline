@@ -89,6 +89,25 @@ def test_registry_ids_are_unique():
     assert len(ids) == len(set(ids))
 
 
+def test_nine_max_60bb_signature_wins_over_bare_9way(tmp_path):
+    # The Aug-2026 60bb 9-max cash depth: its stack-suffixed signature must
+    # match BEFORE the bare "Omaha/9-way" 100bb spec (registry ORDER
+    # MATTERS -- see the KNOWN_PLO_PACKS invariant comment).
+    _touch_rng(tmp_path / "sixty/ranges/Omaha/9-way/60bb[5p-2bb]/2.rng")
+    sixty = discover_plo_pack(tmp_path / "sixty")
+    assert sixty.pack_id == "plo_9max_60bb"
+    assert sixty.table_size == 9
+    assert sixty.seats == SEATS_9MAX
+    assert sixty.spec.stack_bb == 60.0  # noqa: PLR2004
+    assert sixty.spec.game_format == "cash"
+    assert sixty.spec.ev_in_bb is False  # milli-SMALL-blind EV units
+    assert sixty.spec.default_base == "plo9_60_ranges"
+
+    # A bare 9-way root (no stack folder) still resolves to the 100bb spec.
+    _touch_rng(tmp_path / "nine/ranges/Omaha/9-way/100bb/2.rng")
+    assert discover_plo_pack(tmp_path / "nine").pack_id == "plo_9max_100bb"
+
+
 # --- seat display + positions ----------------------------------------------------
 def test_display_seat_is_table_size_aware():
     # 6-max: Monker dialect remap (its LJ IS the UTG-equivalent seat).

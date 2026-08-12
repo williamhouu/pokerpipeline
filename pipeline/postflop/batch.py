@@ -86,6 +86,12 @@ class PostflopBatchResult:
     # carry the rest so the spend ledger stays honest (THE USAGE RULE).
     total_cache_creation_tokens: int = 0
     total_cache_read_tokens: int = 0
+    # DEGENERATE-ENDING TRIPWIRE (Aug 2026, full-hand batches only): True
+    # when the batch expected postflop enders (every length profile does)
+    # but every shipped hand ended PREFLOP -- the "8/8 preflop-only" failure
+    # that once shipped silently. The done panel / Review must surface it
+    # loudly. Always False for standalone batches.
+    ending_mix_degenerate: bool = False
 
 
 def _collect_worthy(

@@ -150,7 +150,12 @@ def _ev_vs_strategy_check(
     board_set = set(flop)
     start_pot = float(s.meta["pot"])
     eff_flop = float(s.meta["eff_stack"])
-    pre = {adapter.oop: s.preflop_weights("BB"), adapter.ip: s.preflop_weights("BTN")}
+    # Seat-aware range keys (Aug 2026): legacy files key preflop_ranges as
+    # literal 'BB'/'BTN'; the v9 exports key by the real seats (UTG vs SB).
+    pre = {
+        adapter.oop: s.preflop_weights_for(adapter.oop, "BB"),
+        adapter.ip: s.preflop_weights_for(adapter.ip, "BTN"),
+    }
     base_reach = {
         side: [
             (pre[side].get(s.idx_to_hand[i], 0.0)
@@ -330,12 +335,13 @@ def audit(path: str) -> int:  # noqa: C901 - a linear report
     inrange = [i for i, s in persum.items() if s > 0]
     sums = [persum[i] for i in inrange]
     # Scale invariant: per-combo action sums cluster at ~255 (the adapter
-    # normalises per combo, so +/-1 rounding is fine). maxbyte==255 exactly is
-    # NOT an invariant -- a node where every combo mixes tops out at 254 (the
-    # 8h6h5s intake, July 2026); >= 250 still catches a 0-100 or 0-127 scale.
-    scale_ok = (
-        maxbyte >= 250 and min(sums) >= 250 and max(sums) <= 258
-    )
+    # normalises per combo, so +/-1 rounding is fine). maxbyte is NOT an
+    # invariant at ANY threshold -- a node where every combo mixes tops out
+    # well below 255 (8h6h5s July 2026: 254; the AsKd9s 3BP Aug 2026: 236,
+    # every r:0 combo splitting between two c-bet sizes). The SUMS prong
+    # alone catches a wrong scale: a 0-100 or 0-127 export sums to ~100/127,
+    # far outside [250, 258]. maxbyte stays printed as context only.
+    scale_ok = min(sums) >= 250 and max(sums) <= 258
     print("\n[3] FORMAT INTEGRITY")
     print(f"    freq blob 0-255 conditional{_flag(scale_ok)}: maxbyte={maxbyte}, "
           f"per-combo action-sums in [{min(sums)}, {max(sums)}] (expect ~255)")
@@ -358,22 +364,36 @@ def audit(path: str) -> int:  # noqa: C901 - a linear report
         total = sum(wt.values())
         return wt, n, total
 
+    # Seat-aware player keys (Aug 2026, first non-BTN/BB geometry): legacy
+    # exports key preflop_ranges as literal 'BTN' (IP) / 'BB' (OOP); the v9
+    # exports key by the REAL seat names (e.g. UTG vs SB). Resolve via the
+    # keys actually present; the role logic below (opener/3-bettor/caller)
+    # is seat-independent.
+    from pipeline.postflop.adapters.sqlite_db import derive_scenario as _derive_sc
+
+    _sc = _derive_sc(meta)
+    ip_name = str(_sc.get("ip_position", "BTN"))
+    oop_name = str(_sc.get("oop_position", "BB"))
+    _players = {p for (p,) in cur.execute("SELECT DISTINCT player FROM preflop_ranges")}
+    ip_key = ip_name if ip_name in _players else "BTN"
+    oop_key = oop_name if oop_name in _players else "BB"
+
     print(f"\n[4] RANGES (pulled from preflop_ranges, by 169-class; expectations for a {pot_type})")
-    btn_wt, btn_n, btn_tot = range_summary("BTN")
-    bb_wt, bb_n, bb_tot = range_summary("BB")
+    btn_wt, btn_n, btn_tot = range_summary(ip_key)
+    bb_wt, bb_n, bb_tot = range_summary(oop_key)
 
     def avg(wt, n, h):
         return (wt[h] / n[h]) if h in n and n[h] else 0.0
 
     btn_trash = sum(avg(btn_wt, btn_n, h) for h in ("72o", "32o", "K2o")) / 3
     bb_trash = sum(avg(bb_wt, bb_n, h) for h in ("72o", "32o", "T2o")) / 3
-    if n_raises >= 2:  # 3-bet pot: BB 3-bet (uncapped), BTN call-vs-3bet (capped-ish)
-        print(f"    BTN call-vs-3bet width = {btn_tot / 13.26:.1f}%   BB 3-bet width = {bb_tot / 13.26:.1f}%")
+    if n_raises >= 2:  # 3-bet pot: OOP 3-bet (uncapped), IP call-vs-3bet (capped-ish)
+        print(f"    {ip_name} call-vs-3bet width = {btn_tot / 13.26:.1f}%   {oop_name} 3-bet width = {bb_tot / 13.26:.1f}%")
         # The 3-bettor holds the premiums; trash 3-bet bluffs exist but the
         # worst offsuit junk should be ~absent.
         bb_prem = sum(avg(bb_wt, bb_n, h) for h in ("AA", "KK", "AKs")) / 3
         bb_ok = bb_prem > 0.9 and bb_trash < 0.05
-        print(f"    BB 3-bet range UNCAPPED{_flag(bb_ok)}: premiums (AA/KK/AKs) avg={bb_prem:.2f} (want ~1),"
+        print(f"    {oop_name} 3-bet range UNCAPPED{_flag(bb_ok)}: premiums (AA/KK/AKs) avg={bb_prem:.2f} (want ~1),"
               f" trash (72o/32o/T2o) avg={bb_trash:.2f}")
         # The caller flats the middle (premiums mostly 4-bet, junk folds). A
         # premium-heavy caller range usually means the WRONG file was shipped
@@ -382,35 +402,35 @@ def audit(path: str) -> int:  # noqa: C901 - a linear report
         btn_mid = sum(avg(btn_wt, btn_n, h) for h in ("KQs", "QJs", "JTs", "TT")) / 4
         btn_ok = btn_trash < 0.05 and btn_mid > 0.3
         prem_warn = btn_prem > 0.8
-        print(f"    BTN call-vs-3bet CAPPED-ISH{_flag(btn_ok)}: trash avg={btn_trash:.2f},"
+        print(f"    {ip_name} call-vs-3bet CAPPED-ISH{_flag(btn_ok)}: trash avg={btn_trash:.2f},"
               f" mid(KQs/QJs/JTs/TT) avg={btn_mid:.2f}")
-        print(f"    BTN premiums (AA/KK/AK) avg={btn_prem:.2f}{_flag(True, warn=prem_warn)}"
+        print(f"    {ip_name} premiums (AA/KK/AK) avg={btn_prem:.2f}{_flag(True, warn=prem_warn)}"
               f"  (mostly 4-bet -> well below 1; ~1 suggests the open range was shipped instead)")
         fails += (not bb_ok) + (not btn_ok)
-    else:  # single-raised pot: BTN open (uncapped), BB call (capped)
-        print(f"    BTN open width = {btn_tot / 13.26:.1f}%   BB call width = {bb_tot / 13.26:.1f}%")
-        # BTN must NOT be inverted (premiums ~1, trash 0).
+    else:  # single-raised pot: IP open (uncapped), OOP call (capped)
+        print(f"    {ip_name} open width = {btn_tot / 13.26:.1f}%   {oop_name} call width = {bb_tot / 13.26:.1f}%")
+        # The opener must NOT be inverted (premiums ~1, trash 0).
         btn_prem = sum(avg(btn_wt, btn_n, h) for h in ("AA", "KK", "AKs")) / 3
         btn_ok = btn_prem > 0.9 and btn_trash < 0.05
-        print(f"    BTN premiums (AA/KK/AKs) avg={btn_prem:.2f}, trash (72o/32o/K2o) avg={btn_trash:.2f}{_flag(btn_ok)}")
-        # BB calling range must be CAPPED (premiums 3-bet -> ~0) and bottomed (trash 0).
+        print(f"    {ip_name} premiums (AA/KK/AKs) avg={btn_prem:.2f}, trash (72o/32o/K2o) avg={btn_trash:.2f}{_flag(btn_ok)}")
+        # The calling range must be CAPPED (premiums 3-bet -> ~0) and bottomed (trash 0).
         bb_prem = sum(avg(bb_wt, bb_n, h) for h in ("AA", "KK", "QQ", "AKs", "AKo")) / 5
         bb_mid = sum(avg(bb_wt, bb_n, h) for h in ("QJs", "JTs", "76s", "22")) / 4
         bb_ok = bb_prem < 0.05 and bb_trash < 0.05 and bb_mid > 0.3
-        print(f"    BB calling range CAPPED{_flag(bb_ok)}: premiums(AA/KK/QQ/AK) avg={bb_prem:.2f} (want ~0),"
+        print(f"    {oop_name} calling range CAPPED{_flag(bb_ok)}: premiums(AA/KK/QQ/AK) avg={bb_prem:.2f} (want ~0),"
               f" trash avg={bb_trash:.2f}, mid(QJs/JTs/76s/22) avg={bb_mid:.2f}")
         fails += (not btn_ok) + (not bb_ok)
 
-    # -- did the SOLVE use the shipped OOP range? r:0 in-range == BB's range
-    # (BB is OOP and acts first at r:0 in both pot types).
+    # -- did the SOLVE use the shipped OOP range? r:0 in-range == OOP's range
+    # (the OOP seat acts first at r:0 in both pot types).
     bb_range = {h for h, w in cur.execute(
-        "SELECT hand, weight FROM preflop_ranges WHERE player='BB' AND weight>0")}
+        "SELECT hand, weight FROM preflop_ranges WHERE player=? AND weight>0", (oop_key,))}
     bb_playable = {h for h in bb_range if not (h[:2] in board or h[2:] in board)}
     inrange_hands = {idx2hand[i] for i in inrange}
     used_ok = inrange_hands == bb_playable
     bb_role = "3-bet" if n_raises >= 2 else "calling"
-    print(f"\n[5] SOLVE USED THE SHIPPED BB {bb_role.upper()} RANGE{_flag(used_ok)}")
-    print(f"    r:0 in-range combos = {len(inrange_hands)}; BB {bb_role} range (board-masked) = {len(bb_playable)}")
+    print(f"\n[5] SOLVE USED THE SHIPPED {oop_name} {bb_role.upper()} RANGE{_flag(used_ok)}")
+    print(f"    r:0 in-range combos = {len(inrange_hands)}; {oop_name} {bb_role} range (board-masked) = {len(bb_playable)}")
     print(f"    in r:0 not in range = {len(inrange_hands - bb_playable)}; in range not at r:0 = {len(bb_playable - inrange_hands)}")
     fails += not used_ok
 
@@ -455,25 +475,27 @@ def audit(path: str) -> int:  # noqa: C901 - a linear report
                 agg[a] += w * (f[a][i] / s)
         return {a: agg[a] / tot for a in agg} if tot else {}, tot
 
-    btn_full = {h: float(w) for h, w in cur.execute("SELECT hand, weight FROM preflop_ranges WHERE player='BTN'")}
-    bb_full = {h: float(w) for h, w in cur.execute("SELECT hand, weight FROM preflop_ranges WHERE player='BB'")}
+    btn_full = {h: float(w) for h, w in cur.execute(
+        "SELECT hand, weight FROM preflop_ranges WHERE player=?", (ip_key,))}
+    bb_full = {h: float(w) for h, w in cur.execute(
+        "SELECT hand, weight FROM preflop_ranges WHERE player=?", (oop_key,))}
     ip_after_check, _ = agg_strategy("r:0:c", btn_full)
     oop_first, _ = agg_strategy("r:0", bb_full)
     ip_bet_total = sum(v for a, v in ip_after_check.items() if a.startswith("BET_"))
     oop_bet_total = sum(v for a, v in oop_first.items() if a.startswith("BET_"))
     print("\n[7] STRATEGY SANITY (range-weighted)")
     if n_raises >= 2:
-        # 3-bet pot: BB (the 3-bettor) c-bets at r:0; a high frequency is normal.
-        print(f"    BB (3-bettor) c-bet at r:0 = {oop_bet_total * 100:.0f}% (sizes: "
+        # 3-bet pot: the OOP 3-bettor c-bets at r:0; a high frequency is normal.
+        print(f"    {oop_name} (3-bettor) c-bet at r:0 = {oop_bet_total * 100:.0f}% (sizes: "
               + ", ".join(f"{a}={v*100:.0f}%" for a, v in sorted(oop_first.items()) if v > 0.01) + ")")
-        print(f"    BTN stab after BB check at r:0:c = {ip_bet_total * 100:.0f}% (sizes: "
+        print(f"    {ip_name} stab after {oop_name} check at r:0:c = {ip_bet_total * 100:.0f}% (sizes: "
               + ", ".join(f"{a}={v*100:.0f}%" for a, v in sorted(ip_after_check.items()) if v > 0.01) + ")")
     else:
-        print(f"    BTN c-bet at r:0:c = {ip_bet_total * 100:.0f}% (sizes: "
+        print(f"    {ip_name} c-bet at r:0:c = {ip_bet_total * 100:.0f}% (sizes: "
               + ", ".join(f"{a}={v*100:.0f}%" for a, v in sorted(ip_after_check.items()) if v > 0.01) + ")")
         lead_warn = oop_bet_total > 0.30
-        print(f"    BB OOP lead at r:0 = {oop_bet_total * 100:.0f}%{_flag(True, warn=lead_warn)}"
-              f"  (textbook BTN-vs-BB SRP is ~0-15%; >30% = unusual, confirm with vendor)")
+        print(f"    {oop_name} OOP lead at r:0 = {oop_bet_total * 100:.0f}%{_flag(True, warn=lead_warn)}"
+              f"  (textbook IP-vs-blind SRP is ~0-15%; >30% = unusual, confirm with vendor)")
 
     # -- EV vs strategy internal consistency (the July-2026 v7 defect) --
     fails += _ev_vs_strategy_check(con)

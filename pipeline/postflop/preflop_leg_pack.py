@@ -388,6 +388,53 @@ def _build_pack_facts(
     return replace(facts, ev_gap_bb=ev_gap)
 
 
+# Mixed-leg floor (Aug 8 2026, user-approved rule change): a preflop leg
+# whose as-played action the chart MIXES (plays >= this often, but not as
+# its favorite) keeps the hand but is NARRATED, NOT ASKED -- the action
+# shows in the story and animation like a villain action, with no question
+# whose correct answer would contradict the hand's own continuation. Below
+# the floor the chart genuinely refuses the line and the whole hand still
+# drops (the July-15 no-flop-start rule's original intent; its motivating
+# K4o example opened 36%, so the floor sits below it deliberately -- K4o
+# hands now narrate too, which the user accepted in approving 30%).
+MIXED_LEG_MIN_FREQUENCY = 0.30
+
+
+def as_played_frequency(
+    source: PackLegSource, hero_position: str, hero_combo: str,
+    *, step_index: int | None = None,
+    terminal_fold: bool = False, terminal_raise: bool = False,
+) -> float | None:
+    """Conditional frequency at which the pack plays the leg's action.
+
+    For a continuation leg that is the AS-PLAYED family ("Raise"/"Call")
+    at hero's step; for an ender leg it is Fold (or the sized Raise),
+    mirroring :func:`_build_pack_facts`'s gate exactly. ``None`` when the
+    spot cannot be sampled (artifact-material jam mix) -- callers must
+    treat that as refused, never as mixed."""
+    from pipeline.preflop_ranges import (  # noqa: PLC0415
+        combo_str_to_hand_class,
+    )
+
+    step = source.step_at(hero_position, step_index)
+    hand_class = combo_str_to_hand_class(hero_combo)
+    spot = _sampled_pack_spot(
+        step.node, hand_class, source.pack, combo=hero_combo,
+    )
+    if spot is None:
+        return None
+    if terminal_fold:
+        family = "Fold"
+    elif terminal_raise:
+        family = "Raise"
+    else:
+        family = step.as_played_prefix
+    return sum(
+        f for a, f in spot.action_frequencies.items()
+        if a.startswith(family)
+    )
+
+
 def _facts_difficulty(
     facts, *, trap_difficulty: bool, razor_difficulty: bool,
 ):

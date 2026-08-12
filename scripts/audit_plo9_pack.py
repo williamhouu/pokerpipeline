@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Re-runnable intake audit for the PLO 9-max 100bb Monker pack (July 2026).
+"""Re-runnable intake audit for the PLO 9-max Monker pack family (July 2026).
+
+Written for the 100bb export; the 60bb sibling (Aug 2026) shares the grammar,
+seats, rake and EV units, so it audits with the same checks -- pass
+``--pack-dir plo9_60_ranges --stack-bb 60``.
 
 The PLO analogue of ``scripts/audit_nlhe9_pack.py``: pulls REAL numbers from
 the extracted ``.rng`` files and prints a prioritized PASS / WARN / FAIL
@@ -112,7 +116,7 @@ def read_labeled(path: Path) -> tuple[list[str], list[tuple[float, float]]]:
     return labels, values
 
 
-def audit(pack_dir: Path) -> int:  # noqa: C901, PLR0915 - a linear report
+def audit(pack_dir: Path, stack_bb: float = 100.0) -> int:  # noqa: C901, PLR0915 - a linear report
     fails = 0
     rng_root = None
     for f in sorted(pack_dir.rglob("*.rng")):
@@ -123,7 +127,7 @@ def audit(pack_dir: Path) -> int:  # noqa: C901, PLR0915 - a linear report
         return 1
 
     print("=" * 72)
-    print(f"PLO 9-MAX PACK AUDIT: {rng_root}")
+    print(f"PLO 9-MAX PACK AUDIT ({stack_bb:g}bb): {rng_root}")
     print("=" * 72)
 
     stems = sorted(p.stem for p in rng_root.glob("*.rng"))
@@ -304,6 +308,26 @@ def audit(pack_dir: Path) -> int:  # noqa: C901, PLR0915 - a linear report
               f"{_flag(ok, warn=warn)}{('  worst: ' + detail) if worst else ''}")
         fails += not ok
 
+    # -- [7] open size from pot math ---------------------------------------------
+    # Token "2" is the pot raise. First-in, blinds only (no ante): the raise
+    # is TO call(1bb) + pot-after-call(0.5 + 1 + 1) = 3.5bb -- independent of
+    # stack depth. Verified two ways: this first-principles arithmetic AND the
+    # shared pot-limit walk (resolve_pot_limit at this pack's stack_bb), which
+    # every downstream consumer (prose, chart export) uses.
+    print(f"\n[7] OPEN SIZE (token 2 = pot raise, {stack_bb:g}bb stacks)")
+    from pipeline.plo.action_history import resolve_pot_limit
+    from pipeline.plo.pack import SEATS_9MAX, parse_node_path
+
+    expected_open = 1.0 + (0.5 + 1.0 + 1.0)  # call + pot after the call
+    history = parse_node_path("2", seats=SEATS_9MAX)
+    resolved, pot_after = resolve_pot_limit(history, stack_bb=stack_bb)
+    open_to = resolved[-1].to_bb or 0.0
+    ok = abs(open_to - expected_open) < 1e-9
+    print(f"    UTG first-in pot raise resolves to {open_to:g}bb"
+          f"{_flag(ok)} (first-principles pot math: {expected_open:g}bb; "
+          f"pot after = {pot_after:g}bb)")
+    fails += not ok
+
     print("\n" + "=" * 72)
     verdict = "CLEAN" if fails == 0 else f"{fails} HARD CHECK(S) FAILED"
     print(f"VERDICT: {verdict}"
@@ -315,5 +339,11 @@ def audit(pack_dir: Path) -> int:  # noqa: C901, PLR0915 - a linear report
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pack-dir", default="plo9_ranges", type=Path)
+    ap.add_argument(
+        "--stack-bb",
+        default=100.0,
+        type=float,
+        help="effective stack depth of the export (60 for the 60bb sibling)",
+    )
     args = ap.parse_args()
-    raise SystemExit(audit(args.pack_dir))
+    raise SystemExit(audit(args.pack_dir, stack_bb=args.stack_bb))

@@ -186,3 +186,84 @@ def test_pending_jam_over_jam_is_call_off() -> None:
     # second jam leaves it nothing to decide -> no pending action.
     assert pending == []
     assert closes is True
+
+
+# --- Aug 2026: the pack's last eight unregistered (token, level) combos ------
+def test_lookup_table_pins_aug_2026_rare_combo_sizes() -> None:
+    """The 8 (pct, level) combos registered Aug 2026. Before this, they
+    resolved through the multiplicative fallback: every 4-bet-level token
+    rendered 15bb and every 3-bet-level token 7.5bb (a 195%-pot squeeze
+    reading "raise to 7.5bb"). Sizes are analogy-derived from the
+    registered anchors (see the table's comment block); provisional
+    pending Ryan's confirmation, but pinned so they can only change
+    deliberately.
+    """
+    assert _RYAN_PACK_RAISE_SIZES_BB[(81.0, 2)] == 10.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(99.0, 2)] == 9.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(165.0, 2)] == 13.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(195.0, 2)] == 12.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(57.0, 3)] == 22.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(75.0, 3)] == 22.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(85.0, 3)] == 22.0
+    assert _RYAN_PACK_RAISE_SIZES_BB[(105.0, 3)] == 22.0
+
+
+def test_resolve_history_bvb_line_walks_registered_sizes() -> None:
+    """End-to-end pot walk down the BvB line that uses two of the new
+    combos: SB opens 76%->3bb, BB 3-bets 99%->9bb, SB 4-bets 105%->22bb.
+    Locks both the per-action sizes and the pot accounting they feed.
+    """
+    from pipeline.preflop.action_history import resolve_preflop_history
+
+    PT = PreflopActionType
+    history = (
+        ParsedAction("UTG", PT.FOLD),
+        ParsedAction("HJ", PT.FOLD),
+        ParsedAction("CO", PT.FOLD),
+        ParsedAction("BTN", PT.FOLD),
+        ParsedAction("SB", PT.RAISE, 76.0),
+        ParsedAction("BB", PT.RAISE, 99.0),
+        ParsedAction("SB", PT.RAISE, 105.0),
+    )
+    state = resolve_preflop_history(history, _pack())
+    assert state.sizes_bb == (None, None, None, None, 3.0, 9.0, 22.0)
+    assert state.high_bet_bb == 22.0
+    assert state.raise_level == 3
+    assert state.pot_bb == 22.0 + 9.0  # SB's 22 + BB's 9
+
+
+def test_ryan_pack_every_sized_token_is_registered() -> None:
+    """Completeness sweep over the real pack: every (pct-token, raise
+    level) combo occurring in any filename must be in the lookup table,
+    so no production line can reach the multiplicative fallback. Skipped
+    when the (gitignored) pack isn't on disk.
+    """
+    import pytest
+
+    pack_root = (
+        Path(__file__).resolve().parent.parent
+        / "ranges" / "ryan_preflop_tree"
+        / "PioViewer - NLH 6max 100bb 2.5x Open"
+    )
+    if not pack_root.is_dir():
+        pytest.skip("ryan pack not on disk")
+
+    missing: set[tuple[float, int]] = set()
+    for folder in pack_root.iterdir():
+        if not folder.is_dir():
+            continue
+        for f in folder.iterdir():
+            if f.suffix != ".txt":
+                continue
+            parts = f.stem.split("_")
+            level = 0
+            for i in range(1, len(parts), 2):
+                act = parts[i]
+                if act in ("Fold", "Call"):
+                    continue
+                level += 1  # sized raise or AI both advance the raise level
+                if act.endswith("%"):
+                    key = (float(act.rstrip("%")), level)
+                    if key not in _RYAN_PACK_RAISE_SIZES_BB:
+                        missing.add(key)
+    assert not missing, f"unregistered (pct, level) combos: {sorted(missing)}"

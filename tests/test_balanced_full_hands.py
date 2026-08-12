@@ -359,3 +359,64 @@ def test_topup_replaces_a_dropped_hand(tmp_path: Path, monkeypatch) -> None:
     assert c["hands_topped_up"] == 1
     # The batch still delivers the requested count (reserve permitting).
     assert c["hands_written"] == 1
+
+
+# --- degenerate-ending tripwire (Aug 2026) ------------------------------------
+def test_ending_mix_degenerate_tripwire_fires_on_preflop_only(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The Aug 5 failure shape: the postflop pool yields NOTHING (here:
+    forced empty assembly) and the batch fills entirely from the preflop-
+    ender reserve -- 8/8 preflop-only once shipped SILENTLY. The tripwire
+    must set counters.ending_mix_degenerate AND the batch result flag so
+    the done panel / Review surface it loudly."""
+    import json
+
+    import pipeline.postflop.full_hand_batch as fhb
+    from pipeline.postflop.preflop_leg_pack import find_pack_leg_source
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    # Fold-dominant BB defend node (fold 0.70, inside the 0.65-0.99 window)
+    # -> real preflop fold-ender candidates exist.
+    pack = _matching_pack(
+        tmp_path, call_freq=0.25, threebet_freq=0.05, pack_id="fixture_folds",
+    )
+    src = find_pack_leg_source(solve, tmp_path, packs=[pack])
+    assert src is not None
+    monkeypatch.setattr(fhb, "find_pack_leg_source", lambda *a, **k: src)
+    monkeypatch.setattr(fhb, "assemble_hands", lambda *a, **k: [])
+
+    out = tmp_path / "degen.csv"
+    res = fhb.generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=2, dry_run=True,
+        balanced_lengths=True, variety_seed=3, equity_runouts=20,
+        preflop_leg_pack_root=tmp_path,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    c = meta["counters"]
+    assert c["hands_written"] >= 1
+    assert set(c["hands_by_ending"]) == {"preflop"}
+    assert c["ending_mix_degenerate"] is True
+    assert res.ending_mix_degenerate is True
+
+
+def test_ending_mix_degenerate_tripwire_quiet_on_mixed_batch(
+    tmp_path: Path,
+) -> None:
+    """A batch with any postflop ender keeps the flag False."""
+    import json
+
+    from pipeline.postflop.full_hand_batch import generate_full_hand_batch
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    out = tmp_path / "mixed.csv"
+    res = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=2, dry_run=True,
+        variety_seed=3, equity_runouts=20,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    c = meta["counters"]
+    assert c["hands_written"] >= 1
+    assert any(st != "preflop" for st in c["hands_by_ending"])
+    assert c["ending_mix_degenerate"] is False
+    assert res.ending_mix_degenerate is False

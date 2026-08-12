@@ -147,10 +147,39 @@ def _emoji_cards(cards: Iterable[str]) -> str:
 
 
 def _format_frequencies(action_frequencies: dict[str, float]) -> str:
-    """'Bet 75%: 70%, Bet 33%: 20%, Check: 10%' (descending), skipping ~0."""
-    items = sorted(action_frequencies.items(), key=lambda kv: -kv[1])
+    """'Bet 75%: 70%, Bet 33%: 20%, Check: 10%' (descending), skipping ~0.
+
+    Integer percentages use the **largest-remainder method** so the column
+    sums to exactly 100 (Aug 2026, user audit catch: per-item ``round()``
+    shipped ``Check: 98%, Bet 10bb: 2%, Bet 23bb: 1%`` = 101). The July-2026
+    standing rule is ONE largest-remainder allocation for every percentage
+    surface. MIRRORS ``pipeline.preflop.format_writer.
+    _format_action_frequencies`` (not imported: the postflop package stays
+    self-contained -- the same convention as ``_drop_unreasonable_all_in``).
+    Actions the solver essentially never takes (< 0.5%) are dropped before
+    rounding; empty / all-zero strategies render as "".
+    """
+    if not action_frequencies:
+        return ""
+    if sum(action_frequencies.values()) <= 0:
+        return ""
+    strategy = {lbl: f for lbl, f in action_frequencies.items() if f >= 0.005}  # noqa: PLR2004
+    if not strategy:
+        return ""
+    by_freq_desc = sorted(strategy.items(), key=lambda kv: -kv[1])
+    raw = [(label, freq * 100.0) for label, freq in by_freq_desc]
+    floors = [(label, int(value), value - int(value)) for label, value in raw]
+    deficit = 100 - sum(floor for _, floor, _ in floors)
+    if deficit != 0:
+        ranked_by_remainder = sorted(enumerate(floors), key=lambda kv: -kv[1][2])[
+            : max(deficit, 0)
+        ]
+        bumps = {idx for idx, _ in ranked_by_remainder}
+    else:
+        bumps = set()
     return ", ".join(
-        f"{label}: {freq * 100:.0f}%" for label, freq in items if freq >= 0.005
+        f"{label}: {floor + (1 if i in bumps else 0)}%"
+        for i, (label, floor, _) in enumerate(floors)
     )
 
 

@@ -73,6 +73,33 @@ ANSWER_STYLE_FROM_RADIO_LABEL: dict[str, str] = {
 }
 
 
+def answer_qualifier(dominant_frequency: float) -> str:
+    """The ``Always``/``Mostly`` qualifier the GTO spectrum renders for a
+    dominant action (or verb family) at this solver frequency.
+
+    SINGLE SOURCE OF TRUTH: both spectrum builders
+    (:func:`_spectrum_options` and :func:`_family_spectrum_options`) call
+    this, so a consumer (e.g. the 🎛️ fully-balanced qualifier axis) can
+    never drift from the rendered option prefix.
+    """
+    return "Always" if dominant_frequency >= PURE_THRESHOLD else "Mostly"
+
+
+def qualifier_axis_active(style: str) -> bool:
+    """True when this answer style can render Always/Mostly qualifiers.
+
+    ``gto`` always renders them; ``auto`` may (it falls to the spectrum on
+    mixed spots); ``blend`` counts as active by the balanced-axis spec (a
+    blend batch may carry spectrum-style questions if the blend mix ever
+    includes gto -- today's blend mixes basic + sizing only, so for blend
+    the axis is conservative future-proofing and costs nothing visible).
+    ``basic`` and ``sizing`` never render qualifiers, so the balanced
+    qualifier axis must stay OFF there -- including it would change their
+    selection for a distinction the player can never see.
+    """
+    return style in ("gto", "auto", "blend")
+
+
 def _aggression_key(action: NodeAction) -> tuple[int, float]:
     """Sort key: verb rank, then bet size (so Bet 2bb precedes Bet 4.5bb)."""
     size = action.pot_fraction if action.pot_fraction is not None else (
@@ -158,7 +185,7 @@ def _spectrum_options(
         less, more = less_a.label, more_a.label
     dom = less if dominant == less_a.label else more
     options = [f"Always {less}", f"Mostly {less}", f"Mostly {more}", f"Always {more}"]
-    prefix = "Always" if spot.dominant_frequency >= PURE_THRESHOLD else "Mostly"
+    prefix = answer_qualifier(spot.dominant_frequency)
     correct = f"{prefix} {dom}"
     if correct not in options:  # defensive: dominant must be one of the two
         correct = f"Mostly {dom}" if f"Mostly {dom}" in options else options[0]
@@ -240,7 +267,7 @@ def _collapsed_spectrum_options(
     aggr_freq = sum(spot.action_frequencies.get(a.label, 0.0) for a in by_verb[aggr_v])
     pass_freq = sum(spot.action_frequencies.get(a.label, 0.0) for a in by_verb[passive_v])
     dom, dom_freq = (aggr, aggr_freq) if aggr_freq >= pass_freq else (passive, pass_freq)
-    prefix = "Always" if dom_freq >= PURE_THRESHOLD else "Mostly"
+    prefix = answer_qualifier(dom_freq)
     return options, f"{prefix} {dom}"
 
 
@@ -407,6 +434,8 @@ __all__ = [
     "ANSWER_STYLES",
     "ANSWER_STYLE_FROM_RADIO_LABEL",
     "PURE_THRESHOLD",
+    "answer_qualifier",
     "build_options",
     "frequencies_for_options",
+    "qualifier_axis_active",
 ]

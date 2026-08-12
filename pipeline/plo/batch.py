@@ -54,7 +54,11 @@ from pipeline.plo.node_enumerator import (
     plo_pot_entrant_count,
     plo_node_action_context,
 )
-from pipeline.plo.options import build_options
+from pipeline.plo.options import (
+    answer_qualifier,
+    build_options,
+    qualifier_axis_active,
+)
 from pipeline.plo.pack import PloActionType, PloPack, rake_pct_from_note
 from pipeline.plo.position import position_bucket
 from pipeline.plo.question_extractor import (
@@ -170,7 +174,14 @@ def _first_worthy_spot(
 def _balance_attrs_for(
     spot: PloSpot, facts: Any, difficulty_score: float, pack: PloPack
 ) -> BalanceAttrs:
-    """The five balance-axis values for one spot (see balanced_select)."""
+    """The balance-axis values for one spot (see balanced_select).
+
+    ``qualifier`` is derived from the SOLVER's dominant-action frequency
+    (answer_qualifier == the exact build_options_gto prefix rule), never
+    from rendered option text -- the user's July-21 rule. It only balances
+    when the batch's answer style is GTO-capable (include_qualifier at the
+    balanced_order / balance_report call sites).
+    """
     hand_class = facts.hand_class
     return BalanceAttrs(
         difficulty_band=difficulty_band(difficulty_score),
@@ -181,6 +192,7 @@ def _balance_attrs_for(
             hand_class.pair_pattern, hand_class.suit_pattern
         ),
         node_id=spot.node.node_id,
+        qualifier=answer_qualifier(spot.dominant_frequency),
     )
 
 
@@ -599,7 +611,8 @@ def generate_plo_batch(
             # scored pool -- the honest-shortfall record the done panel and
             # Review read (see balanced_select.balance_report).
             meta["balance_report"] = balance_report(
-                selected_attrs, balance_pool_attrs
+                selected_attrs, balance_pool_attrs,
+                include_qualifier=qualifier_axis_active(answer_style),
             )
         meta_tmp = meta_path.with_name(meta_path.name + ".tmp")
         meta_tmp.write_text(json.dumps(meta, indent=2, default=str))
@@ -683,7 +696,12 @@ def generate_plo_batch(
             )
             if len(pool_spots) >= pool_cap:
                 break
-        order = balanced_order(balance_pool_attrs, total_questions)
+        # Always/Mostly qualifier axis is active only for GTO-capable
+        # answer styles (basic-style selection stays byte-identical).
+        order = balanced_order(
+            balance_pool_attrs, total_questions,
+            include_qualifier=qualifier_axis_active(answer_style),
+        )
         spot_iter = iter([pool_spots[i] for i in order])
     else:
         spot_iter = _drawn_spots()

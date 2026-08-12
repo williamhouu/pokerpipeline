@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from array import array
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -89,7 +90,12 @@ def main() -> int:
         print(f"      {b}")
 
     # [2] format + [3] strategy consistency ---------------------------------
-    values: dict[str, list[tuple[float, float]]] = {}
+    # Compact per-file storage: (p array, ev array) as float32. The deep
+    # packs (75bb+ = 11k+ files) do NOT fit in memory as 16,432-tuple lists
+    # (~2MB/file -> ~23GB, which swapped a nearly-full disk to death at
+    # intake); two float arrays are ~130KB/file. float32 precision is far
+    # inside every audit tolerance.
+    values: dict[str, tuple[array, array]] = {}
     fmt_bad = 0
     p_range_bad = 0
     for f in files:
@@ -103,7 +109,10 @@ def main() -> int:
             continue
         if any(not (0.0 <= p <= 1.0001) for p, _ in v):
             p_range_bad += 1
-        values[f.stem] = v
+        values[f.stem] = (
+            array("f", (p for p, _ in v)),
+            array("f", (ev for _, ev in v)),
+        )
     ok = fmt_bad == 0 and p_range_bad == 0
     fails += not ok
     print(f"\n[2] format: {len(values)}/{len(files)} parse as 2x{HAND_COUNT}; "
@@ -121,7 +130,7 @@ def main() -> int:
             continue
         checked += 1
         for i in range(HAND_COUNT):
-            reach = sum(values[s][i][0] for s in sibs)
+            reach = sum(values[s][0][i] for s in sibs)
             if reach > 1.02:  # noqa: PLR2004  small tolerance for rounding
                 over_one += 1
                 break
@@ -131,19 +140,61 @@ def main() -> int:
           f"{over_one} with per-hand reach summing > 1{_flag(ok)}")
 
     # [4] EV sanity ---------------------------------------------------------
-    all_ev_zero = all(ev == 0.0 for v in values.values() for _, ev in v)
+    all_ev_zero = all(ev == 0.0 for _, ev_arr in values.values() for ev in ev_arr)
     # First-in fold node for the opener (SEATS[0]): the single-token "0" file.
     fold_stem = "0"
     fold_ev_ok = True
     if fold_stem in values:
         # A non-blind first-in fold gives up nothing -> EV ~ 0.
-        evs = [ev for p, ev in values[fold_stem] if p > 0]
+        evs = [ev for p, ev in zip(*values[fold_stem]) if p > 0]
         if evs:
             fold_ev_ok = max(abs(e) for e in evs) < 0.05  # noqa: PLR2004
     ok = (not all_ev_zero) and fold_ev_ok
     fails += not ok
     print(f"\n[4] EV: non-degenerate={not all_ev_zero}, "
           f"opener fold-EV~0={fold_ev_ok}{_flag(ok)}")
+
+    # [4b] cash EV-unit anchor (bb-ante packs use [5b] instead) -------------
+    # The files' own fold bookkeeping pins the EV units: a folder is out
+    # exactly what it committed. In milli-SMALL-blind units (every 6-max
+    # cash pack) the SB's forced open-fold EV is -1000 (its posted 0.5bb =
+    # 1sb) and the BB's forced fold vs a single open is -2000 (the 1bb
+    # blind = 2sb). A milli-BB export would read -500 / -1000 instead, so
+    # this catches a unit change in a re-export. The open token itself is
+    # discovered (not assumed) and its pot-limit size resolved from the
+    # token's own pot-%: raise-to = 1bb call + pct x 2.5bb first-in pot.
+    if "(bb-ante)" not in root.name:
+        def _forced_ev_milli(stem: str) -> float | None:
+            v = values.get(stem)
+            if not v:
+                return None
+            num = sum(p * ev for p, ev in zip(*v) if p > 0)
+            den = sum(p for p in v[0] if p > 0)
+            return (num / den * 1000) if den else None
+
+        cash_singles = sorted(s for s in values if "." not in s)
+        open_toks = [s for s in cash_singles if s not in ("0", "1", "3", "5")]
+        sb_fold = _forced_ev_milli("0.0.0.0.0")
+        bb_stem = next(
+            (f"{t}.0.0.0.0.0" for t in open_toks
+             if f"{t}.0.0.0.0.0" in values),
+            None,
+        )
+        bb_fold = _forced_ev_milli(bb_stem) if bb_stem else None
+        sb_ok = sb_fold is not None and abs(sb_fold - (-1000)) < 50  # noqa: PLR2004
+        bb_ok = bb_fold is not None and abs(bb_fold - (-2000)) < 100  # noqa: PLR2004
+        ok = sb_ok and bb_ok
+        fails += not ok
+        sb_txt = f"{sb_fold:.0f}" if sb_fold is not None else "missing"
+        bb_txt = f"{bb_fold:.0f}" if bb_fold is not None else "missing"
+        sizes = {
+            t: f"{1 + int(t[2:]) / 100.0 * 2.5:.2f}bb"
+            for t in open_toks if t.startswith("40")
+        }
+        print(f"\n[4b] cash EV anchor (milli-sb): SB open-fold {sb_txt} "
+              f"(expect -1000), BB fold vs open {bb_txt} (expect -2000)"
+              f"{_flag(ok)}")
+        print(f"     open tokens {open_toks} -> first-in raise-to {sizes}")
 
     # [5] range sanity: first-in aggression width ---------------------------
     # The opener's RFI = single-token files: raise/all-in/min-raise vs
@@ -153,7 +204,7 @@ def main() -> int:
         v = values.get(stem)
         if not v:
             return 0.0
-        num = sum(p * combo_multiplicity(i) for i, (p, _) in enumerate(v))
+        num = sum(p * combo_multiplicity(i) for i, p in enumerate(v[0]))
         return 100.0 * num / _TOTAL_COMBOS
 
     def _rfi_label(stem: str) -> str:
@@ -186,8 +237,8 @@ def main() -> int:
             v = values.get(stem)
             if not v:
                 return None
-            num = sum(p * ev for p, ev in v if p > 0)
-            den = sum(p for p, _ in v if p > 0)
+            num = sum(p * ev for p, ev in zip(*v) if p > 0)
+            den = sum(p for p in v[0] if p > 0)
             return (num / den * 1000) if den else None
 
         sb_fold = _forced_ev("0.0.0.0.0")
@@ -231,10 +282,10 @@ def main() -> int:
         if sum(1 for a in hist if a.action in _AGGRO) != 1:
             continue
         for i in range(HAND_COUNT):
-            reach = sum(values[s][i][0] for s in sibs)
+            reach = sum(values[s][0][i] for s in sibs)
             if reach < 0.5:
                 continue
-            acts = [(values[s][i][0] / reach, values[s][i][1], s) for s in sibs]
+            acts = [(values[s][0][i] / reach, values[s][1][i], s) for s in sibs]
             dom_f, dom_ev, dom_s = max(acts, key=lambda t: t[0])
             if dom_f < 0.8:  # noqa: PLR2004  only near-pure dominant actions
                 continue

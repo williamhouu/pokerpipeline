@@ -937,6 +937,14 @@ def meta_question_for(
     for q in questions:
         if not isinstance(q, dict):
             continue
+        # Merged all-depths batches (Aug 2026) stamp each record with its
+        # source pack_id; two depths can share a bare node_id + hero cards,
+        # so when the stamp exists it must also appear in the node reference
+        # (which starts with "<pack_id>/..."). Single-pack records have no
+        # stamp -> unchanged behavior.
+        q_pack = str(q.get("pack_id", ""))
+        if q_pack and q_pack not in node_reference:
+            continue
         q_node = str(q.get("node_id", ""))
         if (
             q_node
@@ -1361,3 +1369,24 @@ def hand_rows_to_csv(
             d["Answer Explanation"] = override
         out.append(d)
     return approved_rows_to_csv(fieldnames, out)
+
+
+def ev_tie_tolerance(pot_cell: str | None, *, floor_bb: float = 0.10) -> float:
+    """Tie threshold for the "EV of each action" crowning (Aug 9 2026).
+
+    Solver per-node EV exports are only trustworthy to roughly their
+    convergence target (~0.5-1% of pot), so an absolute 0.10bb threshold
+    crowned noise-scale "edges" on big pots (a +0.96bb call on a 116bb pot
+    rendered "Call ✅" under a card whose frequency-correct answer was
+    Fold -- the exact confusion the July 0.10bb floor fixed on small pots,
+    reappearing at scale). Pot-relative: 1% of the row's POT, floored at
+    the old absolute so small pots behave exactly as before. Unparseable /
+    missing POT (dollar-display batches, old CSVs) keeps the floor.
+    """
+    tol = floor_bb
+    cell = (pot_cell or "").strip().upper().rstrip("B")
+    try:
+        tol = max(tol, 0.01 * float(cell))
+    except ValueError:
+        pass
+    return tol

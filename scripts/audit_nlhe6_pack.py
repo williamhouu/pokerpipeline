@@ -65,8 +65,19 @@ from pipeline.preflop_ranges import parse_monker_rng_file  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SEAT_ORDER = ("UTG", "HJ", "CO", "BTN", "SB", "BB")
 
-# Deterministic landmarks from this session's first walk (June 14 2026).
-EXPECTED_NODES = {20: 913, 30: 2247}
+# Deterministic landmarks from the first walk per depth (20/30: June 14
+# 2026; 40-200: the Aug 5 2026 ladder intake, 50bb counted WITH its token-15
+# fixed-size registration).
+EXPECTED_NODES = {
+    20: 913,
+    30: 2247,
+    40: 2884,
+    50: 2994,
+    70: 2526,
+    100: 9270,
+    150: 14690,
+    200: 21924,
+}
 
 _COMBOS = {"pair": 6, "suited": 4, "offsuit": 12}
 
@@ -82,10 +93,13 @@ def build_pack(depth: int) -> PreflopPack:
         grammar_name="monker_nlhe",
         table_size=6,
         stack_depth_bb=depth,
-        open_size_bb=2.0,
+        open_size_bb=(2.0 if depth <= 50 else 2.5),
         file_glob="*.rng",
         size_round_bb=0.5,
         ev_units_per_bb=2000.0,  # milli-sb; the size lock below verifies it
+        # 50bb only: the BvB iso token 15 = 3bb (EV-anchored; matches the
+        # registered pack in pipeline/preflop/pack.py).
+        fixed_raise_tokens_bb=((("15", 3.0),) if depth == 50 else None),
     )
 
 
@@ -139,7 +153,7 @@ def audit_tree(pack: PreflopPack, nodes: tuple[PreflopDecisionNode, ...]) -> Non
         )
 
     # AA canary on the BB-vs-UTG-open node (UTG opens `5`, folds to BB).
-    open_stem = "5" + ".0" * 4
+    open_stem = ("5" if pack.stack_depth_bb <= 50 else "40060") + ".0" * 4
     bb_defend = next(
         n
         for n in nodes
@@ -171,21 +185,24 @@ def _fold_commit_sb(path: Path) -> float | None:
     return commits[len(commits) // 2] if commits else None
 
 
-def _find_opener_fold_anchor(pack: PreflopPack) -> Path | None:
-    """Shallowest file where the seat that min-raise-opened (`5`) then folds.
+def _find_opener_fold_anchor(
+    pack: PreflopPack, open_tok: str = "5"
+) -> Path | None:
+    """Shallowest file where the seat that OPENED (``open_tok``) then folds.
 
     Its fold EVs read minus the open size, in small blinds -- the
-    independent proof that ``5`` == the 2bb open.
+    independent proof of the open token's decoded size. The opener is the
+    first raise in the history (token-agnostic, so the `5` min-raise packs
+    and the `40060` pot-relative packs both anchor).
     """
     best: tuple[int, Path] | None = None
-    for f in pack.root_path.glob("5.*.0.rng"):
+    for f in pack.root_path.glob(f"{open_tok}.*.0.rng"):
         ah = parse(f, pack).action_history
         opener = next(
             (
                 a.position
                 for a in ah
                 if a.action_type is PreflopActionType.RAISE
-                and a.raise_size_pct == MIN_RAISE_PCT
             ),
             None,
         )
@@ -199,9 +216,23 @@ def audit_token_sizes(pack: PreflopPack) -> None:
     print("\n== token-size lock (EV-derived, independent of the size walk) ==")
     root = pack.root_path
     failures = 0
+    depth = pack.stack_depth_bb
+    # Per-depth conventions (Aug 5 2026 intake of the 40-200bb ladder):
+    # opens are the `5` min-raise (2bb) through 50bb, the `40060`
+    # pot-relative token (2.5bb) from 70bb; the BvB iso over the SB limp is
+    # `14` (2.5bb) through 40bb, the pack-registered `15` (3bb) at 50bb,
+    # and pot-relative `40100` (3bb) from 70bb.
+    open_tok = "5" if depth <= 50 else "40060"
+    open_sb_expect = 4.0 if depth <= 50 else 5.0
+    if depth <= 40:
+        iso_anchor, iso_sb_expect = "0.0.0.0.1.14.3.0.rng", 5.0
+    elif depth == 50:
+        iso_anchor, iso_sb_expect = "0.0.0.0.1.15.40125.0.rng", 6.0
+    else:
+        iso_anchor, iso_sb_expect = "0.0.0.0.1.40100.40350.0.rng", 6.0
 
     # 1. Unit proof: SB folds first-in having posted only the 0.5bb blind.
-    sb_blind = _fold_commit_sb(root / "5.0.0.0.0.rng")
+    sb_blind = _fold_commit_sb(root / f"{open_tok}.0.0.0.0.rng")
     ok = sb_blind is not None and abs(sb_blind - 1.0) < 0.02
     failures += not ok
     print(
@@ -209,43 +240,52 @@ def audit_token_sizes(pack: PreflopPack) -> None:
         f"milli-SB) {'OK' if ok else 'FAIL'}"
     )
 
-    # 2. `5` open == 2bb: an opener who later folds is out the open size.
-    anchor = _find_opener_fold_anchor(pack)
+    # 2. Open size lock: an opener who later folds is out the open size.
+    anchor = _find_opener_fold_anchor(pack, open_tok)
     open_sb = _fold_commit_sb(anchor) if anchor else None
-    ok = open_sb is not None and abs(open_sb - 4.0) < 0.05
+    ok = open_sb is not None and abs(open_sb - open_sb_expect) < 0.05
     failures += not ok
     name = anchor.name if anchor else "<none found>"
     print(
-        f"  `5` open via {name}: opener committed {open_sb!r} sb "
-        f"(expect 4.0 = 2bb) {'OK' if ok else 'FAIL'}"
+        f"  `{open_tok}` open via {name}: opener committed {open_sb!r} sb "
+        f"(expect {open_sb_expect} = {open_sb_expect / 2:g}bb) "
+        f"{'OK' if ok else 'FAIL'}"
     )
 
-    # 3. `14` BB-iso == 2.5bb: BB iso-raises over the limp, jams over it,
-    #    BB folds -> BB committed the iso size.
-    iso_sb = _fold_commit_sb(root / "0.0.0.0.1.14.3.0.rng")
-    ok = iso_sb is not None and abs(iso_sb - 5.0) < 0.05
+    # 3. BvB iso size lock: BB iso-raises over the SB limp, SB re-raises,
+    #    BB folds -> BB committed exactly the iso size. The anchor file is
+    #    discovered (the SB's re-raise token differs by depth).
+    iso_tok = iso_anchor.split(".")[5]
+    found = sorted(
+        root.glob(f"0.0.0.0.1.{iso_tok}.*.0.rng"), key=lambda p: len(p.name)
+    )
+    iso_path = root / iso_anchor if (root / iso_anchor).exists() else (
+        found[0] if found else None
+    )
+    iso_sb = _fold_commit_sb(iso_path) if iso_path else None
+    ok = iso_sb is not None and abs(iso_sb - iso_sb_expect) < 0.05
     failures += not ok
     print(
-        f"  `14` BB-iso via 0.0.0.0.1.14.3.0.rng: BB committed {iso_sb!r} sb "
-        f"(expect 5.0 = 2.5bb) {'OK' if ok else 'FAIL'}"
+        f"  `{iso_tok}` BB-iso via {iso_path.name if iso_path else '<none>'}: "
+        f"BB committed {iso_sb!r} sb (expect {iso_sb_expect} = "
+        f"{iso_sb_expect / 2:g}bb) {'OK' if ok else 'FAIL'}"
     )
 
     # 4. The pack's ev_units_per_bb converts file EVs to bb correctly: the
-    #    BB-iso fold (5.0 sb committed) must read 2.5bb through the divisor
+    #    BB-iso fold must read minus the iso size in bb through the divisor
     #    the format writer uses for the action_ev_bb column.
     units = pack.ev_units_per_bb
     iso_raw = None
-    iso_path = root / "0.0.0.0.1.14.3.0.rng"
-    if iso_path.exists():
+    if iso_path is not None and iso_path.exists():
         data = parse_monker_rng_file(iso_path)
         evs = [ev for _h, (p, ev) in data.items() if p > 0.05]
         iso_raw = sorted(evs)[len(evs) // 2] if evs else None
     iso_bb = None if (iso_raw is None or not units) else iso_raw / units
-    ok = iso_bb is not None and abs(iso_bb - (-2.5)) < 0.05
+    ok = iso_bb is not None and abs(iso_bb - (-iso_sb_expect / 2)) < 0.05
     failures += not ok
     print(
         f"  ev_units_per_bb={units}: BB-iso fold -> {iso_bb!r} bb "
-        f"(expect -2.5) {'OK' if ok else 'FAIL'}"
+        f"(expect {-iso_sb_expect / 2}) {'OK' if ok else 'FAIL'}"
     )
 
     print(f"  {'ALL TOKEN SIZES LOCKED' if failures == 0 else f'{failures} FAILURES'}")
@@ -255,7 +295,7 @@ def audit_token_sizes(pack: PreflopPack) -> None:
 # --- section 3: render slice ---------------------------------------------------
 def render_spots(pack: PreflopPack, nodes: tuple[PreflopDecisionNode, ...]) -> None:
     print("\n== render slice (real fact extractor + format writer) ==")
-    open_stem = "5" + ".0" * 4
+    open_stem = ("5" if pack.stack_depth_bb <= 50 else "40060") + ".0" * 4
 
     def first(pred):
         return next(n for n in nodes if pred(n))
@@ -344,7 +384,7 @@ def run_depth(depth: int, section: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--depth", type=int, choices=[20, 30], default=None)
+    ap.add_argument("--depth", type=int, choices=[20, 30, 40, 50, 70, 100, 150, 200], default=None)
     ap.add_argument(
         "--section", choices=["tree", "sizes", "render", "all"], default="all"
     )

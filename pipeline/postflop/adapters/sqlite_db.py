@@ -214,12 +214,29 @@ class _Solve:
         self.n = len(self.idx_to_hand)
         self.meta = dict(con.execute("SELECT key, value FROM metadata"))
         self._actions_cache: dict[str, list[_DBAction]] = {}
+        # The player keys actually present in preflop_ranges. Legacy exports
+        # (the BTN-vs-BB family) key the OOP range as literal 'BB' and the IP
+        # range as 'BTN' regardless of the real seats; the Aug-2026 v9 exports
+        # (first non-BTN/BB geometry: UTG vs SB) key by the REAL seat name.
+        self.range_players: set[str] = {
+            p for (p,) in con.execute("SELECT DISTINCT player FROM preflop_ranges")
+        }
 
     def preflop_weights(self, player: str) -> dict[str, float]:
         rows = self.con.execute(
             "SELECT hand, weight FROM preflop_ranges WHERE player=?", (player,)
         )
         return {hand: float(w) for hand, w in rows}
+
+    def preflop_weights_for(self, position: str, legacy_key: str) -> dict[str, float]:
+        """Range weights for the seat at ``position``.
+
+        INVARIANT (Aug 2026, first UTG-vs-SB solve): never assume the
+        ``preflop_ranges.player`` column says 'BTN'/'BB' -- prefer the real
+        seat name when the file uses it, and only fall back to the legacy
+        role key ('BB' for OOP, 'BTN' for IP) on the old exports."""
+        key = position if position in self.range_players else legacy_key
+        return self.preflop_weights(key)
 
     def actions(self, node_id: str) -> list[_DBAction]:
         cached = self._actions_cache.get(node_id)
@@ -372,7 +389,10 @@ class SqliteDbAdapter:
         open_bb = float(m.group(1)) if m else 3.0
 
         # Reach bases: each side's preflop range, board-masked, idx-aligned.
-        pre = {self.oop: s.preflop_weights("BB"), self.ip: s.preflop_weights("BTN")}
+        pre = {
+            self.oop: s.preflop_weights_for(self.oop, "BB"),
+            self.ip: s.preflop_weights_for(self.ip, "BTN"),
+        }
         base_reach = {
             side: [
                 (
@@ -1075,6 +1095,70 @@ SOLVE_QUALITY_FLAGS: tuple[tuple[str, str, str], ...] = (
         "notation and wrongly reported the v7 family as internally "
         "inconsistent - that is retracted; these files are "
         "production-usable.",
+    ),
+    # Aug 10 2026: BTN vs BB SRP 200bb on As7d5c -- the wide-range geometry
+    # (BTN opens 47%, BB defends capped). REACH-pruned export; the 86GB
+    # _clean_full sibling is still zipped in ~/Downloads awaiting the SSD.
+    (
+        "As7d5c_clean_reach",
+        "info",
+        "Good solve (intake-audited clean Aug 10 2026; EV-vs-strategy "
+        "pooled +0.0 pts, 0 bad nodes). BTN opens, BB calls (8-max, 200bb, "
+        "8% cap 2bb rake) on As 7d 5c. Wide ranges = the best hand-variety "
+        "source so far. Two things to know: (1) REACH-PRUNED: only 8 flop "
+        "nodes (c-bet-heavy lines; the flop check-raise wars and rare "
+        "lines are thin) -- the FULL export exists and lands when disk "
+        "allows; (2) BB leads (donks) the flop 39% range-weighted, mostly "
+        "the SMALL (33%) size -- VENDOR-CONFIRMED GENUINE (Aug 10 2026): "
+        "ranges/tree/rake are hash-identical to the 8h6h5s solve, which "
+        "leads only 15% under the same config (our cross-check), so the "
+        "A75 texture itself drives it. BB-lead lines are trustworthy; "
+        "note the tree offers TWO lead sizes, so 0-15% single-size "
+        "benchmarks don't apply.",
+    ),
+    # Aug 6 2026 (second intake wave): the FULL export of the UTG vs SB
+    # AsKd9s solve -- same solve as the reach file, exported with the reach
+    # filter DISABLED. Pattern matches only the _clean_full file; the reach
+    # sibling keeps its own entry below.
+    (
+        "AsKd9s_clean_full",
+        "info",
+        "Good solve (intake-audited clean Aug 6 2026; EV-vs-strategy check "
+        "+0.3 pts pooled, 0 bad nodes). The complete export of the UTG vs "
+        "Small Blind 3-bet pot (8-max, 200bb, 8% cap 2bb rake): UTG opens, "
+        "the Small Blind 3-bets, UTG calls. Unlike the reach-pruned sibling, "
+        "EVERY line is here (1.34M decision nodes vs 99k; no reach filter, "
+        "no downsampling): the flop check line's continuations exist - UTG "
+        "stab, Small Blind check-raise, and the raise-war up to all-in - so "
+        "flop check-raise and stab-response questions work from this file. "
+        "Rivers reached through betting genuinely mix, so barrel-river "
+        "questions work too. Two things to know: (1) facing the flop c-bet, "
+        "UTG can only fold or call (no raise-vs-c-bet branch was configured "
+        "in the tree - true of the full export as well, not a pruning "
+        "artifact); (2) it is a 44 GB file, so loading is slower than the "
+        "other solves - prefer it for full-hand batches, and use the reach "
+        "sibling only when its missing branches don't matter.",
+    ),
+    # Aug 6 2026: the first non-BTN/BB geometry (UTG vs SB 3-bet pot). The
+    # pattern is the REACH variant's name on purpose so the full export
+    # above keeps its own entry.
+    (
+        "AsKd9s_clean_reach",
+        "info",
+        "Good solve (intake-audited clean Aug 6 2026; EV-vs-strategy check "
+        "measured exactly 0). The first non-BTN/BB geometry: UTG opens, the "
+        "Small Blind 3-bets, UTG calls (8-max, 200bb, 8% cap 2bb rake). Full "
+        "sizing families: two flop bets, two turn bets, three river bets, "
+        "sized 2.7x raises on turn AND river, and rivers reached through "
+        "betting genuinely mix - barrel-river questions work here. Two "
+        "things to know: (1) this is the reach-pruned export (lines below "
+        "0.1% cumulative reach are omitted), so the flop holds only the "
+        "c-bet lines - the Small Blind checks just 2% and the check line's "
+        "continuations are pruned, meaning no flop check-raise or "
+        "stab-response spots exist in this file; (2) facing the flop c-bet, "
+        "UTG can only fold or call (no raise branch anywhere on the flop), "
+        "so flop raise questions can never come from this solve. Turn and "
+        "river raises are present and normal.",
     ),
     # July 28 2026: the 8h6h5s 200bb delivery (the "all sizes on all lines"
     # request). Listed BEFORE the QsJd9s pattern: its filename also contains

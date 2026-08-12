@@ -911,21 +911,16 @@ def _preflop_notes(facts: PreflopFacts, pack: PreflopPack) -> str:
     )
 
 
-def _preflop_animation_script(
-    facts: PreflopFacts, pack: PreflopPack, *,
-    stakes_bb_dollars: float, game_format: str, display_in_bb: bool = False,
-) -> str:
-    """The app's animation timeline for a standalone preflop question.
+def preflop_animation_actions(
+    node, pack: "PreflopPack",
+) -> list[tuple[str, str, float | None, bool]]:
+    """The node's prior actions as the shared animation walk's tuples.
 
-    The pack node's ``history_before`` already lists every prior action
-    INCLUDING the folds (unlike the postflop solves' line-only summaries),
-    so no fold synthesis is needed: map each parsed action onto the shared
-    :mod:`pipeline.animation` walk with its resolved bb size and stop at
-    hero's decision. Built from the same resolved sizes as the Question
-    prose, so the two can never disagree."""
-    from pipeline.animation import AnimationTable, walk_explicit_preflop  # noqa: PLC0415
-
-    node = facts.spot.node
+    Extracted from :func:`_preflop_animation_script` (Aug 2026) so the
+    batch's vacuous-decision gate replays the SAME action sequence the
+    rendered animation will carry -- the gate and the timeline can never
+    disagree about hero's remaining chips.
+    """
     resolved = resolve_preflop_history(node.history_before, pack)
     actions: list[tuple[str, str, float | None, bool]] = []
     for parsed, size in zip(node.history_before, resolved.sizes_bb):
@@ -944,6 +939,25 @@ def _preflop_animation_script(
             )
         else:  # a BB check option etc.
             actions.append((parsed.position, "check", None, False))
+    return actions
+
+
+def _preflop_animation_script(
+    facts: PreflopFacts, pack: PreflopPack, *,
+    stakes_bb_dollars: float, game_format: str, display_in_bb: bool = False,
+) -> str:
+    """The app's animation timeline for a standalone preflop question.
+
+    The pack node's ``history_before`` already lists every prior action
+    INCLUDING the folds (unlike the postflop solves' line-only summaries),
+    so no fold synthesis is needed: map each parsed action onto the shared
+    :mod:`pipeline.animation` walk with its resolved bb size and stop at
+    hero's decision. Built from the same resolved sizes as the Question
+    prose, so the two can never disagree."""
+    from pipeline.animation import AnimationTable, walk_explicit_preflop  # noqa: PLC0415
+
+    node = facts.spot.node
+    actions = preflop_animation_actions(node, pack)
     table = AnimationTable(
         table_size=pack.table_size,
         starting_stack_bb=float(pack.stack_depth_bb),

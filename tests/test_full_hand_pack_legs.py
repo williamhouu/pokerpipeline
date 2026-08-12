@@ -207,6 +207,42 @@ def test_coherence_gate_drops_the_whole_hand_no_flop_start(tmp_path, monkeypatch
         assert r["Hand Stage"] == "Preflop", (r["hand_id"], r["Hand Stage"])
 
 
+def test_mixed_leg_narrates_not_asks_and_keeps_hand(tmp_path, monkeypatch) -> None:
+    """Aug 8 2026 rule change (user-approved, softening the July-15 rule
+    it sits beside): when the chart MIXES the as-played action (here BB
+    defends by calling 40% vs 3-betting 50% -- call is played plenty but
+    is not the favorite), the hand is KEPT and the preflop leg is
+    NARRATED, NOT ASKED. The action must still appear in the postflop
+    rows' self-contained story and animation, so the play-through never
+    starts mid-hand from the student's point of view. Below
+    MIXED_LEG_MIN_FREQUENCY (see the 20%-call test above) the whole hand
+    still drops."""
+    import csv as _csv
+    import json as _json
+
+    pack = _matching_pack(
+        tmp_path, call_freq=0.4, threebet_freq=0.5, pack_id="fixture_mixed",
+    )
+    result, meta = _run_batch(tmp_path, monkeypatch, pack, heroes=("BB",))
+    assert result.questions_written > 0
+    c = meta["counters"]
+    assert c["preflop_legs_narrated_unasked"] > 0
+    assert c["hands_dropped_preflop_incoherent"] == 0
+    rows = list(_csv.DictReader(
+        (tmp_path / "out.csv").open(encoding="utf-8-sig")
+    ))
+    assert rows
+    # No preflop QUESTION shipped for these hands...
+    assert all(r["Hand Stage"] != "Preflop" for r in rows)
+    # ...but the narrated preflop actions still animate before the flop
+    # deal in every row's self-contained timeline.
+    anim = _json.loads(rows[0]["animation_script"])
+    types = [e.get("type") for e in anim["events"]]
+    deal_i = types.index("deal")
+    assert "raise" in types[:deal_i]   # the open
+    assert "call" in types[:deal_i]    # the narrated defend
+
+
 def test_hand_difficulty_band_filter(tmp_path, monkeypatch) -> None:
     """The band filter drops whole hands by hand_difficulty BEFORE any
     generation; an impossible band writes zero hands and records the

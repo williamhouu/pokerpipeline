@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
              "flag only)",
     )
     parser.add_argument(
-        "--length-profile", choices=["river_heavy", "river_leaning", "equal"],
+        "--length-profile", choices=["river_heavy", "river_leaning", "equal", "flop_turn_only"],
         default="river_heavy",
         help="with --balanced-lengths: hand-count share per ending street "
              "(river_heavy = 70%% river, the production default since July "
@@ -195,7 +195,9 @@ def main(argv: list[str] | None = None) -> int:
         "--diversify-hands", action="store_true",
         help="full-hands mode: round-robin the batch across hero seat, line "
              "depth, and hand strength (assembles an oversized pool first); "
-             "ignored with a difficulty band",
+             "with --balanced-lengths it pre-orders the pool so the street "
+             "quotas pick balanced hands (Aug 2026 -- previously silently "
+             "ignored in that combination); ignored with a difficulty band",
     )
     parser.add_argument(
         "--variety-seed", type=int, default=None, metavar="N",

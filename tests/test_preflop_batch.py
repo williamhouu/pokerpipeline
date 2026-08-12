@@ -1557,3 +1557,56 @@ def test_ordinary_spot_failure_still_does_not_abort(tmp_path: Path) -> None:
     )
     assert len(result.failures) == 1
     assert result.questions_written == 1
+
+
+# --- 🎛️ balanced mode: Always/Mostly qualifier axis (Aug 2026) ---------------
+def test_balanced_gto_batch_reports_the_qualifier_axis(tmp_path: Path) -> None:
+    """With a GTO-capable answer style the balanced batch balances (and
+    reports) the Always/Mostly qualifier, derived from SOLVER frequency via
+    pipeline.preflop.options.answer_qualifier -- never from option text."""
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "bal_gto.csv"
+    generate_preflop_batch(
+        pack=pack,
+        output_path=out,
+        total_questions=2,
+        dry_run=True,
+        balanced=True,
+        answer_style="gto",
+        random_seed=7,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    report = meta["balance_report"]
+    axes = {ax["axis"]: ax for ax in report["axes"]}
+    assert "qualifier" in axes
+    assert axes["qualifier"]["label"] == "Always/Mostly"
+    # Worthy preflop spots are mixed by construction (<= 95% dominant), so
+    # both committed rows classify Mostly here -- the point is the axis is
+    # present and its counts are honest.
+    achieved = {
+        v["value"]: v["achieved"] for v in axes["qualifier"]["values"]
+    }
+    assert sum(achieved.values()) == report["selected"]
+    assert set(achieved) == {"Mostly"}
+
+
+def test_balanced_basic_batch_omits_the_qualifier_axis(tmp_path: Path) -> None:
+    """basic labels never render Always/Mostly, so the axis must be fully
+    INACTIVE: absent from the report, and the selection axes are exactly the
+    pre-change set (context / verb / position / difficulty)."""
+    pack = _build_open_only_pack(tmp_path)
+    out = tmp_path / "bal_basic.csv"
+    generate_preflop_batch(
+        pack=pack,
+        output_path=out,
+        total_questions=2,
+        dry_run=True,
+        balanced=True,
+        answer_style="basic",
+        random_seed=7,
+    )
+    meta = json.loads(out.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    report = meta["balance_report"]
+    assert [ax["axis"] for ax in report["axes"]] == [
+        "context", "verb", "position", "difficulty",
+    ]

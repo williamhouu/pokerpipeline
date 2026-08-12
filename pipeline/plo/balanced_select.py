@@ -7,6 +7,7 @@ use it too); this module owns the PLO-specific schema:
 * **difficulty band** (Easy / Medium / Hard)            weight 1.00
 * **situation** (the PLO_ACTION_CONTEXTS bucket)        weight 0.90
 * **correct-answer verb** (fold / call-check / raise)   weight 0.80
+* **Always/Mostly qualifier** (GTO-capable styles ONLY) weight 0.70
 * **hero position bucket** (early/middle/late/sb/bb)    weight 0.50
 * **hand shape family** (paired x suitedness)           weight 0.25
 
@@ -50,6 +51,30 @@ BALANCE_AXES: tuple[tuple[str, str, float], ...] = (
     ("hand_shape", "Hand shape", 0.25),
 )
 
+# Always/Mostly qualifier axis (Aug 2026, user ask: a 44/56 Always/Mostly
+# split with strong per-verb skews let players meta-game the prefix). Only
+# ACTIVE when the batch's answer style can render GTO-style options
+# (qualifier_axis_active in pipeline.plo.options); with basic labels the
+# axis is omitted entirely so selection is byte-identical to before.
+# INVARIANT (the user's July-21 rule, extended): the qualifier value is
+# derived from the SOLVER's dominant-action frequency via
+# pipeline.plo.options.answer_qualifier (the exact mapping
+# build_options_gto renders), NEVER by parsing rendered option text.
+QUALIFIER_AXIS: tuple[str, str, float] = ("qualifier", "Always/Mostly", 0.70)
+
+
+def balance_axes(
+    include_qualifier: bool = False,
+) -> tuple[tuple[str, str, float], ...]:
+    """The active axis schema: :data:`BALANCE_AXES`, plus the qualifier
+    axis slotted between the answer-verb and position axes (its weight
+    order) when the batch's answer style can render qualifiers."""
+    if not include_qualifier:
+        return BALANCE_AXES
+    axes = list(BALANCE_AXES)
+    axes.insert(3, QUALIFIER_AXIS)  # after answer_verb (0.80), before position
+    return tuple(axes)
+
 
 def difficulty_band(score: float) -> str:
     """``Easy`` / ``Medium`` / ``Hard`` for a difficulty score."""
@@ -78,7 +103,12 @@ def hand_shape_family(pair_pattern: str, suit_pattern: str) -> str:
 
 @dataclass(frozen=True)
 class BalanceAttrs:
-    """One candidate spot's value on each balance axis."""
+    """One candidate spot's value on each balance axis.
+
+    ``qualifier`` is always carried (it is cheap to compute) but only
+    BALANCES when the caller passes ``include_qualifier=True`` -- the axis
+    list decides, so basic-style batches stay byte-identical.
+    """
 
     difficulty_band: str
     action_context: str
@@ -86,25 +116,35 @@ class BalanceAttrs:
     position: str
     hand_shape: str
     node_id: str = ""
+    qualifier: str = ""
 
     def value(self, axis: str) -> str:
         return str(getattr(self, axis))
 
     def as_dict(self) -> dict[str, str]:
-        return {key: self.value(key) for key, _label, _w in BALANCE_AXES}
+        out = {key: self.value(key) for key, _label, _w in BALANCE_AXES}
+        out["qualifier"] = self.qualifier
+        return out
 
 
-def balanced_order(attrs: Sequence[BalanceAttrs], count: int) -> list[int]:
+def balanced_order(
+    attrs: Sequence[BalanceAttrs],
+    count: int,
+    *,
+    include_qualifier: bool = False,
+) -> list[int]:
     """Greedy balanced ordering of the WHOLE pool; consume front-to-back.
 
     Thin wrapper over :func:`pipeline.balanced_select.balanced_order` with
     the PLO axes and a node-reuse spread penalty. ``count`` only matters to
     callers slicing the result -- the ordering rule is uniform.
+    ``include_qualifier`` adds the Always/Mostly axis (GTO-capable answer
+    styles only; see :data:`QUALIFIER_AXIS`).
     """
     del count  # the ordering rule is uniform; callers slice
     return _core_order(
         [a.as_dict() for a in attrs],
-        BALANCE_AXES,
+        balance_axes(include_qualifier),
         spread_keys=[a.node_id for a in attrs],
     )
 
@@ -112,20 +152,24 @@ def balanced_order(attrs: Sequence[BalanceAttrs], count: int) -> list[int]:
 def balance_report(
     selected: Sequence[BalanceAttrs],
     pool: Sequence[BalanceAttrs],
+    *,
+    include_qualifier: bool = False,
 ) -> dict:
     """Achieved-vs-target distribution per axis (see the shared leaf)."""
     return _core_report(
         [a.as_dict() for a in selected],
         [a.as_dict() for a in pool],
-        BALANCE_AXES,
+        balance_axes(include_qualifier),
     )
 
 
 __all__ = [
     "BALANCE_AXES",
     "DIFFICULTY_BANDS",
+    "QUALIFIER_AXIS",
     "BalanceAttrs",
     "answer_verb",
+    "balance_axes",
     "balance_report",
     "balanced_order",
     "difficulty_band",

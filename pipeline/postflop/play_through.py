@@ -58,6 +58,20 @@ from pipeline.postflop.spot_sampler import PostflopSpot, sample_spot
 
 _STREET_ORDER = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
 
+# Fold-truncation ender floor (Aug 2026, Option B of the re-gate softening).
+# The brief's ORIGINAL worthiness floor (55% dominant frequency) -- used as the
+# default independent floor for a fold-TRUNCATED ender, deliberately below the
+# production batch window's 0.65. Rationale: the batch window tunes QUESTION
+# QUALITY preferences, but for a truncated ender the alternative to asking a
+# mildly-below-window fold is losing the WHOLE hand (walking back one decision
+# can't rescue it: the no-mid-hand-endings rule only allows a non-fold ender on
+# the river, and the leg before a flop/turn fold-truncation is never a river
+# decision) -- so a 60/40 lean-fold ender is the lesser evil vs pool collapse,
+# while a 53/47 coin-flip still drops. Measured on the reach-pruned AsKd9s
+# solve, the strict (window-bound) re-gate dropped 241 candidate hands and
+# full-hand batches degenerated to preflop-only enders.
+TRUNCATION_MIN_FREQUENCY = 0.55
+
 
 @dataclass(frozen=True)
 class HandLeg:
@@ -224,6 +238,12 @@ LENGTH_PROFILES: dict[str, dict[str, float]] = {
     "river_heavy": {"preflop": 0.1, "flop": 0.1, "turn": 0.1, "river": 0.7},
     "river_leaning": {"preflop": 0.2, "flop": 0.2, "turn": 0.2, "river": 0.4},
     "equal": {"preflop": 0.25, "flop": 0.25, "turn": 0.25, "river": 0.25},
+    # Aug 9 2026 (user ask): batches made ONLY of early-street enders --
+    # hands whose final question is a flop or turn decision (correct-fold
+    # endings, per the no-mid-hand-endings rule). Short-story drills; also
+    # the widest hand-class variety per the narrate-rule (mixed-open hands
+    # qualify most easily as early enders).
+    "flop_turn_only": {"preflop": 0.0, "flop": 0.5, "turn": 0.5, "river": 0.0},
 }
 
 
@@ -349,6 +369,8 @@ def _villain_combo_for_line(
 def _build_legs(
     solve: PostflopSolve, hero: str, combo: str, nodes: list[PostflopNode],
     *, include_preflop: bool, counters: dict | None = None,
+    min_frequency: float | None = None, max_frequency: float | None = None,
+    truncation_min_frequency: float | None = None,
 ) -> list[HandLeg]:
     """The ordered legs for one hero+combo: optional preflop leg(s), then each
     postflop decision node.
@@ -415,6 +437,53 @@ def _build_legs(
         # The leg is marked terminal_fold; every leg after it is dropped.
         # INVARIANT: no leg before the last may have a fold-dominant spot.
         if spot.dominant_verb == "fold":
+            # WORTHINESS RE-GATE (Aug 2026, user audit catch; floor SOFTENED
+            # Aug 6): truncation promotes THIS leg to the hand's ender, but
+            # only the SEED spot ever passed the batch's worthiness window --
+            # a mid-line fold can sit at any frequency (the proof case: a
+            # 53/47 fold shipped as an ender under min_frequency 0.65).
+            # The FLOOR for a truncated ender is INDEPENDENT of the batch
+            # window (``truncation_min_frequency``, default 0.55 = the
+            # brief's original worthiness floor, threaded from the batch):
+            # the window tunes question-quality preferences, but here the
+            # alternative to asking a mildly-below-window fold is losing the
+            # WHOLE hand (a walk-back rescue is impossible: a pre-river
+            # ender must be a fold, and the leg before a flop/turn fold is
+            # never a river decision), so a 60/40 lean-fold ender ships even
+            # in a 0.65-window batch while a 53/47 coin-flip still drops.
+            # Measured: the strict window-bound gate collapsed the pruned
+            # AsKd9s solve's full-hand pool to preflop-only enders.
+            # INVARIANT (safety property, unchanged): no unworthy question
+            # ever ships -- every shipped fold-truncated ender's dominant
+            # frequency lies in [floor, max_frequency] where floor =
+            # truncation_min_frequency (or min_frequency when None); no
+            # illegal mid-hand ending ever ships (_ends_legally still runs).
+            floor = (
+                truncation_min_frequency
+                if truncation_min_frequency is not None
+                else min_frequency
+            )
+            in_window = (
+                (floor is None or spot.dominant_frequency >= floor)
+                and (max_frequency is None or spot.dominant_frequency <= max_frequency)
+            )
+            if not in_window:
+                if counters is not None:
+                    counters["hands_dropped_truncated_unworthy"] = (
+                        counters.get("hands_dropped_truncated_unworthy", 0) + 1
+                    )
+                return None
+            if (
+                counters is not None
+                and min_frequency is not None
+                and spot.dominant_frequency < min_frequency
+            ):
+                # Telemetry: this ender ships ONLY because the independent
+                # floor is softer than the batch window (the [0.55, 0.65)
+                # band on a production batch).
+                counters["hands_kept_truncated_below_window"] = (
+                    counters.get("hands_kept_truncated_below_window", 0) + 1
+                )
             legs.append(HandLeg(
                 kind="postflop", street=n.street, node_id=n.node_id,
                 spot=spot, terminal_fold=True,
@@ -468,6 +537,242 @@ def _ends_legally(legs: list[HandLeg]) -> bool:
     return last.street == "river" or last.terminal_fold
 
 
+def dedupe_hand_class_twins(
+    hands: list, *, counters: dict | None = None,
+) -> list:
+    """One hand per (hero seat, final node, hero HAND CLASS) -- first wins.
+
+    The full-hand port of the sizing trainer's class dedupe (Aug 2026, user
+    audit catch): suit twins of the same class sit adjacent in worthy order,
+    so a batch shipped THREE QsQx hands identical up to suits on the same
+    line. The key is the hand's FEATURED FINAL decision node plus the hero
+    combo's rank class (``QsQd``/``QsQc``/``QsQh`` -> ``QQ``); input order is
+    preserved and the first hand of each class keeps its slot, so this
+    composes with every downstream selector (diversify / balanced / quotas)
+    -- run it on the CANDIDATE POOL, before any of them. Counter:
+    ``hands_dropped_class_twins``.
+    """
+    from pipeline.postflop.sizing_batch import hand_class_key  # noqa: PLC0415 - import-weight guard (sizing_batch pulls the .db adapter)
+
+    seen: set[tuple] = set()
+    out: list = []
+    for hand in hands:
+        key = (hand.hero, hand.legs[-1].node_id if hand.legs else "",
+               hand_class_key(hand.hero_combo))
+        if key in seen:
+            if counters is not None:
+                counters["hands_dropped_class_twins"] = (
+                    counters.get("hands_dropped_class_twins", 0) + 1
+                )
+            continue
+        seen.add(key)
+        out.append(hand)
+    return out
+
+
+def demote_class_street_twins(
+    hands: list, *, counters: dict | None = None,
+) -> list:
+    """Demote same-(hero, hand class, ending street) twins to the pool TAIL.
+
+    Widens :func:`dedupe_hand_class_twins` (Aug 2026, user ask): two
+    AK-top-two hands on DIFFERENT runouts escape the final-node key yet
+    tell the student the same story, so a 5-hand batch shipped AcKc and
+    AhKh river play-throughs back to back. Demotion, never removal: the
+    FIRST hand of each key keeps its slot (input order is the action-heavy
+    density order, so that is the densest telling), later twins move to
+    the tail in their relative order. Pool size is unchanged, so quota
+    selectors pick distinct stories first while a class-starved pool can
+    still fill the batch from the tail. Run on the CANDIDATE POOL after
+    density ordering, before any quota/trim. Counter:
+    ``hands_demoted_class_twins``.
+    """
+    from pipeline.postflop.sizing_batch import hand_class_key  # noqa: PLC0415 - import-weight guard (sizing_batch pulls the .db adapter)
+
+    seen: set[tuple] = set()
+    head: list = []
+    tail: list = []
+    for hand in hands:
+        # ends_with_fold is part of the key: a correct-fold ending and a
+        # continue ending of the same class on the same street are opposite
+        # lessons (the balanced quotas treat fold-enders as their own
+        # bucket), so they are never twins of each other.
+        key = (hand.hero, hand_class_key(hand.hero_combo),
+               hand.ending_street, hand.ends_with_fold)
+        if key in seen:
+            tail.append(hand)
+            if counters is not None:
+                counters["hands_demoted_class_twins"] = (
+                    counters.get("hands_demoted_class_twins", 0) + 1
+                )
+            continue
+        seen.add(key)
+        head.append(hand)
+    return head + tail
+
+
+def cap_class_repeats(
+    hands: list, *, max_per_class: int = 2, counters: dict | None = None,
+) -> list:
+    """Second demotion tier (Aug 2026, user ask): at most ``max_per_class``
+    hands per hero RANK CLASS in the pool head, regardless of street or
+    ender type.
+
+    :func:`demote_class_street_twins` allows one hand per (class, street,
+    ender) -- but on a single board the worthiness window concentrates on
+    the board's bluff-catcher class (65-99% = MIXED decisions, and the
+    mixed class on e.g. AsKd9s 3BP is QQ at every node), so a batch shipped
+    QQ x5 across different streets. This pass keeps the first
+    ``max_per_class`` tellings of a class and demotes the rest to the tail
+    in relative order. Same never-drop contract: pool size unchanged, so a
+    pool with nothing but the bluff-catcher still fills its quotas from the
+    tail (the counter is the honest record). Keyed WITHOUT the hero seat on
+    purpose -- five QQ hands read as repetition no matter which seat held
+    them. NOTE for include_villain batches: a flip-frame pair whose two
+    frames share the combo counts as 2 tellings of that class.
+    Counter: ``hands_demoted_class_cap``.
+    """
+    from pipeline.postflop.sizing_batch import hand_class_key  # noqa: PLC0415 - import-weight guard (sizing_batch pulls the .db adapter)
+
+    kept_per: dict[str, int] = {}
+    head: list = []
+    tail: list = []
+    for hand in hands:
+        key = hand_class_key(hand.hero_combo)
+        if kept_per.get(key, 0) >= max_per_class:
+            tail.append(hand)
+            if counters is not None:
+                counters["hands_demoted_class_cap"] = (
+                    counters.get("hands_demoted_class_cap", 0) + 1
+                )
+            continue
+        kept_per[key] = kept_per.get(key, 0) + 1
+        head.append(hand)
+    return head + tail
+
+
+def swap_for_class_variety(
+    selected: list,
+    reserve: dict,
+    *,
+    max_per_class: int = 2,
+    counters: dict | None = None,
+) -> list:
+    """Post-quota swap: trade excess same-class picks for other-street
+    reserve hands (Aug 8 2026, user ask -- the last tier of the QQ fix).
+
+    :func:`cap_class_repeats` orders the POOL, but the street quotas
+    override it: on a board whose flop/turn ender buckets contain ONLY the
+    bluff-catcher class (QQ on AsKd9s), the quota tail-fills the capped
+    class right back in. This pass runs AFTER the quota mix: while a class
+    holds more than ``max_per_class`` selected hands, the LOWEST-priority
+    excess pick (latest in mix order) is swapped for the first reserve
+    hand of an under-cap class, searching deepest street first. Trades
+    street-quota fidelity for class variety, deliberately -- the ending-mix
+    counters report the shifted mix. ``reserve`` (street -> list, the
+    quota's unselected remainder) is CONSUMED in place so downstream
+    atomicity backfill can't re-serve a swapped-in hand. Stops honestly
+    when the reserve has no under-cap class left (counter records the
+    swaps made; a still-over-cap batch means the pool truly held nothing
+    else). Batch size never changes. Counter:
+    ``hands_swapped_for_class_variety``.
+    """
+    from pipeline.postflop.sizing_batch import hand_class_key  # noqa: PLC0415 - import-weight guard (sizing_batch pulls the .db adapter)
+
+    counts: dict[str, int] = {}
+    for h in selected:
+        k = hand_class_key(h.hero_combo)
+        counts[k] = counts.get(k, 0) + 1
+    out = list(selected)
+    for i in range(len(out) - 1, -1, -1):
+        k = hand_class_key(out[i].hero_combo)
+        if counts.get(k, 0) <= max_per_class:
+            continue
+        repl = None
+        for street in ("river", "turn", "flop", "preflop"):
+            queue = reserve.get(street) or []
+            for j, cand in enumerate(queue):
+                ck = hand_class_key(cand.hero_combo)
+                if counts.get(ck, 0) < max_per_class:
+                    repl = queue.pop(j)
+                    break
+            if repl is not None:
+                break
+        if repl is None:
+            break  # reserve dry of under-cap classes -- ship honestly
+        counts[k] -= 1
+        rk = hand_class_key(repl.hero_combo)
+        counts[rk] = counts.get(rk, 0) + 1
+        out[i] = repl
+        if counters is not None:
+            counters["hands_swapped_for_class_variety"] = (
+                counters.get("hands_swapped_for_class_variety", 0) + 1
+            )
+    return out
+
+
+def pull_replacement_class_aware(
+    reserve: dict,
+    streets: tuple,
+    filter_fn,
+    class_counts: dict,
+    *,
+    max_per_class: int = 2,
+    seen_combos: set | None = None,
+):
+    """Class-aware reserve pull for atomicity backfill (Aug 8 2026 -- THE
+    root fix of the QQ monoculture).
+
+    The spy diagnosis: selection ships a varied batch, then the preflop
+    coherence gate (no-flop-start rule) drops the varied combos the range
+    pack refuses (65s/QTs/T9s in a 3-bet pot), and the old backfill pulled
+    the reserve head IN DENSITY ORDER -- where the coherent survivors are
+    exactly the premium classes. 47 drops -> QQ x5 shipped from a QQ x1
+    selection. The selection-layer tiers (demote/cap/swap) never see this
+    because it happens downstream of them.
+
+    Two passes over ``reserve`` (street dict, searched in ``streets``
+    order, queues consumed in place):
+
+    1. first candidate whose rank class sits UNDER ``max_per_class`` in
+       ``class_counts`` AND passes ``filter_fn``;
+    2. any candidate that passes -- batch fullness beats variety.
+
+    A candidate ``filter_fn`` refuses (returns ``None``) is consumed for
+    good in either pass (it can never pass later); a coherent over-cap
+    candidate is left in place for pass 2 / later pulls. When nothing is
+    over cap, pass 1 consumes the queues exactly like the legacy head-pop,
+    so drop-free batches are byte-identical. Caller updates
+    ``class_counts``. Returns the replacement hand or ``None``.
+    """
+    from pipeline.postflop.sizing_batch import hand_class_key  # noqa: PLC0415 - import-weight guard (sizing_batch pulls the .db adapter)
+
+    tiers = (0, 1, 2) if seen_combos is not None else (0, 2)
+    for tier in tiers:
+        for street in streets:
+            queue = reserve.get(street) or []
+            i = 0
+            while i < len(queue):
+                cand = queue[i]
+                over_cap = class_counts.get(
+                    hand_class_key(cand.hero_combo), 0
+                ) >= max_per_class
+                if tier == 0 and over_cap:
+                    i += 1
+                    continue
+                # tier 1 (Aug 8 2026): a class REPEAT is forced, but the
+                # literal same combo twice reads worse than a suit sibling
+                # -- prefer an unseen combo before giving up entirely.
+                if tier == 1 and cand.hero_combo in seen_combos:
+                    i += 1
+                    continue
+                ok = filter_fn(queue.pop(i))
+                if ok is not None:
+                    return ok
+                # refused for good: consumed; do not advance i
+    return None
+
+
 def assemble_hands(
     solve: PostflopSolve,
     *,
@@ -478,6 +783,9 @@ def assemble_hands(
     include_villain: bool = False,
     variety_seed: int | None = None,
     counters: dict | None = None,
+    min_frequency: float | None = None,
+    max_frequency: float | None = None,
+    truncation_min_frequency: float | None = None,
 ) -> list[PlayThroughHand]:
     """Assemble play-through hands from ``solve``, seeded by worthy ``seeds``.
 
@@ -498,6 +806,15 @@ def assemble_hands(
             batch); an int = a per-seed deterministic shuffle within each depth
             group, so different seeds pick different hands (see
             :func:`_variety_order`).
+        min_frequency / max_frequency: the batch's worthiness window,
+            re-applied to a FOLD-TRUNCATED ender (the seed passed the window;
+            a mid-line fold promoted to the ender did not). ``None`` = no
+            re-gate (legacy behaviour for direct callers).
+        truncation_min_frequency: independent FLOOR for the truncated-ender
+            re-gate (Aug 2026 softening; batches pass 0.55, the brief's
+            original floor). ``None`` = the floor is ``min_frequency``
+            (the strict legacy re-gate). The ceiling stays
+            ``max_frequency`` either way.
 
     Returns:
         A deterministic (per ``variety_seed``) list of :class:`PlayThroughHand`.
@@ -530,7 +847,9 @@ def assemble_hands(
         for n in line:
             consumed.add((n.node_id, combo))
         legs = _build_legs(solve, hero, combo, line, include_preflop=include_preflop,
-                           counters=counters)
+                           counters=counters, min_frequency=min_frequency,
+                           max_frequency=max_frequency,
+                           truncation_min_frequency=truncation_min_frequency)
         if legs is None:
             continue  # as-played coherence: divergent line, drop the hand
         if not _ends_legally(legs):
@@ -564,6 +883,8 @@ def assemble_hands(
                 v_legs = _build_legs(
                     solve, villain, v_combo, v_nodes,
                     include_preflop=include_preflop, counters=counters,
+                    min_frequency=min_frequency, max_frequency=max_frequency,
+                    truncation_min_frequency=truncation_min_frequency,
                 )
                 if v_legs and not _ends_legally(v_legs):
                     if counters is not None:
@@ -586,9 +907,15 @@ def assemble_hands(
 __all__ = [
     "ENDING_STREETS",
     "LENGTH_PROFILES",
+    "TRUNCATION_MIN_FREQUENCY",
     "HandLeg",
     "PlayThroughHand",
     "assemble_hands",
     "balanced_hand_mix",
     "balanced_length_mix",
+    "dedupe_hand_class_twins",
+    "cap_class_repeats",
+    "demote_class_street_twins",
+    "pull_replacement_class_aware",
+    "swap_for_class_variety",
 ]

@@ -279,3 +279,125 @@ def test_graceful_stop_keeps_committed_hands(tmp_path):
     assert meta["counters"]["stopped_early"] is True
     assert 1 <= meta["counters"]["hands_written"] < 2  # noqa: PLR2004
     assert out.exists() and out.read_bytes()  # the committed hand is on disk
+
+
+# --- Always/Mostly qualifier axis (Aug 2026, user ask) ------------------------
+# The axis is judged on the FEATURED FINAL decision like the verb axis, reads
+# the SOLVER dominant frequency (pipeline.postflop.options.answer_qualifier,
+# the exact GTO-spectrum prefix rule), never option text, and is active only
+# for GTO-capable answer styles (gto / auto / blend).
+
+
+def test_hand_attrs_qualifier_reads_solver_frequency():
+    from pipeline.postflop.options import answer_qualifier
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    hands = _pool(solve)
+    assert hands
+    for hand in hands:
+        attrs = hand_balance_attrs(hand, solve)
+        deepest = hand.legs[-1]
+        if getattr(deepest, "spot", None) is not None:
+            assert attrs["qualifier"] == answer_qualifier(
+                deepest.spot.dominant_frequency
+            )
+            assert attrs["qualifier"] in ("Always", "Mostly")
+        else:
+            # Preflop-only ender: no postflop spot -> its own bucket, like
+            # the strength/decision axes.
+            assert attrs["qualifier"] == "Preflop only"
+
+
+def test_postflop_answer_qualifier_matches_spectrum_prefix():
+    """PARITY PIN: on 2-action GTO spots the rendered correct-answer prefix
+    equals answer_qualifier(spot.dominant_frequency) -- single source of
+    truth for the threshold (PURE_THRESHOLD)."""
+    from pipeline.postflop.options import answer_qualifier, build_options
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    worthy, _lq, _ps, _am = _collect_worthy(
+        solve, min_frequency=0.65, max_frequency=0.99, min_ev_gap_bb=None,
+    )
+    checked = 0
+    for spot in worthy:
+        if len(spot.live_actions) != 2:
+            continue
+        _opts, correct = build_options(spot, style="gto")
+        prefix = correct.split()[0]
+        if prefix not in ("Always", "Mostly"):
+            continue  # degenerate fallback to plain labels
+        assert prefix == answer_qualifier(spot.dominant_frequency)
+        checked += 1
+    assert checked > 0
+
+
+def test_hand_axes_qualifier_slots_by_weight_and_inactive_is_untouched():
+    from pipeline.postflop.balanced_hands import (
+        POSTFLOP_HAND_AXES,
+        QUALIFIER_AXIS,
+        hand_axes,
+    )
+
+    assert hand_axes(False) is POSTFLOP_HAND_AXES  # basic/sizing: unchanged
+    keys = [k for k, _l, _w in hand_axes(True)]
+    assert keys == [
+        "answer_verb", "decision_type", "qualifier", "strength", "hero",
+    ]
+    assert QUALIFIER_AXIS == ("qualifier", "Always/Mostly", 0.70)
+
+
+def test_qualifier_axis_active_styles_for_postflop():
+    from pipeline.postflop.options import qualifier_axis_active
+
+    assert qualifier_axis_active("gto")
+    assert qualifier_axis_active("auto")
+    assert qualifier_axis_active("blend")
+    assert not qualifier_axis_active("basic")
+    assert not qualifier_axis_active("sizing")
+
+
+def test_order_pool_qualifier_flattens_and_inactive_matches_default():
+    from pipeline.balanced_select import balanced_order as _core_order
+    from pipeline.postflop.balanced_hands import hand_axes
+
+    # Synthetic attr pool skewed 80/20 Mostly/Always on the qualifier with
+    # every other axis constant: active axis -> even split in the first 8;
+    # inactive -> pool order ships the skew untouched (pre-change parity).
+    def _a(q, i):
+        return {
+            "answer_verb": "fold", "decision_type": "Facing a bet",
+            "strength": "medium", "hero": "BTN", "qualifier": q,
+        }
+
+    pool = [_a("Mostly", i) for i in range(16)] + [
+        _a("Always", 16 + i) for i in range(4)
+    ]
+    on = _core_order(pool, hand_axes(True))
+    first_on = [pool[i]["qualifier"] for i in on[:8]]
+    assert first_on.count("Always") == 4
+    off = _core_order(pool, hand_axes(False))
+    assert off == list(range(20))
+
+
+def test_fully_balanced_gto_batch_reports_qualifier_axis(tmp_path):
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    out = tmp_path / "fh_gto.csv"
+    res = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=4, dry_run=True,
+        fully_balanced=True, variety_seed=3, answer_style="gto",
+    )
+    meta = json.loads(Path(res.meta_path).read_text())
+    axis_keys = [a["axis"] for a in meta["balance_report"]["axes"]]
+    assert "qualifier" in axis_keys
+
+
+def test_fully_balanced_basic_batch_omits_qualifier_axis(tmp_path):
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    out = tmp_path / "fh_basic.csv"
+    res = generate_full_hand_batch(
+        solve=solve, output_path=out, total_hands=4, dry_run=True,
+        fully_balanced=True, variety_seed=3, answer_style="basic",
+    )
+    meta = json.loads(Path(res.meta_path).read_text())
+    axis_keys = [a["axis"] for a in meta["balance_report"]["axes"]]
+    assert "qualifier" not in axis_keys

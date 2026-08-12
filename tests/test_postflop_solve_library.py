@@ -226,6 +226,76 @@ def test_resolve_preflop_summary_never_guesses() -> None:
         )
 
 
+# --- seat-keyed preflop_ranges (Aug 2026, first UTG-vs-SB solve) -------------
+_UTG_SB_3BP_META = {
+    "spot": "UTG_vs_SB_3BP_8max_noante_200bb",
+    "game_format": "8max NLHE",
+    "flop": "AsKd9s",
+    "pot": "3100",
+    "pot_bb": "31.0",
+    "eff_stack": "18500",
+    "eff_stack_bb": "185",
+    "stack_bb": "200",
+    "ante": "0",
+    "rake": "8% cap 2bb",
+    "preflop_line": "UTG open 3bb, SB 3bet 15bb, UTG call",
+    "oop_range": "SB_3bet_raise15_vs_UTG_open_200bb",
+    "ip_range": "UTG_call_vs_SB_3bet_200bb",
+}
+
+
+def test_derive_scenario_reads_utg_vs_sb() -> None:
+    """The first non-BTN/BB geometry: seats must come from the metadata, not
+    any hardcoded BTN/BB default."""
+    sc = derive_scenario(_UTG_SB_3BP_META)
+    assert sc["table_size"] == 8
+    assert sc["ip_position"] == "UTG"
+    assert sc["oop_position"] == "SB"
+    assert sc["game_format"] == "cash"
+
+
+def _make_ranges_db(path: Path, players: dict[str, dict[str, float]]) -> None:
+    con = sqlite3.connect(str(path))
+    con.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("CREATE TABLE hand_index (idx INTEGER, hand TEXT)")
+    con.execute("INSERT INTO hand_index VALUES (0, 'AsAd')")
+    con.execute("CREATE TABLE preflop_ranges (player TEXT, hand TEXT, weight REAL)")
+    for player, hands in players.items():
+        con.executemany(
+            "INSERT INTO preflop_ranges VALUES (?, ?, ?)",
+            [(player, h, w) for h, w in hands.items()],
+        )
+    con.commit()
+    con.close()
+
+
+def test_preflop_weights_for_prefers_real_seat_keys(tmp_path: Path) -> None:
+    """REGRESSION (Aug 2026 UTG-vs-SB intake): the adapter used to query
+    preflop_ranges with literal 'BB'/'BTN'. A v9 export keys by the REAL
+    seats (SB/UTG), which returned two EMPTY ranges and built zero nodes.
+    The seat name must win when present; legacy files fall back."""
+    from pipeline.postflop.adapters.sqlite_db import _Solve
+
+    # v9 style: real seat keys.
+    v9 = tmp_path / "v9.db"
+    _make_ranges_db(v9, {"SB": {"AsKs": 1.0}, "UTG": {"QdQc": 0.5}})
+    con = sqlite3.connect(str(v9))
+    s = _Solve(con)
+    assert s.range_players == {"SB", "UTG"}
+    assert s.preflop_weights_for("SB", "BB") == {"AsKs": 1.0}
+    assert s.preflop_weights_for("UTG", "BTN") == {"QdQc": 0.5}
+    con.close()
+
+    # Legacy style: literal BTN/BB keys whatever the real seats.
+    legacy = tmp_path / "legacy.db"
+    _make_ranges_db(legacy, {"BB": {"7h6h": 0.8}, "BTN": {"AhKh": 1.0}})
+    con = sqlite3.connect(str(legacy))
+    s = _Solve(con)
+    assert s.preflop_weights_for("SB", "BB") == {"7h6h": 0.8}
+    assert s.preflop_weights_for("UTG", "BTN") == {"AhKh": 1.0}
+    con.close()
+
+
 class _MetaOnly:
     """Duck-typed stand-in for the adapter's ``_Solve`` (only ``.meta``)."""
 

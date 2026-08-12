@@ -56,7 +56,7 @@ from pipeline.preflop.spot_sampler import sample_spot  # noqa: E402
 from pipeline.preflop_ranges import parse_monker_rng_file  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEPTHS = (10, 15, 20, 30, 50, 75, 300)
+DEPTHS = (10, 15, 20, 30, 40, 50, 75, 100, 200, 300)
 SEATS_8MAX = ("UTG", "UTG+1", "LJ", "HJ", "CO", "BTN", "SB", "BB")
 
 # Deterministic landmarks from the intake walk (Aug 3 2026). A drifted count
@@ -67,8 +67,11 @@ EXPECTED_NODES: dict[int, int] = {
     15: 3612,
     20: 3534,
     30: 8046,
+    40: 11204,
     50: 12339,
     75: 10291,
+    100: 42943,
+    200: 89434,
     300: 89202,
 }
 
@@ -237,7 +240,7 @@ def audit_token_sizes(pack: PreflopPack) -> None:
         print(f"  {label}: {got!r} (expect {want}) {'OK' if ok else 'FAIL'}")
 
     # 1. Unit proof: SB folds to an open having posted the 0.5bb blind.
-    open_tok = {10: "3", 15: "5", 20: "5", 30: "5", 50: "40034", 75: "40043", 300: "40043"}[depth]
+    open_tok = {10: "3", 15: "5", 20: "5", 30: "5", 40: "40034", 50: "40034", 75: "40043", 100: "40034", 200: "40043", 300: "40043"}[depth]
     check(
         "SB-blind fold (unit = milli-sb; 1.0 sb = 0.5bb)",
         _fold_commit_sb(root / f"{open_tok}.0.0.0.0.0.0.rng"),

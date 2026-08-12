@@ -75,6 +75,7 @@ from pipeline.postflop.validators import (  # noqa: E402
     run_postflop_audit_validators,
     run_postflop_soft_validators,
     soft_validate_equity_vs_data,
+    soft_validate_ev_ranking,
     soft_validate_verdict_vs_answer,
     validate_banned_phrases,
     validate_card_suit_consistency,
@@ -2262,6 +2263,51 @@ def test_validate_hero_hand_name_and_impossible_hands():
     ).is_valid
     # unlisted names are never flagged
     assert validate_hero_hand_name(gen("Your king-high misses."), facts).is_valid
+    # Aug-2026 v9-FULL audit false positives, pinned to the observed prose:
+    # the nut-advantage range-share idiom "two pair or better" is a range
+    # bucket, never hero's hand...
+    assert validate_hero_hand_name(
+        gen("Your range makes two pair or better 36% of the time."), facts
+    ).is_valid
+    assert validate_hero_hand_name(
+        gen("You hold 36% of the strong made hands (two pair or better)."),
+        facts,
+    ).is_valid
+    # ...and a name preceded by "or "/"into " is a hypothetical outdraw list.
+    assert validate_hero_hand_name(
+        gen("Even then you might be running into a straight or two pair."),
+        facts,
+    ).is_valid
+    # ...and a future-improvement statement describes a LATER hand
+    # (observed on the 5-hand rerun: hero holds a set).
+    facts_set = SimpleNamespace(
+        made_hand="set",
+        board=("As", "Kd", "9s"),
+        spot=SimpleNamespace(hero_combo="KhKc"),
+    )
+    assert validate_hero_hand_name(
+        gen("Your hand can also improve to a full house."), facts_set
+    ).is_valid
+    # ...and a NEGATED name teaches the misread rather than committing it
+    # (observed on the Aug-7 panel batch: QQ on A-K-9).
+    facts_qq = SimpleNamespace(
+        made_hand="pocket_pair_below_overcards",
+        board=("As", "Kd", "9s"),
+        spot=SimpleNamespace(hero_combo="QsQd"),
+    )
+    assert validate_hero_hand_name(
+        gen("Your queens are not an overpair on this board."), facts_qq
+    ).is_valid
+    assert not validate_hero_hand_name(
+        gen("You have an overpair here."), facts_qq
+    ).is_valid
+    # The real error class still trips with the idioms present elsewhere.
+    still_bad = validate_hero_hand_name(
+        gen("You have top pair, and your range makes two pair or better "
+            "36% of the time."),
+        facts,
+    )
+    assert not still_bad.is_valid
 
     # impossible-hand check: THREE 9s visible (paired board + hero 9) ->
     # "99" is dead; two visible leaves the last two, still dealable.
@@ -2273,6 +2319,30 @@ def test_validate_hero_hand_name_and_impossible_hands():
     bad = validate_no_impossible_hands(gen("Pairs like 99 keep calling."), facts2)
     assert not bad.is_valid and "99" in bad.error_message
     assert validate_no_impossible_hands(gen("Pairs like 88 keep calling."), facts2).is_valid
+    # Aug-2026 v9-FULL audit false positive: naming an impossible combo in
+    # BLOCKER/REMOVAL context is the blocker fact stated correctly. Pinned
+    # to the observed prose (hero KsKc on As Kd 9s -> villain KK impossible).
+    facts_kk = SimpleNamespace(
+        made_hand="set",
+        board=("As", "Kd", "9s"),
+        spot=SimpleNamespace(hero_combo="KsKc"),
+    )
+    assert validate_no_impossible_hands(
+        gen("You remove about 53% of their value combos (their AK and KK) "
+            "while blocking essentially none of their bluffs."),
+        facts_kk,
+    ).is_valid
+    assert validate_no_impossible_hands(
+        gen("Holding two kings removes roughly half of the value combos "
+            "the Small Blind can have, since AK and KK are far less "
+            "likely now."),
+        facts_kk,
+    ).is_valid
+    # A bare claim that villain HOLDS the impossible hand still trips.
+    bad_kk = validate_no_impossible_hands(
+        gen("The Small Blind shows up with KK here often."), facts_kk
+    )
+    assert not bad_kk.is_valid and "KK" in bad_kk.error_message
     # two 9s visible only: 99 still possible (never flag)
     facts3 = SimpleNamespace(
         made_hand="second_pair",
@@ -2563,3 +2633,69 @@ def test_range_advantage_node_cache_is_transparent() -> None:
     facts_mod._RANGE_ADV_CACHE[id(node)] = (object(), ("bogus",) * 5)
     assert facts_mod.compute_range_advantage(node) == fresh
     facts_mod._RANGE_ADV_CACHE.clear()
+
+
+# --- EV-ranking soft validator (Aug 2026) ------------------------------------
+def test_soft_ev_ranking_flags_wrong_action() -> None:
+    # The row-15 proof case: prose crowns FOLD the higher-EV choice while the
+    # per-action EVs rank Call above Fold (KsJd: Call 1.2 > Raise 0.6 > Fold 0).
+    facts = _facts_for("flop_ip_facing_bet", "KsJd")
+    g = _gen(
+        "Being in position helps a little, which is why this mixes rather "
+        "than being an automatic muck, but with a nut disadvantage and 4.2 "
+        "SPR behind, folding is the higher-EV choice."
+    )
+    warns = soft_validate_ev_ranking(g, facts)
+    assert len(warns) == 1
+    assert "Call" in warns[0] and "fold" in warns[0].lower()
+    # Wired into the soft stack.
+    assert any("EV" in w for w in run_postflop_soft_validators(g, facts))
+
+
+def test_soft_ev_ranking_accepts_correct_claim() -> None:
+    facts = _facts_for("flop_ip_facing_bet", "KsJd")
+    g = _gen("Even out of position, calling is the higher-EV choice here.")
+    assert soft_validate_ev_ranking(g, facts) == []
+    # "highest EV" / "maximizes EV" phrasings on the right action also pass.
+    assert soft_validate_ev_ranking(
+        _gen("Calling simply maximizes EV against this range."), facts
+    ) == []
+
+
+def test_soft_ev_ranking_ignores_near_ties() -> None:
+    # A near-tie (<= 0.05bb) is genuine indifference, never a wrong claim.
+    import dataclasses
+
+    node = SOLVE.nodes["flop_ip_facing_bet"]
+    tie = dataclasses.replace(
+        node, combo_evs={"KsJd": {"Call": 1.0, "Fold": 0.97, "Raise": 0.2}},
+    )
+    facts = extract_facts(sample_spot(tie, "KsJd"), SOLVE)
+    g = _gen("It is very close, but folding is the higher-EV choice.")
+    assert soft_validate_ev_ranking(g, facts) == []
+
+
+def test_soft_ev_ranking_needs_a_named_action() -> None:
+    # No attributed action -> no flag (conservative by design).
+    facts = _facts_for("flop_ip_facing_bet", "KsJd")
+    g = _gen("This line is simply the higher-EV route against their range.")
+    assert soft_validate_ev_ranking(g, facts) == []
+
+
+# --- action_frequencies sums to exactly 100 (Aug 2026) -----------------------
+def test_format_frequencies_largest_remainder_sums_to_100() -> None:
+    from pipeline.postflop.format_writer import _format_frequencies
+
+    # The row-7 proof case shape: naive per-item rounding shipped
+    # "Check: 98%, Bet 10bb: 2%, Bet 23bb: 1%" (sums to 101).
+    cell = _format_frequencies(
+        {"Check": 0.9755, "Bet 10bb": 0.0155, "Bet 23bb": 0.009}
+    )
+    parts = cell.split(", ")
+    pcts = [int(p.rsplit(": ", 1)[1].rstrip("%")) for p in parts]
+    assert sum(pcts) == 100
+    assert parts[0].startswith("Check: ")  # still descending-frequency order
+    # A clean two-way mix stays exact; sub-0.5% actions are still trimmed.
+    assert _format_frequencies({"Fold": 0.53, "Call": 0.47}) == "Fold: 53%, Call: 47%"
+    assert _format_frequencies({"Call": 0.999, "Raise": 0.001}) == "Call: 100%"
+    assert _format_frequencies({}) == ""

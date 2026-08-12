@@ -104,7 +104,11 @@ from pipeline.preflop.node_enumerator import (
     PreflopDecisionNode,
     enumerate_nodes,
 )
-from pipeline.preflop.options import build_options
+from pipeline.preflop.options import (
+    answer_qualifier,
+    build_options,
+    qualifier_axis_active,
+)
 from pipeline.preflop.pack import PreflopPack, pack_allins_realistic
 from pipeline.preflop.batch_cross_check import cross_check_batch
 from pipeline.preflop.sanity_checker import (
@@ -442,6 +446,38 @@ def collect_worthy_spots(
     """
     out: list[tuple[PreflopSpot, PreflopQuestionEvaluation]] = []
     for node in nodes:
+        # VACUOUS-DECISION GATE (Aug 2026, MTT audit): Monker's tree emits
+        # decision nodes for a hero who has ALREADY called all-in (side-pot
+        # formalities carrying meaningless fold/call frequencies) -- 47
+        # shipped short-stack questions asked a player with 0bb behind what
+        # to do. Replay the node's action history through the SAME shared
+        # chip walk the animation uses; a hero with no chips has no
+        # decision, so the whole node is skipped (hand-independent -> one
+        # check per node). Counter: ``spots_skipped_hero_all_in``.
+        if pack is not None:
+            from pipeline.animation import (  # noqa: PLC0415
+                hero_stack_at_preflop_decision,
+            )
+            from pipeline.preflop.format_writer import (  # noqa: PLC0415
+                preflop_animation_actions,
+            )
+
+            try:
+                _hero_behind = hero_stack_at_preflop_decision(
+                    table_size=pack.table_size,
+                    starting_stack_bb=float(pack.stack_depth_bb),
+                    ante_bb=float(getattr(pack, "ante_bb", 0.0) or 0.0),
+                    actions=preflop_animation_actions(node, pack),
+                    hero_seat=node.actor,
+                )
+            except (ValueError, KeyError):
+                _hero_behind = None  # unanimatable node: other gates decide
+            if _hero_behind is not None and _hero_behind <= 0:
+                if counters is not None:
+                    counters["spots_skipped_hero_all_in"] = (
+                        counters.get("spots_skipped_hero_all_in", 0) + 1
+                    )
+                continue
         for spot in enumerate_spots_for_node(node, min_total_weight=min_presence):
             if strip_artifacts:
                 spot = strip_artifact_allins(spot)
@@ -1065,6 +1101,9 @@ def generate_preflop_batch(
     artifact_material_spots_skipped = _collect_counters.get(
         "artifact_material_spots_skipped", 0
     )
+    spots_skipped_hero_all_in = _collect_counters.get(
+        "spots_skipped_hero_all_in", 0
+    )
 
     # 4. Nothing worthy -> empty result.
     if not worthy:
@@ -1096,19 +1135,31 @@ def generate_preflop_batch(
         from pipeline.balanced_select import answer_verb, balanced_order  # noqa: PLC0415
 
         rng.shuffle(worthy)
+        # Always/Mostly qualifier axis (Aug 2026): active only when the
+        # batch's answer style can render GTO-style options (gto/auto) --
+        # with basic labels the axis is omitted so selection is
+        # byte-identical to before. INVARIANT (the user's July-21 rule,
+        # extended): the qualifier derives from the SOLVER's dominant
+        # frequency via answer_qualifier (the exact build_options_gto
+        # prefix rule), NEVER by parsing rendered option text.
+        _qual_active = qualifier_axis_active(answer_style)
         _attrs = [
             {
                 "context": node_action_context(sp.node),
                 "verb": answer_verb(sp.dominant_action),
                 "position": sp.node.actor,
+                "qualifier": answer_qualifier(sp.dominant_frequency),
             }
             for sp, _ev in worthy
         ]
         _axes = [
             ("context", "Situation", 1.0),
             ("verb", "Answer verb", 0.9),
-            ("position", "Hero seat", 0.5),
         ]
+        if _qual_active:
+            # Slotted just below the answer-verb axis's weight.
+            _axes.append(("qualifier", "Always/Mostly", 0.8))
+        _axes.append(("position", "Hero seat", 0.5))
         _order = balanced_order(
             _attrs, _axes,
             spread_keys=[sp.node.node_id for sp, _ev in worthy],
@@ -1577,6 +1628,10 @@ def generate_preflop_batch(
                         "verb": answer_verb(spot.dominant_action),
                         "position": spot.node.actor,
                         "difficulty": _difficulty_band(difficulty.score),
+                        # Solver-frequency-derived, never option text.
+                        "qualifier": answer_qualifier(
+                            spot.dominant_frequency
+                        ),
                     }
                 )
             claim_checks.append(claim_check_json)
@@ -1721,7 +1776,12 @@ def generate_preflop_batch(
             # so an audit couldn't confirm the gates fired from the meta
             # alone). run_settings = inputs; counters = what happened.
             balance_report=(
-                _balance_report_for_meta(_balance_attrs) if balanced else None
+                _balance_report_for_meta(
+                    _balance_attrs,
+                    include_qualifier=qualifier_axis_active(answer_style),
+                )
+                if balanced
+                else None
             ),
             counters={
                 "worthy_spots_available": len(worthy),
@@ -1739,6 +1799,10 @@ def generate_preflop_batch(
                 # strategy mixes the deep pack's AllIn at >= 5% -- silenced
                 # (never asked); trace dust was stripped + renormalised.
                 "artifact_material_spots_skipped": artifact_material_spots_skipped,
+                # Vacuous-decision gate (Aug 2026): nodes where hero was
+                # already all-in before the "decision" (Monker side-pot
+                # formality nodes) -- skipped, never askable.
+                "spots_skipped_hero_all_in": spots_skipped_hero_all_in,
                 "questions_attempted": attempted,
                 "questions_written": written,
                 "soft_flagged_rows": sum(1 for s in row_statuses if s),
@@ -1813,14 +1877,25 @@ def _prompt_record(spot: PreflopSpot, parts: dict[str, object]) -> dict[str, obj
 
 def _balance_report_for_meta(
     attrs: list[dict[str, str]],
+    *,
+    include_qualifier: bool = False,
 ) -> dict[str, object]:
     """Achieved-vs-target balance report over the committed rows' axes
-    (context / verb / position / difficulty band), via the shared leaf."""
+    (context / verb / position / difficulty band, plus the Always/Mostly
+    qualifier when the answer style renders it), via the shared leaf.
+
+    INVARIANT: the qualifier axis value is derived from solver frequency
+    (pipeline.preflop.options.answer_qualifier), never from option text.
+    """
     from pipeline.balanced_select import balance_report  # noqa: PLC0415
 
     axes = [
         ("context", "Situation", 1.0),
         ("verb", "Answer verb", 0.9),
+    ]
+    if include_qualifier:
+        axes.append(("qualifier", "Always/Mostly", 0.8))
+    axes += [
         ("position", "Hero seat", 0.5),
         ("difficulty", "Difficulty band", 1.0),
     ]

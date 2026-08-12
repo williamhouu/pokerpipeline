@@ -126,3 +126,22 @@ def test_discover_and_range_at(tmp_path):
 def test_discover_raises_when_empty(tmp_path):
     with pytest.raises(FileNotFoundError, match="no .rng files"):
         discover_plo_pack(tmp_path)
+
+
+def test_cash_depth_packs_match_by_dir_signature(tmp_path):
+    # The Aug-2026 cash depth packs (chart-export working data): each
+    # stack-suffixed signature must win over the bare Omaha/6-way 100bb
+    # fallback (registry ORDER MATTERS -- see KNOWN_PLO_PACKS).
+    for depth in (30, 40, 50, 75, 150, 200):
+        base = tmp_path / f"plo{depth}"
+        nested = base / "ranges" / "Omaha" / "6-way" / f"{depth}bb[5p-1bb]"
+        nested.mkdir(parents=True)
+        _write_rng(nested / "40100.rng", {0: (1.0, 3.0)})
+        pack = discover_plo_pack(base)
+        assert pack.pack_id == f"plo_6max_{depth}bb"
+        assert pack.spec.stack_bb == float(depth)
+        assert pack.spec.table_size == 6
+        assert pack.spec.game_format == "cash"
+        assert pack.spec.ev_in_bb is False  # milli-SMALL-blind EV units
+        assert pack.spec.venue_neutral is True
+        assert pack.spec.default_base == f"plo{depth}_ranges"

@@ -632,3 +632,168 @@ def test_preflop_entry_batch_blank_hand_id(tmp_path: Path) -> None:
         assert r["Hand Stage"] == "Preflop"
         # worthiness-gated to a real defend (mixed call frequency).
         assert r["Correct Answer"] in ("Call", "Mostly Call", "Always Call")
+
+
+# --- fold-truncation worthiness re-gate (Aug 2026) ---------------------------
+def _with_turn_fold_mix(fold_freq: float):
+    """The connected fixture with the TURN facing-bet node's hero mix set to
+    ``{Fold: fold_freq, Call: 1 - fold_freq}`` -- so a river-seeded hand
+    fold-truncates at the turn with a chosen ender frequency."""
+    import dataclasses
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    n5 = solve.nodes["r:0:c:b180:c:2h:c:b635"]
+    replaced = dataclasses.replace(
+        n5, strategy={"Jh9c": {"Fold": fold_freq, "Call": round(1 - fold_freq, 4)}},
+    )
+    return dataclasses.replace(solve, nodes={**solve.nodes, n5.node_id: replaced})
+
+
+def test_out_of_window_fold_truncation_drops_the_hand() -> None:
+    """The row-15 proof case: a 53/47 mid-line fold promoted to the ender
+    sits BELOW even the independent truncation floor (0.55, the brief's
+    original) -- the whole hand is dropped (atomicity, like no-flop-starts)
+    and the counter says why. The Aug 2026 softening changed the FLOOR
+    (window min -> 0.55), not the drop semantics: a coin-flip ender is
+    still an unaskable question."""
+    from pipeline.postflop.spot_sampler import sample_spot
+
+    solve = _with_turn_fold_mix(0.53)
+    seed = [sample_spot(
+        solve.nodes["r:0:c:b180:c:2h:c:b635:c:Kd:c:b1535"], "Jh9c",
+    )]
+    counters: dict = {}
+    hands = assemble_hands(
+        solve, seeds=seed, heroes=("BB",),
+        min_frequency=0.65, max_frequency=0.99, counters=counters,
+        truncation_min_frequency=0.55,
+    )
+    assert hands == []
+    assert counters["hands_dropped_truncated_unworthy"] == 1
+    assert "hands_kept_truncated_below_window" not in counters
+
+
+def test_below_window_above_floor_truncation_ships_the_ender() -> None:
+    """Aug 2026 softening: a 60/40 lean-fold ender is BELOW the batch window
+    (0.65) but AT/ABOVE the independent 0.55 truncation floor -- the hand
+    ships, ending on the (asked) truncated fold leg, and the telemetry
+    counter records that only the softened floor kept it."""
+    from pipeline.postflop.spot_sampler import sample_spot
+
+    solve = _with_turn_fold_mix(0.60)
+    seed = [sample_spot(
+        solve.nodes["r:0:c:b180:c:2h:c:b635:c:Kd:c:b1535"], "Jh9c",
+    )]
+    counters: dict = {}
+    hands = assemble_hands(
+        solve, seeds=seed, heroes=("BB",),
+        min_frequency=0.65, max_frequency=0.99, counters=counters,
+        truncation_min_frequency=0.55,
+    )
+    assert len(hands) == 1
+    assert hands[0].ends_with_fold
+    assert hands[0].legs[-1].node_id == "r:0:c:b180:c:2h:c:b635"
+    assert hands[0].legs[-1].terminal_fold  # the ender IS asked, as a question
+    assert counters["hands_kept_truncated_below_window"] == 1
+    assert "hands_dropped_truncated_unworthy" not in counters
+
+
+def test_legacy_none_floor_keeps_strict_window_regate() -> None:
+    """Direct callers that do not pass truncation_min_frequency keep the
+    strict legacy re-gate: the floor falls back to min_frequency, so the
+    same 60/40 ender drops."""
+    from pipeline.postflop.spot_sampler import sample_spot
+
+    solve = _with_turn_fold_mix(0.60)
+    seed = [sample_spot(
+        solve.nodes["r:0:c:b180:c:2h:c:b635:c:Kd:c:b1535"], "Jh9c",
+    )]
+    counters: dict = {}
+    hands = assemble_hands(
+        solve, seeds=seed, heroes=("BB",),
+        min_frequency=0.65, max_frequency=0.99, counters=counters,
+    )
+    assert hands == []
+    assert counters["hands_dropped_truncated_unworthy"] == 1
+
+
+def test_in_window_fold_truncation_keeps_the_hand() -> None:
+    """A 74/26 fold truncation IS in the window: the hand ships, ending on
+    the truncated turn fold leg."""
+    from pipeline.postflop.spot_sampler import sample_spot
+
+    solve = _with_turn_fold_mix(0.74)
+    seed = [sample_spot(
+        solve.nodes["r:0:c:b180:c:2h:c:b635:c:Kd:c:b1535"], "Jh9c",
+    )]
+    counters: dict = {}
+    hands = assemble_hands(
+        solve, seeds=seed, heroes=("BB",),
+        min_frequency=0.65, max_frequency=0.99, counters=counters,
+    )
+    assert len(hands) == 1
+    assert hands[0].ends_with_fold
+    assert hands[0].legs[-1].node_id == "r:0:c:b180:c:2h:c:b635"
+    assert "hands_dropped_truncated_unworthy" not in counters
+
+
+# --- (final node, hand class) suit-twin dedupe (Aug 2026) --------------------
+def _twinned_solve():
+    """The connected fixture with a SUIT TWIN (Jd9c) of the hero combo (Jh9c)
+    playing the identical mix at every BB node -- the class-duplicate shape
+    the AUDIT UTG_SB batch shipped three of (QsQc / QsQh / QsQd)."""
+    import dataclasses
+
+    solve = btn_vs_bb_full_hand_2cJs7s()
+    twin = "Jd9c"
+    nodes = {}
+    for nid, n in solve.nodes.items():
+        if n.actor == "BB" and "Jh9c" in n.strategy:
+            nodes[nid] = dataclasses.replace(
+                n,
+                strategy={**n.strategy, twin: dict(n.strategy["Jh9c"])},
+                hero_range={**n.hero_range, twin: 1.0},
+            )
+        else:
+            nodes[nid] = n
+    entry = dict(solve.preflop_entry_ranges)
+    entry["BB"] = {**entry["BB"], twin: entry["BB"]["Jh9c"]}
+    return dataclasses.replace(solve, nodes=nodes, preflop_entry_ranges=entry)
+
+
+def test_hand_class_suit_twins_collapse_to_one() -> None:
+    from pipeline.postflop.play_through import dedupe_hand_class_twins
+    from pipeline.postflop.spot_sampler import sample_spot
+
+    solve = _twinned_solve()
+    deep = solve.nodes["r:0:c:b180:c:2h:c:b635:c:Kd:c:b1535"]
+    seeds = [sample_spot(deep, "Jh9c"), sample_spot(deep, "Jd9c")]
+    hands = assemble_hands(solve, seeds=seeds, heroes=("BB",))
+    assert len(hands) == 2  # two suit twins of one class on the same line
+    counters: dict = {}
+    deduped = dedupe_hand_class_twins(hands, counters=counters)
+    assert len(deduped) == 1  # first wins (pool order preserved)
+    assert deduped[0].hero_combo == hands[0].hero_combo
+    assert counters["hands_dropped_class_twins"] == 1
+
+
+def test_full_hand_batch_wires_class_twin_dedupe(tmp_path: Path) -> None:
+    """Batch-level wiring: the twinned solve's batch dedupes before any
+    selector and reports the drop in meta.counters."""
+    import json
+
+    out = tmp_path / "twins.csv"
+    generate_full_hand_batch(
+        solve=_twinned_solve(), output_path=out, total_hands=10, dry_run=True,
+    )
+    meta = json.loads(
+        out.with_name(out.stem + ".meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["counters"]["hands_dropped_class_twins"] >= 1
+    # At most ONE J9-class hand ships (the twins collapsed in the pool).
+    from pipeline.postflop.sizing_batch import hand_class_key
+
+    rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+    combos = {r["hand_id"].rsplit("_", 2)[-2] for r in rows}
+    j9 = [c for c in combos if hand_class_key(c) == "J9o"]
+    assert len(j9) <= 1

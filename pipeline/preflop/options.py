@@ -472,6 +472,32 @@ def build_options_auto(
     return build_options_gto(facts, pack=pack)
 
 
+# --- the Always/Mostly qualifier, as a reusable pure rule --------------------
+def answer_qualifier(dominant_freq: float) -> str:
+    """The ``Always``/``Mostly`` qualifier the GTO option path renders for a
+    dominant action at this solver frequency.
+
+    SINGLE SOURCE OF TRUTH: delegates to
+    :func:`pipeline.explanation_generator.frequency_to_verb_prefix` -- the
+    exact mapping :func:`build_options_gto` applies to the correct answer --
+    so a consumer (e.g. the 🎛️ fully-balanced qualifier axis) can never
+    drift from the rendered option prefix. Returns ``""`` only for a
+    dominant below 5% (never a worthy spot).
+    """
+    return frequency_to_verb_prefix(dominant_freq)
+
+
+def qualifier_axis_active(style: str) -> bool:
+    """True when this answer style can render Always/Mostly qualifiers.
+
+    ``gto`` always renders them; ``auto`` may (it falls to the GTO spectrum
+    on mixed spots). ``basic`` never does, so the balanced qualifier axis
+    must stay OFF there -- including it would change basic-style selection
+    for a distinction the player can never see.
+    """
+    return style in ("gto", "auto")
+
+
 # --- the dispatcher ---------------------------------------------------------
 def build_options(
     facts: PreflopFacts,
@@ -507,6 +533,7 @@ def build_options(
 __all__ = [
     "ANSWER_STYLES",
     "ANSWER_STYLE_FROM_RADIO_LABEL",
+    "answer_qualifier",
     "build_options",
     "build_options_auto",
     "build_options_basic",
@@ -514,4 +541,5 @@ __all__ = [
     "canonicalize_action_label",
     "canonicalize_strategy",
     "is_check_spot",
+    "qualifier_axis_active",
 ]

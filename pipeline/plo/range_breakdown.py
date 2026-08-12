@@ -37,8 +37,11 @@ from pipeline.plo.fact_extractor import villain_range_stem
 from pipeline.plo.hand_model import classify_plo_hand
 from pipeline.plo.hand_order import cards_at, combo_multiplicity
 from pipeline.plo.options import (
+    _action_aggression,
     _hero_raise_level,
     canonicalize_action_label,
+    canonicalize_strategy,
+    integer_percentages,
     is_check_spot,
 )
 from pipeline.plo.pack import PloActionType, range_at
@@ -282,20 +285,88 @@ def _pct(x: float) -> str:
     return f"{x:.0f}%"
 
 
+# Third-person verb for a canonical action label ("Call" -> "calls").
+_ACTION_VERB = {
+    "Fold": "folds", "Call": "calls", "Check": "checks", "Raise": "raises",
+    "3-bet": "3-bets", "4-bet": "4-bets", "5-bet": "5-bets",
+    "All-in": "jams",
+}
+
+
+def _verb(label: str) -> str:
+    return _ACTION_VERB.get(label, label.lower())
+
+
 def _lead_actions(bucket: _Bucket) -> str:
     """"raises 26%, folds 74%" for a hero bucket's action split."""
     if not bucket.actions:
         return ""
-    verbs = {
-        "Fold": "folds", "Call": "calls", "Check": "checks", "Raise": "raises",
-        "3-bet": "3-bets", "4-bet": "4-bets", "5-bet": "5-bets",
-        "All-in": "jams",
-    }
     parts = [
-        f"{verbs.get(lbl, lbl.lower())} {pct}%"
+        f"{_verb(lbl)} {pct}%"
         for lbl, pct in sorted(bucket.actions.items(), key=lambda kv: -kv[1])
     ]
     return ", ".join(parts)
+
+
+def hand_action_percentages(facts: PloFacts) -> dict[str, int]:
+    """This exact hand's own action mix as house integer percents.
+
+    Canonical labels ("3-bet", never "Raise 100%") via the SAME
+    :func:`pipeline.plo.options.integer_percentages` allocation as the CSV
+    ``action_frequencies`` column and the SOLVER DATA ``action_strategy``
+    block, so the breakdown can never quote a percentage the question's
+    other surfaces disagree with. ``{}`` when the spot carries no strategy.
+    """
+    strategy = canonicalize_strategy(facts)
+    if not strategy or sum(strategy.values()) <= 0:
+        return {}
+    return integer_percentages(strategy)
+
+
+def _hand_reconciliation(
+    hand_actions: dict[str, int] | None,
+    hero_bucket: _Bucket | None,
+) -> str:
+    """The sentence tying the SHAPE bucket's split back to this exact hand.
+
+    The bucket line states how the whole shape family plays ("a shape this
+    range folds 67%, calls 21%, 3-bets 12% here") while the question shows the
+    hand's OWN answer (Call 94%) -- read side by side those look contradictory,
+    so the summary must always end by reconciling to the hand's own mix:
+
+    * agreement (hand's dominant action == the bucket's plurality action):
+      a plain confirmation, "Your exact hand calls 94%.";
+    * hand STRONGER than its bucket (more aggressive dominant action):
+      "Overall this shape folds 67% here, but yours is one of the stronger
+      hands in the shape: this exact hand calls 94%.";
+    * hand WEAKER than its bucket (less aggressive dominant action):
+      "Overall this shape calls 60% here, but this exact combination is one
+      of the weaker ones in the shape: it folds 88%."
+
+    Returns "" when the hand has no strategy to state (never invents one);
+    leading space included so callers can append verbatim.
+    """
+    if not hand_actions:
+        return ""
+    hand_label = max(hand_actions, key=hand_actions.__getitem__)
+    hand_pct = hand_actions[hand_label]
+    plain = f" Your exact hand {_verb(hand_label)} {hand_pct}%."
+    if hero_bucket is None or not hero_bucket.actions:
+        return plain
+    bucket_label = max(hero_bucket.actions, key=hero_bucket.actions.__getitem__)
+    bucket_pct = hero_bucket.actions[bucket_label]
+    if bucket_label == hand_label:
+        return plain
+    lead = f" Overall this shape {_verb(bucket_label)} {bucket_pct}% here, but "
+    if _action_aggression(hand_label) > _action_aggression(bucket_label):
+        return (
+            lead + "yours is one of the stronger hands in the shape: "
+            f"this exact hand {_verb(hand_label)} {hand_pct}%."
+        )
+    return (
+        lead + "this exact combination is one of the weaker ones in the "
+        f"shape: it {_verb(hand_label)} {hand_pct}%."
+    )
 
 
 def _shape_phrase(buckets: list[_Bucket], joiner: str) -> str:
@@ -307,20 +378,31 @@ def _shape_phrase(buckets: list[_Bucket], joiner: str) -> str:
     return shape
 
 
-def _hero_copy(buckets: list[_Bucket], hero_cat: str, is_open: bool) -> str:
+def _hero_copy(
+    buckets: list[_Bucket],
+    hero_cat: str,
+    is_open: bool,
+    hand_actions: dict[str, int] | None = None,
+) -> str:
     """One sentence on hero's range shape + where hero's own hand sits in it.
 
     Hero's seat is deliberately omitted -- the question already states it, and
     naming it here would just repeat it.
+
+    INVARIANT (Aug 2026, live user confusion): whenever ``hand_actions`` is
+    known the summary ENDS with :func:`_hand_reconciliation` -- the bucket's
+    shape-family split alone reads as contradicting the question's own answer
+    ("the shape folds 67%" next to "Mostly Call 94%").
     """
+    hero_bucket = next((b for b in buckets if b.category == hero_cat), None)
+    reconcile = _hand_reconciliation(hand_actions, hero_bucket)
     if not buckets:
         return (
             f"Your hand is {hero_cat.lower()}. There is not enough of a range "
-            "at this spot to break it down by shape."
+            f"at this spot to break it down by shape.{reconcile}"
         )
     lead = "Your opening range is " if is_open else "Your continuing range is "
     shape = _shape_phrase(buckets, " and ")
-    hero_bucket = next((b for b in buckets if b.category == hero_cat), None)
     if hero_bucket is not None and hero_bucket.actions:
         placement = (
             f" Your hand is {hero_cat.lower()}, a shape this range "
@@ -333,7 +415,7 @@ def _hero_copy(buckets: list[_Bucket], hero_cat: str, is_open: bool) -> str:
         )
     else:
         placement = f" Your hand is {hero_cat.lower()}, a rare shape in this range."
-    return f"{lead}{shape}.{placement}"
+    return f"{lead}{shape}.{placement}{reconcile}"
 
 
 _ROLE_WORD = {
@@ -368,9 +450,20 @@ def build_range_breakdown(facts: PloFacts, pack: PloPack) -> dict[str, object]:
 
         {"version": 1,
          "hero": {"seat","position","role":"decision","hand_category",
-                  "buckets":[{"category","pct","actions"?}...],"summary"},
+                  "buckets":[{"category","pct","actions"?}...],
+                  "hand_actions"?: {"Call": 94, "3-bet": 6, "Fold": 0},
+                  "summary"},
          "villains": [{"seat","position","role","buckets":[...],"summary"}...],
          "copy": "<one-line range read relative to hero's hand>"}
+
+    ``hand_actions`` (Aug 2026) is THIS EXACT HAND's own action mix -- house
+    integer percents on canonical labels, the same
+    :func:`pipeline.plo.options.integer_percentages` allocation as the
+    ``action_frequencies`` column -- so the app can render the
+    bucket-vs-hand reconciliation natively (the bucket ``actions`` split is
+    the whole SHAPE family; users read the two as contradictory without it).
+    Present whenever the spot carries a strategy; omitted otherwise. The hero
+    ``summary`` and the top-level ``copy`` also state it in prose.
 
     Deterministic and total: an open spot yields an empty ``villains`` list; an
     unresolvable villain node is dropped (never a false summary); a hero hand
@@ -382,14 +475,17 @@ def build_range_breakdown(facts: PloFacts, pack: PloPack) -> dict[str, object]:
     is_open = not villains_meta and not node.history_before
 
     hero_buckets, hero_cat = _hero_buckets(facts)
+    hand_actions = hand_action_percentages(facts)
     hero: dict[str, object] = {
         "seat": node.actor,
         "position": display_seat(node.actor, table_size=table_size),
         "role": "decision",
         "hand_category": hero_cat,
         "buckets": [_bucket_json(b) for b in hero_buckets],
-        "summary": _hero_copy(hero_buckets, hero_cat, is_open),
+        "summary": _hero_copy(hero_buckets, hero_cat, is_open, hand_actions),
     }
+    if hand_actions:
+        hero["hand_actions"] = hand_actions
 
     villains: list[dict[str, object]] = []
     for seat, idx, action in villains_meta:

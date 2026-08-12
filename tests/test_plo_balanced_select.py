@@ -147,3 +147,77 @@ def test_empty_pool_is_safe():
     assert report["selected"] == 0 and report["pool"] == 0
     lines = format_balance_report(report)
     assert len(lines) == 5  # one per axis, no crash on an empty pool
+
+
+# --- Always/Mostly qualifier axis (Aug 2026, user ask) ------------------------
+# 44% Always / 56% Mostly overall with strong per-verb skews let players
+# meta-game the prefix; the axis evens it out. RULE pinned here: the
+# qualifier value comes from the SOLVER's dominant-action frequency
+# (pipeline.plo.options.answer_qualifier), never from option text, and the
+# axis is only active for GTO-capable answer styles.
+
+def _qattrs(qualifier: str, i: int) -> BalanceAttrs:
+    """All non-qualifier axes constant, distinct node ids (no spread ties)."""
+    return BalanceAttrs(
+        difficulty_band="Easy", action_context="Opening", answer_verb="fold",
+        position="early", hand_shape="unpaired rainbow", node_id=f"n{i}",
+        qualifier=qualifier,
+    )
+
+
+def test_balance_axes_qualifier_slots_below_answer_verb():
+    from pipeline.plo.balanced_select import (
+        BALANCE_AXES,
+        QUALIFIER_AXIS,
+        balance_axes,
+    )
+
+    assert balance_axes(False) is BALANCE_AXES  # inactive = untouched schema
+    active = balance_axes(True)
+    keys = [k for k, _l, _w in active]
+    assert keys == [
+        "difficulty_band", "action_context", "answer_verb",
+        "qualifier", "position", "hand_shape",
+    ]
+    weights = {k: w for k, _l, w in active}
+    # Slotted between answer verb (0.80) and position (0.50).
+    assert weights["answer_verb"] > weights["qualifier"] > weights["position"]
+    assert QUALIFIER_AXIS == ("qualifier", "Always/Mostly", 0.70)
+
+
+def test_qualifier_axis_flattens_a_skewed_pool_when_active():
+    # Pool skewed 80/20 Mostly/Always; a raw front-of-pool draw of 8 would be
+    # 8 Mostly. With the axis active the pick alternates to an even 4/4.
+    pool = [_qattrs("Mostly", i) for i in range(16)] + [
+        _qattrs("Always", 16 + i) for i in range(4)
+    ]
+    order = balanced_order(pool, 8, include_qualifier=True)
+    first = [pool[i].qualifier for i in order[:8]]
+    assert first.count("Always") == 4
+    assert first.count("Mostly") == 4
+
+
+def test_qualifier_axis_inactive_is_byte_identical_to_before():
+    # Same skewed pool, axis OFF (basic answer style): the qualifier field is
+    # carried but IGNORED, so with every active axis constant the ordering is
+    # exactly the pool order -- the pre-change behaviour.
+    pool = [_qattrs("Mostly", i) for i in range(16)] + [
+        _qattrs("Always", 16 + i) for i in range(4)
+    ]
+    order = balanced_order(pool, 8, include_qualifier=False)
+    assert order == list(range(20))
+    first = [pool[i].qualifier for i in order[:8]]
+    assert first.count("Always") == 0  # the skew ships untouched
+
+
+def test_balance_report_includes_qualifier_axis_only_when_active():
+    pool = [_qattrs("Mostly", i) for i in range(3)] + [_qattrs("Always", 3)]
+    on = balance_report(pool[:2], pool, include_qualifier=True)
+    off = balance_report(pool[:2], pool, include_qualifier=False)
+    assert "qualifier" in [ax["axis"] for ax in on["axes"]]
+    assert "qualifier" not in [ax["axis"] for ax in off["axes"]]
+    # The generic done-panel renderer picks the axis up with no extra code.
+    line = next(
+        l for l in format_balance_report(on) if l.startswith("Always/Mostly")
+    )
+    assert "Mostly" in line

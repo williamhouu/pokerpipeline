@@ -237,6 +237,26 @@ PLO_PACK_9MAX_100BB = PloPackSpec(
     default_base="plo9_ranges",
 )
 
+# 9-max 60bb cash depth (Aug 2026): the 100bb 9-max pack's sibling export at
+# 60bb effective -- same grammar (bare 0/1/2/3 tokens, 2 = the pot raise),
+# same NLHE-convention seats, same milli-SMALL-blind EV units (verified from
+# the files' own fold bookkeeping at intake), same 5%/2bb rake. Chart-export
+# working data like the 6-max cash depth packs: audited via
+# scripts/audit_plo9_pack.py --pack-dir plo9_60_ranges --stack-bb 60, then
+# the extraction dir is deleted after the chart export. Its stack-suffixed
+# dir_signature must precede the bare "Omaha/9-way" 100bb spec in
+# KNOWN_PLO_PACKS (ORDER MATTERS).
+PLO_PACK_9MAX_60BB = PloPackSpec(
+    pack_id="plo_9max_60bb",
+    display_label="PLO 9-max · 60bb · rake 5%/2bb",
+    seats=SEATS_9MAX,
+    table_size=9,
+    stack_bb=60.0,
+    rake_note="5% up to 2bb",
+    dir_signature="Omaha/9-way/60bb[5p-2bb]",
+    default_base="plo9_60_ranges",
+)
+
 # Short-stack 6-max packs (July 2026): same provider/grammar/rake as the 100bb
 # 6-max pack, but shallow trees for short-stack (tournament-flavoured) play.
 # Their dir_signatures include the STACK folder so a 6-way root resolves to the
@@ -268,6 +288,38 @@ PLO_PACK_6MAX_20BB = PloPackSpec(
     dir_signature="Omaha/6-way/20bb[5p-1bb]",
     default_base="plo20_ranges",
     venue_neutral=True,
+)
+
+# Cash DEPTH packs (Aug 2026): same provider/grammar/rake as the 100bb 6-max
+# pack at six other stack depths -- TEMPORARY chart-export working data (the
+# team generates no questions from them; the extraction dirs are deleted after
+# the chart export). Same milli-SMALL-blind EV units as every 6-max cash pack,
+# verified per extracted depth by scripts/audit_plo6_pack.py section [4b]
+# (SB open-fold EV -1000 milli-sb, BB fold-vs-open EV -2000 milli-sb -- the
+# files' own fold bookkeeping). Depths 30/50/75 are extracted + audited;
+# 150/200bb are registered ahead of extraction (disk-limited -- AUDIT before
+# any use) and the 40bb archive is truncated (pending re-download + audit).
+def _cash_depth_spec(stack: float) -> PloPackSpec:
+    return PloPackSpec(
+        pack_id=f"plo_6max_{stack:g}bb",
+        display_label=f"PLO 6-max · {stack:g}bb · rake 5%/1bb",
+        seats=SEATS,
+        table_size=6,
+        stack_bb=stack,
+        rake_note="5% up to 1bb",
+        dir_signature=f"Omaha/6-way/{stack:g}bb[5p-1bb]",
+        default_base=f"plo{stack:g}_ranges",
+        venue_neutral=True,
+    )
+
+
+PLO_CASH_DEPTH_PACKS: tuple[PloPackSpec, ...] = (
+    _cash_depth_spec(30),
+    _cash_depth_spec(40),
+    _cash_depth_spec(50),
+    _cash_depth_spec(75),
+    _cash_depth_spec(150),
+    _cash_depth_spec(200),
 )
 
 # MTT bb-ante 6-max packs (July 2026): the "PLO MTT (BB ANTE) 3.5x Open"
@@ -313,10 +365,17 @@ PLO_MTT_PACKS: tuple[PloPackSpec, ...] = (
 #: is a prefix of another's (the bare ``Omaha/6-way`` 100bb spec) must come
 #: LAST so the more-specific stack signatures match first in _spec_for_root.
 KNOWN_PLO_PACKS: tuple[PloPackSpec, ...] = (
+    # INVARIANT: every stack-suffixed 6-way signature (12/20bb, the cash
+    # depth packs, the MTT bb-ante packs) must precede PLO_PACK_6MAX_100BB,
+    # whose bare "Omaha/6-way" signature would otherwise shadow them; the
+    # stack-suffixed 9-way signature (60bb) must likewise precede
+    # PLO_PACK_9MAX_100BB, whose bare "Omaha/9-way" would shadow it.
     PLO_PACK_6MAX_12BB,
     PLO_PACK_6MAX_20BB,
+    *PLO_CASH_DEPTH_PACKS,
     *PLO_MTT_PACKS,
     PLO_PACK_6MAX_100BB,
+    PLO_PACK_9MAX_60BB,
     PLO_PACK_9MAX_100BB,
 )
 

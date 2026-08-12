@@ -52,6 +52,19 @@ from pipeline.preflop.pack import PreflopPack
 # When a token isn't here, `_raise_size_bb` falls back to a multiplicative
 # heuristic so generation never crashes — but rare tokens in production
 # output will read approximately rather than precisely.
+#
+# Aug 2026: the pack's last eight unregistered (token, level) combos —
+# 81/99/165/195 at 3-bet level, 57/75/85/105 at 4-bet level — are now
+# registered with sizes derived by analogy to the registered anchors
+# (e.g. 77%→8 / 79%→9 with one caller ⇒ 81% with two callers →10; every
+# registered 4-bet over a ~10bb 3-bet is 22). The pack's % tokens do NOT
+# follow a single pot-relative formula (the Monker rule would put the
+# 162% squeeze at ~16bb where 12bb is registered and solve-anchored), so
+# analogy to neighbors is the only derivation consistent with the sizes
+# the postflop solves were built on. Provisional pending Ryan's
+# confirmation of the PioViewer chip amounts — see the sizing-convention
+# section of docs/ryan_range_pack_index.md. Every combo in the pack is
+# now registered; the fallback below only serves future packs.
 _RYAN_PACK_RAISE_SIZES_BB: dict[tuple[float, int], float] = {
     # OPENS
     (60.0, 1): 2.5,  # UTG/HJ/CO/BTN
@@ -59,18 +72,26 @@ _RYAN_PACK_RAISE_SIZES_BB: dict[tuple[float, int], float] = {
     # 3-BETS
     (77.0, 2): 8.0,  # HJ/CO/BTN 3-bet vs prior open
     (79.0, 2): 9.0,  # 3-bet with a caller between opener and 3-bettor
+    (81.0, 2): 10.0,  # BTN 3-bet with TWO callers behind the opener
+    (99.0, 2): 9.0,  # BB 3-bet (IP) vs SB's 3bb BvB open -- 3x the open
     (150.0, 2): 10.0,  # SB 3-bet vs BTN open
     (155.0, 2): 10.0,  # BB 3-bet vs UTG open
     (182.0, 2): 12.0,  # BB 3-bet vs HJ/CO/BTN open
     # SQUEEZES (a 3-bet after an open + at least one caller)
-    (85.0, 2): 9.0,  # SB squeeze after open + call
-    (162.0, 2): 12.0,  # BB squeeze after open + 1 call
+    (85.0, 2): 9.0,  # not observed in the pack (85% only occurs at level 3)
+    (162.0, 2): 12.0,  # SB squeeze after open + 1 call
+    (165.0, 2): 13.0,  # SB squeeze after open + 2-3 calls (162% + one caller)
+    (195.0, 2): 12.0,  # BB squeeze after open + 1 call (one caller under 198%)
     (198.0, 2): 13.0,  # BB squeeze after open + multi calls
     # 4-BETS
     (49.0, 3): 22.0,  # UTG 4-bet over BB's 3-bet
     (50.0, 3): 25.0,  # HJ/CO/BTN 4-bet over 3-bet
     (54.0, 3): 22.0,  # BB 4-bet over SB 3-bet (in 3-way after BTN open)
+    (57.0, 3): 22.0,  # opener's 4-bet over SB's 10bb 3-bet after BB folds
+    (75.0, 3): 22.0,  # BB cold 4-bet over an 8-10bb 3-bet, opener still live
+    (85.0, 3): 22.0,  # SB cold 4-bet over a 3-bet / over BB's 12bb squeeze
     (95.0, 3): 28.0,  # CO 4-bet over BTN 3-bet
+    (105.0, 3): 22.0,  # SB BvB 4-bet over BB's 9bb 3-bet
 }
 
 

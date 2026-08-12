@@ -190,7 +190,12 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         # packs + the postflop/PLO 0.5bb display rounding). A no-op if its
         # lookup-table sizes are already clean.
         size_round_bb=0.5,
-        description="Ryan's 6-max 100bb 2.5x Open pack, PioViewer format.",
+        # The rake <pct>%/<cap>bb phrase is DATA: chart_export.rake_label
+        # parses the cap from it (same pattern as the Monker 6-max packs).
+        description=(
+            "Ryan's 6-max 100bb 2.5x Open pack, PioViewer format, "
+            "rake 4%/0.3bb cap."
+        ),
     ),
     # The 9-max Monker pack lives in its own gitignored sibling dir (where
     # the June-2026 extraction was verified), not under ranges/ -- the
@@ -232,6 +237,37 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
             "NLHE 6-max 20bb Monker pack -- min-raise (2bb) opens, "
             "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
         ),
+    ),
+    # The rest of the same vendor ladder (Aug 5 2026 intake): 40/50bb keep
+    # the `5` min-raise open; 70bb+ open with the `40060` pot-relative token
+    # (resolves 1 + 0.60 x 2.5 = 2.5bb, no ante in cash).
+    *(
+        PreflopPackSignature(
+            pack_id=f"monker_nlhe_6max_{_d}bb",
+            rake_pct=0.05,
+            relative_pack_root=(
+                f"../nlhe6_ranges/ranges/Hold'em/6-way/{_d}bb(5p-0.5bb)"
+            ),
+            grammar_name="monker_nlhe",
+            table_size=6,
+            stack_depth_bb=_d,
+            open_size_bb=(2.0 if _d in (40, 50) else 2.5),
+            sb_to_bb_ratio=0.5,
+            file_glob="*.rng",
+            size_round_bb=0.5,
+            ev_units_per_bb=2000.0,
+            # 50bb only: the BvB iso over the SB limp is the fixed token `15`
+            # = raise-to 3bb, EV-anchored via 0.0.0.0.1.15.40125.0.rng (the
+            # BB folding there is out exactly 6.0 sb). Other depths use the
+            # built-in `14` (<=40bb) or pot-relative `40100` (>=70bb).
+            fixed_raise_tokens_bb=((("15", 3.0),) if _d == 50 else None),
+            description=(
+                f"NLHE 6-max {_d}bb Monker pack -- "
+                f"{'min-raise (2bb)' if _d in (40, 50) else '2.5bb'} opens, "
+                "rake 5%/0.5bb cap (see docs/nlhe6_pack_notes.md)."
+            ),
+        )
+        for _d in (40, 50, 70, 100, 150, 200)
     ),
     # 8-max LIVE cash packs (100/200/300bb), each materialised from a flat
     # SQLite solve by scripts/convert_preflop_db_to_pack.py into bb-native
@@ -466,6 +502,23 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         description="NLH MTT 8-max 30bb (BB ante 1bb) Monker pack -- 2bb opens.",
     ),
     PreflopPackSignature(
+        pack_id="monker_mtt8_40bb",
+        relative_pack_root="../mtt8_40bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=40,
+        # Same `40034` open token as the 50bb pack: resolves just above 2bb
+        # with the ante in the pot and renders 2bb on the 0.5bb grid.
+        open_size_bb=2.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        description="NLH MTT 8-max 40bb (BB ante 1bb) Monker pack -- 2bb opens.",
+    ),
+    PreflopPackSignature(
         pack_id="monker_mtt8_50bb",
         relative_pack_root="../mtt8_50bb_ranges",
         grammar_name="monker_nlhe",
@@ -483,6 +536,38 @@ KNOWN_PACK_SIGNATURES: tuple[PreflopPackSignature, ...] = (
         game_format="tournament",
         allins_realistic=True,  # a 5-bet jam at 50bb is a real MTT line
         description="NLH MTT 8-max 50bb (BB ante 1bb) Monker pack.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_100bb",
+        relative_pack_root="../mtt8_100bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=100,
+        # Same `40034` open token as the 40/50bb packs -> 2bb on the grid.
+        open_size_bb=2.0,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        description="NLH MTT 8-max 100bb (BB ante 1bb) Monker pack -- 2bb opens.",
+    ),
+    PreflopPackSignature(
+        pack_id="monker_mtt8_200bb",
+        relative_pack_root="../mtt8_200bb_ranges",
+        grammar_name="monker_nlhe",
+        table_size=8,
+        stack_depth_bb=200,
+        # Same `40043` open token as the 75/300bb packs -> 2.5bb on the grid.
+        open_size_bb=2.5,
+        sb_to_bb_ratio=0.5,
+        file_glob="*.rng",
+        size_round_bb=0.5,
+        ev_units_per_bb=2000.0,
+        ante_bb=1.0,
+        game_format="tournament",
+        description="NLH MTT 8-max 200bb (BB ante 1bb) Monker pack -- 2.5bb opens.",
     ),
     PreflopPackSignature(
         pack_id="monker_mtt8_75bb",

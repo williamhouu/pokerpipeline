@@ -120,6 +120,7 @@ from pipeline.preflop.batch import (  # noqa: E402
     node_action_context,
 )
 from pipeline.preflop.fact_extractor import PreflopFacts  # noqa: E402
+from pipeline.preflop.multi_depth import generate_all_depths_batch  # noqa: E402
 from pipeline.preflop.node_cache import (  # noqa: E402
     descriptor_to_node,
     load_descriptors,
@@ -1411,11 +1412,12 @@ def _render_generate_page_postflop() -> None:
         if pf_balanced_lengths:
             pf_length_profile = st.radio(
                 "Length profile",
-                ["river_heavy", "river_leaning", "equal"],
+                ["river_heavy", "river_leaning", "equal", "flop_turn_only"],
                 format_func=lambda v: {
                     "river_heavy": "River-heavy — 70% river (default)",
                     "river_leaning": "River-leaning — 40% river / 20% each",
                     "equal": "Equal — 25% each",
+                    "flop_turn_only": "Flop/turn enders only — 50/50",
                 }.get(v, v),
                 horizontal=True,
                 key="postflop_length_profile",
@@ -1537,10 +1539,24 @@ def _render_generate_page_postflop() -> None:
             "from each perspective." if is_full else
             "Generate spots where this player is to act. Both = a mix."
         )
+        # 🎯 Auto-select every seat per solve (Aug 2026, user ask). With a
+        # bare key the widget kept the LAST solve's selection, and seats
+        # that don't exist on the newly picked solve were silently dropped
+        # (BTN/BB -> UTG/SB left the picker empty). Pure helper + test in
+        # gen_settings; a deliberate subset WITHIN one solve still sticks.
+        gen_settings.seed_heroes_for_solve(
+            st.session_state,
+            key="postflop_heroes",
+            tag_key="postflop_heroes_solve_tag",
+            solve_tag=str(picked),
+            options=[solve.ip_position, solve.oop_position],
+        )
+        # No default= here: the seeding above owns the key (passing both
+        # trips Streamlit's "value set via Session State AND default"
+        # warning).
         heroes = st.multiselect(
             "Whose decisions to ask about",
             options=[solve.ip_position, solve.oop_position],
-            default=[solve.ip_position, solve.oop_position],
             key="postflop_heroes",
             help=hero_help,
         )
@@ -1973,10 +1989,14 @@ def _render_generate_page_postflop() -> None:
                 "last check (flag only; never triggers another rewrite).",
             )
         if is_full and (pf_run_claim_checker or pf_revise_pass):
+            # Default OFF (Aug 7 2026, user ask): the everyday expectation is
+            # ship-everything-and-show-flags; strict-clean is an audit-batch
+            # tool. ON silently replaced flagged hands (often with preflop
+            # enders), which read as a degenerate batch.
             pf_strict_clean = st.checkbox(
                 "🧼 Ship only fully-clean hands "
                 "(regenerate a flagged hand once, else replace it)",
-                value=True,
+                value=False,
                 key="postflop_strict_clean_hands",
                 help=(
                     "A play-through ships whole or not at all, so one flagged "
@@ -2750,20 +2770,24 @@ def _render_generate_page_preflop() -> None:
     )
     # 🏆 All-depths mode (Aug 2026, bet-sizing-trainer pattern): a toggle
     # right at the pack section that repurposes the main GENERATE button to
-    # queue ONE batch per MTT depth. Every setting below (count-per-depth,
-    # prompt, style, Layer-7, balanced) still applies to each batch -- the
-    # toggle changes WHAT the button launches, never what you can configure.
+    # launch ONE background job that generates every MTT depth back to back
+    # and merges them into ONE batch (one CSV + meta, one Review entry, one
+    # ledger entry). Every setting below (count-per-depth, prompt, style,
+    # Layer-7, balanced) still applies to each depth -- the toggle changes
+    # WHAT the button launches, never what you can configure.
     all_depths_mode = False
     if _pack_format(pack) == "tournament":
         all_depths_mode = st.toggle(
-            "🏆 All tournament depths — one balanced batch per depth",
+            "🏆 All tournament depths — one merged balanced batch",
             key="preflop_all_depths_toggle",
             help=(
-                "ON: the GENERATE button queues one batch per MTT depth, "
-                "back to back on the job queue, each using the exact "
-                "settings you configure below (prompt, answer style, "
-                "count, audit mode...). The question count applies to EACH "
-                "depth. OFF: generate only the pack selected above."
+                "ON: the GENERATE button launches ONE job that generates "
+                "every MTT depth back to back with the exact settings you "
+                "configure below (prompt, answer style, count, audit "
+                "mode...) and merges everything into ONE batch: one CSV, "
+                "one Review entry, one spend-log entry. The question count "
+                "applies to EACH depth. OFF: generate only the pack "
+                "selected above."
             ),
         )
         if all_depths_mode:
@@ -2776,9 +2800,10 @@ def _render_generate_page_preflop() -> None:
                 key=lambda p_: p_.stack_depth_bb,
             )
             st.caption(
-                "Will queue "
+                "Will generate "
                 + ", ".join(f"{p_.stack_depth_bb:g}bb" for p_ in _all_mtt_packs)
-                + " — the pack picked above is ignored while this is on."
+                + " and merge them into ONE batch — the pack picked above "
+                "is ignored while this is on."
             )
 
     # Metadata only (context + player count per node, grouped by actor) --
@@ -3635,14 +3660,14 @@ def _render_generate_page_preflop() -> None:
     job_active = jobs.has_active_job()
 
     _gen_label = (
-        f"🏆 GENERATE ALL TOURNAMENT DEPTHS ({int(total)} questions each, "
-        "queued back to back)"
+        f"🏆 GENERATE ALL TOURNAMENT DEPTHS ({int(total)} questions each · "
+        "one merged batch)"
         if all_depths_mode
         else "GENERATE BATCH"
     )
     if job_active and not all_depths_mode:
-        # All-depths mode may QUEUE behind the active job -- that is the
-        # point of the queue; single mode keeps the guard.
+        # All-depths mode may QUEUE behind the active job -- its single
+        # merged job goes through the FIFO queue; single mode keeps the guard.
         st.button(
             "GENERATE BATCH  (a job is already running -- see panel above)",
             disabled=True,
@@ -3678,10 +3703,53 @@ def _render_generate_page_preflop() -> None:
             PREFLOP_GEN_SETTINGS_PATH,
             {k: st.session_state.get(k) for k in _PREFLOP_GEN_SAVED_KEYS},
         )
-        # All-depths mode: queue one batch per MTT pack with the SAME
-        # settings; the first starts now, the rest run back to back.
-        _target_packs = (
-            sorted(
+        # Shared UI->batch settings for both launch modes below.
+        _shared_job_kwargs: dict[str, Any] = dict(
+            hero_positions=list(hero_positions),
+            action_contexts=list(action_contexts),
+            player_counts=list(player_counts),
+            freq_min=freq_low / 100.0,
+            freq_max=freq_high / 100.0,
+            exclude_ambiguous_band=exclude_ambiguous_band,
+            exclude_near_pure_band=exclude_near_pure_band,
+            min_difficulty=int(band_low),
+            max_difficulty=int(band_high),
+            trap_difficulty=bool(trap_difficulty),
+            razor_difficulty=bool(razor_difficulty),
+            diversify=bool(diversify),
+            balanced=bool(fully_balanced),
+            min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
+            min_villain_line_pct=(
+                None if min_villain_pct == 0.0 else float(min_villain_pct)
+            ),
+            min_hero_premise_freq=(
+                None
+                if min_premise_pct == 0.0
+                else float(min_premise_pct) / 100.0
+            ),
+            display_in_bb=_currency.startswith("Big blinds"),
+            stakes_bb_dollars=float(_stake_bb),
+            live_or_online=_venue,
+            model_label=_model,
+            dry_run=bool(_dry_run),
+            answer_style=answer_style_canonical,
+            system_prompt=_prompt_text,
+            prompt_name=_prompt_name,
+            random_seed=_seed_val,
+            temperature=_temp_val,
+            run_claim_checker=run_claim_checker,
+            claim_checker_prompt=claim_checker_prompt,
+            revise_pass=revise_pass,
+            final_audit=final_audit,
+            run_sanity_audit=bool(run_sanity_audit),
+            equity_runouts=equity_runouts,
+        )
+        if all_depths_mode:
+            # All-depths mode (Aug 2026): ONE merged job across every MTT
+            # pack with the SAME settings -- one CSV, one meta.json, one
+            # Review entry, one ledger entry. Queued (not failed) when a
+            # job is already active.
+            _target_packs = sorted(
                 (
                     p_
                     for p_ in _cached_preflop_packs()
@@ -3689,64 +3757,20 @@ def _render_generate_page_preflop() -> None:
                 ),
                 key=lambda p_: p_.stack_depth_bb,
             )
-            if all_depths_mode
-            else [pack]
-        )
-        for _target_pack in _target_packs:
+            _start_all_depths_preflop_job(
+                packs=_target_packs,
+                questions_per_depth=int(total),
+                output_filename=f"MTT all-depths balanced {int(total)}q",
+                **_shared_job_kwargs,
+            )
+        else:
             _start_preflop_job(
-                pack=_target_pack,
-                hero_positions=list(hero_positions),
-                action_contexts=list(action_contexts),
-                player_counts=list(player_counts),
-                freq_min=freq_low / 100.0,
-                freq_max=freq_high / 100.0,
-                exclude_ambiguous_band=exclude_ambiguous_band,
-                exclude_near_pure_band=exclude_near_pure_band,
-                min_difficulty=int(band_low),
-                max_difficulty=int(band_high),
-                trap_difficulty=bool(trap_difficulty),
-                razor_difficulty=bool(razor_difficulty),
-                diversify=bool(diversify),
-                balanced=bool(fully_balanced),
-                min_ev_gap_bb=(None if min_ev_gap == 0.0 else float(min_ev_gap)),
-                min_villain_line_pct=(
-                    None if min_villain_pct == 0.0 else float(min_villain_pct)
-                ),
-                min_hero_premise_freq=(
-                    None
-                    if min_premise_pct == 0.0
-                    else float(min_premise_pct) / 100.0
-                ),
-                display_in_bb=_currency.startswith("Big blinds"),
-                stakes_bb_dollars=float(_stake_bb),
-                live_or_online=_venue,
+                pack=pack,
                 total_questions=int(total),
-                # All-depths: each batch self-names by depth; single mode
-                # keeps the filename box's value.
-                output_filename=(
-                    f"MTT {_target_pack.stack_depth_bb:g}bb balanced "
-                    f"{int(total)}q"
-                    if all_depths_mode
-                    else _out_filename
-                ),
-                model_label=_model,
-                dry_run=bool(_dry_run),
-                answer_style=answer_style_canonical,
-                system_prompt=_prompt_text,
-                prompt_name=_prompt_name,
-                random_seed=_seed_val,
-                temperature=_temp_val,
-                run_claim_checker=run_claim_checker,
-                claim_checker_prompt=claim_checker_prompt,
-                revise_pass=revise_pass,
-                final_audit=final_audit,
-                run_sanity_audit=bool(run_sanity_audit),
-                equity_runouts=equity_runouts,
-                # Queue (rather than fail) when a job is already active, and
-                # rerun ONCE after the loop -- a mid-loop rerun would abandon
-                # the remaining depths.
-                enqueue=all_depths_mode,
+                output_filename=_out_filename,
+                enqueue=False,
                 rerun_after=False,
+                **_shared_job_kwargs,
             )
         st.rerun()
 
@@ -3794,8 +3818,9 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
     """Kick off a preflop batch on a background thread and rerun.
 
     ``enqueue=True`` routes through the FIFO job queue instead of failing
-    when another job is active -- the ALL-DEPTHS tournament button queues
-    one batch per pack and they run back to back (Aug 2026).
+    when another job is active. (The ALL-DEPTHS tournament button no
+    longer loops through here -- it launches ONE merged job via
+    :func:`_start_all_depths_preflop_job`, Aug 2026.)
 
     Before this refactor the batch ran inline in the Streamlit script
     thread, so any rerun (sidebar click, tab switch, button press)
@@ -3891,10 +3916,134 @@ def _start_preflop_job(  # noqa: PLR0913 -- thin UI->batch parameter pass-throug
         return
 
     # Re-run immediately so the job panel takes over the next render.
-    # (The ALL-DEPTHS loop passes rerun_after=False and reruns ONCE after
-    # queueing every pack -- a rerun mid-loop would abandon the rest.)
+    # (The Generate click site passes rerun_after=False and reruns once
+    # itself, after saving settings.)
     if rerun_after:
         st.rerun()
+
+
+def _start_all_depths_preflop_job(  # noqa: PLR0913 -- thin UI->batch pass-through
+    *,
+    packs: list[PreflopPack],
+    questions_per_depth: int,
+    output_filename: str,
+    hero_positions: list[str],
+    action_contexts: list[str],
+    player_counts: list[int],
+    freq_min: float,
+    freq_max: float,
+    exclude_ambiguous_band: bool,
+    exclude_near_pure_band: bool,
+    min_difficulty: int,
+    max_difficulty: int,
+    trap_difficulty: bool,
+    razor_difficulty: bool,
+    diversify: bool,
+    balanced: bool,
+    min_ev_gap_bb: float | None,
+    min_villain_line_pct: float | None,
+    min_hero_premise_freq: float | None,
+    display_in_bb: bool,
+    model_label: str,
+    dry_run: bool,
+    answer_style: str,
+    stakes_bb_dollars: float = 0.50,
+    live_or_online: str = "Online",
+    system_prompt: str | None = None,
+    prompt_name: str = "",
+    random_seed: int | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    run_claim_checker: bool = False,
+    claim_checker_prompt: str | None = None,
+    revise_pass: bool = False,
+    final_audit: bool = False,
+    run_sanity_audit: bool = False,
+    equity_runouts: int = 400,
+) -> None:
+    """Launch the 🏆 all-depths MERGED tournament batch as ONE job.
+
+    One subprocess job runs :func:`pipeline.preflop.multi_depth.
+    generate_all_depths_batch` across every MTT pack (ascending depth)
+    and merges everything into ONE CSV + meta.json -- one Review entry
+    and, because the returned :class:`BatchResult` sums the per-depth
+    token totals, one ledger entry via the normal
+    :func:`_maybe_log_completed_job` sweep. Queued (not failed) behind
+    an already-active job.
+    """
+    import os  # noqa: PLC0415
+
+    if not packs:
+        st.error("⚠️ No tournament packs found on disk.")
+        return
+    # Same fail-loudly key check as the single-pack launcher.
+    if not dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
+        st.error(
+            "❌ ANTHROPIC_API_KEY is not set. Add it to `.env` at the "
+            "repo root (the admin panel auto-loads .env), or enable "
+            "**Dry run** above to test the pipeline without API calls."
+        )
+        return
+
+    PREFLOP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stem = output_filename.removesuffix(".csv").strip() or "preflop_batch"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = PREFLOP_OUTPUT_DIR / f"{stem}_{timestamp}.csv"
+
+    model_api = _MODEL_LABEL_TO_API.get(model_label, model_label)
+    overall = questions_per_depth * len(packs)
+    label = (
+        f"{overall} preflop questions · {len(packs)} depths"
+        + (" (dry-run)" if dry_run else f" · {model_label.split()[0]}")
+        + f" → {output_path.name}"
+    )
+
+    try:
+        # ONE queued subprocess job for the whole run. All kwargs below are
+        # picklable and map onto generate_preflop_batch's own parameter
+        # names (multi_depth passes them through per depth).
+        jobs.enqueue_subprocess_job(
+            generate_all_depths_batch,
+            label=label,
+            packs=list(packs),
+            questions_per_depth=questions_per_depth,
+            output_path=output_path,
+            hero_positions=hero_positions,
+            action_contexts=action_contexts,
+            player_counts=player_counts,
+            min_frequency=freq_min,
+            max_frequency=freq_max,
+            exclude_ambiguous_band=exclude_ambiguous_band,
+            exclude_near_pure_band=exclude_near_pure_band,
+            min_difficulty=min_difficulty,
+            max_difficulty=max_difficulty,
+            trap_difficulty=trap_difficulty,
+            razor_difficulty=razor_difficulty,
+            diversify=diversify,
+            balanced=balanced,
+            min_ev_gap_bb=min_ev_gap_bb,
+            min_villain_line_pct=min_villain_line_pct,
+            min_hero_premise_freq=min_hero_premise_freq,
+            display_in_bb=display_in_bb,
+            stakes_bb_dollars=stakes_bb_dollars,
+            live_or_online=live_or_online,
+            answer_style=answer_style,
+            model=model_api,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            prompt_name=prompt_name,
+            dry_run=dry_run,
+            random_seed=random_seed,
+            run_claim_checker=run_claim_checker,
+            claim_checker_prompt=claim_checker_prompt,
+            revise_pass=revise_pass,
+            final_audit=final_audit,
+            run_sanity_audit=run_sanity_audit,
+            equity_runouts=equity_runouts,
+        )
+    except RuntimeError as exc:
+        st.error(f"⚠️ Could not start batch: {exc}")
+        return
+    # No rerun here -- the Generate click site reruns once after launching.
 
 
 def _render_razor_difficulty_explainer() -> None:
@@ -7539,7 +7688,12 @@ def _render_action_ev_bars(row: dict[str, str]) -> None:
     # action is marked tied instead.
     _sorted_evs = sorted((bb for _, bb in actions), reverse=True)
     _second = _sorted_evs[1] if len(_sorted_evs) > 1 else None
-    _decisive = _second is None or (best - _second) >= 0.10  # noqa: PLR2004
+    # POT-RELATIVE tolerance (Aug 9 2026): 1% of pot, floored at the old
+    # 0.10bb -- a +0.96bb "edge" on a 116bb pot is solve-convergence noise
+    # and crowning it contradicted the frequency-correct answer. See
+    # review.ev_tie_tolerance (pure + tested).
+    _tol = review.ev_tie_tolerance(row.get("POT"))
+    _decisive = _second is None or (best - _second) >= _tol
     # Symmetric scale floored at +-1bb so a genuinely tiny gap reads as tiny
     # rather than getting stretched to fill the bar.
     span = max(1.0, max(abs(bb) for _, bb in actions)) * 1.15
@@ -7556,7 +7710,7 @@ def _render_action_ev_bars(row: dict[str, str]) -> None:
         if _decisive:
             mark = " ✅" if abs(bb - best) < 1e-9 else ""
         else:
-            mark = " · ≈ tied" if (best - bb) < 0.10 else ""  # noqa: PLR2004
+            mark = " · ≈ tied" if (best - bb) < _tol else ""
         html.append(
             f'<div style="font-size:0.8em;color:#444;margin:6px 0 1px;">'
             f"{label}{mark} · {bb:+.2f} bb</div>"
@@ -9518,9 +9672,19 @@ def render_postflop_compare_page() -> None:
 
     fc1, fc2 = st.columns(2)
     with fc1:
+        # 🎯 Same per-solve all-seats auto-select as the Generate page
+        # (Aug 2026, user ask) -- see gen_settings.seed_heroes_for_solve.
+        gen_settings.seed_heroes_for_solve(
+            st.session_state,
+            key="pfcmp_heroes",
+            tag_key="pfcmp_heroes_solve_tag",
+            solve_tag=str(picked),
+            options=[solve_sum.ip_position, solve_sum.oop_position],
+        )
         heroes = st.multiselect(
-            "Whose decisions", options=[solve_sum.ip_position, solve_sum.oop_position],
-            default=[solve_sum.ip_position, solve_sum.oop_position], key="pfcmp_heroes",
+            "Whose decisions",
+            options=[solve_sum.ip_position, solve_sum.oop_position],
+            key="pfcmp_heroes",
         )
     with fc2:
         streets = st.multiselect(

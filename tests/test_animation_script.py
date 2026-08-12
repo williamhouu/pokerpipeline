@@ -218,3 +218,69 @@ def test_plo_writer_animation_uses_display_seats() -> None:
     assert [e["seat"] for e in events if e["type"] == "fold"] == ["UTG", "HJ", "CO", "SB"]
     assert events[-1] == {"i": events[-1]["i"], "type": "decision",
                           "seat": "BB", "street": "preflop"}
+
+
+# --- chip-conservation clamp + vacuous-decision gate (Aug 2026 MTT audit) -----
+def test_wager_clamps_to_remaining_stack_bb_ante_jam() -> None:
+    """The B205 bug, exactly: 10bb bb-ante MTT, BB posts blind 1 + ante 1
+    (8 behind), then 'jams to 10bb' per the pack label. The old walk drove
+    BB's stack to -1 in 89 shipped events; the clamp caps the wager at the
+    real chips (to 9bb), zeroes the stack, and marks it all-in."""
+    from pipeline.animation import AnimationTable
+
+    t = AnimationTable(table_size=8, starting_stack_bb=10.0, ante_bb=1.0)
+    t.post_blinds()
+    assert t.stacks["BB"] == 8.0            # 10 - 1 blind - 1 ante
+    t.wager_to("BB", "raise", 10.0)         # pack says "to 10"; only 9 possible
+    e = t.events[-1]
+    assert e["to_bb"] == 9.0 and e["stack_bb"] == 0.0 and e["all_in"] is True
+    assert all((ev.get("stack_bb") or 0) >= 0 for ev in t.events)
+
+
+def test_call_clamps_and_marks_all_in() -> None:
+    from pipeline.animation import AnimationTable
+
+    t = AnimationTable(table_size=8, starting_stack_bb=10.0, ante_bb=1.0)
+    t.post_blinds()
+    t.wager_to("HJ", "raise", 10.0, all_in=True)
+    t.call("SB")                             # SB has 9.5 behind vs 10 to match
+    e = t.events[-1]
+    assert e["amount_bb"] == 9.5 and e["stack_bb"] == 0.0 and e["all_in"] is True
+
+
+def test_unclamped_events_byte_identical() -> None:
+    """A normal deep-stack walk must not change at all (no clamp, no
+    forced all_in): the guard only fires on physically impossible wagers
+    or exactly-emptied stacks."""
+    from pipeline.animation import AnimationTable
+
+    t = AnimationTable(table_size=8, starting_stack_bb=200.0)
+    t.post_blinds()
+    t.wager_to("BTN", "raise", 3.0)
+    t.call("BB")
+    for e in t.events:
+        assert "all_in" not in e
+
+
+def test_hero_stack_at_preflop_decision_vacuous() -> None:
+    """The B205 question shape: SB calls the HJ jam all-in, BB re-jams,
+    'SB decision' -- hero has 0bb and the gate must say so."""
+    from pipeline.animation import hero_stack_at_preflop_decision
+
+    actions = [
+        ("UTG", "fold", None, False), ("UTG+1", "fold", None, False),
+        ("LJ", "fold", None, False), ("HJ", "raise", 10.0, True),
+        ("CO", "fold", None, False), ("BTN", "fold", None, False),
+        ("SB", "call", None, True), ("BB", "raise", 10.0, True),
+    ]
+    behind = hero_stack_at_preflop_decision(
+        table_size=8, starting_stack_bb=10.0, ante_bb=1.0,
+        actions=actions, hero_seat="SB",
+    )
+    assert behind == 0.0
+    # ...and the same line at 40bb leaves SB a REAL decision (not gated).
+    behind_deep = hero_stack_at_preflop_decision(
+        table_size=8, starting_stack_bb=40.0, ante_bb=1.0,
+        actions=actions, hero_seat="SB",
+    )
+    assert behind_deep > 0
